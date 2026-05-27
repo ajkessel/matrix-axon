@@ -281,6 +281,36 @@ PRD, tech spec, and implementation spec freeze at MVP ship. After that, they bec
 
 The current state of the system lives in `AGENTS.md` and the ADR log.
 
+## References and test corpus
+
+We're not the first project in this space. Other Matrix clients have already hit the protocol's sharp edges; their issue trackers are a cheap source of edge cases we should cover from the start.
+
+### Architectural references
+
+Read these for lessons, not to copy code.
+
+- **gomuks.** Closest architectural cousin — persistent backend, thin frontend, similar problem framing. Differences: single-user / single-account, no documented API, mautrix-go instead of matrix-rust-sdk. **Transfers:** protocol handling, sync edge cases, room-state management, redaction / edit semantics, what a server-side Matrix client actually has to do. **Doesn't transfer:** anything API-shaped or multi-account-scoped.
+- **Element X / matrix-rust-sdk.** Same crypto and sync library we use. Their issue tracker is where library-level bugs surface first. **Transfers:** library gotchas, sliding-sync edge cases, megolm session handling, key-backup recovery flows. **Doesn't transfer:** their client-side state model — we own that on the server.
+- **mautrix bridges** (mautrix-telegram, mautrix-discord, mautrix-whatsapp, etc.). Source of unusual bridged event shapes. Their issues reveal what real bridge traffic looks like and where bridges produce content our timeline rendering needs to tolerate.
+- **Synapse / Dendrite issues.** Where homeserver-side quirks we have to tolerate get discussed (rate limits, sync response oddities, MSC4186 compliance gaps).
+
+### Test corpus
+
+A `tests/fixtures/` directory holds JSON event payloads, recorded sync responses, and end-to-end scenarios that drive the protocol-level test suite. Build it up by harvesting categories from the trackers above and add fixtures as new edge cases appear (whether discovered locally or upstream).
+
+Categories to cover, all with at least one fixture before MVP ships:
+
+- Gappy backfill (sliding sync delivering a window with gaps in the timeline).
+- Megolm session loss → undecryptable events (UTDs) → key-backup recovery once keys arrive.
+- Redaction edge cases: redaction of an edit, redaction of a redaction, redacted-while-decrypting.
+- Room upgrades mid-conversation (`m.room.tombstone` arrives during active reading).
+- Large rooms (10k+ members, multi-MB state events).
+- Slow / flaky upstream homeservers (timeouts, partial sync responses, retry behavior).
+- Bridged event shapes (mautrix `m.room.message` variants, bridge-specific `body` and `formatted_body` content, reply-to chains across the bridge).
+- Malformed or unexpected events from upstream (we ignore-and-log, don't crash).
+
+Treat this as a living checklist: when an upstream issue closes with "fixed bug in X edge case" and X is one we'd plausibly see, add the fixture for X if we don't have it.
+
 ## What not to build
 
 Mirrors the PRD non-goals and out-of-scope items; the agent should not drift into these:
