@@ -11,7 +11,8 @@ End-state target. Create incrementally as milestones land.
 ```
 matrix-axon/
   Cargo.toml                 # workspace
-  CLAUDE.md                  # living context for agentic contributors
+  AGENTS.md                  # canonical orientation for agentic contributors
+  CLAUDE.md                  # one-line pointer to AGENTS.md
   crates/
     axon-server/             # binary; wires components together
     axon-core/               # shared types, errors, config
@@ -21,11 +22,13 @@ matrix-axon/
     axon-search/             # Tantivy index
     axon-media/              # media proxy + disk-cache backend
     axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
+  (each crate has its own README.md + crate-level //! rustdoc)
   clients/
     web/                     # axon-web (Vite + React + TS)
   openapi/                   # spec source of truth (handwritten + utoipa-emitted)
   docs/
     mvp/                     # this directory
+    adr/                     # architecture decision records
     self-hosting.md          # produced in Milestone 12
   docker-compose.yml         # Postgres for dev
 ```
@@ -71,7 +74,8 @@ Each milestone has explicit deliverables and a verification step that exercises 
 - Empty crates with `lib.rs` / `main.rs` stubs and minimal `Cargo.toml` files.
 - `docker-compose.yml` running Postgres 16 with a named volume.
 - Basic CI: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
-- Create the initial `CLAUDE.md` (see "Maintaining CLAUDE.md" below).
+- Create the initial `AGENTS.md` and a one-line `CLAUDE.md` pointer (see "Documentation for agentic contributors" below).
+- Seed `docs/adr/` with `0001-record-architecture-decisions.md` (the meta-ADR adopting the practice).
 
 **Verification:** `docker compose up -d postgres && cargo build` succeeds; CI passes on the first push.
 
@@ -229,16 +233,53 @@ Follow Matrix OSS community conventions first; fall back to standard Rust conven
 - **Web alpha (11).** Real dev server, real browser, real Synapse; exercise send / edit / redact / react / media / search; screenshot the timeline.
 - **Self-hosting (12).** A reader follows the doc on a fresh VM and reaches the daily-driver success criterion in under an hour; at least one cloud recipe is exercised end-to-end.
 
-## Maintaining CLAUDE.md
+## Documentation for agentic contributors
 
-A `CLAUDE.md` at the repository root captures the living context that future agentic contributors need to ramp quickly: what the crates do, where things live, which conventions are non-obvious, and what's currently being worked on.
+The OpenAPI spec covers the wire protocol but not the codebase. Future coding agents (Claude Code, Codex, Cursor, whatever comes next) need a separate set of in-repo docs to understand structure, intent, and non-obvious decisions. We maintain four:
 
-- **Create** `CLAUDE.md` during Milestone 1. Initial contents: project name, one-paragraph summary, pointer to `docs/mvp/`, the directory tree from "Project layout" above, and a short conventions section that links here.
-- **Update** as you go. After every milestone, append or revise the relevant section. If you make a non-obvious design choice during a milestone — picking a library, deciding a schema detail that isn't in the specs, adding a build step — note it in `CLAUDE.md` so the next agent doesn't have to reverse-engineer it.
-- **Keep it short.** `CLAUDE.md` is a high-density orientation, not a wiki. If a section grows past a page, that's a signal to break it out into a dedicated doc under `docs/` and leave a one-liner pointer behind.
+### 1. `AGENTS.md` (canonical) + `CLAUDE.md` (pointer)
+
+`AGENTS.md` at the repository root is the vendor-neutral orientation doc that most coding agents now look for by convention. `CLAUDE.md` is a one-line pointer to `AGENTS.md` so Claude Code finds it without us maintaining two copies.
+
+- **Create** `AGENTS.md` during Milestone 1. Initial contents: project name, one-paragraph summary, pointer to `docs/mvp/`, the directory tree from "Project layout" above, a short conventions section that links to the "Conventions" section of this doc, and a "Current state" section that records which milestone is in flight.
+- **Create** `CLAUDE.md` during Milestone 1 with one line: `See AGENTS.md.`
+- **Update** `AGENTS.md` as you go. After every milestone, revise the "Current state" section and append any non-obvious design choices made during that milestone — library picks, schema details that aren't in the specs, build steps, gotchas. The next agent shouldn't have to reverse-engineer those.
+- **Keep it short.** `AGENTS.md` is a high-density orientation, not a wiki. If a section grows past a page, break it out into a dedicated doc under `docs/` and leave a one-liner pointer behind.
 - **Treat it as code.** Edits go through the same PR review as code changes.
 
-The goal: any agentic contributor opening this repo cold reads `CLAUDE.md` and is productive within minutes, without having to grep around or re-read the MVP specs.
+Goal: any agentic contributor opening this repo cold reads `AGENTS.md` and is productive within minutes, without having to grep around or re-read the MVP specs.
+
+### 2. Per-crate `README.md` + crate-level `//!` rustdoc
+
+Every crate under `crates/` has a `README.md` and a crate-level doc comment (`//!`) in `lib.rs`. They serve different audiences but cover the same ground:
+
+- **What this crate is responsible for** in one sentence.
+- **Public API surface** at a glance — the main types and entry points.
+- **Dependencies it owns** vs. dependencies it consumes (e.g. `axon-store` owns Postgres connections; `axon-api` consumes a `Store` handle).
+- **Anything load-bearing that isn't obvious** from the code — invariants, "do not call this from inside a sync handler," etc.
+
+Rustdoc renders for human-readable browsing on docs.rs (if we publish) and for `cargo doc --open` locally. The `README.md` is what an agent or human reads first when grepping by file. Keep them consistent; if they drift, the README is the source of truth and rustdoc is regenerated to match.
+
+### 3. Architecture decision records under `docs/adr/`
+
+Lightweight ADRs (Michael Nygard format — Context / Decision / Consequences, one page max) capture non-obvious decisions as they're made. Filename pattern: `NNNN-kebab-case-title.md`, monotonically numbered.
+
+Write an ADR when:
+
+- You pick one library over another for a non-trivial reason.
+- You make a schema or API choice the specs don't prescribe.
+- You discover an upstream bug or quirk and work around it.
+- You decide *not* to do something that seems like an obvious next step.
+
+The first ADR (`0001-record-architecture-decisions.md`) is the meta-ADR adopting the practice — created in Milestone 1.
+
+Don't write ADRs for decisions the MVP specs already settle; those are anchored in `docs/mvp/` and re-stating them in ADRs creates drift. The ADR directory is for what happens *during* implementation that the specs don't cover.
+
+### 4. `docs/mvp/` (this directory, locked at end of MVP)
+
+PRD, tech spec, and implementation spec freeze at MVP ship. After that, they become historical reference — changes to product/architecture go through new docs (or new versions). An agent reading them later should treat them as "what we decided going in," not "current state."
+
+The current state of the system lives in `AGENTS.md` and the ADR log.
 
 ## What not to build
 
