@@ -170,6 +170,8 @@ Almost every architectural question was resolved during planning. The table belo
 
 **Open: threads in MVP or immediately after?** Threads are a P0 post-MVP track at minimum. The open question is whether they make MVP. If yes, the schema needs thread-aware indexing (the `relates_to` hot column already captures `m.thread` relations; we'd need API endpoints — `GET /v1/rooms/{id}/threads`, threaded timeline reads, thread-scoped reactions — and a "view in thread" affordance in `axon-web`). If no, they ship in the first release after MVP.
 
+**Open: how to handle redacted events?** Should Axon expose and index redacted events or hide them from its user? This depends on how we view the purpose of redactions: are they to get rid of bad content that no one should see, or, e.g., moderation decisions that may want to be reviewed/reverted later?
+
 ## Threat model summary
 
 (Flag for what changes when push lands.)
