@@ -154,12 +154,14 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
 ### 9. Search backend
 
 - `axon-search` opens a Tantivy index.
-- Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text, default analyzer: tokenizer + lowercase + light stemming).
+- Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
+- `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
 - Populate on event ingestion in the sync pipeline.
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
+- No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
 
-**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; redact one of those events and confirm it disappears from results; latency p95 under 200ms on the Riley-shape target.
+**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
 
 ### 10. Drafts and per-device read state
 

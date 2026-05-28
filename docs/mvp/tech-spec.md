@@ -134,7 +134,21 @@ All routes live under `/v1/…`. SemVer applies to the OpenAPI spec. Breaking ch
 
 Tantivy index populated on event ingestion. `account_id` is a facet field; queries can scope to one account or aggregate across all. BM25 ranking. Filters: room, sender, account, date range.
 
-Single language-agnostic analyzer for MVP: Tantivy default tokenizer + lowercase + light stemming. Per-language detection and per-room overrides are deferred. Rationale: Riley-shaped users have mostly English / Latin-script content; the cost-benefit of per-language analyzers doesn't pay off at MVP scale, and we keep the door open by versioning the index schema.
+Single language-agnostic analyzer for MVP. The analyzer chain is Tantivy's default tokenizer plus three built-in token filters: `LowerCaser` (case-insensitive matching), `AsciiFoldingFilter` (diacritics fold — `café` matches `cafe`), and `Stemmer` (light morphological stemming — `cats` matches `cat`, `running` matches `run`). These are configuration, not code we write; Tantivy ships them all.
+
+What the analyzer handles vs. what it doesn't, so expectations are explicit:
+
+- **In scope (free, via the chain above):** case-insensitivity, diacritic folding, regular singular/plural and verb-form matching.
+- **Typo tolerance:** available but opt-in at query time via Tantivy's `FuzzyTermQuery` (Levenshtein edit distance), not in the analyzer. We can wire a bounded fuzzy mode into the search endpoint later; not required for MVP.
+- **Synonyms** (`NYC` ≈ `New York`): not built in; needs a custom filter or query expansion. Out of scope for MVP.
+- **Semantic / meaning-based search:** not Tantivy's job (vectors / embeddings). Already deferred as "advanced search (semantic)" on the roadmap.
+
+Two known limitations of the single-analyzer choice, both pointing at the deferred per-language work:
+
+- Stemming is inherently language-specific. A Snowball English stemmer mis-stems French / German / etc. We accept English-ish stemming tuned for Latin-script content.
+- The default tokenizer splits on whitespace and punctuation, so it does not segment CJK or other non-space-delimited scripts (those need `lindera` / `tantivy-jieba`-style tokenizers).
+
+Per-language detection, per-room overrides, and CJK tokenization are deferred. Rationale: Riley-shaped users have mostly English / Latin-script content; the cost-benefit of per-language analyzers doesn't pay off at MVP scale, and we keep the door open by versioning the index schema.
 
 **Encryption at rest.** The Tantivy index contains decrypted message text — search is the whole point. It lives on the same disk as Postgres and inherits whatever the operator deploys for filesystem-level encryption (LUKS, dm-crypt, ZFS native encryption, encrypted-volume cloud disks). Application-level encryption of the index would defeat search; we do not attempt it. Per-account content-encryption keys, with whatever search story comes with them (encrypted search schemes, decrypted-on-the-fly query-time indexes, etc.), are a v2 concern and explicitly out of scope for MVP. The threat-model section flags this.
 
