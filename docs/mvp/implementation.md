@@ -156,7 +156,6 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
 - `axon-search` opens a Tantivy index.
 - Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text, default analyzer: tokenizer + lowercase + light stemming).
 - Populate on event ingestion in the sync pipeline.
-- Remove index entries when their event is redacted.
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
 
