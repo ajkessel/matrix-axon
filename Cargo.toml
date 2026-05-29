@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/axon-server",
+    "crates/axon-core",
+    "crates/axon-store",
+    "crates/axon-sync",
+    "crates/axon-crypto",
+    "crates/axon-search",
+    "crates/axon-media",
+    "crates/axon-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+axon-core   = { path = "crates/axon-core" }
+axon-store  = { path = "crates/axon-store" }
+axon-sync   = { path = "crates/axon-sync" }
+axon-crypto = { path = "crates/axon-crypto" }
+axon-search = { path = "crates/axon-search" }
+axon-media  = { path = "crates/axon-media" }
+axon-api    = { path = "crates/axon-api" }

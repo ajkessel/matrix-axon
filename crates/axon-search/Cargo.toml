@@ -1,0 +1,11 @@
+[package]
+name = "axon-search"
+description = "Tantivy full-text search index, populated on event ingestion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core  = { workspace = true }
+axon-store = { workspace = true }

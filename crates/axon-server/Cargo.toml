@@ -1,0 +1,20 @@
+[package]
+name = "axon-server"
+description = "Axon binary — wires all crates together and owns the process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "axon"
+path = "src/main.rs"
+
+[dependencies]
+axon-core   = { workspace = true }
+axon-store  = { workspace = true }
+axon-sync   = { workspace = true }
+axon-crypto = { workspace = true }
+axon-search = { workspace = true }
+axon-media  = { workspace = true }
+axon-api    = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "axon-api"
+description = "axum HTTP and WebSocket handlers; OpenAPI spec via utoipa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core  = { workspace = true }
+axon-store = { workspace = true }

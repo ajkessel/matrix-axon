@@ -1,0 +1,10 @@
+[package]
+name = "axon-store"
+description = "Postgres-backed event store, room state, and account data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core = { workspace = true }

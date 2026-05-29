@@ -1,0 +1,11 @@
+[package]
+name = "axon-sync"
+description = "matrix-rust-sdk sync engine wrapper (Simplified Sliding Sync)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core  = { workspace = true }
+axon-store = { workspace = true }

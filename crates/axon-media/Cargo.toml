@@ -1,0 +1,10 @@
+[package]
+name = "axon-media"
+description = "Media proxy with bounded LRU disk cache for MXC URLs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axon-core = { workspace = true }
