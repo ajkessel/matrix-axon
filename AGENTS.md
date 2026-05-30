@@ -57,7 +57,13 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 3, subphase 3a complete** — the binary provisions the configured account, logs in (or restores a session), and runs Simplified Sliding Sync per account. Event persistence (3b) and decryption robustness + the edge-case corpus (3c) are next.
+**Milestone 3, subphase 3b complete** — the binary provisions the configured account, logs in (or restores a session), runs Simplified Sliding Sync per account, and persists every incoming Matrix timeline event into Postgres scoped by `account_id`. Decryption robustness and the edge-case corpus (3c) are next.
+
+Non-obvious choices made in 3b (see ADR 0012):
+
+- **Event persistence hook:** `Client::add_event_handler(persist_timeline_event)` with `AnySyncTimelineEvent` + `RawEvent` context. Registered on the `Client` before `SyncService::start()` so no events are missed during initial sync. matrix-rust-sdk decrypts Megolm payloads before dispatch, so `raw_content` in the `events` table always holds plaintext (or the `m.room.encrypted` wrapper for UTDs). ADR 0012.
+- **Events table:** `(id BIGSERIAL, event_id TEXT, room_id TEXT, account_id UUID, sender TEXT, origin_ts BIGINT, event_type TEXT, content JSONB, raw_content JSONB, provenance TEXT DEFAULT 'upstream_homeserver', received_at TIMESTAMPTZ)`. Unique on `(account_id, event_id)` — upsert is idempotent. `content` is nullable: UTDs arrive as `m.room.encrypted` with `content = NULL`; the M3c re-decryption queue will back-fill those rows. Index on `(account_id, room_id, origin_ts DESC)` for timeline reads. M4 adds hot-column refinements and sibling ciphertext/session tables.
+- **sqlx JSONB:** added `json` feature to `sqlx-postgres` (transitively enables `sqlx-core/json`) so `serde_json::Value` binds as JSONB.
 
 Non-obvious choices made in 3a (see ADRs 0006–0008, 0010, 0011):
 

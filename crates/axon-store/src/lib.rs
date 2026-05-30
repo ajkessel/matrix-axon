@@ -8,10 +8,12 @@
 
 mod accounts;
 mod error;
+mod events;
 mod migrations;
 
 pub use accounts::Account;
 pub use error::StoreError;
+pub use events::NewEvent;
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
