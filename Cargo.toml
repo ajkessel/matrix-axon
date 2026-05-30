@@ -26,3 +26,24 @@ axon-crypto = { path = "crates/axon-crypto" }
 axon-search = { path = "crates/axon-search" }
 axon-media  = { path = "crates/axon-media" }
 axon-api    = { path = "crates/axon-api" }
+
+# Async runtime + HTTP
+tokio = { version = "1", default-features = false }
+axum  = { version = "0.8" }
+
+# Database
+sqlx = { version = "0.8", default-features = false }
+
+# Config + serialization
+figment    = { version = "0.10" }
+serde      = { version = "1" }
+serde_json = { version = "1" }
+
+# Errors
+thiserror = { version = "2" }
+anyhow    = { version = "1" }
+
+# Observability
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", default-features = false }
+dotenvy            = { version = "0.15" }

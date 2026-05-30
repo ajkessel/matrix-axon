@@ -25,6 +25,10 @@ target
 .env.*
 !.env.example
 
+# Local config (may hold secrets); the example is tracked
+axon.toml
+!axon.toml.example
+
 # Editor
 .vscode/
 .idea/

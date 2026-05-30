@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Axon pre-commit hook: fast subset of CI (formatting + lints).
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# (or run ./scripts/setup-hooks.sh)
+#
+# The full gate — including `cargo test` — always runs in CI. This hook keeps
+# commits snappy while catching the two most common failures locally.
+#
+# Bypass in a pinch with:  git commit --no-verify
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "pre-commit: cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "pre-commit: ok"

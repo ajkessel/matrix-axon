@@ -117,6 +117,9 @@ Each milestone has explicit deliverables and a verification step that exercises 
 - WebSocket at `/v1/ws`. Envelope: `{type, account_id, payload}`. Live timeline events fan out from the sync engine.
 - OpenAPI spec emitted via utoipa; written in parallel.
 - TypeScript stubs generated into `clients/web/src/api/`.
+- Define a shared `ApiResponse<T>` / `ApiError` envelope type in `axon-api` and a
+  custom `IntoResponse` impl so all handlers return consistent JSON shapes and error
+  bodies. (Deferred from M2; designing against zero real handlers is premature.)
 
 **Verification:** Boot the server, `curl /v1/rooms`, hit `/v1/rooms/{id}/timeline`, open a websocat session to `/v1/ws` and see live events arrive tagged with `account_id` as new events come in over sync.
 

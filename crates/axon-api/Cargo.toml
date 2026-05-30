@@ -9,3 +9,6 @@ license.workspace = true
 [dependencies]
 axon-core  = { workspace = true }
 axon-store = { workspace = true }
+axum       = { workspace = true }
+serde_json = { workspace = true }
+tracing    = { workspace = true }

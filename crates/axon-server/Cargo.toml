@@ -18,3 +18,10 @@ axon-crypto = { workspace = true }
 axon-search = { workspace = true }
 axon-media  = { workspace = true }
 axon-api    = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+axum  = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+dotenvy = { workspace = true }

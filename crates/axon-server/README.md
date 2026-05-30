@@ -11,6 +11,13 @@ Entry point for the `axon` binary. Reads config, initializes all subsystems (`ax
 - **Owns:** the process and runtime; `anyhow` error handling at the binary boundary.
 - **Consumes:** every other Axon crate.
 
+## Notes
+
+- Boot sequence: load `Config` → init `tracing` (honors `RUST_LOG`, else
+  `log.level`) → `Store::connect` (runs migrations) → build `axon_api::router`
+  → bind + `axum::serve` with graceful shutdown on Ctrl-C / SIGTERM.
+
 ## Status
 
-Stub — `main()` is empty.
+Boots the HTTP server with config + DB bootstrap and `/healthz` (Milestone 2).
+The `axon token` CLI subcommand arrives in Milestone 8.

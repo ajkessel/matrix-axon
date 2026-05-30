@@ -1,0 +1,23 @@
+# Copy to axon.toml and adjust, or set the same values via environment
+# variables. axon.toml is gitignored.
+#
+# Precedence (lowest to highest): these defaults < this file < DATABASE_URL <
+# AXON_-prefixed env vars (nested with "__", e.g. AXON_SERVER__PORT=9090).
+#
+# axon looks for a config file at $AXON_CONFIG, else ./axon.toml; if neither
+# exists it runs from environment variables and built-in defaults alone.
+
+[server]
+# Bind address. Defaults to loopback; put a reverse proxy in front for external
+# access, or set 0.0.0.0 to bind all interfaces.
+host = "127.0.0.1"
+port = 8080
+
+[database]
+# Required. Also accepted via the bare DATABASE_URL env var.
+url = "postgres://axon:axon@127.0.0.1:5432/axon"
+max_connections = 5
+
+[log]
+# tracing filter directive. Overridden by RUST_LOG when set.
+level = "info"

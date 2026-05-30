@@ -6,7 +6,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-axon}
       POSTGRES_DB: ${POSTGRES_DB:-axon}
     ports:
-      - "5432:5432"
+      # Host port is configurable to avoid clashing with a local Postgres
+      # (e.g. Homebrew/Postgres.app on macOS). Override POSTGRES_PORT in .env
+      # and update DATABASE_URL to match.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - axon-pgdata:/var/lib/postgresql/data
 

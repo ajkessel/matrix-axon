@@ -5,3 +5,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[dependencies]
+serde     = { workspace = true, features = ["derive"] }
+figment   = { workspace = true, features = ["toml", "env"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }

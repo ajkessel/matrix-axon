@@ -18,20 +18,50 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Developer quick-start
 
-Prerequisites: Rust (stable), Docker, Docker Compose.
+Prerequisites: Rust (stable), Postgres 16.
+
+### 1. Start Postgres
+
+**With Docker (easiest):**
+```bash
+docker compose up -d postgres
+```
+
+**Without Docker** — create the role and database in your local Postgres instance:
+```bash
+psql postgres <<SQL
+CREATE ROLE axon LOGIN PASSWORD 'axon';
+CREATE DATABASE axon OWNER axon;
+SQL
+```
+
+### 2. Configure
 
 ```bash
-# Start Postgres
-docker compose up -d postgres
+cp .env.example .env
+```
 
-# Build everything
-cargo build
+The server loads `.env` automatically on startup. The defaults in `.env.example` match the docker-compose settings; adjust `DATABASE_URL` if your Postgres is configured differently.
 
-# Run the server (stub — returns nothing useful until Milestone 2)
+> **Port already in use?** If you have a local Postgres (Homebrew, Postgres.app) on 5432, the docker-compose container can't claim the port and connections hit the local instance instead — you'll see `role "axon" does not exist`. Set `POSTGRES_PORT` to a free port in `.env` (e.g. `5433`), update the port in `DATABASE_URL` to match, then `docker compose up -d postgres`.
+>
+> **macOS + Docker note:** `localhost` can resolve to IPv6 (`::1`) on macOS, but Docker only binds to IPv4. The examples use `127.0.0.1` explicitly to avoid this.
+
+### 3. Build and run
+
+```bash
+# Enable the git pre-commit hook (fmt + clippy) — once per clone
+./scripts/setup-hooks.sh
+
 cargo run -p axon-server
 ```
 
-CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push.
+In another shell:
+```bash
+curl localhost:8080/healthz     # -> {"status":"ok"}
+```
+
+CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
 
 ## Docs
 
@@ -45,6 +75,6 @@ CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on 
 
 ## Status
 
-MVP in progress — **Milestone 1 of 12 complete** (workspace scaffolding).
+MVP in progress — **Milestone 2 of 12 complete** (config loader, Postgres pool + migrations, `/healthz`).
 
-Next: Milestone 2 — config loader, Postgres pool, `/healthz`.
+Next: Milestone 3 — sync engine v0 (`accounts` table, matrix-rust-sdk client per account, Simplified Sliding Sync).
