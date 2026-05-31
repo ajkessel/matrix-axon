@@ -21,6 +21,11 @@ pub enum Error {
     /// avoid an `axon-core` → `axon-store` dependency cycle.
     #[error("store error: {0}")]
     Store(String),
+
+    /// A sync-engine error (raised by `axon-sync`). Carried as a string for the
+    /// same acyclicity reason as [`Error::Store`].
+    #[error("sync error: {0}")]
+    Sync(String),
 }
 
 /// Errors raised while loading [`crate::Config`].
@@ -31,6 +36,12 @@ pub enum ConfigError {
     /// `Result` carrying it.
     #[error("failed to load configuration: {0}")]
     Figment(#[from] Box<figment::Error>),
+
+    /// Configuration parsed but failed a semantic check (e.g. an account
+    /// supplied neither or both of `password` / `access_token`). Validated
+    /// outside figment so the message is human-readable.
+    #[error("invalid configuration: {0}")]
+    Validation(String),
 }
 
 /// Convenience alias for fallible APIs returning the top-level [`Error`].

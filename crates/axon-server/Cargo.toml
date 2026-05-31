@@ -20,6 +20,7 @@ axon-media  = { workspace = true }
 axon-api    = { workspace = true }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio-util = { workspace = true }
 axum  = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

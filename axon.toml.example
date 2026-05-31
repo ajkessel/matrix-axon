@@ -21,3 +21,25 @@ max_connections = 5
 [log]
 # tracing filter directive. Overridden by RUST_LOG when set.
 level = "info"
+
+[sync]
+# Directory for the matrix-rust-sdk state + crypto stores (one subdir per
+# account). MUST be durable: losing it forces a re-login and the loss of
+# historical Megolm decryption keys.
+data_dir = "axon-data/sync"
+# Symmetric key used to (a) encrypt each account's access token at rest via
+# pgcrypto and (b) passphrase the SDK's SQLite store. Required once an account
+# is configured. Keep it secret; prefer setting it via AXON_SYNC__STORE_KEY
+# rather than committing it here.
+store_key = "change-me"
+
+# The single account to provision on boot. Omit the whole [sync.account] block
+# to run with no accounts (the server still boots and serves HTTP). Supply
+# exactly one of `password` (first-login; consumed once, never stored) or
+# `access_token` (+ `device_id`); the resulting token is stored encrypted.
+[sync.account]
+user_id = "@alice:example.org"
+homeserver_url = "https://matrix.example.org"
+password = "hunter2"
+# access_token = "syt_..."   # alternative to password
+# device_id = "ABCDEFGH"     # required when using access_token

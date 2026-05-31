@@ -46,7 +46,7 @@ matrix-axon/
 - **Event schema:** hybrid hot-columns + JSONB. `origin_ts` is `BIGINT` milliseconds since Unix epoch.
 - **Provenance:** every event row has `provenance = 'upstream_homeserver'` for MVP.
 - **API:** all routes under `/v1/`. WebSocket at `/v1/ws`. Envelope `{type, account_id, payload}`.
-- **Migrations:** under `crates/axon-store/migrations/`, UTC timestamp prefixes (`YYYYMMDDHHMMSS_description.sql`, via `sqlx migrate add`) to avoid cross-branch collisions; forward-only — see ADR 0004.
+- **Migrations:** under `crates/axon-store/migrations/`, UTC timestamp prefixes (`YYYYMMDDHHMMSS_description.sql`, via `sqlx migrate add`) to avoid cross-branch collisions; forward-only — see ADR 0004. For any table that carries `updated_at TIMESTAMPTZ`, add a `BEFORE UPDATE` trigger (using a shared `trigger_set_updated_at()` plpgsql function) so application queries never need to remember `updated_at = now()` — the DB enforces it automatically.
 - **Errors:** `thiserror` in libraries; `anyhow` only at the `axon-server` binary boundary.
 - **Logging:** `tracing` with structured fields — always include `account_id`, `room_id`, `event_id` where applicable.
 - **OpenAPI:** the spec is the source of truth. Handler types must compile against it (utoipa). Drift between spec and generated stubs is a bug.
@@ -56,6 +56,18 @@ matrix-axon/
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
+
+**Milestone 3, subphase 3a complete** — the binary provisions the configured account, logs in (or restores a session), and runs Simplified Sliding Sync per account. Event persistence (3b) and decryption robustness + the edge-case corpus (3c) are next.
+
+Non-obvious choices made in 3a (see ADRs 0006–0008, 0010, 0011):
+
+- **Dependency conflict:** adding `matrix-sdk` (→ rusqlite → `libsqlite3-sys 0.35`) collides with the `sqlx` umbrella's `sqlx-sqlite` (`libsqlite3-sys` 0.28–0.30) over the `links = "sqlite3"` native lib. Fix: drop the umbrella for `sqlx-core` + `sqlx-postgres` directly (pinned `=0.8.2`), embed migrations via `include_dir` (hand-built `Migrator`, same checksum format as `sqlx::migrate!`), and align sqlx onto the **aws-lc-rs** rustls provider to match matrix-sdk (two providers → runtime TLS panic). ADR 0006.
+- **Sync:** `matrix_sdk_ui::sync_service::SyncService` (not the low-level `SlidingSync`); one `Client` + one SQLite store per account under `sync.data_dir/<account_id>`; one supervised task per account, restarted with exponential backoff on `SyncService` `Error`/`Terminated`; `CancellationToken` for graceful drain. ADR 0007.
+- **Auth:** login once, restore thereafter. Access token stored encrypted at rest via pgcrypto `pgp_sym_encrypt` keyed by `sync.store_key`; password consumed once, never stored. Tokens treated as long-lived; `M_UNKNOWN_TOKEN` recovery + MSC2918 refresh deferred to M4. ADRs 0008, 0010.
+- **sqlx queries:** runtime `query`/`query_as` (no `query!` macros, no compile-time DB); `FromRow` hand-implemented. CI stays DB-free; account store methods covered by `#[ignore]` integration tests (`cargo test -p axon-store -- --ignored` with `DATABASE_URL`).
+- **E2EE key acquisition (deferred):** a fresh `axon` device is unverified, so encrypted rooms show UTDs until it obtains keys. Two complementary paths (ADR 0011): the *mature* path is **BFF-proxied interactive verification** — axon streams the SAS emoji over `/v1/ws` so the user verifies the axon session from the axon client (M4/M5+); after trust, the user's other devices gossip the cross-signing + backup secrets, so the recovery key never touches the server. The *bootstrap/fallback* (no client yet) is the account **recovery key** (Secure Storage / 4S): one `recover()` call unlocks both key backup and cross-signing (M4).
+
+---
 
 **Milestone 2 complete** — the binary boots: typed config, Postgres pool + migrations, and an axum server with `/healthz`.
 
@@ -70,4 +82,4 @@ Non-obvious choices made in Milestone 2 (see ADRs 0002–0003):
 - **CI:** unchanged. No `query!` macros yet, so sqlx compile-time checks aren't triggered and tests need no DB. When checked queries land in M3, add a Postgres service or a `.sqlx` offline cache.
 - **Pre-commit hook:** `.githooks/pre-commit` runs the fmt + clippy subset of CI; enable per clone with `./scripts/setup-hooks.sh` (`core.hooksPath`). Full `cargo test` stays in CI.
 
-Next: **Milestone 3** — `accounts` table in `axon-store`; `axon-sync` wires one matrix-rust-sdk `Client` per account and runs Simplified Sliding Sync, persisting events scoped by `account_id`.
+Next: **Milestone 3, subphase 3b** — the `events` table and `archive.rs`: consume the SDK's room-update firehose and persist events (raw + decrypted) into Postgres scoped by `account_id`.

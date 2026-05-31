@@ -39,3 +39,6 @@ clients/web/dist/
 
 # sqlx offline query cache (checked in only when intentional)
 .sqlx/
+
+# matrix-rust-sdk per-account state + crypto stores (runtime data, never tracked)
+axon-data/

@@ -7,6 +7,7 @@
 use anyhow::Context;
 use axon_core::Config;
 use axon_store::Store;
+use axon_sync::SyncEngine;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -25,6 +26,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connecting to database")?;
 
+    // Start the sync engine: it provisions the configured account and runs one
+    // supervised Simplified Sliding Sync task per account.
+    let sync_engine = SyncEngine::start(store.clone(), config.sync.clone())
+        .await
+        .context("starting sync engine")?;
+
     let app = axon_api::router(store);
 
     let addr = config.socket_addr();
@@ -38,6 +45,11 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+
+    // HTTP has drained; now wind down the sync tasks and wait for them to flush
+    // their SDK stores before exiting.
+    tracing::info!("stopping sync engine");
+    sync_engine.shutdown().await;
 
     Ok(())
 }

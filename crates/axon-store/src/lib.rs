@@ -6,11 +6,14 @@
 //! embedded into the binary at compile time, so a deployed `axon` needs no
 //! migration files on disk.
 
+mod accounts;
 mod error;
+mod migrations;
 
+pub use accounts::Account;
 pub use error::StoreError;
 
-use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx_postgres::{PgPool, PgPoolOptions};
 
 /// A handle to the Axon Postgres database.
 ///
@@ -30,7 +33,7 @@ impl Store {
             .await?;
 
         tracing::info!("running database migrations");
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        migrations::embedded_migrator()?.run(&pool).await?;
 
         Ok(Store { pool })
     }

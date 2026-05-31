@@ -8,14 +8,21 @@ license.workspace = true
 
 [dependencies]
 axon-core = { workspace = true }
-sqlx = { workspace = true, features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "migrate",
-    "uuid",
-    "chrono",
-    "macros",
-] }
+# Depend on the driver crates directly rather than the `sqlx` umbrella: the
+# umbrella unconditionally pulls `sqlx-sqlite` into the resolution graph, whose
+# `libsqlite3-sys` (links = "sqlite3") collides with matrix-sdk's rusqlite at an
+# incompatible version. Going direct keeps sqlx-sqlite out of the graph entirely.
+# aws-lc-rs (not ring) to match matrix-sdk's reqwest: rustls 0.23 refuses to
+# auto-pick a process-default CryptoProvider when two are compiled in, so both
+# TLS users must agree on one provider or TLS panics at runtime.
+sqlx-core = { workspace = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }
+sqlx-postgres = { workspace = true, features = ["migrate", "uuid", "chrono"] }
+include_dir = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

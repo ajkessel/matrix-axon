@@ -9,3 +9,21 @@ license.workspace = true
 [dependencies]
 axon-core  = { workspace = true }
 axon-store = { workspace = true }
+
+# matrix-sdk + matrix-sdk-ui must move together (version skew breaks the build).
+# bundled-sqlite vendors SQLite (no system libsqlite3 needed) for the SDK's own
+# state + crypto store; e2e-encryption enables Olm/Megolm. Both are also in the
+# default feature set, but we name them so the build doesn't silently break if
+# upstream defaults change.
+matrix-sdk = { workspace = true, features = [
+    "e2e-encryption",
+    "bundled-sqlite",
+] }
+matrix-sdk-ui = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio-util = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

@@ -108,6 +108,13 @@ Each milestone has explicit deliverables and a verification step that exercises 
 
 **Verification:** SQL queries: paginate the most recent N events in a room reverse-chronologically; redact an event and confirm timeline reads mask its content while ciphertext sibling row remains; cursor-based pagination returns stable results across calls.
 
+**E2EE key acquisition & device trust (ADR 0011).** A fresh `axon` device is unverified, so encrypted rooms show UTDs until it obtains keys. Two complementary paths; this milestone builds both pieces that can stand alone, the rest lands in Milestone 5:
+
+- **Recovery-key bootstrap (build here, end-to-end).** `client.encryption().recovery().recover(key)` restores both the Megolm key backup (history) and the cross-signing private keys (so `axon` self-verifies and future keys flow). Add `sync.account.recovery_key`, encrypted at rest like the access token (ADR 0008) — prefer transient-only handling of this crown-jewel secret. This path needs no client, so it's what lets this milestone **prove decryption end-to-end before any front-end exists**.
+- **Verification plumbing (build here, exercised in M5).** The programmatic SDK flow — surface a `VerificationRequest`, `accept()`, read `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. "Headless" means `axon` has no UI of its own, not that it can't verify; the SDK API is fully programmatic. The user-facing emoji exchange can't be exercised until the M5 WebSocket exists, so this milestone builds the plumbing and M5 wires the UX. Note `axon-crypto` is the "thin verification surface over rust-sdk crypto" from the project layout.
+
+**Verification (E2EE):** against a real homeserver with key backup enabled, supply `sync.account.recovery_key`, confirm UTD rows flip to `decrypted = true` as backed-up keys arrive, and that `axon` shows as a verified/cross-signed device.
+
 ### 5. Client API v0
 
 - axum routes under `/v1/`:
@@ -122,6 +129,10 @@ Each milestone has explicit deliverables and a verification step that exercises 
   bodies. (Deferred from M2; designing against zero real handlers is premature.)
 
 **Verification:** Boot the server, `curl /v1/rooms`, hit `/v1/rooms/{id}/timeline`, open a websocat session to `/v1/ws` and see live events arrive tagged with `account_id` as new events come in over sync.
+
+**Interactive verification UX over the WebSocket (consumes the M4 plumbing — ADR 0011).** Wire the verification flow built in Milestone 4 to the client: `axon` relays incoming/outgoing `VerificationRequest`s and streams the SAS emoji/decimals over `/v1/ws`, so the user verifies the `axon` session *from the axon client*, exactly as they would verify any other device. This is the mature E2EE key-acquisition path: once `axon` is interactively verified, the user's other devices **gossip** the cross-signing secrets and key-backup key to it automatically — so the recovery key never has to be stored server-side. (This is the BFF answer to "no verification UI in the alpha" — the API surface ships here; `axon-web` driving it is a later/optional add. QR-code verification is a follow-up.)
+
+**Verification (interactive E2EE):** from a trusted Element session, start verification of the `axon` device; confirm the SAS emoji arrive over `/v1/ws`, that confirming both sides cross-signs `axon`, and that subsequently-sent encrypted messages decrypt without the recovery key.
 
 ### 6. Mutations
 

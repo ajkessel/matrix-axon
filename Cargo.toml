@@ -29,10 +29,30 @@ axon-api    = { path = "crates/axon-api" }
 
 # Async runtime + HTTP
 tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
 axum  = { version = "0.8" }
 
-# Database
+# Database. sqlx-core / sqlx-postgres are pinned exactly: axon-store depends on
+# their semver-exempt `_`-prefixed features (runtime + TLS provider selection),
+# which exist only because we bypass the `sqlx` umbrella to keep sqlx-sqlite out
+# of the graph (see axon-store/Cargo.toml + ADR 0006). An exact pin stops a
+# `cargo update` from silently renaming those features out from under us.
 sqlx = { version = "0.8", default-features = false }
+sqlx-core = { version = "=0.8.2", default-features = false }
+sqlx-postgres = { version = "=0.8.2", default-features = false }
+uuid = { version = "1", default-features = false }
+chrono = { version = "0.4", default-features = false }
+# Embeds the migrations/ directory into the binary at compile time. We can't use
+# sqlx's `migrate!` macro (it lives in the `sqlx` umbrella, which we drop to keep
+# sqlx-sqlite out of the graph — see axon-store/Cargo.toml), so we embed here and
+# build a sqlx_core::migrate::Migrator ourselves.
+include_dir = { version = "0.7" }
+
+# Matrix. Keep the SDK's default features (they carry its intended TLS/HTTP
+# stack — 0.17 exposes no standalone tls feature). Extra features are added at
+# the crate level.
+matrix-sdk    = { version = "0.17" }
+matrix-sdk-ui = { version = "0.17" }
 
 # Config + serialization
 figment    = { version = "0.10" }

@@ -33,6 +33,10 @@ pub struct Config {
     /// Logging settings.
     #[serde(default)]
     pub log: LogConfig,
+    /// Sync-engine settings: where the matrix-rust-sdk stores live and which
+    /// account (if any) to provision on boot.
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 /// HTTP server bind settings.
@@ -68,6 +72,88 @@ pub struct LogConfig {
     pub level: String,
 }
 
+/// Sync-engine settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncConfig {
+    /// Directory under which the matrix-rust-sdk state + crypto stores live,
+    /// one subdirectory per account. Must be durable — losing it forces a
+    /// re-login and the loss of historical Megolm sessions.
+    #[serde(default = "default_sync_data_dir")]
+    pub data_dir: PathBuf,
+    /// Symmetric key used to encrypt the access token at rest (pgcrypto
+    /// `pgp_sym_encrypt`) and to passphrase the SDK's SQLite store. Required
+    /// once an account is provisioned; validated at provision time so the error
+    /// message is human-readable.
+    #[serde(default)]
+    pub store_key: Option<String>,
+    /// The account to provision on boot, if any. Absent means "run with no
+    /// accounts" (the binary still boots and serves HTTP).
+    #[serde(default)]
+    pub account: Option<AccountProvision>,
+}
+
+/// Provisioning details for a single Matrix account.
+///
+/// Exactly one of [`password`](Self::password) or
+/// [`access_token`](Self::access_token) must be supplied; this is validated at
+/// provision time via [`credential`](Self::credential). The password is
+/// consumed once at first login and never persisted — only the resulting token
+/// is stored (encrypted).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountProvision {
+    /// Full Matrix user ID, e.g. `@alice:example.org`.
+    pub user_id: String,
+    /// Homeserver base URL, e.g. `https://matrix.example.org`.
+    pub homeserver_url: String,
+    /// Password for first-login. Mutually exclusive with `access_token`.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Pre-provisioned access token. Mutually exclusive with `password`.
+    #[serde(default)]
+    pub access_token: Option<String>,
+    /// Device ID to associate with a pre-provisioned `access_token`. Ignored
+    /// for password login (the homeserver assigns one).
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// A validated login credential — exactly one of the two mutually-exclusive
+/// options on [`AccountProvision`].
+#[derive(Debug, Clone, Copy)]
+pub enum Credential<'a> {
+    /// Password login (first boot); homeserver issues a fresh token + device.
+    Password(&'a str),
+    /// Restore from a pre-provisioned access token (+ optional device ID).
+    Token {
+        /// The access token.
+        token: &'a str,
+        /// The device ID it belongs to, if known.
+        device_id: Option<&'a str>,
+    },
+}
+
+impl AccountProvision {
+    /// Resolve the single valid credential, erroring if zero or both of
+    /// `password` / `access_token` are set.
+    pub fn credential(&self) -> Result<Credential<'_>, ConfigError> {
+        match (self.password.as_deref(), self.access_token.as_deref()) {
+            (Some(pw), None) => Ok(Credential::Password(pw)),
+            (None, Some(token)) => Ok(Credential::Token {
+                token,
+                device_id: self.device_id.as_deref(),
+            }),
+            (Some(_), Some(_)) => Err(ConfigError::Validation(format!(
+                "sync.account for {}: provide exactly one of `password` or `access_token`, not both",
+                self.user_id
+            ))),
+            (None, None) => Err(ConfigError::Validation(format!(
+                "sync.account for {}: one of `password` or `access_token` is required",
+                self.user_id
+            ))),
+        }
+    }
+}
+
 fn default_host() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -84,6 +170,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_sync_data_dir() -> PathBuf {
+    PathBuf::from("axon-data/sync")
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -97,6 +187,16 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: default_log_level(),
+        }
+    }
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_sync_data_dir(),
+            store_key: None,
+            account: None,
         }
     }
 }
@@ -218,7 +318,79 @@ mod tests {
                 max_connections: 5,
             },
             log: LogConfig::default(),
+            sync: SyncConfig::default(),
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
+    }
+
+    #[test]
+    fn sync_defaults_when_absent() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let config = Config::load(None).expect("load");
+            assert_eq!(config.sync.data_dir, PathBuf::from("axon-data/sync"));
+            assert!(config.sync.store_key.is_none());
+            assert!(config.sync.account.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sync_account_loads_from_file() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "axon.toml",
+                r#"
+                    [database]
+                    url = "postgres://file@localhost/db"
+                    [sync]
+                    store_key = "s3cret"
+                    [sync.account]
+                    user_id = "@alice:example.org"
+                    homeserver_url = "https://matrix.example.org"
+                    password = "hunter2"
+                "#,
+            )?;
+            let config = Config::load(Some(Path::new("axon.toml"))).expect("load");
+            let account = config.sync.account.expect("account");
+            assert_eq!(account.user_id, "@alice:example.org");
+            assert!(matches!(
+                account.credential(),
+                Ok(Credential::Password("hunter2"))
+            ));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn credential_requires_exactly_one() {
+        let neither = AccountProvision {
+            user_id: "@a:b".into(),
+            homeserver_url: "https://b".into(),
+            password: None,
+            access_token: None,
+            device_id: None,
+        };
+        assert!(neither.credential().is_err());
+
+        let both = AccountProvision {
+            password: Some("p".into()),
+            access_token: Some("t".into()),
+            ..neither.clone()
+        };
+        assert!(both.credential().is_err());
+
+        let token_only = AccountProvision {
+            access_token: Some("t".into()),
+            device_id: Some("DEV".into()),
+            ..neither
+        };
+        assert!(matches!(
+            token_only.credential(),
+            Ok(Credential::Token {
+                token: "t",
+                device_id: Some("DEV")
+            })
+        ));
     }
 }
