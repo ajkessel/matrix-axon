@@ -16,7 +16,7 @@ axon-core = { workspace = true }
 # auto-pick a process-default CryptoProvider when two are compiled in, so both
 # TLS users must agree on one provider or TLS panics at runtime.
 sqlx-core = { workspace = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }
-sqlx-postgres = { workspace = true, features = ["migrate", "uuid", "chrono"] }
+sqlx-postgres = { workspace = true, features = ["migrate", "uuid", "chrono", "json"] }
 include_dir = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }

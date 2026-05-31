@@ -9,10 +9,14 @@
 use std::time::Duration;
 
 use axon_core::{AccountProvision, SyncConfig};
-use axon_store::{Account, Store};
+use axon_store::{Account, NewEvent, Store};
+use matrix_sdk::event_handler::{Ctx, RawEvent};
+use matrix_sdk::ruma::events::AnySyncTimelineEvent;
+use matrix_sdk::Room;
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::client::connect_account;
 use crate::error::{sdk_err, SyncError};
@@ -113,6 +117,87 @@ async fn supervise_account(
     }
 }
 
+/// Shared context injected into the per-account event handler.
+#[derive(Clone)]
+struct PersistContext {
+    store: Store,
+    account_id: Uuid,
+}
+
+/// Event handler: persist every synced timeline event to Postgres.
+///
+/// For E2EE rooms, matrix-rust-sdk decrypts the megolm payload before
+/// dispatching, so `ev` and `raw` already carry the plaintext content. UTDs
+/// arrive as `m.room.encrypted` events with the ciphertext as content; the
+/// re-decryption queue (M3c) will back-fill their `content` column.
+async fn persist_timeline_event(
+    ev: AnySyncTimelineEvent,
+    room: Room,
+    raw: RawEvent,
+    Ctx(ctx): Ctx<PersistContext>,
+) {
+    let raw_val: serde_json::Value = match serde_json::from_str(raw.get()) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                error = %err,
+                "failed to parse raw event JSON; skipping persistence"
+            );
+            return;
+        }
+    };
+
+    // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
+    let event_type: String = raw_val
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_owned();
+    // An event that is still `m.room.encrypted` at dispatch is one the SDK could
+    // not decrypt (a UTD): its `content` is the megolm ciphertext envelope, not
+    // plaintext. Persist `content = NULL` so the column means "decrypted payload"
+    // — `content IS NOT NULL` is then a true decrypted signal, and the M3c
+    // re-decryption queue can find pending UTDs by `content IS NULL`. The full
+    // ciphertext (incl. `session_id`) is preserved in `raw_event` for re-decryption.
+    // Once the SDK decrypts a megolm event it dispatches it with the cleartext
+    // type, so this branch is skipped and the real plaintext content is stored.
+    let content = if event_type == "m.room.encrypted" {
+        None
+    } else {
+        raw_val.get("content").cloned()
+    };
+    let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
+
+    let new_ev = NewEvent {
+        event_id: ev.event_id().as_str(),
+        room_id: room.room_id().as_str(),
+        account_id: ctx.account_id,
+        sender: ev.sender().as_str(),
+        origin_ts,
+        event_type: &event_type,
+        content,
+        raw_event: raw_val,
+    };
+
+    if let Err(err) = ctx.store.upsert_event(&new_ev).await {
+        tracing::warn!(
+            account_id = %ctx.account_id,
+            event_id = %ev.event_id(),
+            error = %err,
+            "failed to persist event"
+        );
+    } else {
+        tracing::debug!(
+            account_id = %ctx.account_id,
+            event_id = %ev.event_id(),
+            room_id = %room.room_id(),
+            event_type = event_type.as_str(),
+            "persisted event"
+        );
+    }
+}
+
 /// Run one account's sync to completion: authenticate, start the sync service,
 /// and monitor its state until cancellation (returns `Ok`) or an error/terminal
 /// state (returns `Err`, triggering a supervised restart).
@@ -124,6 +209,15 @@ async fn run_account(
 ) -> Result<(), SyncError> {
     let credential = credential_for(config, account)?;
     let client = connect_account(store, account, config, credential).await?;
+
+    // Register event persistence before starting the sync service so no events
+    // are missed between SyncService::start() and handler registration.
+    let persist_ctx = PersistContext {
+        store: store.clone(),
+        account_id: account.account_id,
+    };
+    client.add_event_handler_context(persist_ctx);
+    client.add_event_handler(persist_timeline_event);
 
     let sync_service = SyncService::builder(client)
         .build()
@@ -146,8 +240,15 @@ async fn run_account(
         }
     };
 
-    // Always drain the service so its SQLite store flushes before we drop it.
-    sync_service.stop().await;
+    // Drain the service so its SQLite store flushes before we drop it. Cap the
+    // wait so a hung stop() doesn't block process exit indefinitely — the OS
+    // will close the SQLite file cleanly on drop regardless.
+    if tokio::time::timeout(Duration::from_secs(5), sync_service.stop())
+        .await
+        .is_err()
+    {
+        tracing::warn!(account_id = %account.account_id, "sync service stop() timed out after 5s");
+    }
     result
 }
 

@@ -50,6 +50,7 @@ matrix-axon/
 - **Errors:** `thiserror` in libraries; `anyhow` only at the `axon-server` binary boundary.
 - **Logging:** `tracing` with structured fields — always include `account_id`, `room_id`, `event_id` where applicable.
 - **OpenAPI:** the spec is the source of truth. Handler types must compile against it (utoipa). Drift between spec and generated stubs is a bug.
+- **Pull requests:** every PR body includes, by default, a **Verification guide** (prereqs + copy-pasteable, end-to-end steps that exercise real behavior — not just `cargo check`) and a **Code review guide** (a suggested file-by-file review order, dependencies first, plus a "where to keep a close eye" section calling out correctness, security, and lifetime concerns). Match the format of PRs #6 and #7. Scope both guides to the PR's actual diff.
 - **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend, no OAuth server — see `docs/mvp/implementation.md` "What not to build" for the full list.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
 
@@ -57,7 +58,13 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 3, subphase 3a complete** — the binary provisions the configured account, logs in (or restores a session), and runs Simplified Sliding Sync per account. Event persistence (3b) and decryption robustness + the edge-case corpus (3c) are next.
+**Milestone 3, subphase 3b complete** — the binary provisions the configured account, logs in (or restores a session), runs Simplified Sliding Sync per account, and persists every incoming Matrix timeline event into Postgres scoped by `account_id`. Decryption robustness and the edge-case corpus (3c) are next.
+
+Non-obvious choices made in 3b (see ADR 0012):
+
+- **Event persistence hook:** `Client::add_event_handler(persist_timeline_event)` with `AnySyncTimelineEvent` + `RawEvent` context. Registered on the `Client` before `SyncService::start()` so no events are missed during initial sync. matrix-rust-sdk decrypts Megolm payloads before dispatch, so `raw_event` in the `events` table holds the plaintext envelope for decrypted events (or the `m.room.encrypted` envelope — ciphertext + `session_id` — for UTDs). ADR 0012.
+- **Events table:** `(id BIGSERIAL, event_id TEXT, room_id TEXT, account_id UUID, sender TEXT, origin_ts BIGINT, event_type TEXT, content JSONB, raw_event JSONB, provenance TEXT DEFAULT 'upstream_homeserver', received_at TIMESTAMPTZ)`. `raw_event` is the full event envelope as dispatched (plaintext for decrypted events, the `m.room.encrypted` ciphertext for UTDs); `content` is the extracted decrypted payload. Unique on `(account_id, event_id)` — upsert is idempotent. `content` is nullable: UTDs arrive as `m.room.encrypted` with `content = NULL`; the M3c re-decryption queue back-fills those rows, reading the ciphertext straight from `raw_event`. Index on `(account_id, room_id, origin_ts DESC)` for timeline reads. M4 ("Event store schema") adds hot-column refinements and sibling tables holding the original ciphertext + megolm session metadata + sender device keys (keyed by `event_id`, for every event) so decrypted rows stay re-verifiable against Matrix's signatures — distinct from M3c re-decryption, which reads UTD ciphertext straight from `raw_event`.
+- **sqlx JSONB:** added `json` feature to `sqlx-postgres` (transitively enables `sqlx-core/json`) so `serde_json::Value` binds as JSONB.
 
 Non-obvious choices made in 3a (see ADRs 0006–0008, 0010, 0011):
 
