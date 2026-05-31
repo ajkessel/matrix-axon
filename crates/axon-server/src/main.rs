@@ -4,6 +4,9 @@
 //! migrations), build the router, then serve until a shutdown signal arrives.
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
+use std::future::IntoFuture;
+use std::time::Duration;
+
 use anyhow::Context;
 use axon_core::Config;
 use axon_store::Store;
@@ -41,15 +44,26 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "axon listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    // Serve until a shutdown signal arrives. We `select!` the server against the
+    // signal rather than using `with_graceful_shutdown` so that pressing Ctrl-C
+    // stops serving *immediately* — a stuck or idle keep-alive connection can't
+    // wedge shutdown waiting for it to drain.
+    tokio::select! {
+        result = axum::serve(listener, app).into_future() => result.context("server error")?,
+        _ = shutdown_signal() => tracing::info!("shutdown signal received"),
+    }
 
-    // HTTP has drained; now wind down the sync tasks and wait for them to flush
-    // their SDK stores before exiting.
+    // Wind down the sync tasks so their SDK stores flush. But never let a hung
+    // SDK `stop()` (e.g. blocked on an in-flight 30s long-poll) wedge process
+    // exit: cap the drain, and let a second Ctrl-C force an immediate exit.
     tracing::info!("stopping sync engine");
-    sync_engine.shutdown().await;
+    tokio::select! {
+        _ = sync_engine.shutdown() => tracing::info!("sync engine stopped"),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+            tracing::warn!("sync engine did not stop within 10s; exiting anyway");
+        }
+        _ = shutdown_signal() => tracing::warn!("second shutdown signal; exiting immediately"),
+    }
 
     Ok(())
 }
