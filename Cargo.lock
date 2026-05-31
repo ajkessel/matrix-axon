@@ -326,6 +326,7 @@ dependencies = [
  "axon-sync",
  "axum",
  "dotenvy",
+ "libc",
  "tokio",
  "tokio-util",
  "tracing",
