@@ -63,12 +63,17 @@ semantics matter. It is overkill for the batch-write use case here.
   `raw_event`. The M3c re-decryption queue reads the ciphertext straight from
   `raw_event` and back-fills `content` as keys arrive — no separate ciphertext
   store is needed for re-decryption.
-- The one thing **not** retained in Postgres is the ciphertext of events the SDK
-  decrypted *inline* (live messages): for those, `raw_event` holds plaintext and
-  the original ciphertext lives only in the SDK's SQLite store (per ADR 0007).
-  Nothing in the MVP needs that ciphertext-at-rest; if a future audit/forensics
-  requirement ever does, it can be captured then. We do not speculatively add a
-  sibling ciphertext table now.
+- For events the SDK decrypted *inline* (live messages), `raw_event` holds the
+  plaintext envelope — the original ciphertext for those is **not** in the
+  `events` table (it lives only in the SDK's SQLite store, per ADR 0007). That
+  gap is filled in **Milestone 4 ("Event store schema")**, which adds sibling
+  tables keyed by `event_id` holding the original ciphertext, megolm session
+  metadata, and sender device keys for *every* event, so any decrypted row can
+  be re-verified against Matrix's own signatures (see `tech-spec.md`). 3b does
+  not build those tables; it only needs `raw_event` and `content`. Note this is
+  orthogonal to M3c re-decryption, which already has everything it needs in
+  `raw_event` (a UTD's ciphertext + `session_id`) and does not depend on the M4
+  sibling tables.
 - The handler is registered per `run_account` call (i.e., on every supervised
   restart). `SyncService::builder` takes ownership of the `Client`, which
   carries the registered handlers; when the service is stopped and dropped the
