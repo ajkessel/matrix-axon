@@ -240,15 +240,8 @@ async fn run_account(
         }
     };
 
-    // Drain the service so its SQLite store flushes before we drop it. Cap the
-    // wait so a hung stop() doesn't block process exit indefinitely — the OS
-    // will close the SQLite file cleanly on drop regardless.
-    if tokio::time::timeout(Duration::from_secs(5), sync_service.stop())
-        .await
-        .is_err()
-    {
-        tracing::warn!(account_id = %account.account_id, "sync service stop() timed out after 5s");
-    }
+    // Always drain the service so its SQLite store flushes before we drop it.
+    sync_service.stop().await;
     result
 }
 

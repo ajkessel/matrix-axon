@@ -26,9 +26,3 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 dotenvy = { workspace = true }
-
-# Shutdown signals are handled via sigwait on a dedicated thread (see main.rs):
-# a C dependency in the crypto stack clobbers handler-based SIGINT, so we block
-# the signals and dequeue them directly.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
