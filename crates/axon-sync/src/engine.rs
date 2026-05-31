@@ -159,7 +159,7 @@ async fn persist_timeline_event(
     // plaintext. Persist `content = NULL` so the column means "decrypted payload"
     // — `content IS NOT NULL` is then a true decrypted signal, and the M3c
     // re-decryption queue can find pending UTDs by `content IS NULL`. The full
-    // ciphertext (incl. `session_id`) is preserved in `raw_content` for re-decryption.
+    // ciphertext (incl. `session_id`) is preserved in `raw_event` for re-decryption.
     // Once the SDK decrypts a megolm event it dispatches it with the cleartext
     // type, so this branch is skipped and the real plaintext content is stored.
     let content = if event_type == "m.room.encrypted" {
@@ -177,7 +177,7 @@ async fn persist_timeline_event(
         origin_ts,
         event_type: &event_type,
         content,
-        raw_content: raw_val,
+        raw_event: raw_val,
     };
 
     if let Err(err) = ctx.store.upsert_event(&new_ev).await {

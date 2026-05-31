@@ -46,20 +46,29 @@ semantics matter. It is overkill for the batch-write use case here.
 
 ## Consequences
 
-- `raw_content` in the `events` table stores the *decrypted* event JSON for
-  E2EE rooms (not the ciphertext). This is possible because the SDK decrypts
-  Megolm payloads internally before dispatching to handlers: when a sender
-  encrypts a message, their client distributes the Megolm session key to every
-  device currently in the room (including axon) via an `m.room_key` to-device
-  event, so axon already holds the key by the time the encrypted event arrives.
-  The SDK decrypts silently and gives handlers the plaintext. Historical messages
-  (sent before axon's device existed) are the exception — no `m.room_key` was
-  ever sent to axon for those sessions, so they arrive as UTDs (see next bullet).
-  Ciphertext and Megolm session metadata live in the SDK's SQLite store (per ADR
-  0007). M4 will add sibling tables for the original ciphertext if needed.
+- `raw_event` in the `events` table stores the **full event envelope** as the
+  SDK dispatched it (type, sender, `content`, unsigned, …), *not* the ciphertext
+  specifically. What it contains depends on the decryption path:
+  - **Live-decrypted message** → plaintext envelope. The SDK decrypts Megolm
+    internally before dispatch: when a sender encrypts a message, their client
+    distributes the Megolm session key to every device then in the room
+    (including axon) via an `m.room_key` to-device event, so axon holds the key
+    by the time the event arrives and the handler sees plaintext.
+  - **UTD** (historical message, or any session axon never received a key for)
+    → the `m.room.encrypted` envelope, i.e. ciphertext + `session_id`.
+  The companion `content` column is the *extracted, decrypted* payload: the
+  event's `content` field for decrypted events, `NULL` for UTDs.
 - UTD events are persisted with `content = NULL` and `event_type =
-  m.room.encrypted`. The M3c re-decryption queue will back-fill `content` as
-  keys arrive.
+  m.room.encrypted`; their ciphertext and `session_id` are already in
+  `raw_event`. The M3c re-decryption queue reads the ciphertext straight from
+  `raw_event` and back-fills `content` as keys arrive — no separate ciphertext
+  store is needed for re-decryption.
+- The one thing **not** retained in Postgres is the ciphertext of events the SDK
+  decrypted *inline* (live messages): for those, `raw_event` holds plaintext and
+  the original ciphertext lives only in the SDK's SQLite store (per ADR 0007).
+  Nothing in the MVP needs that ciphertext-at-rest; if a future audit/forensics
+  requirement ever does, it can be captured then. We do not speculatively add a
+  sibling ciphertext table now.
 - The handler is registered per `run_account` call (i.e., on every supervised
   restart). `SyncService::builder` takes ownership of the `Client`, which
   carries the registered handlers; when the service is stopped and dropped the

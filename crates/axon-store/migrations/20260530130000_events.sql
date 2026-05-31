@@ -7,7 +7,7 @@ CREATE TABLE events (
     origin_ts   BIGINT       NOT NULL,
     event_type  TEXT         NOT NULL,
     content     JSONB,
-    raw_content JSONB        NOT NULL,
+    raw_event   JSONB        NOT NULL,
     provenance  TEXT         NOT NULL DEFAULT 'upstream_homeserver',
     received_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (account_id, event_id)

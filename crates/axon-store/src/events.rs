@@ -27,8 +27,12 @@ pub struct NewEvent<'a> {
     /// Decrypted event `content` as JSON. `None` for events that could not be
     /// decrypted (UTDs); will be populated by the re-decryption queue (M3c).
     pub content: Option<Value>,
-    /// Full event JSON as seen by the SDK (post-decryption for E2EE rooms).
-    pub raw_content: Value,
+    /// The full event envelope as dispatched to the SDK handler: type, sender,
+    /// `content`, unsigned, etc. Plaintext for events the SDK decrypted; the
+    /// `m.room.encrypted` envelope (ciphertext + `session_id`) for UTDs. This is
+    /// the whole event, not just the ciphertext — `content` above is the
+    /// extracted, decrypted payload.
+    pub raw_event: Value,
 }
 
 impl Store {
@@ -38,7 +42,7 @@ impl Store {
         sqlx_core::query::query(
             "INSERT INTO events \
              (event_id, room_id, account_id, sender, origin_ts, event_type, \
-              content, raw_content) \
+              content, raw_event) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (account_id, event_id) DO NOTHING",
         )
@@ -49,7 +53,7 @@ impl Store {
         .bind(ev.origin_ts)
         .bind(ev.event_type)
         .bind(&ev.content)
-        .bind(&ev.raw_content)
+        .bind(&ev.raw_event)
         .execute(&self.pool)
         .await?;
         Ok(())
