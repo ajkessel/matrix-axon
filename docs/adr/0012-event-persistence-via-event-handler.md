@@ -47,9 +47,16 @@ semantics matter. It is overkill for the batch-write use case here.
 ## Consequences
 
 - `raw_content` in the `events` table stores the *decrypted* event JSON for
-  E2EE rooms (not the ciphertext). Ciphertext and Megolm session metadata live
-  in the SDK's SQLite store (per ADR 0007). M4 will add sibling tables for the
-  original ciphertext if needed.
+  E2EE rooms (not the ciphertext). This is possible because the SDK decrypts
+  Megolm payloads internally before dispatching to handlers: when a sender
+  encrypts a message, their client distributes the Megolm session key to every
+  device currently in the room (including axon) via an `m.room_key` to-device
+  event, so axon already holds the key by the time the encrypted event arrives.
+  The SDK decrypts silently and gives handlers the plaintext. Historical messages
+  (sent before axon's device existed) are the exception — no `m.room_key` was
+  ever sent to axon for those sessions, so they arrive as UTDs (see next bullet).
+  Ciphertext and Megolm session metadata live in the SDK's SQLite store (per ADR
+  0007). M4 will add sibling tables for the original ciphertext if needed.
 - UTD events are persisted with `content = NULL` and `event_type =
   m.room.encrypted`. The M3c re-decryption queue will back-fill `content` as
   keys arrive.
