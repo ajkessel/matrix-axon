@@ -148,13 +148,25 @@ async fn persist_timeline_event(
         }
     };
 
-    let content = raw_val.get("content").cloned();
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_owned();
+    // An event that is still `m.room.encrypted` at dispatch is one the SDK could
+    // not decrypt (a UTD): its `content` is the megolm ciphertext envelope, not
+    // plaintext. Persist `content = NULL` so the column means "decrypted payload"
+    // — `content IS NOT NULL` is then a true decrypted signal, and the M3c
+    // re-decryption queue can find pending UTDs by `content IS NULL`. The full
+    // ciphertext (incl. `session_id`) is preserved in `raw_content` for re-decryption.
+    // Once the SDK decrypts a megolm event it dispatches it with the cleartext
+    // type, so this branch is skipped and the real plaintext content is stored.
+    let content = if event_type == "m.room.encrypted" {
+        None
+    } else {
+        raw_val.get("content").cloned()
+    };
     let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
 
     let new_ev = NewEvent {
