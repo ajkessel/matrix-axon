@@ -298,6 +298,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "axon-itest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "matrix-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "axon-media"
 version = "0.1.0"
 dependencies = [

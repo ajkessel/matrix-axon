@@ -1,0 +1,66 @@
+# Synapse configuration for LOCAL INTEGRATION TESTING ONLY.
+#
+# This homeserver is a throwaway: insecure secrets, no TLS, sqlite, wide-open
+# rate limits. Never expose it outside localhost or reuse these values.
+#
+# It exists so axon can run its sync + re-decryption pipeline against a real
+# Matrix server. The one axon-specific requirement is MSC4186 (Simplified
+# Sliding Sync), enabled under `experimental_features` below — axon speaks only
+# Simplified Sliding Sync, so without it nothing syncs.
+
+server_name: "localhost"
+pid_file: /data/homeserver.pid
+signing_key_path: "/data/localhost.signing.key"
+log_config: "/data/log.config"
+media_store_path: /data/media_store
+report_stats: false
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: sqlite3
+  args:
+    database: /data/homeserver.db
+
+# Throwaway dev secrets — fine for a localhost test server, never for real use.
+registration_shared_secret: "axon-dev-registration-secret"
+macaroon_secret_key: "axon-dev-macaroon-secret"
+form_secret: "axon-dev-form-secret"
+
+# Users are created via the admin/shared-secret API (register_new_matrix_user),
+# so open registration stays off.
+enable_registration: false
+
+# No federation in local testing.
+trusted_key_servers: []
+suppress_key_server_warning: true
+
+# Simplified Sliding Sync (MSC4186): the endpoint axon's SyncService uses.
+experimental_features:
+  msc4186_enabled: true
+
+# Wide-open rate limits so seeding (many messages + E2EE key uploads) and a
+# fresh device's initial sync don't get 429'd mid-test.
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000

@@ -10,6 +10,8 @@ Axon is a self-hosted personal agent for Matrix: a persistent state layer (sync,
 | `docs/mvp/tech-spec.md` | Architecture decisions and tradeoffs |
 | `docs/mvp/implementation.md` | Milestone-by-milestone build plan (authoritative for agentic contributors) |
 | `docs/adr/` | Architecture decision records — decisions made during implementation |
+| `docs/integration-testing.md` | Running axon against a local Synapse (sync + M3c re-decryption) by hand |
+| `scripts/integration-test.sh` | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Also runs in CI (`.github/workflows/integration.yml`). |
 
 ## Directory layout
 
@@ -27,6 +29,7 @@ matrix-axon/
     axon-search/             # Tantivy index
     axon-media/              # media proxy + disk-cache backend
     axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
+    axon-itest/              # dev-only: integration-test seeder (the `seed` binary)
   clients/
     web/                     # axon-web (Vite + React + TS) — alpha client
   openapi/                   # OpenAPI 3.1 spec (source of truth)
@@ -34,9 +37,12 @@ matrix-axon/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)
     adr/                     # architecture decision records
     self-hosting.md          # produced in Milestone 12
-  docker-compose.yml         # Postgres 16 for dev
+  docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
+  scripts/
+    integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
   .github/workflows/
     lint-and-test.yml        # cargo fmt + clippy + test on every push/PR
+    integration.yml          # E2EE re-decryption test (Synapse + Postgres) on PRs
 ```
 
 ## Key conventions
@@ -69,6 +75,7 @@ Non-obvious choices made in 3c (see ADR 0014):
 Non-obvious choices made in 3b (see ADR 0012):
 
 - **Event persistence hook:** `Client::add_event_handler(persist_timeline_event)` with `AnySyncTimelineEvent` + `RawEvent` context. Registered on the `Client` before `SyncService::start()` so no events are missed during initial sync. matrix-rust-sdk decrypts Megolm payloads before dispatch, so `raw_event` in the `events` table holds the plaintext envelope for decrypted events (or the `m.room.encrypted` envelope — ciphertext + `session_id` — for UTDs). ADR 0012.
+- **Timeline coverage is latest-event-only (current limitation):** the handler persists the events Simplified Sliding Sync surfaces, which is the *latest* timeline event per room — not full room history. Seeding a room with N messages and syncing a fresh device archives ~1 event (the most recent), so the integration test asserts on the count axon actually archived, not on how many were sent. Per-room timeline backfill is future work (M4+).
 - **Events table:** `(id BIGSERIAL, event_id TEXT, room_id TEXT, account_id UUID, sender TEXT, origin_ts BIGINT, event_type TEXT, content JSONB, raw_event JSONB, provenance TEXT DEFAULT 'upstream_homeserver', received_at TIMESTAMPTZ)`. `raw_event` is the full event envelope as dispatched (plaintext for decrypted events, the `m.room.encrypted` ciphertext for UTDs); `content` is the extracted decrypted payload. Unique on `(account_id, event_id)` — upsert is idempotent. `content` is nullable: UTDs arrive as `m.room.encrypted` with `content = NULL`; the M3c re-decryption queue back-fills those rows, reading the ciphertext straight from `raw_event`. Index on `(account_id, room_id, origin_ts DESC)` for timeline reads. M4 ("Event store schema") adds hot-column refinements and sibling tables holding the original ciphertext + megolm session metadata + sender device keys (keyed by `event_id`, for every event) so decrypted rows stay re-verifiable against Matrix's signatures — distinct from M3c re-decryption, which reads UTD ciphertext straight from `raw_event`.
 - **sqlx JSONB:** added `json` feature to `sqlx-postgres` (transitively enables `sqlx-core/json`) so `serde_json::Value` binds as JSONB.
 - **Ctrl-C shutdown investigation (ADR 0013):** a post-3b hang turned out to be caused by an inherited blocked signal mask in the developer's terminal session (`SIGINT` blocked in the kernel pending queue, never delivered to any handler). No code change to axon was needed. The original `with_graceful_shutdown` + `tokio::signal::ctrl_c()` shutdown path is correct. If Ctrl-C does not work, run `python3 -c "import signal; print(signal.pthread_sigmask(signal.SIG_BLOCK, []))"` — if `2` appears, open a new terminal window.

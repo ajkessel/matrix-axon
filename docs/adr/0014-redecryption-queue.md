@@ -60,7 +60,9 @@ Two drivers feed the queue (`crates/axon-sync/src/redecrypt.rs`):
   keys themselves (those download lazily), so on a quiet account no later event
   would ever trigger the fetch. Without this, the sweep finds the rows but can't
   decrypt them. The arrival-stream path skips the download — its keys just
-  landed in the store.
+  landed in the store. This gap was invisible to the fixture unit tests (which
+  stub the SDK seam) and was caught only by the end-to-end integration test
+  (`scripts/integration-test.sh`).
 
 `decrypt_event` returns a UTD `TimelineEvent` (not an error) when the key still
 isn't available, so success is gated on `TimelineEventKind::Decrypted`. Every

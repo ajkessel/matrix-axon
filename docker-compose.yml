@@ -13,5 +13,41 @@ services:
     volumes:
       - axon-pgdata:/var/lib/postgresql/data
 
+  # Local Matrix homeserver for integration testing axon against a real server.
+  # Gated behind the `integration` profile so normal `docker compose up` (and
+  # the Postgres-only dev loop) never starts it:
+  #
+  #   docker compose --profile integration up -d synapse
+  #
+  # Runs as root to keep first-boot signing-key generation + sqlite writes to
+  # the named volume simple (no uid-991 chown dance); fine for a throwaway
+  # localhost server. `--generate-keys` is idempotent, so restarts are cheap.
+  synapse:
+    image: matrixdotorg/synapse:latest
+    profiles: ["integration"]
+    user: root
+    environment:
+      SYNAPSE_SERVER_NAME: localhost
+      SYNAPSE_REPORT_STATS: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        python -m synapse.app.homeserver -c /data/homeserver.yaml --generate-keys &&
+        exec python -m synapse.app.homeserver -c /data/homeserver.yaml
+    volumes:
+      - axon-synapse-data:/data
+      - ./docker/synapse/homeserver.yaml:/data/homeserver.yaml:ro
+      - ./docker/synapse/log.config:/data/log.config:ro
+    ports:
+      - "${SYNAPSE_PORT:-8008}:8008"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
 volumes:
   axon-pgdata:
+  axon-synapse-data:
