@@ -10,6 +10,7 @@ members = [
     "crates/axon-search",
     "crates/axon-media",
     "crates/axon-api",
+    "crates/axon-itest",
 ]
 
 [workspace.package]
@@ -30,6 +31,7 @@ axon-api    = { path = "crates/axon-api" }
 # Async runtime + HTTP
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+futures-util = { version = "0.3", default-features = false }
 axum  = { version = "0.8" }
 
 # Database. sqlx-core / sqlx-postgres are pinned exactly: axon-store depends on

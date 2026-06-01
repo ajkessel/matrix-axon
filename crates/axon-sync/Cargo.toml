@@ -23,6 +23,8 @@ matrix-sdk-ui = { workspace = true }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tokio-util = { workspace = true }
+# StreamExt::next for the room-key arrival stream.
+futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }

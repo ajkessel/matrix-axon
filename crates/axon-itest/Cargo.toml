@@ -1,0 +1,32 @@
+# Integration-test seeding tool. NOT part of the shipped product — it plays the
+# role of "device A" (a normal, verified Matrix client) in the end-to-end
+# re-decryption test: it creates an encrypted room, sends messages, and mints a
+# Secure Backup recovery key that axon (the unverified "device B" under test)
+# later uses to back-fill UTDs. See docs/integration-testing.md.
+[package]
+name = "axon-itest"
+description = "End-to-end integration-test seeder (plays a verified Matrix client)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "seed"
+path = "src/seed.rs"
+
+[dependencies]
+# Same feature set as axon-sync so the SDK resolves to one copy in the lock:
+# e2e-encryption for Olm/Megolm + backups, bundled-sqlite for the crypto store.
+matrix-sdk = { workspace = true, features = [
+    "e2e-encryption",
+    "bundled-sqlite",
+] }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

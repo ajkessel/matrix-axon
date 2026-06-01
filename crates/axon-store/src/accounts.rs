@@ -32,7 +32,7 @@ pub struct Account {
     /// Device ID assigned at login (or supplied with a pre-provisioned token).
     pub device_id: Option<String>,
     /// Reserved sync-position cursor; the SyncService manages its own position
-    /// in its SQLite store, so this stays `NULL` for M3.
+    /// in its SQLite store, so this currently stays `NULL`.
     pub sync_token: Option<String>,
     /// Row creation time.
     pub created_at: DateTime<Utc>,
@@ -139,8 +139,9 @@ impl Store {
         }
     }
 
-    /// Update the reserved sync-position cursor. Unused in M3 (the SyncService
-    /// owns its position) but present per the milestone deliverable.
+    /// Update the reserved sync-position cursor. Currently unused (the
+    /// SyncService owns its position) but kept for a future sync model that
+    /// manages its own cursor.
     pub async fn update_sync_token(
         &self,
         account_id: Uuid,

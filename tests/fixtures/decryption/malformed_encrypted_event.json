@@ -1,0 +1,5 @@
+{
+  "type": "m.room.encrypted",
+  "sender": "@mallory:example.org",
+  "event_id": "$malformed1:example.org"
+}
