@@ -115,6 +115,14 @@ pub struct AccountProvision {
     /// for password login (the homeserver assigns one).
     #[serde(default)]
     pub device_id: Option<String>,
+    /// Secure Backup / 4S recovery key, used once on boot to import the megolm
+    /// key backup and cross-signing keys so a fresh `axon` device can decrypt
+    /// historical messages (the re-decryption queue's driver). Like `password`,
+    /// it is consumed in-memory and **never persisted** — durable, encrypted-at-
+    /// rest recovery-key storage is deferred future work (ADR 0011, ADR 0014). It
+    /// is not part of [`Credential`]; it seeds key recovery, not login.
+    #[serde(default)]
+    pub recovery_key: Option<String>,
 }
 
 /// A validated login credential — exactly one of the two mutually-exclusive
@@ -370,6 +378,7 @@ mod tests {
             password: None,
             access_token: None,
             device_id: None,
+            recovery_key: None,
         };
         assert!(neither.credential().is_err());
 

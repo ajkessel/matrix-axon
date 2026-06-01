@@ -58,7 +58,13 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 3, subphase 3b complete** — the binary provisions the configured account, logs in (or restores a session), runs Simplified Sliding Sync per account, and persists every incoming Matrix timeline event into Postgres scoped by `account_id`. Decryption robustness and the edge-case corpus (3c) are next.
+**Milestone 3, subphase 3c complete** — on top of 3b's per-account sync + event persistence, the binary now back-fills UTDs: when megolm room keys arrive, a re-decryption queue finds the matching `content IS NULL` rows and writes their decrypted `content` + real `event_type`. A transient `recovery_key` config knob drives the queue end-to-end on a fresh device. Milestone 3 is complete; **Milestone 4 (event store schema + key lifecycle)** is next.
+
+Non-obvious choices made in 3c (see ADR 0014):
+
+- **Re-decryption queue (`crates/axon-sync/src/redecrypt.rs`):** two drivers — the SDK's `room_keys_received_stream()` (drains the pending UTDs for each arriving `(room_id, session_id)`) and a one-shot startup sweep over all of an account's `content IS NULL` rows (catches keys already in the crypto store or imported by `recover()` before we subscribe). The sweep first calls `backups().download_room_keys_for_room()` per room — `recover()` imports the backup *decryption key* but not the megolm room keys themselves, so on a quiet account nothing else would fetch them; the arrival-stream path skips the download (its keys just landed). Runs as a child task of `run_account` on a child `CancellationToken`, joined on return. Per-row failures are logged and skipped — never fatal to sync. ADR 0014.
+- **`events.megolm_session_id` hot column + partial index:** UTDs lift `content.session_id` into a first-class column; `events_pending_utd_idx (account_id, room_id, megolm_session_id) WHERE content IS NULL` makes the arriving-key lookup an index hit rather than a JSONB scan. The back-fill `UPDATE … WHERE content IS NULL` guard is idempotent and won't clobber a row a live dispatch already decrypted.
+- **Transient `recover()` (ADR 0011, 0014):** `sync.account.recovery_key` is consumed once on boot to import the megolm backup + cross-signing keys (the queue's driver on a fresh, unverified device). It is **never persisted** — not part of `Credential`, no column on `accounts`; durable at-rest storage + interactive verification stay in M4/M5. A wrong/rotated key is a readable `tracing::error`, non-fatal.
 
 Non-obvious choices made in 3b (see ADR 0012):
 
@@ -89,5 +95,3 @@ Non-obvious choices made in Milestone 2 (see ADRs 0002–0003):
 - **Errors:** top-level `axon_core::Error` is acyclic — its `Store(String)` variant carries a message so `axon-core` need not depend on `axon-store`; leaf crates impl `From<LeafError> for axon_core::Error`.
 - **CI:** unchanged. No `query!` macros yet, so sqlx compile-time checks aren't triggered and tests need no DB. When checked queries land in M3, add a Postgres service or a `.sqlx` offline cache.
 - **Pre-commit hook:** `.githooks/pre-commit` runs the fmt + clippy subset of CI; enable per clone with `./scripts/setup-hooks.sh` (`core.hooksPath`). Full `cargo test` stays in CI.
-
-Next: **Milestone 3, subphase 3c** — re-decryption queue: when Megolm room keys arrive, retry stored UTD rows and back-fill `content`.

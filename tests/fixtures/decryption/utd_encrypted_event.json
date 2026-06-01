@@ -1,0 +1,14 @@
+{
+  "type": "m.room.encrypted",
+  "sender": "@alice:example.org",
+  "event_id": "$utd1:example.org",
+  "origin_server_ts": 1700000000000,
+  "content": {
+    "algorithm": "m.megolm.v1.aes-sha2",
+    "ciphertext": "AwgAEnABCDEFciphertextpayloadgoeshere==",
+    "device_id": "AXONDEVICE",
+    "sender_key": "Curve25519SenderKeyBase64Goeshere",
+    "session_id": "session-abc-123"
+  },
+  "unsigned": {}
+}

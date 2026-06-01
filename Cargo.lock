@@ -354,6 +354,7 @@ version = "0.1.0"
 dependencies = [
  "axon-core",
  "axon-store",
+ "futures-util",
  "matrix-sdk",
  "matrix-sdk-ui",
  "serde_json",

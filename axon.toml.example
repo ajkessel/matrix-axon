@@ -43,3 +43,9 @@ homeserver_url = "https://matrix.example.org"
 password = "hunter2"
 # access_token = "syt_..."   # alternative to password
 # device_id = "ABCDEFGH"     # required when using access_token
+# Secure Backup / 4S recovery key. Supplied once to let this fresh device import
+# the megolm key backup + cross-signing keys and decrypt historical messages;
+# consumed in-memory and NEVER written to the database. Durable, encrypted-at-
+# rest storage of this key is a later milestone (M4). Prefer setting it via
+# AXON_SYNC__ACCOUNT__RECOVERY_KEY rather than committing it here.
+# recovery_key = "EsTc ..."

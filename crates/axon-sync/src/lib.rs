@@ -4,8 +4,10 @@
 //! one matrix-rust-sdk [`Client`](matrix_sdk::Client) per account, authenticates
 //! (login on first boot, session restore thereafter), and runs a
 //! [`SyncService`](matrix_sdk_ui::sync_service::SyncService) — Simplified
-//! Sliding Sync (MSC4186), no legacy `/sync`. Event persistence into the
-//! Postgres archive lands in the next subphase.
+//! Sliding Sync (MSC4186), no legacy `/sync`. Every synced timeline event is
+//! persisted into the Postgres archive; events the SDK can't decrypt (UTDs) are
+//! stored as ciphertext and back-filled by the re-decryption queue once their
+//! megolm keys arrive (see [`redecrypt`]).
 //!
 //! The public surface is [`SyncEngine`]: start it with a `Store`, a
 //! `SyncConfig`, and a cancellation token; it supervises a task per account and
@@ -14,6 +16,7 @@
 mod client;
 mod engine;
 mod error;
+mod redecrypt;
 
 pub use engine::SyncEngine;
 pub use error::SyncError;

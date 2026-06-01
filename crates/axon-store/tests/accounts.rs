@@ -8,19 +8,14 @@
 //! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-store -- --ignored
 //! ```
 
-use axon_store::Store;
-use uuid::Uuid;
+mod common;
 
-async fn connect() -> Store {
-    let url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-    Store::connect(&url, 5).await.expect("connect + migrate")
-}
+use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn upsert_is_idempotent_and_listable() {
-    let store = connect().await;
+    let store = common::migrated_store().await;
     // Unique user per run so repeated runs don't collide.
     let user = format!("@upsert-{}:localhost", Uuid::new_v4());
     let hs = "https://hs.example.org";
@@ -35,12 +30,14 @@ async fn upsert_is_idempotent_and_listable() {
 
     let listed = store.list_accounts().await.expect("list");
     assert!(listed.iter().any(|a| a.account_id == first.account_id));
+
+    common::cleanup_account(&common::raw_pool().await, first.account_id).await;
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn session_token_encrypts_and_round_trips() {
-    let store = connect().await;
+    let store = common::migrated_store().await;
     let user = format!("@session-{}:localhost", Uuid::new_v4());
     let account = store
         .upsert_account(&user, "https://hs.example.org")
@@ -81,4 +78,6 @@ async fn session_token_encrypts_and_round_trips() {
         .account_token(account.account_id, "wrong-key")
         .await
         .is_err());
+
+    common::cleanup_account(&common::raw_pool().await, account.account_id).await;
 }
