@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use axon_store::{PendingUtd, Store};
 use futures_util::StreamExt;
-use matrix_sdk::deserialized_responses::{TimelineEvent, TimelineEventKind};
+use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent, TimelineEventKind};
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::AnyTimelineEvent;
 use matrix_sdk::ruma::serde::Raw;
@@ -47,6 +47,16 @@ pub(crate) fn megolm_session_id(raw_event: &Value) -> Option<&str> {
 fn extract_decrypted(ev: &TimelineEvent) -> Option<(Value, String)> {
     match &ev.kind {
         TimelineEventKind::Decrypted(decrypted) => extract_content_and_type(&decrypted.event),
+        _ => None,
+    }
+}
+
+/// The SDK's [`EncryptionInfo`] for a successfully re-decrypted event, so the
+/// re-decryption path can record the same crypto-provenance siblings the live
+/// dispatch path does. `None` for a UTD `TimelineEvent`. Borrows from `ev`.
+fn decrypted_encryption_info(ev: &TimelineEvent) -> Option<&EncryptionInfo> {
+    match &ev.kind {
+        TimelineEventKind::Decrypted(decrypted) => Some(decrypted.encryption_info.as_ref()),
         _ => None,
     }
 }
@@ -229,8 +239,19 @@ async fn redecrypt_one(room: &Room, store: &Store, account_id: Uuid, row: &Pendi
         return;
     };
 
+    // Plaintext-derived hot columns, now available post-decryption.
+    let body_text = crate::meta::body_text(&content).map(str::to_owned);
+    let relates_to = crate::meta::relates_to(&content);
+
     match store
-        .update_decrypted_event(account_id, &row.event_id, &content, &event_type)
+        .update_decrypted_event(
+            account_id,
+            &row.event_id,
+            &content,
+            &event_type,
+            body_text.as_deref(),
+            relates_to.as_ref(),
+        )
         .await
     {
         Ok(()) => tracing::info!(
@@ -240,13 +261,34 @@ async fn redecrypt_one(room: &Room, store: &Store, account_id: Uuid, row: &Pendi
             event_type = event_type.as_str(),
             "re-decrypted UTD"
         ),
-        Err(err) => tracing::warn!(
-            %account_id,
-            room_id = %room.room_id(),
-            event_id = row.event_id,
-            error = %err,
-            "failed to back-fill re-decrypted event"
-        ),
+        Err(err) => {
+            tracing::warn!(
+                %account_id,
+                room_id = %room.room_id(),
+                event_id = row.event_id,
+                error = %err,
+                "failed to back-fill re-decrypted event"
+            );
+            return;
+        }
+    }
+
+    // Record the crypto-provenance siblings now that we know how it decrypted —
+    // a UTD had no EncryptionInfo at persist time. Best-effort; never fatal.
+    if let Some(info) = decrypted_encryption_info(&decrypted) {
+        let meta = crate::meta::crypto_meta(info);
+        if let Err(err) = store
+            .upsert_event_crypto(&meta.as_event_crypto(account_id, &row.event_id))
+            .await
+        {
+            tracing::warn!(
+                %account_id,
+                room_id = %room.room_id(),
+                event_id = row.event_id,
+                error = %err,
+                "failed to persist crypto sibling for re-decrypted event"
+            );
+        }
     }
 }
 

@@ -90,6 +90,12 @@ pub struct SyncConfig {
     /// accounts" (the binary still boots and serves HTTP).
     #[serde(default)]
     pub account: Option<AccountProvision>,
+    /// Per-room timeline window the sliding-sync list requests (`n`). The SDK
+    /// default is `1` (latest event only); we raise it so each room archives its
+    /// last N events, giving the timeline read real depth to paginate. Bounded
+    /// substitute for full history backfill (that is later work). Defaults to 20.
+    #[serde(default = "default_timeline_limit")]
+    pub timeline_limit: u32,
 }
 
 /// Provisioning details for a single Matrix account.
@@ -182,6 +188,10 @@ fn default_sync_data_dir() -> PathBuf {
     PathBuf::from("axon-data/sync")
 }
 
+fn default_timeline_limit() -> u32 {
+    20
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -205,6 +215,7 @@ impl Default for SyncConfig {
             data_dir: default_sync_data_dir(),
             store_key: None,
             account: None,
+            timeline_limit: default_timeline_limit(),
         }
     }
 }

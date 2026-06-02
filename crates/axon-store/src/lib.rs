@@ -13,7 +13,7 @@ mod migrations;
 
 pub use accounts::Account;
 pub use error::StoreError;
-pub use events::{NewEvent, PendingUtd};
+pub use events::{EventCiphertext, EventCrypto, NewEvent, PendingUtd, TimelineCursor, TimelineRow};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 

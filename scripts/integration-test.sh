@@ -233,9 +233,10 @@ wait_until() {
 
 # --- phase 1: fresh device B, no recovery key -> UTDs accumulate -------------
 #
-# axon archives the events Simplified Sliding Sync surfaces, which is the latest
-# timeline event per room — not the full backlog. So device B typically sees one
-# UTD even though the seeder sent several messages. We assert on the count axon
+# axon archives the events Simplified Sliding Sync surfaces. As of M4a the
+# per-room timeline window is raised from the SDK default of 1 (sync.timeline_limit,
+# default 20), so device B now sees several UTDs rather than just the latest — but
+# still bounded by that window, not the full backlog. We assert on the count axon
 # *actually* archived rather than MESSAGE_COUNT, then prove that exact set flips.
 
 log "Phase 1: axon as fresh device B (no recovery key) — expect UTDs"

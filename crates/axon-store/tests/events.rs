@@ -10,11 +10,41 @@
 
 mod common;
 
-use axon_store::NewEvent;
+use axon_store::{EventCiphertext, EventCrypto, NewEvent, Store, TimelineCursor};
 use serde_json::{json, Value};
 use sqlx_core::row::Row;
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
+
+/// Insert a decrypted `m.room.message` with a body, returning its event_id.
+async fn insert_message(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    origin_ts: i64,
+    body: &str,
+) -> String {
+    let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
+    let content = json!({ "msgtype": "m.text", "body": body });
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.room.message", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: Some(body),
+        })
+        .await
+        .expect("insert message");
+    event_id
+}
 
 async fn read_event(pool: &PgPool, account_id: Uuid, event_id: &str) -> (Option<Value>, String) {
     let row = sqlx_core::query::query(
@@ -72,6 +102,9 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
             content: None, // content is NULL for pending UTD
             raw_event: raw_event.clone(),
             megolm_session_id: Some(&session_id),
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
         })
         .await
         .expect("insert UTD");
@@ -96,7 +129,14 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
     // Back-fill the decrypted payload.
     let content = json!({ "msgtype": "m.text", "body": "decrypted!" });
     store
-        .update_decrypted_event(account_id, &event_id, &content, "m.room.message")
+        .update_decrypted_event(
+            account_id,
+            &event_id,
+            &content,
+            "m.room.message",
+            Some("decrypted!"),
+            None,
+        )
         .await
         .expect("back-fill");
 
@@ -118,6 +158,8 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
             &event_id,
             &json!({ "body": "SHOULD NOT OVERWRITE" }),
             "m.room.redaction",
+            Some("SHOULD NOT OVERWRITE"),
+            None,
         )
         .await
         .expect("guarded update");
@@ -138,6 +180,9 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
             content: None,
             raw_event,
             megolm_session_id: Some(&session_id),
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
         })
         .await
         .expect("re-upsert UTD");
@@ -146,6 +191,292 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
         .await
         .expect("pending after re-upsert")
         .is_empty());
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// Cursor pagination over a room timeline: pages are reverse-chronological,
+/// non-overlapping, and stable across calls.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_timeline_paginates_reverse_chronologically() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@tl-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    // Five events, ascending in time.
+    let base_ts = 1_700_000_000_000;
+    for i in 0..5 {
+        insert_message(
+            &store,
+            account_id,
+            &room_id,
+            base_ts + i,
+            &format!("msg {i}"),
+        )
+        .await;
+    }
+
+    // Walk the timeline in pages of 2, newest first.
+    let mut seen: Vec<i64> = Vec::new();
+    let mut cursor: Option<TimelineCursor> = None;
+    loop {
+        let page = store
+            .room_timeline(account_id, &room_id, cursor, 2)
+            .await
+            .expect("page");
+        if page.is_empty() {
+            break;
+        }
+        // Each page is strictly descending by origin_ts.
+        for w in page.windows(2) {
+            assert!(w[0].origin_ts > w[1].origin_ts, "page not descending");
+        }
+        cursor = Some(page.last().unwrap().cursor());
+        seen.extend(page.iter().map(|r| r.origin_ts));
+    }
+
+    // All five, newest→oldest, no overlap or skips.
+    assert_eq!(
+        seen,
+        vec![base_ts + 4, base_ts + 3, base_ts + 2, base_ts + 1, base_ts]
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// The `id` tiebreaker: events sharing one `origin_ts` paginate stably — ordered
+/// by `id` descending, with no overlap or skip across a page boundary that falls
+/// *inside* the tie group. (The reverse-chron test above uses distinct
+/// timestamps, so it never actually exercises the tiebreaker.)
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_timeline_tiebreaks_same_timestamp_by_id() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@tie-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    // Four events sharing one origin_ts — only `id` distinguishes them. Inserts
+    // get ascending BIGSERIAL ids, so insertion order == id order.
+    let ts = 1_700_000_000_000;
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        ids.push(insert_message(&store, account_id, &room_id, ts, &format!("same-ts {i}")).await);
+    }
+
+    // Pages of 2 — the boundary lands inside the tie group.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<TimelineCursor> = None;
+    loop {
+        let page = store
+            .room_timeline(account_id, &room_id, cursor, 2)
+            .await
+            .expect("page");
+        if page.is_empty() {
+            break;
+        }
+        // All share origin_ts, so ordering is purely by id, descending.
+        for w in page.windows(2) {
+            assert_eq!(w[0].origin_ts, w[1].origin_ts);
+            assert!(w[0].id > w[1].id, "tie group not ordered by id desc");
+        }
+        cursor = Some(page.last().unwrap().cursor());
+        seen.extend(page.iter().map(|r| r.event_id.clone()));
+    }
+
+    // Every event exactly once, newest-inserted (highest id) first.
+    let mut expected = ids.clone();
+    expected.reverse();
+    assert_eq!(seen, expected, "tiebroken order wrong or page overlap/skip");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// A redacted event is masked at read time — content/body cleared and
+/// `redaction_event_id` set — while its ciphertext sibling survives untouched.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_timeline_masks_redacted_events() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@red-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    let target = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "secret").await;
+
+    // The target started as an encrypted event, so it has a ciphertext sibling.
+    store
+        .insert_event_ciphertext(&EventCiphertext {
+            account_id,
+            event_id: &target,
+            room_id: &room_id,
+            algorithm: "m.megolm.v1.aes-sha2",
+            sender_key: Some("CURVE25519"),
+            session_id: Some("session-xyz"),
+            ciphertext: json!({ "algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "BASE64" }),
+        })
+        .await
+        .expect("ciphertext sibling");
+
+    // A redaction event pointing at the target.
+    let redaction_id = format!("$red-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_500,
+            event_type: "m.room.redaction",
+            content: Some(json!({ "reason": "oops" })),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": target }),
+            megolm_session_id: None,
+            redacts: Some(&target),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert redaction");
+
+    let timeline = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+
+    let masked = timeline
+        .iter()
+        .find(|r| r.event_id == target)
+        .expect("target present");
+    assert!(masked.content.is_none(), "content should be masked");
+    assert!(
+        masked.decrypted_body_text.is_none(),
+        "body should be masked"
+    );
+    assert_eq!(
+        masked.redaction_event_id.as_deref(),
+        Some(redaction_id.as_str())
+    );
+
+    // The ciphertext sibling is untouched by the read-time masking.
+    let ct_count: i64 = sqlx_core::query::query(
+        "SELECT count(*) AS c FROM event_ciphertext WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account_id)
+    .bind(&target)
+    .fetch_one(&pool)
+    .await
+    .expect("count ciphertext")
+    .try_get("c")
+    .expect("c");
+    assert_eq!(ct_count, 1);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// The crypto sibling tables upsert from EncryptionInfo and cascade-delete with
+/// their event row.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_crypto_siblings_upsert_and_cascade() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@cry-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let event_id = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "hi").await;
+
+    // Initial write (e.g. unverified at first sight).
+    store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id: &event_id,
+            session_id: Some("session-1"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: false,
+            forwarder_user_id: None,
+            forwarder_device_id: None,
+            device_id: Some("DEVICEA"),
+            verification_state: "unverified",
+        })
+        .await
+        .expect("crypto insert");
+
+    // Re-write upserts (e.g. device later verified) — no duplicate-key error.
+    store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id: &event_id,
+            session_id: Some("session-1"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: false,
+            forwarder_user_id: None,
+            forwarder_device_id: None,
+            device_id: Some("DEVICEA"),
+            verification_state: "verified",
+        })
+        .await
+        .expect("crypto upsert");
+
+    let state: String = sqlx_core::query::query(
+        "SELECT verification_state AS v FROM event_sender_device_keys \
+         WHERE account_id = $1 AND event_id = $2",
+    )
+    .bind(account_id)
+    .bind(&event_id)
+    .fetch_one(&pool)
+    .await
+    .expect("device row")
+    .try_get("v")
+    .expect("v");
+    assert_eq!(state, "verified");
+
+    // Deleting the event cascades to both sibling tables.
+    sqlx_core::query::query("DELETE FROM events WHERE account_id = $1 AND event_id = $2")
+        .bind(account_id)
+        .bind(&event_id)
+        .execute(&pool)
+        .await
+        .expect("delete event");
+    for table in ["event_megolm_session", "event_sender_device_keys"] {
+        let n: i64 = sqlx_core::query::query(&format!(
+            "SELECT count(*) AS c FROM {table} WHERE account_id = $1 AND event_id = $2"
+        ))
+        .bind(account_id)
+        .bind(&event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count sibling")
+        .try_get("c")
+        .expect("c");
+        assert_eq!(n, 0, "{table} should cascade-delete");
+    }
 
     common::cleanup_account(&pool, account_id).await;
 }
