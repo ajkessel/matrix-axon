@@ -165,17 +165,32 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
 
 **Verification:** Issue a token; hit `/v1/rooms` with and without the header; revoke; confirm the next call is rejected.
 
-### 9. Search backend
+### 9. Search & history backfill
+
+Search is only as good as the history it can see, and sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). So this milestone is two parts: build the index (9a), then make it cover a room's full upstream history (9b) — together they satisfy the PRD's "full-history search" success criterion and its 100–200k-event working-set target. The split mirrors the M4a/M4b pattern.
+
+#### 9a. Search ingestion & indexing
 
 - `axon-search` opens a Tantivy index.
 - Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
 - `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
-- Populate on event ingestion in the sync pipeline.
+- Populate on event ingestion in the sync pipeline (so anything ingested — live sync *or* 9b backfill — is indexed by the same path).
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
 - No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
 
-**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
+**Verification (9a):** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
+
+#### 9b. History backfill
+
+The engine that reaches back for a room's pre-existing history, so the 9a index (and the timeline read) covers more than the post-install slice. `recover()` (ADR 0011/0014) imports the *keys* to decrypt old messages, but not the *messages* — those must be fetched by paging the room. (ADR 0018.)
+
+- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()`, and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and the 9a index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
+- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
+- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
+- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
+
+**Verification (9b):** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); confirm a search for a phrase from a pre-install message now returns it; kill and restart axon mid-backfill and confirm it resumes without duplicating rows.
 
 ### 10. Drafts and per-device read state
 
@@ -219,18 +234,7 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
 
 **Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
 
-### 13. History backfill (post-MVP)
-
-Sync only ingests events going forward (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015); it never reaches back for a room's pre-existing history. This milestone builds the engine that does, closing the gap against the PRD's "full-history search" success criterion and its 100–200k-event working-set target. Until it lands, the archive — and therefore the M9 search index — covers only *ingested* history; this milestone makes "full history" literally true. (ADR 0018.)
-
-- A bounded, **resumable** backfill engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()` (ADR 0011/0014) and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and (once M9 exists) search indexing all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
-- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
-- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
-- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
-
-**Verification:** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); with M9 present, confirm a search for a phrase from a pre-install message returns it; kill and restart axon mid-backfill and confirm it resumes without duplicating rows.
-
-### 14. Threads (post-MVP)
+### 13. Threads (post-MVP)
 
 Deferred out of the MVP and handled as a self-contained milestone after the web alpha ships. The store already captures `m.relates_to` generically — including `m.thread` — in `events.relates_to` (ADR 0015), so this milestone is **additive and backfill-free**: the thread membership of every already-stored event is recoverable from data on disk, with no re-sync or re-parse. The deferral cost is a future index + endpoints, not a re-architecture.
 
@@ -246,7 +250,7 @@ Deferred out of the MVP and handled as a self-contained milestone after the web 
 
 The one genuinely open question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
 
-- **Threads — resolved: deferred to a dedicated post-MVP Milestone 14.** Rather than thread the feature through Milestone 4 (indexing), Milestone 5 (endpoints), and Milestone 11 (UI), it is handled as one self-contained milestone after the MVP ships. The MVP store deliberately captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so the deferral is forward-compatible — Milestone 14 is additive and backfill-free, not a re-architecture. See Milestone 14.
+- **Threads — resolved: deferred to a dedicated post-MVP Milestone 13.** Rather than thread the feature through Milestone 4 (indexing), Milestone 5 (endpoints), and Milestone 11 (UI), it is handled as one self-contained milestone after the MVP ships. The MVP store deliberately captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so the deferral is forward-compatible — Milestone 13 is additive and backfill-free, not a re-architecture. See Milestone 13.
 
 Everything else is settled. If an ambiguity arises during implementation that neither the PRD nor the tech spec covers, stop and ask rather than picking silently.
 

@@ -1,4 +1,4 @@
-# ADR 0018 — History backfill as a dedicated milestone
+# ADR 0018 — History backfill, folded into the search milestone
 
 ## Context
 
@@ -10,62 +10,63 @@ a room's pre-existing history. ADR 0015 named a "full history-backfill engine" a
 
 That omission collides with the PRD:
 
-- **Success criterion #2 — "Full-history search… p95 < 200ms."** The M9 search
-  index is populated on event ingestion, so it contains exactly what sync has
-  ingested. On a fresh install that is *not* a room's full upstream history, so
-  "full-history search" is not literally achievable.
+- **Success criterion #2 — "Full-history search… p95 < 200ms."** The search index
+  is populated on event ingestion, so it contains exactly what has been ingested.
+  On a fresh install that is *not* a room's full upstream history, so
+  "full-history search" is not literally achievable from sync alone.
 - **The 100–200k-event working-set target** only materializes if something
   deliberately pulls that history down.
 
-A subtlety that makes this its own piece of work: `recover()` (ADR 0011/0014)
-imports the *keys* to decrypt old messages, but not the *messages* themselves —
+A subtlety that makes backfill a distinct piece of work: `recover()` (ADR
+0011/0014) imports the *keys* to decrypt old messages, but not the *messages* —
 those must still be fetched by paging each room's `/messages` endpoint. So
-backfill is a distinct engine, not a side effect of key recovery.
+backfill is its own engine, not a side effect of key recovery.
 
 ## Decision
 
-**History backfill is a dedicated milestone (13), sequenced before threads
-(now 14).** It is ordered ahead of threads because it closes a *PRD success
-criterion* gap, whereas threads are an additive feature deferral (ADR 0017).
+**History backfill is folded into the search milestone (Milestone 9), which is
+split into two parts:**
 
-Shape:
+- **9a — search ingestion & indexing** (the Tantivy index + `/v1/search`).
+- **9b — history backfill** (the engine below).
+
+This keeps backfill **in-MVP** and co-located with the criterion it serves:
+"full-history search" needs both the index (9a) and the history (9b), so the two
+belong in one milestone. The split mirrors the M4a/M4b pattern. (Threads return
+to **Milestone 13**.)
+
+This supersedes the interim placement of backfill as a standalone post-MVP
+Milestone 13 and resolves the open question that placement raised — *in-MVP vs
+post-MVP* — in favour of **in-MVP**: the alpha should be able to search a room's
+full history, not just the slice ingested since install.
+
+Engine shape (9b):
 
 - A bounded, **resumable** engine that pages backward through each room's
   timeline via the SDK's room pagination, decrypts with already-imported keys,
   and persists through the **same ingestion path as live sync** — so hot columns,
-  crypto siblings, redaction handling, and search indexing apply uniformly and
+  crypto siblings, redaction handling, and the 9a index apply uniformly and
   re-runs are idempotent (`ON CONFLICT DO NOTHING`).
 - Per-room backfill state (e.g. a `room_backfill` table keyed by
   `(account_id, room_id)` recording the oldest token reached and a `complete`
-  flag) so progress survives restarts and the engine knows where to resume.
+  flag) so progress survives restarts.
 - Background and throttled, so it never starves live sync; configurable target
   depth.
 - It retires the `sync.timeline_limit` bump as the "bounded substitute" for real
   backfill (ADR 0015).
 
-## Status / open question
-
-This ADR records that the engine **needs a milestone and where it sits**. One
-question is deliberately left for the human, because it changes the MVP's scope,
-not just its ordering:
-
-- **Is backfill in-MVP or post-MVP?** As placed (Milestone 13, after the M12
-  self-hosting docs), the MVP alpha ships with search over *ingested* history and
-  literal full-history search arrives just after. That contradicts a literal
-  reading of PRD criterion #2. The alternative is to pull backfill ahead of the
-  web alpha / docs (renumbering the tail) so the MVP itself satisfies the
-  criterion, at the cost of a later alpha. **Default for now: post-MVP (13).** If
-  full-history search is a hard MVP gate, promote it and soften nothing; if "the
-  alpha searches what it has ingested, full history follows" is acceptable, keep
-  it here and soften the PRD wording.
-
 ## Consequences
 
-- Threads move from Milestone 13 to **Milestone 14** (ADR 0017 and
-  `implementation.md` updated accordingly).
-- Once built, the archive and search index can cover a room's full upstream
-  history, not just the post-install slice; `sync.timeline_limit` becomes a
-  cold-start latency knob rather than the de facto history bound.
+- Backfill ships **inside the MVP**, so the alpha satisfies the "full-history
+  search" criterion rather than deferring it; no PRD wording needs softening.
+- Ordering within M9 is natural: 9a builds the index, 9b feeds it the rest of
+  history through the same ingestion path — so 9b indexing is automatic, not a
+  second integration.
+- Threads move back to **Milestone 13** (ADR 0017 and `implementation.md` updated
+  accordingly).
 - Because backfill reuses the live ingestion path, no new persistence,
-  decryption, or indexing code is needed — it is a driver that feeds existing
-  machinery, which is what keeps it a single milestone.
+  decryption, or indexing code is needed — it is a driver feeding existing
+  machinery, which is what keeps 9b a tractable half-milestone rather than its
+  own.
+- `sync.timeline_limit` becomes a cold-start latency knob rather than the de
+  facto history bound.
