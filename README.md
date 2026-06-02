@@ -20,9 +20,17 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 Prerequisites: Rust (stable), Postgres 16.
 
-### 1. Start Postgres
+### 1. Install Prerequisites
 
-**With Docker (easiest):**
+#### Ubuntu
+```bash
+sudo apt install docker.io docker-compose-v2
+sudo snap install --classic rustup
+```
+
+### 2. Install and Start Postgres
+
+**With Docker (easiest, optional):**
 ```bash
 docker compose up -d postgres
 ```
@@ -35,7 +43,7 @@ CREATE DATABASE axon OWNER axon;
 SQL
 ```
 
-### 2. Configure
+### 3. Configure
 
 ```bash
 cp .env.example .env
@@ -47,7 +55,7 @@ The server loads `.env` automatically on startup. The defaults in `.env.example`
 >
 > **macOS + Docker note:** `localhost` can resolve to IPv6 (`::1`) on macOS, but Docker only binds to IPv4. The examples use `127.0.0.1` explicitly to avoid this.
 
-### 3. Build and run
+### 4. Build and run
 
 ```bash
 # Enable the git pre-commit hook (fmt + clippy) — once per clone
@@ -62,6 +70,15 @@ curl localhost:8080/healthz     # -> {"status":"ok"}
 ```
 
 CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
+
+### 5. Start over
+
+If you want to restart with a fresh instance and fresh data, just destroy and restart the postgres Docker instance:
+
+```bash
+docker compose down -v postgres
+docker compose up -d postgres
+```
 
 ## Docs
 
