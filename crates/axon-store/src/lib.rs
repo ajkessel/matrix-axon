@@ -10,10 +10,12 @@ mod accounts;
 mod error;
 mod events;
 mod migrations;
+mod state;
 
 pub use accounts::Account;
 pub use error::StoreError;
 pub use events::{EventCiphertext, EventCrypto, NewEvent, PendingUtd, TimelineCursor, TimelineRow};
+pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 
