@@ -1,5 +1,23 @@
 # ADR 0011 — E2EE key acquisition and device trust for a headless agent
 
+## Status (updated M4a)
+
+How the two paths actually landed, versus the M4/M5 split this ADR first
+anticipated:
+
+- **Recovery-key bootstrap — landed in M3c, not M4.** `recover()` is the
+  re-decryption queue's driver, so it shipped with M3c (`engine.rs`,
+  `recovery_key_for`). It is consumed once on boot and **never persisted**. The
+  M4 review of whether to persist it encrypted at rest is closed in ADR 0015:
+  **keep transient-only**.
+- **Verification plumbing — moved wholly to M5, not M4.** This ADR floated
+  building the SDK verification surface in M4 and wiring the UX in M5. But the
+  plumbing cannot be exercised before the `/v1/ws` channel exists (M5), so a
+  M4/M5 split bought nothing; the whole interactive path (surface + UX, in
+  `axon-crypto`) is M5 work. M4 is the event-store schema (ADR 0015).
+
+The body below is the original decision record. See ADR 0015 for the re-scope.
+
 ## Context
 
 `axon` runs as a background device. When it logs in for the first time it appears

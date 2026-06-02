@@ -16,6 +16,7 @@
 mod client;
 mod engine;
 mod error;
+mod meta;
 mod redecrypt;
 
 pub use engine::SyncEngine;

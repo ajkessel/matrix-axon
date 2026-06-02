@@ -27,6 +27,10 @@ level = "info"
 # account). MUST be durable: losing it forces a re-login and the loss of
 # historical Megolm decryption keys.
 data_dir = "axon-data/sync"
+# Per-room timeline window the sliding-sync list requests. The matrix-sdk default
+# is 1 (latest event only); raising it makes each room archive its last N events,
+# giving the timeline read real depth to page through. Default 20.
+timeline_limit = 20
 # Symmetric key used to (a) encrypt each account's access token at rest via
 # pgcrypto and (b) passphrase the SDK's SQLite store. Required once an account
 # is configured. Keep it secret; prefer setting it via AXON_SYNC__STORE_KEY
@@ -45,7 +49,7 @@ password = "hunter2"
 # device_id = "ABCDEFGH"     # required when using access_token
 # Secure Backup / 4S recovery key. Supplied once to let this fresh device import
 # the megolm key backup + cross-signing keys and decrypt historical messages;
-# consumed in-memory and NEVER written to the database. Durable, encrypted-at-
-# rest storage of this key is a later milestone (M4). Prefer setting it via
-# AXON_SYNC__ACCOUNT__RECOVERY_KEY rather than committing it here.
+# consumed in-memory and NEVER written to the database (kept transient-only by
+# decision — ADR 0015; the no-server-secret path is interactive verification in
+# M5). Prefer setting it via AXON_SYNC__ACCOUNT__RECOVERY_KEY over committing it.
 # recovery_key = "EsTc ..."

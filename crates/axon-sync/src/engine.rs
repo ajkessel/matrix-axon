@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use axon_core::{AccountProvision, SyncConfig};
-use axon_store::{Account, NewEvent, Store};
+use axon_store::{Account, EventCiphertext, NewEvent, Store};
+use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::AnySyncTimelineEvent;
 use matrix_sdk::Room;
@@ -128,13 +129,19 @@ struct PersistContext {
 /// Event handler: persist every synced timeline event to Postgres.
 ///
 /// For E2EE rooms, matrix-rust-sdk decrypts the megolm payload before
-/// dispatching, so `ev` and `raw` already carry the plaintext content. UTDs
-/// arrive as `m.room.encrypted` events with the ciphertext as content; the
-/// re-decryption queue will back-fill their `content` column once keys arrive.
+/// dispatching, so `ev` and `raw` already carry the plaintext content and
+/// `enc_info` describes how it was decrypted. UTDs arrive as `m.room.encrypted`
+/// events with the ciphertext as content and `enc_info = None`; the
+/// re-decryption queue back-fills their `content` once keys arrive.
+///
+/// Alongside the `events` row this writes the M4 sibling rows (ADR 0015): the
+/// ciphertext sibling for UTDs (the only events whose ciphertext the SDK hands
+/// us), and the crypto-provenance siblings from `enc_info` for decrypted events.
 async fn persist_timeline_event(
     ev: AnySyncTimelineEvent,
     room: Room,
     raw: RawEvent,
+    enc_info: Option<EncryptionInfo>,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
     let raw_val: serde_json::Value = match serde_json::from_str(raw.get()) {
@@ -155,6 +162,7 @@ async fn persist_timeline_event(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_owned();
+    let is_utd = event_type == "m.room.encrypted";
     // An event that is still `m.room.encrypted` at dispatch is one the SDK could
     // not decrypt (a UTD): its `content` is the megolm ciphertext envelope, not
     // plaintext. Persist `content = NULL` so the column means "decrypted payload"
@@ -163,7 +171,7 @@ async fn persist_timeline_event(
     // ciphertext (incl. `session_id`) is preserved in `raw_event` for re-decryption.
     // Once the SDK decrypts a megolm event it dispatches it with the cleartext
     // type, so this branch is skipped and the real plaintext content is stored.
-    let content = if event_type == "m.room.encrypted" {
+    let content = if is_utd {
         None
     } else {
         raw_val.get("content").cloned()
@@ -172,16 +180,33 @@ async fn persist_timeline_event(
     // re-decryption queue can match arriving room keys to this row without
     // re-parsing the envelope. Owned (not borrowed from `raw_val`) so `raw_val`
     // can still move into `raw_event` below.
-    let megolm_session_id: Option<String> = if event_type == "m.room.encrypted" {
+    let megolm_session_id: Option<String> = if is_utd {
         crate::redecrypt::megolm_session_id(&raw_val).map(str::to_owned)
     } else {
         None
     };
+    // Hot columns. `redacts` applies to redaction events (never encrypted);
+    // `relates_to` / `decrypted_body_text` come from the plaintext content, so
+    // they're only available once decrypted (a re-decrypted UTD picks them up via
+    // the re-decryption back-fill, not here). Owned so raw_val can still move.
+    let redacts: Option<String> = crate::meta::redacts(&raw_val).map(str::to_owned);
+    let relates_to = content.as_ref().and_then(crate::meta::relates_to);
+    let decrypted_body_text: Option<String> = content
+        .as_ref()
+        .and_then(|c| crate::meta::body_text(c).map(str::to_owned));
+    // Capture the ciphertext envelope before raw_val is moved — only UTDs carry it.
+    let ciphertext = if is_utd {
+        raw_val.get("content").cloned()
+    } else {
+        None
+    };
     let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
+    let event_id = ev.event_id().as_str().to_owned();
+    let room_id = room.room_id().as_str().to_owned();
 
     let new_ev = NewEvent {
-        event_id: ev.event_id().as_str(),
-        room_id: room.room_id().as_str(),
+        event_id: &event_id,
+        room_id: &room_id,
         account_id: ctx.account_id,
         sender: ev.sender().as_str(),
         origin_ts,
@@ -189,23 +214,80 @@ async fn persist_timeline_event(
         content,
         raw_event: raw_val,
         megolm_session_id: megolm_session_id.as_deref(),
+        redacts: redacts.as_deref(),
+        relates_to,
+        decrypted_body_text: decrypted_body_text.as_deref(),
     };
 
     if let Err(err) = ctx.store.upsert_event(&new_ev).await {
+        // Don't write sibling rows if the event row didn't land — they FK to it.
         tracing::warn!(
             account_id = %ctx.account_id,
-            event_id = %ev.event_id(),
+            event_id = %event_id,
             error = %err,
             "failed to persist event"
         );
-    } else {
-        tracing::debug!(
-            account_id = %ctx.account_id,
-            event_id = %ev.event_id(),
-            room_id = %room.room_id(),
-            event_type = event_type.as_str(),
-            "persisted event"
-        );
+        return;
+    }
+    tracing::debug!(
+        account_id = %ctx.account_id,
+        event_id = %event_id,
+        room_id = %room_id,
+        event_type = event_type.as_str(),
+        "persisted event"
+    );
+
+    // Sibling rows are best-effort: a failure here must not take down sync.
+    persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
+}
+
+/// Write the M4 crypto sibling rows for an event already persisted to `events`.
+/// `ciphertext` is the `m.room.encrypted` content for UTDs (`None` otherwise);
+/// `enc_info` is the SDK decryption info for decrypted events (`None` for UTDs).
+async fn persist_event_siblings(
+    ctx: &PersistContext,
+    event_id: &str,
+    room_id: &str,
+    ciphertext: Option<serde_json::Value>,
+    enc_info: Option<&EncryptionInfo>,
+) {
+    if let Some(ciphertext) = ciphertext {
+        let algorithm = ciphertext
+            .get("algorithm")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let sender_key = ciphertext
+            .get("sender_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let session_id = ciphertext
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let row = EventCiphertext {
+            account_id: ctx.account_id,
+            event_id,
+            room_id,
+            algorithm: &algorithm,
+            sender_key: sender_key.as_deref(),
+            session_id: session_id.as_deref(),
+            ciphertext,
+        };
+        if let Err(err) = ctx.store.insert_event_ciphertext(&row).await {
+            tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist ciphertext sibling");
+        }
+    }
+
+    if let Some(info) = enc_info {
+        let meta = crate::meta::crypto_meta(info);
+        if let Err(err) = ctx
+            .store
+            .upsert_event_crypto(&meta.as_event_crypto(ctx.account_id, event_id))
+            .await
+        {
+            tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist crypto sibling");
+        }
     }
 }
 
@@ -252,7 +334,10 @@ async fn run_account(
     // `SyncService::builder` consumes the client; keep a clone for the
     // re-decryption queue and the startup sweep (the client is Arc-backed, so
     // clones are cheap and share one underlying connection + crypto store).
+    // Raise the room-list timeline window from the SDK default of 1 (latest
+    // event only) so each room archives its last N events. See ADR 0015.
     let sync_service = SyncService::builder(client.clone())
+        .with_room_list_timeline_limit(config.timeline_limit)
         .build()
         .await
         .map_err(sdk_err)?;
