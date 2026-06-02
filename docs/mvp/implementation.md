@@ -210,19 +210,32 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
   - Config reference (every setting from `axon-core`'s config loader).
   - First-run flow: account provisioning, token minting, accessing `axon-web`.
   - Operational basics: backups (`pg_dump` + media cache directory), upgrades, logs.
-  - Cloud deployment recipes — at minimum one each for:
+  - Deployment recipes — at minimum one each for:
+    - Home machine behind a private mesh VPN (the recommended self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the Milestone 8 token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
     - Railway (or a similar Procfile-style PaaS).
     - DigitalOcean droplet (Docker Compose + nginx reverse proxy + Let's Encrypt).
     - AWS (EC2 + RDS Postgres; ECS optional; reference Terraform welcome but not required).
-    - Bare Linux VPS (the default — covered in the operational basics above).
+    - Bare Linux VPS (covered in the operational basics above).
 
-**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one cloud recipe is exercised end-to-end (any of the three) by someone other than the author.
+**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
+
+### 13. Threads (post-MVP)
+
+Deferred out of the MVP and handled as a self-contained milestone after the web alpha ships. The store already captures `m.relates_to` generically — including `m.thread` — in `events.relates_to` (ADR 0015), so this milestone is **additive and backfill-free**: the thread membership of every already-stored event is recoverable from data on disk, with no re-sync or re-parse. The deferral cost is a future index + endpoints, not a re-architecture.
+
+- Migration: a thread lookup over `events.relates_to` — an expression/partial index (or a generated column) keyed on the thread root, e.g. over `relates_to->>'event_id' WHERE relates_to->>'rel_type' = 'm.thread'`. Applies retroactively to existing rows.
+- `axon-store` reads: list a room's threads (root event + latest reply + reply count) and a thread-scoped timeline read (reuse the cursor pagination from the timeline read, scoped to a thread root).
+- Endpoints: `GET /v1/rooms/{room_id}/threads` and a thread-scoped timeline (e.g. `GET /v1/rooms/{room_id}/threads/{root_id}/timeline`).
+- Mutations: thread-aware send (set `m.relates_to` with `rel_type: m.thread`) on the existing send path (Milestone 6).
+- `axon-web`: a "view in thread" affordance and a thread panel.
+
+**Verification:** In a room with a threaded conversation, `GET …/threads` lists the thread with the correct reply count; the thread-scoped timeline returns only that thread's events, reverse-chronological with stable pagination; a reply sent into the thread round-trips and appears under the right root. Confirm the thread index resolves over events stored *before* this milestone (proving the backfill-free claim).
 
 ## Open decisions that gate milestones
 
-One genuinely open question carried over from [`tech-spec.md`](./tech-spec.md):
+The one genuinely open question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
 
-- **Threads in MVP or immediately after.** If threads make MVP, Milestone 4 needs thread-aware `relates_to` indexing (it already captures `m.thread`); Milestone 5 needs thread endpoints (`GET /v1/rooms/{id}/threads`, thread-scoped timeline reads); Milestone 11 needs a "view in thread" affordance. Stop and confirm with the human before pulling threads in — this is a scope expansion, not a free addition.
+- **Threads — resolved: deferred to a dedicated post-MVP Milestone 13.** Rather than thread the feature through Milestone 4 (indexing), Milestone 5 (endpoints), and Milestone 11 (UI), it is handled as one self-contained milestone after the MVP ships. The MVP store deliberately captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so the deferral is forward-compatible — Milestone 13 is additive and backfill-free, not a re-architecture. See Milestone 13.
 
 Everything else is settled. If an ambiguity arises during implementation that neither the PRD nor the tech spec covers, stop and ask rather than picking silently.
 
