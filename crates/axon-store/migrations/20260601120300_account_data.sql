@@ -1,4 +1,4 @@
--- M4b: account data — both global (account-wide) and per-room. See ADR 0016.
+-- Account data — both global (account-wide) and per-room. See ADR 0016.
 --
 -- Account data events carry only a `type` and a `content` blob (no event_id,
 -- sender, or origin_ts), and there is exactly one current value per type per

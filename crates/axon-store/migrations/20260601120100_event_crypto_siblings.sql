@@ -1,4 +1,4 @@
--- M4a: sibling tables holding the cryptographic provenance of encrypted events,
+-- Sibling tables holding the cryptographic provenance of encrypted events,
 -- keyed 1:1 by (account_id, event_id) so a decrypted `events` row stays
 -- re-verifiable against Matrix's signatures. See ADR 0015.
 --

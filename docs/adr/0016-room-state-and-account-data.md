@@ -22,8 +22,9 @@ This ADR records the M4b decisions the spec does not pin down.
 `room_state` and `account_data` hold the *resolved current value*, upserted in
 place as syncs arrive — a read is a point lookup, not a fold over history. The
 raw state events still land in `events` (state events are part of the Matrix
-timeline), so nothing is lost; these tables are the materialized view a
-room-summary or read-marker read consults.
+timeline), so nothing is lost; these tables are the derived current-value
+projection a room-summary or read-marker read consults — maintained by hand on
+each upsert, not a Postgres `MATERIALIZED VIEW`.
 
 - `room_state` PK = the Matrix state identity `(account_id, room_id, event_type,
   state_key)`. `state_key` is `''` for singletons (`m.room.name`) and the target

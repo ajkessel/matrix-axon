@@ -136,7 +136,7 @@ struct PersistContext {
 /// events with the ciphertext as content and `enc_info = None`; the
 /// re-decryption queue back-fills their `content` once keys arrive.
 ///
-/// Alongside the `events` row this writes the M4 sibling rows (ADR 0015): the
+/// Alongside the `events` row this writes the crypto sibling rows (ADR 0015): the
 /// ciphertext sibling for UTDs (the only events whose ciphertext the SDK hands
 /// us), and the crypto-provenance siblings from `enc_info` for decrypted events.
 async fn persist_timeline_event(
@@ -243,7 +243,7 @@ async fn persist_timeline_event(
     persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
 }
 
-/// Write the M4 crypto sibling rows for an event already persisted to `events`.
+/// Write the crypto sibling rows for an event already persisted to `events`.
 /// `ciphertext` is the `m.room.encrypted` content for UTDs (`None` otherwise);
 /// `enc_info` is the SDK decryption info for decrypted events (`None` for UTDs).
 async fn persist_event_siblings(
@@ -294,11 +294,12 @@ async fn persist_event_siblings(
 }
 
 /// Event handler: project a room-state event into the `room_state` table (the
-/// current-value view). The raw state event is also persisted to `events` by
-/// [`persist_timeline_event`]; this writes the resolved tuple a room-summary read
-/// needs. Identity fields come from the typed event; `type`/`state_key`/`content`
-/// from the raw JSON so the exact content (incl. unknown fields) is preserved.
-async fn persist_state_event(
+/// derived current-value view, maintained by upsert). The raw state event is
+/// also persisted to `events` by [`persist_timeline_event`]; this writes the
+/// resolved tuple a room-summary read needs. Identity fields come from the typed
+/// event; `type`/`state_key`/`content` from the raw JSON so the exact content
+/// (incl. unknown fields) is preserved.
+async fn persist_room_state_event(
     ev: AnySyncStateEvent,
     room: Room,
     raw: RawEvent,
@@ -441,11 +442,10 @@ async fn run_account(
     };
     client.add_event_handler_context(persist_ctx);
     client.add_event_handler(persist_timeline_event);
-    // Room state + account data (M4b, ADR 0016). These reuse the same
-    // PersistContext. The global-account-data handler must not take a `Room`
-    // argument — it has no room, and the SDK skips a handler whose `Room`
-    // extractor fails.
-    client.add_event_handler(persist_state_event);
+    // Room state + account data (ADR 0016). These reuse the same PersistContext.
+    // The global-account-data handler must not take a `Room` argument — it has no
+    // room, and the SDK skips a handler whose `Room` extractor fails.
+    client.add_event_handler(persist_room_state_event);
     client.add_event_handler(persist_room_account_data);
     client.add_event_handler(persist_global_account_data);
 

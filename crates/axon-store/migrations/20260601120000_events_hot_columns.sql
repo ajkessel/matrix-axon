@@ -1,5 +1,5 @@
--- M4a: promote the remaining hot columns the timeline read path needs and add
--- the indexes for room listing and redaction lookup. See ADR 0015.
+-- Promote the remaining hot columns the timeline read path needs and add the
+-- indexes for room listing and redaction lookup. See ADR 0015.
 --
 -- `redacts`            — for an `m.room.redaction` event, the target event_id it
 --                        redacts. NULL for every other event. The timeline read

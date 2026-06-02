@@ -1,4 +1,4 @@
-//! Integration tests for the room-state and account-data projections (M4b).
+//! Integration tests for the room-state and account-data projections.
 //!
 //! Like the event-store tests these need a running Postgres and are `#[ignore]`d
 //! by default. Run them with:

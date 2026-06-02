@@ -1,12 +1,13 @@
--- M4b: current room state, one row per state tuple. See ADR 0016.
+-- Current room state, one row per state tuple. See ADR 0016.
 --
 -- Matrix room state is the set of state events keyed by (type, state_key); the
--- *current* value of each is the latest such event. We materialize that current
--- view here rather than replaying the timeline: each sync upsert overwrites the
--- tuple's row, so a read is a point lookup, not a fold over history. The raw
--- state events still land in `events` (state events are part of the timeline) —
--- this table is the resolved projection a room-summary read needs (name, topic,
--- avatar, members, …).
+-- *current* value of each is the latest such event. We keep that current value
+-- here as a derived projection rather than replaying the timeline: each sync
+-- upsert overwrites the tuple's row, so a read is a point lookup, not a fold over
+-- history. (It is maintained by hand on each upsert — not a Postgres MATERIALIZED
+-- VIEW.) The raw state events still land in `events` (state events are part of
+-- the timeline) — this table is the resolved projection a room-summary read needs
+-- (name, topic, avatar, members, …).
 --
 -- The PK is the Matrix state identity (account_id, room_id, event_type,
 -- state_key). `state_key` is '' for singleton state (m.room.name, m.room.topic)
