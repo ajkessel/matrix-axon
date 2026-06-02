@@ -1,4 +1,4 @@
-//! Pure extractors that lift the M4 hot-column and crypto-provenance fields out
+//! Pure extractors that lift the hot-column and crypto-provenance fields out
 //! of event JSON and the SDK's [`EncryptionInfo`]. Kept separate from the I/O in
 //! `engine.rs`/`redecrypt.rs` so they're trivially unit-testable. See ADR 0015.
 

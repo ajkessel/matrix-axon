@@ -165,17 +165,33 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
 
 **Verification:** Issue a token; hit `/v1/rooms` with and without the header; revoke; confirm the next call is rejected.
 
-### 9. Search backend
+### 9. Search & history backfill
+
+Search is only as good as the history it can see, and sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). So this milestone is two parts: build the index (9a), then make it cover a room's full upstream history (9b) — together they satisfy the PRD's "full-history search" success criterion and its 100–200k-event working-set target. The split mirrors the M4a/M4b pattern.
+
+#### 9a. Search ingestion & indexing
 
 - `axon-search` opens a Tantivy index.
 - Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
 - `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
-- Populate on event ingestion in the sync pipeline.
+- Populate on event ingestion in the sync pipeline (so anything ingested — live sync *or* 9b backfill — is indexed by the same path).
+- One-time **initial index build** over events already in the store. By the time this milestone runs the store already holds everything live-synced since Milestone 5, which predates the index; a bulk pass indexes that existing corpus so search covers all ingested history, not just events arriving after the index exists.
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
 - No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
 
-**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
+**Verification (9a):** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
+
+#### 9b. History backfill
+
+The engine that reaches back for a room's pre-existing history, so the 9a index (and the timeline read) covers more than the post-install slice. `recover()` (ADR 0011/0014) imports the *keys* to decrypt old messages, but not the *messages* — those must be fetched by paging the room. (ADR 0018.)
+
+- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()`, and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and the 9a index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
+- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
+- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
+- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
+
+**Verification (9b):** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); confirm a search for a phrase from a pre-install message now returns it; kill and restart axon mid-backfill and confirm it resumes without duplicating rows.
 
 ### 10. Drafts and per-device read state
 
@@ -210,19 +226,32 @@ Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can 
   - Config reference (every setting from `axon-core`'s config loader).
   - First-run flow: account provisioning, token minting, accessing `axon-web`.
   - Operational basics: backups (`pg_dump` + media cache directory), upgrades, logs.
-  - Cloud deployment recipes — at minimum one each for:
+  - Deployment recipes — at minimum one each for:
+    - Home machine behind a private mesh VPN (the recommended self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the Milestone 8 token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
     - Railway (or a similar Procfile-style PaaS).
     - DigitalOcean droplet (Docker Compose + nginx reverse proxy + Let's Encrypt).
     - AWS (EC2 + RDS Postgres; ECS optional; reference Terraform welcome but not required).
-    - Bare Linux VPS (the default — covered in the operational basics above).
+    - Bare Linux VPS (covered in the operational basics above).
 
-**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one cloud recipe is exercised end-to-end (any of the three) by someone other than the author.
+**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
+
+### 13. Threads (post-MVP)
+
+Deferred out of the MVP and handled as a self-contained milestone after the web alpha ships. The store already captures `m.relates_to` generically — including `m.thread` — in `events.relates_to` (ADR 0015), so this milestone is **additive and backfill-free**: the thread membership of every already-stored event is recoverable from data on disk, with no re-sync or re-parse. The deferral cost is a future index + endpoints, not a re-architecture.
+
+- Migration: a thread lookup over `events.relates_to` — an expression/partial index (or a generated column) keyed on the thread root, e.g. over `relates_to->>'event_id' WHERE relates_to->>'rel_type' = 'm.thread'`. Applies retroactively to existing rows.
+- `axon-store` reads: list a room's threads (root event + latest reply + reply count) and a thread-scoped timeline read (reuse the cursor pagination from the timeline read, scoped to a thread root).
+- Endpoints: `GET /v1/rooms/{room_id}/threads` and a thread-scoped timeline (e.g. `GET /v1/rooms/{room_id}/threads/{root_id}/timeline`).
+- Mutations: thread-aware send (set `m.relates_to` with `rel_type: m.thread`) on the existing send path (Milestone 6).
+- `axon-web`: a "view in thread" affordance and a thread panel.
+
+**Verification:** In a room with a threaded conversation, `GET …/threads` lists the thread with the correct reply count; the thread-scoped timeline returns only that thread's events, reverse-chronological with stable pagination; a reply sent into the thread round-trips and appears under the right root. Confirm the thread index resolves over events stored *before* this milestone (proving the backfill-free claim).
 
 ## Open decisions that gate milestones
 
-One genuinely open question carried over from [`tech-spec.md`](./tech-spec.md):
+The one genuinely open question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
 
-- **Threads in MVP or immediately after.** If threads make MVP, Milestone 4 needs thread-aware `relates_to` indexing (it already captures `m.thread`); Milestone 5 needs thread endpoints (`GET /v1/rooms/{id}/threads`, thread-scoped timeline reads); Milestone 11 needs a "view in thread" affordance. Stop and confirm with the human before pulling threads in — this is a scope expansion, not a free addition.
+- **Threads — resolved: deferred to a dedicated post-MVP Milestone 13.** Rather than thread the feature through Milestone 4 (indexing), Milestone 5 (endpoints), and Milestone 11 (UI), it is handled as one self-contained milestone after the MVP ships. The MVP store deliberately captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so the deferral is forward-compatible — Milestone 13 is additive and backfill-free, not a re-architecture. See Milestone 13.
 
 Everything else is settled. If an ambiguity arises during implementation that neither the PRD nor the tech spec covers, stop and ask rather than picking silently.
 

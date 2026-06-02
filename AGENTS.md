@@ -64,7 +64,7 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 4, subphase 4a in progress** — the event store grows from M3's flat table into a mature schema: hot columns (`redacts`, `relates_to`, `decrypted_body_text`), crypto-provenance sibling tables, a paginated reverse-chronological timeline read with read-time redaction masking, and a raised sliding-sync timeline window so rooms archive more than the latest event. M4's E2EE half is already handled — the recovery-key bootstrap landed in M3c and interactive verification is M5 (see "M4 re-scope" below). Remaining M4: subphase 4b (account-data + room-state tables).
+**Milestone 4, subphase 4b in progress** — the event store grows from M3's flat table into a mature schema. 4a (merged) added: hot columns (`redacts`, `relates_to`, `decrypted_body_text`), crypto-provenance sibling tables, a paginated reverse-chronological timeline read with read-time redaction masking, and a raised sliding-sync timeline window so rooms archive more than the latest event. 4b adds the two current-value projections — `room_state` and `account_data` — fed by new SDK state-event and account-data handlers. M4's E2EE half is already handled — the recovery-key bootstrap landed in M3c and interactive verification is M5 (see "M4 re-scope" below).
 
 Non-obvious choices made in 4a (see ADR 0015):
 
@@ -73,6 +73,13 @@ Non-obvious choices made in 4a (see ADR 0015):
 - **`Store::room_timeline`:** newest-first, cursor on `(origin_ts, id)` (the `BIGSERIAL` `id` is the tiebreaker so pages never overlap/skip). Redaction is masked **at read time** via a `LEFT JOIN LATERAL` (LIMIT 1) — `content`/`decrypted_body_text` nulled, `redaction_event_id` set — leaving the stored row and ciphertext sibling untouched. No HTTP endpoint yet (that's M5); verified via `--ignored` store tests.
 - **Sliding-sync timeline depth:** the SDK default is **1** (latest event only — the root of M3's latest-only archive). Raised via `SyncServiceBuilder::with_room_list_timeline_limit`, driven by new `sync.timeline_limit` (default 20). Deepens new syncs only; not retroactive backfill.
 - **M4 re-scope (ADR 0011, 0015):** the recovery-key bootstrap landed in M3c (transient-only, kept that way — the M4 at-rest review is closed in ADR 0015); the interactive **verification plumbing moved wholly to M5** (untestable before `/v1/ws`), so `axon-crypto` stays a stub until M5.
+
+Non-obvious choices made in 4b (see ADR 0016):
+
+- **`room_state` / `account_data` are current-value projections**, upserted in place — not logs. The raw events still land in `events` (state events are part of the timeline); these tables hold the resolved latest value a room-summary or read-marker read needs. `room_state` PK is the Matrix state identity `(account_id, room_id, event_type, state_key)`; `account_data` PK is `(account_id, room_id, event_type)`.
+- **Global account data uses `room_id = ''`** (a `NOT NULL DEFAULT ''` sentinel — real room ids start with `!`), so the natural PK carries uniqueness and `ON CONFLICT` targets it directly. A nullable `room_id` would make two global rows for one type "distinct" under SQL NULL semantics and defeat the upsert. The store API maps `room_id: Option<&str>` ↔ `''` at the boundary.
+- **`room_state` upsert is freshness-guarded** (`ON CONFLICT … DO UPDATE … WHERE EXCLUDED.origin_ts >= room_state.origin_ts`): an older replayed state event can't clobber newer state. `account_data` events carry no timestamp, so theirs is plain last-write-wins.
+- **Three new SDK handlers** (`crates/axon-sync/src/engine.rs`): `persist_state_event` (`AnySyncStateEvent`), `persist_room_account_data` (`AnyRoomAccountDataEvent`), `persist_global_account_data` (`AnyGlobalAccountDataEvent`). All reuse the one `PersistContext`. The global handler takes **no `Room` argument** — global account data has no room, and the SDK skips a handler whose `Room` extractor fails. `updated_at` on both tables is maintained by the shared `trigger_set_updated_at()` trigger.
 
 Non-obvious choices made in 3c (see ADR 0014):
 

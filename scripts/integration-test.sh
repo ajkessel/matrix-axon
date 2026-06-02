@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# End-to-end integration test for the M3c re-decryption queue against a real
+# End-to-end integration test for the re-decryption queue against a real
 # Synapse. It exercises the whole prize path with no manual steps:
 #
 #   1. Bring up Postgres + Synapse (the `integration` compose profile).
@@ -233,11 +233,11 @@ wait_until() {
 
 # --- phase 1: fresh device B, no recovery key -> UTDs accumulate -------------
 #
-# axon archives the events Simplified Sliding Sync surfaces. As of M4a the
-# per-room timeline window is raised from the SDK default of 1 (sync.timeline_limit,
-# default 20), so device B now sees several UTDs rather than just the latest — but
-# still bounded by that window, not the full backlog. We assert on the count axon
-# *actually* archived rather than MESSAGE_COUNT, then prove that exact set flips.
+# axon archives the events Simplified Sliding Sync surfaces. The per-room timeline
+# window is raised from the SDK default of 1 (sync.timeline_limit, default 20), so
+# device B sees several UTDs rather than just the latest — but still bounded by
+# that window, not the full backlog. We assert on the count axon *actually*
+# archived rather than MESSAGE_COUNT, then prove that exact set flips.
 
 log "Phase 1: axon as fresh device B (no recovery key) — expect UTDs"
 run_axon
