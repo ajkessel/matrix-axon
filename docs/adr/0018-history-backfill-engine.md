@@ -32,13 +32,9 @@ split into two parts:**
 
 This keeps backfill **in-MVP** and co-located with the criterion it serves:
 "full-history search" needs both the index (9a) and the history (9b), so the two
-belong in one milestone. The split mirrors the M4a/M4b pattern. (Threads return
-to **Milestone 13**.)
-
-This supersedes the interim placement of backfill as a standalone post-MVP
-Milestone 13 and resolves the open question that placement raised — *in-MVP vs
-post-MVP* — in favour of **in-MVP**: the alpha should be able to search a room's
-full history, not just the slice ingested since install.
+belong in one milestone — the alpha should be able to search a room's full
+history, not just the slice ingested since install. The split mirrors the M4a/M4b
+pattern. (Threads are Milestone 13.)
 
 Engine shape (9b):
 
@@ -62,8 +58,6 @@ Engine shape (9b):
 - Ordering within M9 is natural: 9a builds the index, 9b feeds it the rest of
   history through the same ingestion path — so 9b indexing is automatic, not a
   second integration.
-- Threads move back to **Milestone 13** (ADR 0017 and `implementation.md` updated
-  accordingly).
 - Because backfill reuses the live ingestion path, no new persistence,
   decryption, or indexing code is needed — it is a driver feeding existing
   machinery, which is what keeps 9b a tractable half-milestone rather than its

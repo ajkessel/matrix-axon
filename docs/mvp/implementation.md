@@ -175,6 +175,7 @@ Search is only as good as the history it can see, and sync alone only ingests ev
 - Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
 - `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
 - Populate on event ingestion in the sync pipeline (so anything ingested — live sync *or* 9b backfill — is indexed by the same path).
+- One-time **initial index build** over events already in the store. By the time this milestone runs the store already holds everything live-synced since Milestone 5, which predates the index; a bulk pass indexes that existing corpus so search covers all ingested history, not just events arriving after the index exists.
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
 - No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
