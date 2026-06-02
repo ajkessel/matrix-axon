@@ -18,7 +18,7 @@ choice is what makes the larger deferral cheap.
 
 ## Decision
 
-**Threads are deferred to a single, self-contained, post-MVP Milestone 13** —
+**Threads are deferred to a single, self-contained, post-MVP Milestone 14** —
 not woven through M4/M5/M11.
 
 The deferral is **forward-compatible and backfill-free** because the data is
@@ -42,12 +42,12 @@ which is exactly the expensive kind of deferral this decision sidesteps.
 
 - The MVP (M1–M12) ships without threads; threaded replies still persist as
   ordinary events with their relation preserved, just not surfaced as threads.
-- Milestone 13 is low-risk and self-contained: an index + endpoints + UI, no
+- Milestone 14 is low-risk and self-contained: an index + endpoints + UI, no
   re-architecture. Its verification can assert the thread index resolves over
   events stored *before* the milestone, proving the backfill-free claim.
 - The "one JSONB column now" write-time cost (ADR 0015) is the price already paid
   to keep this option open; this ADR is the decision that cashes it in as a
   clean future milestone rather than MVP-critical-path work.
 - `implementation.md` is updated: the threads open-decision is marked resolved
-  and Milestone 13 is added. Per the doc-governance model, the *decision* lives
+  and Milestone 14 is added. Per the doc-governance model, the *decision* lives
   here; the spec records the resulting plan.
