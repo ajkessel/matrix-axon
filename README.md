@@ -89,12 +89,16 @@ CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on 
 
 ### 5. Start over
 
-If you want to restart with a fresh instance and fresh data, just destroy and restart the postgres Docker instance:
+If you want to restart with a fresh instance and fresh data, just destroy and restart the postgres Docker instance per below.
 
 ```bash
 docker compose down -v postgres
 docker compose up -d postgres
 ```
+
+### 6. Troubleshooting
+
+During very early development, there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
 
 ## Docs
 
