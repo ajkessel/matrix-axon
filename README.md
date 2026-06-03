@@ -23,12 +23,28 @@ Prerequisites: Rust (stable), Postgres 16.
 ### 1. Install Prerequisites
 
 #### Ubuntu
+
+This should work on a native Linux box or in a WSL environment on Windows.
+
 ```bash
 sudo apt install docker.io docker-compose-v2
 sudo snap install --classic rustup
 ```
+#### macOS
+
+If you don't yet have Homebrew, Rust, or Docker, these commmands will install all three:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install rust
+brew install --cask docker
+```
+
+You likely need to start Docker from the MacOS desktop the first time and grant it administrative privileges to run.
 
 ### 2. Install and Start Postgres
+
+Run these commands from the top-level matrix-axon directory.
 
 **With Docker (easiest, optional):**
 ```bash
