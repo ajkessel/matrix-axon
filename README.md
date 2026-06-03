@@ -63,6 +63,13 @@ curl localhost:8080/healthz     # -> {"status":"ok"}
 
 CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
 
+If you want to test the client via WebSocket, [websocat](https://github.com/vi/websocat) is useful. You can install from GitHub, or via rust:
+```bash
+cargo install --features=ssl websocat
+```
+
+The executable is typically installed to `~/.cargo/bin`, so you'll want that in your PATH to invoke `websocat` from the shell prompt.
+
 ## Docs
 
 |                                                   |                                                  |
