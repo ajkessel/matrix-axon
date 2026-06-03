@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("starting sync engine")?;
 
-    let app = axon_api::router(store);
+    let app = axon_api::router(axon_api::AppState::new(store));
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)

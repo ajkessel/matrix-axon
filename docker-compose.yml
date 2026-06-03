@@ -12,6 +12,18 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - axon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` against the local socket — reports ready only once initdb
+      # has finished and the real server is accepting connections (the brief
+      # initdb bootstrap server doesn't count). Lets `docker compose up --wait`
+      # and the integration script block on actual readiness rather than a fixed
+      # sleep. `$$VAR` escapes compose interpolation so the container shell reads
+      # its own env.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   # Local Matrix homeserver for integration testing axon against a real server.
   # Gated behind the `integration` profile so normal `docker compose up` (and

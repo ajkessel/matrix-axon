@@ -1,0 +1,111 @@
+//! The shared JSON envelope every `/v1/` handler returns.
+//!
+//! Success bodies are `{ "data": <T> }` ([`ApiResponse`]); error bodies are
+//! `{ "error": { "code", "message" } }` ([`ApiError`]). Handlers return
+//! `Result<ApiResponse<T>, ApiError>` and the [`IntoResponse`] impls here pick
+//! the status code and serialize the body, so every route is consistent.
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+use utoipa::ToSchema;
+
+/// Success envelope: a 2xx body is always `{ "data": <T> }`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiResponse<T> {
+    /// The route-specific payload.
+    pub data: T,
+}
+
+impl<T> ApiResponse<T> {
+    /// Wrap a payload in the success envelope.
+    pub fn new(data: T) -> Self {
+        Self { data }
+    }
+}
+
+impl<T: Serialize> IntoResponse for ApiResponse<T> {
+    fn into_response(self) -> Response {
+        Json(self).into_response()
+    }
+}
+
+/// The error body shape: a machine-readable `code` and a human-readable
+/// `message`, nested under `error`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// Stable, machine-readable code, e.g. `not_found`, `bad_request`.
+    pub code: String,
+    /// Human-readable explanation. Safe to surface to a developer; never carries
+    /// internal error detail for `internal` errors.
+    pub message: String,
+}
+
+/// The error envelope: `{ "error": { "code", "message" } }`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorResponse {
+    /// The error detail.
+    pub error: ErrorBody,
+}
+
+/// An API error: the wire body plus the HTTP status to send it with. Construct
+/// via the helpers; a bare [`StoreError`](axon_store::StoreError) converts into a
+/// logged `500`.
+#[derive(Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    body: ErrorResponse,
+}
+
+impl ApiError {
+    // Only the statuses the current endpoints raise have named constructors
+    // below. Others (401/403 with auth, 409, 422, 503, …) slot in as one-line
+    // wrappers over this private `new` as the API surface grows — the wire shape
+    // and `IntoResponse` stay unchanged.
+    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            body: ErrorResponse {
+                error: ErrorBody {
+                    code: code.to_owned(),
+                    message: message.into(),
+                },
+            },
+        }
+    }
+
+    /// `404 Not Found` — the addressed resource does not exist.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", message)
+    }
+
+    /// `400 Bad Request` — a malformed parameter (e.g. an undecodable cursor).
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    /// `500 Internal Server Error` with a generic message; the real cause is
+    /// logged, never returned.
+    pub fn internal() -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal server error",
+        )
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body)).into_response()
+    }
+}
+
+impl From<axon_store::StoreError> for ApiError {
+    fn from(err: axon_store::StoreError) -> Self {
+        // The store error can carry SQL detail; log it, return a generic body.
+        tracing::error!(error = %err, "store error serving request");
+        ApiError::internal()
+    }
+}

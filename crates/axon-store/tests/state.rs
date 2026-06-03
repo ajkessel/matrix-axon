@@ -5,24 +5,17 @@
 //!
 //! ```sh
 //! docker compose up -d postgres
-//! DATABASE_URL=postgres://axon:axon@127.0.0.1:5433/axon cargo test -p axon-store -- --ignored
+//! # 5432 is the default; use your compose host port (e.g. 5433 if 5432 is taken).
+//! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-store -- --ignored
 //! ```
 
 mod common;
 
-use axon_store::{AccountDataUpsert, RoomStateUpsert, Store};
+use axon_store::{AccountDataUpsert, RoomStateUpsert};
+use common::test_account;
 use serde_json::json;
 use sqlx_core::row::Row;
 use uuid::Uuid;
-
-async fn test_account(store: &Store, prefix: &str) -> Uuid {
-    let user = format!("@{prefix}-{}:localhost", Uuid::new_v4());
-    store
-        .upsert_account(&user, "https://hs.example.org")
-        .await
-        .expect("account")
-        .account_id
-}
 
 /// Room state upserts in place: re-setting a tuple overwrites the prior value,
 /// and distinct (event_type, state_key) tuples coexist.

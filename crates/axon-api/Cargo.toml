@@ -10,5 +10,17 @@ license.workspace = true
 axon-core  = { workspace = true }
 axon-store = { workspace = true }
 axum       = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+uuid       = { workspace = true, features = ["serde"] }
+utoipa     = { workspace = true, features = ["axum_extras", "uuid"] }
+base64     = { workspace = true }
 tracing    = { workspace = true }
+
+[dev-dependencies]
+# DB-gated HTTP integration test: drive the real router with tower's oneshot,
+# seed/clean up directly through the pool.
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower     = { version = "0.5", default-features = false, features = ["util"] }
+uuid      = { workspace = true, features = ["v4"] }
+sqlx-core = { workspace = true }

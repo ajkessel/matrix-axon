@@ -136,9 +136,9 @@ const PENDING_UTD_COLUMNS: &str = "event_id, room_id, raw_event";
 /// so pages never overlap or skip.
 ///
 /// This is **not** an opaque token: its fields are public so the store and its
-/// callers can construct one directly. When the M5 HTTP layer exposes pagination
-/// it should serialize this into an opaque cursor string, so the wire contract
-/// can stay fixed even if the internal sort key changes.
+/// callers can construct one directly. The HTTP layer (`axon-api`) serializes it
+/// into an opaque cursor string, so the wire contract can stay fixed even if the
+/// internal sort key changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineCursor {
     /// `origin_server_ts` in milliseconds — the primary sort key.
@@ -204,6 +204,27 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
         })
     }
 }
+
+/// Shared SELECT projection for timeline reads, with read-time redaction
+/// masking. A `LEFT JOIN LATERAL … LIMIT 1` finds at most one redaction
+/// targeting each event (a plain JOIN would duplicate a multiply-redacted row);
+/// when one exists, `content` and `decrypted_body_text` are masked to `NULL` and
+/// `redaction_event_id` is set. Callers append their own `WHERE` (binding
+/// `account_id` as `$1`) plus any ordering / pagination. Selects exactly the
+/// columns [`TimelineRow`] reads.
+const TIMELINE_SELECT: &str =
+    "SELECT e.id, e.event_id, e.room_id, e.sender, e.origin_ts, e.event_type, \
+            CASE WHEN r.event_id IS NULL THEN e.content END AS content, \
+            CASE WHEN r.event_id IS NULL THEN e.decrypted_body_text END AS decrypted_body_text, \
+            e.relates_to, e.redacts, r.event_id AS redaction_event_id \
+     FROM events e \
+     LEFT JOIN LATERAL ( \
+         SELECT rr.event_id FROM events rr \
+         WHERE rr.account_id = e.account_id \
+           AND rr.event_type = 'm.room.redaction' \
+           AND rr.redacts = e.event_id \
+         LIMIT 1 \
+     ) r ON TRUE";
 
 impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
@@ -398,25 +419,10 @@ impl Store {
         before: Option<TimelineCursor>,
         limit: i64,
     ) -> Result<Vec<TimelineRow>, StoreError> {
-        // The redaction match is a LATERAL subselect with LIMIT 1 so a target
-        // event redacted more than once still yields a single row (a plain JOIN
-        // would duplicate it and corrupt the page size).
-        let mut sql = String::from(
-            "SELECT e.id, e.event_id, e.room_id, e.sender, e.origin_ts, e.event_type, \
-                    CASE WHEN r.event_id IS NULL THEN e.content END AS content, \
-                    CASE WHEN r.event_id IS NULL THEN e.decrypted_body_text END \
-                        AS decrypted_body_text, \
-                    e.relates_to, e.redacts, r.event_id AS redaction_event_id \
-             FROM events e \
-             LEFT JOIN LATERAL ( \
-                 SELECT rr.event_id FROM events rr \
-                 WHERE rr.account_id = e.account_id \
-                   AND rr.event_type = 'm.room.redaction' \
-                   AND rr.redacts = e.event_id \
-                 LIMIT 1 \
-             ) r ON TRUE \
-             WHERE e.account_id = $1 AND e.room_id = $2",
-        );
+        // The redaction match (in TIMELINE_SELECT) is a LATERAL subselect with
+        // LIMIT 1 so a target event redacted more than once still yields a single
+        // row (a plain JOIN would duplicate it and corrupt the page size).
+        let mut sql = format!("{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2");
         if before.is_some() {
             sql.push_str(" AND (e.origin_ts, e.id) < ($3, $4)");
         }
@@ -432,5 +438,24 @@ impl Store {
         }
         let rows = q.bind(limit).fetch_all(&self.pool).await?;
         Ok(rows)
+    }
+
+    /// Read a single event by `(account_id, event_id)`, with the same read-time
+    /// redaction masking as [`room_timeline`](Self::room_timeline): if the event
+    /// has been redacted, `content` and `decrypted_body_text` come back `None`
+    /// and `redaction_event_id` is set. Returns `None` when no such event exists
+    /// for the account.
+    pub async fn get_event(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Option<TimelineRow>, StoreError> {
+        let sql = format!("{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.event_id = $2");
+        let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
     }
 }

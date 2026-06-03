@@ -1,0 +1,558 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Axon API",
+    "description": "Read API for a personal Matrix state layer. Account-scoped resources nest under /v1/accounts/{account_id}; /v1/rooms is the cross-account aggregate.",
+    "license": {
+      "name": "AGPL-3.0-only",
+      "identifier": "AGPL-3.0-only"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/accounts/{account_id}/events/{event_id}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Read a single event by `(account_id, event_id)`. Redacted events come back\nmasked (`content`/`body` null, `redacted` true); an unknown id is a 404.",
+        "operationId": "get_event",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_EventDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/timeline": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read a room's timeline, newest first, with cursor pagination.",
+        "description": "An unknown `account_id`/`room_id` yields an empty page (200), not a 404 — an\nempty timeline and a non-existent room are indistinguishable here and an\nempty page is the natural answer.",
+        "operationId": "room_timeline",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page's `next_cursor`; omit for the newest page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of timeline events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_TimelinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/rooms": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "List rooms across accounts, most-recent-activity first.",
+        "operationId": "list_rooms",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "Narrow the list to a single account. Omit for all accounts.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rooms, newest activity first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_RoomDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiResponse_EventDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A single timeline event — used both as a timeline element and as the\nsingle-event payload. `content`/`body` are `null` for UTDs and for redacted\nevents; `redacted` is the convenience flag derived from `redaction_event_id`.",
+            "required": [
+              "account_id",
+              "event_id",
+              "room_id",
+              "sender",
+              "origin_ts",
+              "type",
+              "redacted"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Axon account this event belongs to."
+              },
+              "body": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Plaintext body. `null` when absent or masked by redaction."
+              },
+              "content": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Decrypted `content` JSON. `null` for UTDs and redacted events."
+              },
+              "event_id": {
+                "type": "string",
+                "description": "Matrix event ID."
+              },
+              "origin_ts": {
+                "type": "integer",
+                "format": "int64",
+                "description": "`origin_server_ts` in milliseconds."
+              },
+              "redacted": {
+                "type": "boolean",
+                "description": "`true` when this event has been redacted (content/body masked)."
+              },
+              "redaction_event_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The `event_id` of the redaction that masked this event, if redacted."
+              },
+              "relates_to": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The event's `m.relates_to` object, if any."
+              },
+              "room_id": {
+                "type": "string",
+                "description": "Matrix room ID."
+              },
+              "sender": {
+                "type": "string",
+                "description": "Matrix user ID of the sender."
+              },
+              "type": {
+                "type": "string",
+                "description": "Matrix event type, e.g. `m.room.message`."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_TimelinePage": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One page of a room timeline: the events plus the cursor to fetch the next\n(older) page. `next_cursor` is `null` when the last page has been reached.",
+            "required": [
+              "events"
+            ],
+            "properties": {
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventDto"
+                },
+                "description": "The page of events, newest first."
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Opaque cursor for the next (older) page, or `null` at the end."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_RoomDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A room in the cross-account list (`GET /v1/rooms`). Identity is\n`(account_id, room_id)` — a room joined by two accounts appears twice.",
+              "required": [
+                "account_id",
+                "room_id",
+                "last_activity_ts"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Axon account this room belongs to."
+                },
+                "avatar_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Avatar `mxc://` URI (`m.room.avatar`), if set."
+                },
+                "canonical_alias": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Canonical alias (`m.room.canonical_alias`), if set."
+                },
+                "last_activity_ts": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "`origin_server_ts` of the most recent event, in milliseconds — the sort key."
+                },
+                "last_event_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The most recent event's id, if the room has any events."
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Room name (`m.room.name`), if set."
+                },
+                "room_id": {
+                  "type": "string",
+                  "description": "Matrix room ID."
+                },
+                "topic": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Room topic (`m.room.topic`), if set."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The error body shape: a machine-readable `code` and a human-readable\n`message`, nested under `error`.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable, machine-readable code, e.g. `not_found`, `bad_request`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation. Safe to surface to a developer; never carries\ninternal error detail for `internal` errors."
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "The error envelope: `{ \"error\": { \"code\", \"message\" } }`.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody",
+            "description": "The error detail."
+          }
+        }
+      },
+      "EventDto": {
+        "type": "object",
+        "description": "A single timeline event — used both as a timeline element and as the\nsingle-event payload. `content`/`body` are `null` for UTDs and for redacted\nevents; `redacted` is the convenience flag derived from `redaction_event_id`.",
+        "required": [
+          "account_id",
+          "event_id",
+          "room_id",
+          "sender",
+          "origin_ts",
+          "type",
+          "redacted"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Axon account this event belongs to."
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plaintext body. `null` when absent or masked by redaction."
+          },
+          "content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Decrypted `content` JSON. `null` for UTDs and redacted events."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Matrix event ID."
+          },
+          "origin_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`origin_server_ts` in milliseconds."
+          },
+          "redacted": {
+            "type": "boolean",
+            "description": "`true` when this event has been redacted (content/body masked)."
+          },
+          "redaction_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `event_id` of the redaction that masked this event, if redacted."
+          },
+          "relates_to": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The event's `m.relates_to` object, if any."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          },
+          "sender": {
+            "type": "string",
+            "description": "Matrix user ID of the sender."
+          },
+          "type": {
+            "type": "string",
+            "description": "Matrix event type, e.g. `m.room.message`."
+          }
+        }
+      },
+      "RoomDto": {
+        "type": "object",
+        "description": "A room in the cross-account list (`GET /v1/rooms`). Identity is\n`(account_id, room_id)` — a room joined by two accounts appears twice.",
+        "required": [
+          "account_id",
+          "room_id",
+          "last_activity_ts"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Axon account this room belongs to."
+          },
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Avatar `mxc://` URI (`m.room.avatar`), if set."
+          },
+          "canonical_alias": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Canonical alias (`m.room.canonical_alias`), if set."
+          },
+          "last_activity_ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`origin_server_ts` of the most recent event, in milliseconds — the sort key."
+          },
+          "last_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most recent event's id, if the room has any events."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room name (`m.room.name`), if set."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Matrix room ID."
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room topic (`m.room.topic`), if set."
+          }
+        }
+      },
+      "TimelinePage": {
+        "type": "object",
+        "description": "One page of a room timeline: the events plus the cursor to fetch the next\n(older) page. `next_cursor` is `null` when the last page has been reached.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventDto"
+            },
+            "description": "The page of events, newest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next (older) page, or `null` at the end."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "rooms",
+      "description": "Rooms and their timelines"
+    },
+    {
+      "name": "events",
+      "description": "Individual events"
+    }
+  ]
+}

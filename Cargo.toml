@@ -60,6 +60,10 @@ matrix-sdk-ui = { version = "0.17" }
 figment    = { version = "0.10" }
 serde      = { version = "1" }
 serde_json = { version = "1" }
+base64     = { version = "0.22" }
+
+# OpenAPI spec emission from handler signatures (M5a).
+utoipa = { version = "5" }
 
 # Errors
 thiserror = { version = "2" }

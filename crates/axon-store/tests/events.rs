@@ -10,41 +10,12 @@
 
 mod common;
 
-use axon_store::{EventCiphertext, EventCrypto, NewEvent, Store, TimelineCursor};
+use axon_store::{EventCiphertext, EventCrypto, NewEvent, TimelineCursor};
+use common::insert_message;
 use serde_json::{json, Value};
 use sqlx_core::row::Row;
 use sqlx_postgres::PgPool;
 use uuid::Uuid;
-
-/// Insert a decrypted `m.room.message` with a body, returning its event_id.
-async fn insert_message(
-    store: &Store,
-    account_id: Uuid,
-    room_id: &str,
-    origin_ts: i64,
-    body: &str,
-) -> String {
-    let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
-    let content = json!({ "msgtype": "m.text", "body": body });
-    store
-        .upsert_event(&NewEvent {
-            event_id: &event_id,
-            room_id,
-            account_id,
-            sender: "@alice:localhost",
-            origin_ts,
-            event_type: "m.room.message",
-            content: Some(content.clone()),
-            raw_event: json!({ "type": "m.room.message", "content": content }),
-            megolm_session_id: None,
-            redacts: None,
-            relates_to: None,
-            decrypted_body_text: Some(body),
-        })
-        .await
-        .expect("insert message");
-    event_id
-}
 
 async fn read_event(pool: &PgPool, account_id: Uuid, event_id: &str) -> (Option<Value>, String) {
     let row = sqlx_core::query::query(

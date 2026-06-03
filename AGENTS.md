@@ -64,7 +64,16 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 4, subphase 4b in progress** — the event store grows from M3's flat table into a mature schema. 4a (merged) added: hot columns (`redacts`, `relates_to`, `decrypted_body_text`), crypto-provenance sibling tables, a paginated reverse-chronological timeline read with read-time redaction masking, and a raised sliding-sync timeline window so rooms archive more than the latest event. 4b adds the two current-value projections — `room_state` and `account_data` — fed by new SDK state-event and account-data handlers. M4's E2EE half is already handled — the recovery-key bootstrap landed in M3c and interactive verification is M5 (see "M4 re-scope" below).
+**Milestone 5, subphase 5a in progress** — the first real client API. M5 ("Client API v0") is split three ways along its dependency seams: **5a** the read-only HTTP API (this work), **5b** the `/v1/ws` WebSocket + live event fan-out, **5c** interactive SAS verification (`axon-crypto`, still a stub until then). 5a adds three read endpoints under `/v1/`, a shared JSON envelope, and a utoipa-emitted OpenAPI spec. The store gains `list_rooms` + `get_event`; `axon-api` gains the envelope, DTOs, routes, and `AppState`.
+
+Non-obvious choices made in 5a (see ADR 0019):
+
+- **Account-nested canonical routes.** `GET /v1/rooms` is the flat cross-account aggregate (newest-activity first, optional `?account_id=` filter); detail routes nest the account: `GET /v1/accounts/{account_id}/rooms/{room_id}/timeline` and `GET /v1/accounts/{account_id}/events/{event_id}` (event under the **account, not the room** — the store keys events by `(account_id, event_id)`). A deliberate deviation from the spec's literal flat routes, consistent with M7's already-nested `/v1/media/{account_id}/…`. **Convention going forward: nest `account_id` on all account-scoped resource routes** — so M6 mutations become `/v1/accounts/{account_id}/rooms/{room_id}/send`, dropping `account_id` from the body.
+- **Response envelope.** Success is `{ "data": <T> }` (`ApiResponse<T>`), errors `{ "error": { "code", "message" } }` (`ApiError`), each with one `IntoResponse`. `StoreError` → logged `500` with a generic body. Missing event → `404`; bad cursor/param → `400`; an unknown room's timeline is an empty `200` page, not `404`.
+- **Opaque cursor.** The store's `(origin_ts, id)` `TimelineCursor` is serialized to the wire as base64url(`"{ts}.{id}"`), returned as `next_cursor` per page (`null` at the end); a malformed cursor is a `400`. Codec in `crates/axon-api/src/cursor.rs`.
+- **`AppState` + `FromRef` seam.** `axon-api::router` takes `AppState { store }` and handlers extract `State<Store>` via `FromRef`, so 5b can add a `broadcast::Sender` field with zero churn to existing handlers.
+- **OpenAPI golden file.** utoipa builds the spec from handler signatures; a DB-free test diffs it against `openapi/openapi.json` (regenerate with `UPDATE_OPENAPI=1 cargo test -p axon-api --test openapi`), making drift a CI failure. TypeScript client stubs are deferred to M11.
+- **Store reads (no new tables/migration).** `list_rooms(Option<account_id>)` aggregates `events` for activity + latest event id and pulls name/topic/avatar/alias from the `room_state` projection in one query (note avatar state is `m.room.avatar` → `content.url`). `get_event(account_id, event_id)` reuses `room_timeline`'s read-time redaction masking via a shared `TIMELINE_SELECT` projection.
 
 Non-obvious choices made in 4a (see ADR 0015):
 

@@ -72,11 +72,19 @@ psql_q() {
 }
 
 log "Waiting for Postgres to accept connections"
-for _ in $(seq 1 30); do
-    if docker exec "$PG" pg_isready -U axon -d axon >/dev/null 2>&1; then break; fi
-    sleep 1
+# Up to ~120s (matching the Synapse budget below): on a cold CI runner Postgres
+# runs first-boot initdb on a fresh volume while the Synapse image is still
+# extracting, and that contention can push readiness past a tight 30s window.
+pg_ready=0
+for _ in $(seq 1 60); do
+    if docker exec "$PG" pg_isready -U axon -d axon >/dev/null 2>&1; then pg_ready=1; break; fi
+    sleep 2
 done
-docker exec "$PG" pg_isready -U axon -d axon >/dev/null 2>&1 || die "Postgres never became ready"
+if [ "$pg_ready" -ne 1 ]; then
+    info "----- last 50 lines of postgres container logs -----"
+    docker logs --tail 50 "$PG" >&2 || true
+    die "Postgres never became ready"
+fi
 info "Postgres ready on host port ${POSTGRES_PORT}"
 
 log "Creating throwaway test database ${ITEST_DB}"
