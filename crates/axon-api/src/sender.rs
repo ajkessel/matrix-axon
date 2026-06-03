@@ -1,0 +1,73 @@
+//! The outbound-message port the mutation handlers depend on.
+//!
+//! `axon-api` defines this trait — the capability it *needs* — rather than
+//! depending on whatever provides it. The real implementation lives in
+//! `axon-sync` (its SDK gateway), adapted onto this port by `axon-server` (the
+//! composition root). So this crate stays free of `axon-sync` and `matrix-sdk`:
+//! handlers speak only [`MessageSender`] and plain types. This mirrors how the
+//! read side stays decoupled via the wire-neutral `LiveEvent` in `axon-core`.
+//!
+//! Every operation returns the resulting Matrix event id on success; failures
+//! are [`SendError`], whose variants map 1:1 to HTTP status in
+//! [`response`](crate::response).
+
+use async_trait::async_trait;
+use uuid::Uuid;
+
+/// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
+/// adapter that implements [`MessageSender`] collapses its richer backend error
+/// into one of these so the handler layer maps a stable set of statuses.
+#[derive(Debug)]
+pub enum SendError {
+    /// The addressed account or room doesn't exist / isn't joined. → `404`.
+    NotFound(String),
+    /// The account couldn't be brought online (homeserver unreachable, auth
+    /// failure). Transient and retryable. → `503`.
+    Unavailable(String),
+    /// A malformed parameter (e.g. an unparseable room or event id). → `400`.
+    Invalid(String),
+    /// The upstream homeserver rejected or failed the operation. → `502`.
+    Upstream(String),
+}
+
+/// Sends message-like events (message / edit / redact / react) on behalf of an
+/// account. Implemented outside this crate; held in [`AppState`](crate::AppState)
+/// as `Arc<dyn MessageSender>`.
+#[async_trait]
+pub trait MessageSender: Send + Sync {
+    /// Send a plain-text message to a room; returns the new event id.
+    async fn send_message(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        body: &str,
+    ) -> Result<String, SendError>;
+
+    /// Edit an existing message (`m.replace`); returns the replacement event id.
+    async fn edit(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        body: &str,
+    ) -> Result<String, SendError>;
+
+    /// Redact an event, optionally with a reason; returns the redaction event id.
+    async fn redact(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        reason: Option<&str>,
+    ) -> Result<String, SendError>;
+
+    /// React to an event with `key` (an emoji/short string); returns the
+    /// reaction event id.
+    async fn react(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+    ) -> Result<String, SendError>;
+}

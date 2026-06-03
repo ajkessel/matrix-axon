@@ -23,6 +23,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "
 tokio-util = { workspace = true }
 axum  = { workspace = true }
 anyhow = { workspace = true }
+# Implements axon-api's async MessageSender trait for the gateway adapter.
+async-trait = { workspace = true }
+uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 dotenvy = { workspace = true }

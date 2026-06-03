@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use axon_core::{AccountProvision, LiveEvent, SyncConfig};
+use axon_core::{LiveEvent, SyncConfig};
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -22,8 +22,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::client::connect_account;
+use crate::client::matches_account;
 use crate::error::{sdk_err, SyncError};
+use crate::gateway::SdkGateway;
+use crate::manager::ClientManager;
 use crate::redecrypt;
 
 /// Backoff bounds for restarting a failed per-account task.
@@ -39,6 +41,10 @@ pub struct SyncEngine {
     /// of this; [`SyncEngine::live_events`] hands a clone to the API layer so
     /// each WebSocket connection can `subscribe()`.
     live_tx: broadcast::Sender<LiveEvent>,
+    /// Per-account client lifecycle. Shared by the supervised sync tasks (which
+    /// drive connects + retry) and the message gateway handed to the API layer
+    /// (see [`SyncEngine::gateway`]).
+    manager: ClientManager,
 }
 
 impl SyncEngine {
@@ -53,6 +59,9 @@ impl SyncEngine {
         // as long as a `Sender` exists, so this does not close it. Capacity is
         // configurable (`sync.live_event_buffer`) — see that field's docs.
         let (live_tx, _rx) = broadcast::channel(config.live_event_buffer);
+        // The client manager is the single owner of per-account clients; both the
+        // supervised sync tasks and the gateway pull from it.
+        let manager = ClientManager::new(store.clone(), config.clone());
         if let Some(provision) = &config.account {
             // Validate the credential up front so a misconfiguration fails fast
             // with a readable error rather than inside a spawned task.
@@ -75,7 +84,10 @@ impl SyncEngine {
                 let config = config.clone();
                 let cancel = cancel.clone();
                 let live_tx = live_tx.clone();
-                tokio::spawn(supervise_account(store, config, account, cancel, live_tx))
+                let manager = manager.clone();
+                tokio::spawn(supervise_account(
+                    store, config, account, cancel, live_tx, manager,
+                ))
             })
             .collect();
 
@@ -83,7 +95,15 @@ impl SyncEngine {
             handles,
             cancel,
             live_tx,
+            manager,
         })
+    }
+
+    /// A message gateway over the per-account clients, for the API layer's send
+    /// path. `axon-server` wraps this in an adapter implementing its
+    /// `MessageSender` port; the returned value is cheap to construct and clone.
+    pub fn gateway(&self) -> SdkGateway {
+        SdkGateway::new(self.manager.clone())
     }
 
     /// A producer handle for the live-event bus. The API layer holds this in its
@@ -113,6 +133,7 @@ async fn supervise_account(
     account: Account,
     cancel: CancellationToken,
     live_tx: broadcast::Sender<LiveEvent>,
+    manager: ClientManager,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -121,12 +142,15 @@ async fn supervise_account(
             return;
         }
 
-        match run_account(&store, &config, &account, &cancel, &live_tx).await {
+        match run_account(&store, &config, &account, &cancel, &live_tx, &manager).await {
             Ok(()) => {
                 // Clean stop (cancellation requested).
                 return;
             }
             Err(err) => {
+                // Drop the cached client so the next attempt reconnects cleanly
+                // (a stale session/connection won't be reused across a restart).
+                manager.evict(account.account_id);
                 tracing::error!(
                     account_id = %account.account_id,
                     error = %err,
@@ -458,9 +482,12 @@ async fn run_account(
     account: &Account,
     cancel: &CancellationToken,
     live_tx: &broadcast::Sender<LiveEvent>,
+    manager: &ClientManager,
 ) -> Result<(), SyncError> {
-    let credential = credential_for(config, account)?;
-    let client = connect_account(store, account, config, credential).await?;
+    // The manager owns client construction + caching (and single-flight with the
+    // gateway, which may have connected this account already). A connect failure
+    // surfaces as a SyncError so the supervisor's backoff/retry is unchanged.
+    let client = manager.get_or_connect(account.account_id).await?;
 
     // Transient key recovery (ADR 0011, ADR 0014): if a recovery key is
     // configured, import the megolm key backup + cross-signing keys once so this
@@ -562,26 +589,4 @@ fn recovery_key_for<'c>(config: &'c SyncConfig, account: &Account) -> Option<&'c
         .as_ref()
         .filter(|p| matches_account(p, account))
         .and_then(|p| p.recovery_key.as_deref())
-}
-
-/// Resolve the login credential for `account` from the configured provision,
-/// matching on `(user_id, homeserver_url)`. Returns `None` if no provision
-/// matches (the account must then have a stored session to authenticate).
-fn credential_for<'c>(
-    config: &'c SyncConfig,
-    account: &Account,
-) -> Result<Option<axon_core::Credential<'c>>, SyncError> {
-    let Some(provision) = config
-        .account
-        .as_ref()
-        .filter(|p| matches_account(p, account))
-    else {
-        return Ok(None);
-    };
-    Ok(Some(provision.credential()?))
-}
-
-/// Whether a configured provision refers to the same account as a stored row.
-fn matches_account(provision: &AccountProvision, account: &Account) -> bool {
-    provision.user_id == account.user_id && provision.homeserver_url == account.homeserver_url
 }

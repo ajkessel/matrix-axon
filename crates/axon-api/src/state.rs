@@ -6,10 +6,14 @@
 //! live-event sender is exactly that: the `/v1/ws` handler pulls
 //! `State<broadcast::Sender<LiveEvent>>`, the read handlers are unchanged.
 
+use std::sync::Arc;
+
 use axon_core::LiveEvent;
 use axon_store::Store;
 use axum::extract::FromRef;
 use tokio::sync::broadcast;
+
+use crate::sender::MessageSender;
 
 /// Everything the HTTP/WebSocket handlers share. Cheap to [`Clone`] (its fields
 /// are all handles).
@@ -21,13 +25,26 @@ pub struct AppState {
     /// `/v1/ws` handler calls [`broadcast::Sender::subscribe`] on a clone of
     /// this once per connection.
     pub live: broadcast::Sender<LiveEvent>,
+    /// Outbound-message port for the mutation handlers. The concrete
+    /// implementation (the sync engine's SDK gateway) is injected by the binary
+    /// via an adapter, so this crate stays free of `axon-sync`/`matrix-sdk`.
+    pub sender: Arc<dyn MessageSender>,
 }
 
 impl AppState {
-    /// Build the application state from a [`Store`] handle and the sync engine's
-    /// live-event sender (see [`axon_sync::SyncEngine::live_events`]).
-    pub fn new(store: Store, live: broadcast::Sender<LiveEvent>) -> Self {
-        Self { store, live }
+    /// Build the application state from a [`Store`] handle, the sync engine's
+    /// live-event sender (see `axon_sync::SyncEngine::live_events`), and an
+    /// outbound-message [`MessageSender`].
+    pub fn new(
+        store: Store,
+        live: broadcast::Sender<LiveEvent>,
+        sender: Arc<dyn MessageSender>,
+    ) -> Self {
+        Self {
+            store,
+            live,
+            sender,
+        }
     }
 }
 
@@ -40,5 +57,11 @@ impl FromRef<AppState> for Store {
 impl FromRef<AppState> for broadcast::Sender<LiveEvent> {
     fn from_ref(state: &AppState) -> broadcast::Sender<LiveEvent> {
         state.live.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MessageSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn MessageSender> {
+        state.sender.clone()
     }
 }

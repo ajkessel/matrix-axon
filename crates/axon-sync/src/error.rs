@@ -1,6 +1,53 @@
 //! Sync-engine errors.
 
 use thiserror::Error;
+use uuid::Uuid;
+
+/// Errors raised by the message gateway (the `SdkGateway` send path) and the
+/// client manager that backs it. Wire-neutral: the API layer's composition-root
+/// adapter (`axon-server`) maps these onto its own `MessageSender` error so
+/// `axon-api` never depends on this crate. Variants are chosen to map cleanly to
+/// HTTP status: unknown account / room → 404, not-yet-connected → 503, bad input
+/// → 400, an upstream homeserver failure → 502.
+#[derive(Debug, Error)]
+pub enum GatewayError {
+    /// No account row exists for this id.
+    #[error("no such account: {0}")]
+    UnknownAccount(Uuid),
+
+    /// The account exists but could not be brought online (homeserver
+    /// unreachable, auth/restore failed, store error). Transient — retryable.
+    #[error("account not connected: {0}")]
+    NotConnected(String),
+
+    /// The addressed room is unknown to this account's client (not joined yet).
+    #[error("room not found: {0}")]
+    RoomNotFound(String),
+
+    /// A malformed parameter (e.g. an unparseable room or event id).
+    #[error("invalid request: {0}")]
+    Invalid(String),
+
+    /// The homeserver rejected or failed the operation.
+    #[error("upstream homeserver error: {0}")]
+    Upstream(String),
+}
+
+impl From<SyncError> for GatewayError {
+    /// A failure to build/authenticate a client surfaces as "not connected" —
+    /// it's the transient, retryable class from the caller's perspective.
+    fn from(err: SyncError) -> Self {
+        GatewayError::NotConnected(err.to_string())
+    }
+}
+
+impl From<GatewayError> for SyncError {
+    /// The supervisor drives connects through the manager but reports failures as
+    /// plain sync errors so its backoff/restart logic is unchanged.
+    fn from(err: GatewayError) -> Self {
+        SyncError::Sdk(err.to_string())
+    }
+}
 
 /// Errors raised by the sync engine.
 #[derive(Debug, Error)]

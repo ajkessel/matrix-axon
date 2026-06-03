@@ -11,11 +11,15 @@
 //! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-api --test ws -- --ignored
 //! ```
 
+mod common;
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use axon_api::AppState;
 use axon_core::LiveEvent;
 use axon_store::Store;
+use common::StubSender;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -36,7 +40,11 @@ async fn ws_streams_live_events() {
     // connection. Dropping the initial receiver means the connected handler is
     // the *only* subscriber, so `send` succeeding proves the socket is wired.
     let (live, _) = broadcast::channel::<LiveEvent>(16);
-    let app = axon_api::router(AppState::new(store, live.clone()));
+    let app = axon_api::router(AppState::new(
+        store,
+        live.clone(),
+        Arc::new(StubSender::ok("$unused:localhost")),
+    ));
 
     // Serve on an ephemeral port in the background.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

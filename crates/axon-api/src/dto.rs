@@ -4,9 +4,9 @@
 //! derive `Serialize`; these are the public JSON shapes, owned by the API layer.
 
 use axon_store::{RoomSummary, TimelineRow};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 /// A room in the cross-account list (`GET /v1/rooms`). Identity is
@@ -118,6 +118,45 @@ impl EventDto {
             redaction_event_id: row.redaction_event_id,
         }
     }
+}
+
+/// Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as a
+/// plain-text `m.room.message`; `account_id`/`room_id` come from the path.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SendMessageRequest {
+    /// The message text.
+    pub body: String,
+}
+
+/// Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
+/// target event's text via an `m.replace` relation.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EditRequest {
+    /// The new message text.
+    pub body: String,
+}
+
+/// Request body for reacting to an event (`POST …/events/{event_id}/reactions`).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReactRequest {
+    /// The reaction key — typically an emoji.
+    pub key: String,
+}
+
+/// Query parameters for redaction (`DELETE …/events/{event_id}`).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RedactQuery {
+    /// Optional human-readable reason recorded on the redaction.
+    pub reason: Option<String>,
+}
+
+/// Result of a successful mutation: the id of the event the homeserver created
+/// (the message, the replacement, the redaction, or the reaction).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SendResultDto {
+    /// The created Matrix event id.
+    pub event_id: String,
 }
 
 /// One page of a room timeline: the events plus the cursor to fetch the next

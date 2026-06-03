@@ -81,6 +81,18 @@ impl Store {
         Ok(account)
     }
 
+    /// Fetch a single account by id, or `None` if no such row exists. Used by
+    /// the sync engine's client manager to cold-connect an account from just its
+    /// id (e.g. when an API send arrives before sync has brought it online).
+    pub async fn get_account(&self, account_id: Uuid) -> Result<Option<Account>, StoreError> {
+        let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE account_id = $1");
+        let account = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
+            .bind(account_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(account)
+    }
+
     /// All provisioned accounts, oldest first. The sync engine iterates these to
     /// spawn one task per account.
     pub async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {

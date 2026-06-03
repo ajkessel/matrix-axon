@@ -127,3 +127,25 @@ async fn create_store_dir(path: &Path) -> Result<(), SyncError> {
         .await
         .map_err(|e| SyncError::Sdk(format!("creating SDK store dir {}: {e}", path.display())))
 }
+
+/// Resolve the login credential for `account` from the configured provision,
+/// matching on `(user_id, homeserver_url)`. Returns `None` if no provision
+/// matches (the account must then have a stored session to authenticate).
+pub(crate) fn credential_for<'c>(
+    config: &'c SyncConfig,
+    account: &Account,
+) -> Result<Option<Credential<'c>>, SyncError> {
+    let Some(provision) = config
+        .account
+        .as_ref()
+        .filter(|p| matches_account(p, account))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(provision.credential()?))
+}
+
+/// Whether a configured provision refers to the same account as a stored row.
+pub(crate) fn matches_account(provision: &axon_core::AccountProvision, account: &Account) -> bool {
+    provision.user_id == account.user_id && provision.homeserver_url == account.homeserver_url
+}

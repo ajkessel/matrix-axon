@@ -11,10 +11,15 @@
 //! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-api -- --ignored
 //! ```
 
+mod common;
+
+use std::sync::Arc;
+
 use axon_api::AppState;
 use axon_store::{NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::StubSender;
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -104,10 +109,14 @@ async fn read_api_end_to_end() {
         .await
         .expect("name");
 
-    // The read endpoints don't touch the live-event bus; a throwaway sender
-    // satisfies `AppState`.
+    // The read endpoints don't touch the live-event bus or the message sender;
+    // throwaway instances satisfy `AppState`.
     let (live, _rx) = tokio::sync::broadcast::channel(16);
-    let app = axon_api::router(AppState::new(store.clone(), live));
+    let app = axon_api::router(AppState::new(
+        store.clone(),
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+    ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
     let (status, body) = get(&app, &format!("/v1/rooms?account_id={account_id}")).await;

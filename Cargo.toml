@@ -69,6 +69,10 @@ utoipa = { version = "5" }
 thiserror = { version = "2" }
 anyhow    = { version = "1" }
 
+# Async trait methods behind `dyn` (the API's MessageSender port + its
+# composition-root adapter in axon-server).
+async-trait = { version = "0.1" }
+
 # Observability
 tracing            = { version = "0.1" }
 tracing-subscriber = { version = "0.3", default-features = false }

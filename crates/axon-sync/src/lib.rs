@@ -16,8 +16,11 @@
 mod client;
 mod engine;
 mod error;
+mod gateway;
+mod manager;
 mod meta;
 mod redecrypt;
 
 pub use engine::SyncEngine;
-pub use error::SyncError;
+pub use error::{GatewayError, SyncError};
+pub use gateway::SdkGateway;
