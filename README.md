@@ -87,19 +87,6 @@ curl localhost:8080/healthz     # -> {"status":"ok"}
 
 CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
 
-### 5. Start over
-
-If you want to restart with a fresh instance and fresh data, just destroy and restart the postgres Docker instance per below.
-
-```bash
-docker compose down -v postgres
-docker compose up -d postgres
-```
-
-### 6. Troubleshooting
-
-During very early development, there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
-
 ## Docs
 
 |                                                   |                                                  |
