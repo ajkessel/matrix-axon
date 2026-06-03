@@ -96,6 +96,14 @@ pub struct SyncConfig {
     /// substitute for full history backfill (that is later work). Defaults to 20.
     #[serde(default = "default_timeline_limit")]
     pub timeline_limit: u32,
+    /// Capacity of the live-event broadcast bus that feeds the `/v1/ws`
+    /// WebSocket: the number of recent events the bus retains for a connected
+    /// client before, if that client can't keep up, the oldest are dropped and
+    /// it is told it lagged. Larger values tolerate slower/burstier clients at
+    /// the cost of a bigger in-memory ring buffer; it never back-pressures sync.
+    /// Defaults to 1024.
+    #[serde(default = "default_live_event_buffer")]
+    pub live_event_buffer: usize,
 }
 
 /// Provisioning details for a single Matrix account.
@@ -192,6 +200,10 @@ fn default_timeline_limit() -> u32 {
     20
 }
 
+fn default_live_event_buffer() -> usize {
+    1024
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -216,6 +228,7 @@ impl Default for SyncConfig {
             store_key: None,
             account: None,
             timeline_limit: default_timeline_limit(),
+            live_event_buffer: default_live_event_buffer(),
         }
     }
 }

@@ -6,9 +6,9 @@
 //!
 //! Versioned application routes live under `/v1/`. Account-scoped resources nest
 //! under `/v1/accounts/{account_id}/…`; `/v1/rooms` is the cross-account
-//! aggregate list. `/healthz` is an unversioned operational liveness probe. The
-//! response envelope (`{data}` / `{error}`) lives in [`response`]; the OpenAPI
-//! document is [`ApiDoc`].
+//! aggregate list. Live events stream over the `/v1/ws` WebSocket. `/healthz` is
+//! an unversioned operational liveness probe. The response envelope (`{data}` /
+//! `{error}`) lives in [`response`]; the OpenAPI document is [`ApiDoc`].
 
 mod cursor;
 mod dto;
@@ -17,6 +17,7 @@ mod openapi;
 mod response;
 mod routes;
 mod state;
+mod ws;
 
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
@@ -42,6 +43,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/events/{event_id}",
             get(routes::events::get_event),
         )
+        // Live event fan-out. Not in the OpenAPI document — a WebSocket upgrade
+        // isn't expressible in OpenAPI 3.1; the frame protocol is documented in
+        // the `ws` module and ADR 0020.
+        .route("/v1/ws", get(ws::ws_handler))
         .with_state(state)
 }
 

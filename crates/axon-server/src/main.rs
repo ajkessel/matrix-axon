@@ -32,7 +32,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("starting sync engine")?;
 
-    let app = axon_api::router(axon_api::AppState::new(store));
+    // The API shares the sync engine's live-event bus so `/v1/ws` can fan out
+    // events as they're persisted.
+    let app = axon_api::router(axon_api::AppState::new(store, sync_engine.live_events()));
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)

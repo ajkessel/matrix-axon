@@ -104,7 +104,10 @@ async fn read_api_end_to_end() {
         .await
         .expect("name");
 
-    let app = axon_api::router(AppState::new(store.clone()));
+    // The read endpoints don't touch the live-event bus; a throwaway sender
+    // satisfies `AppState`.
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(AppState::new(store.clone(), live));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
     let (status, body) = get(&app, &format!("/v1/rooms?account_id={account_id}")).await;

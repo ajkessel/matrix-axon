@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use axon_core::{AccountProvision, SyncConfig};
+use axon_core::{AccountProvision, LiveEvent, SyncConfig};
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -17,6 +17,7 @@ use matrix_sdk::ruma::events::{
 };
 use matrix_sdk::Room;
 use matrix_sdk_ui::sync_service::{State, SyncService};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -34,6 +35,10 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 pub struct SyncEngine {
     handles: Vec<JoinHandle<()>>,
     cancel: CancellationToken,
+    /// Producer end of the live-event bus. The sync tasks publish through clones
+    /// of this; [`SyncEngine::live_events`] hands a clone to the API layer so
+    /// each WebSocket connection can `subscribe()`.
+    live_tx: broadcast::Sender<LiveEvent>,
 }
 
 impl SyncEngine {
@@ -42,6 +47,12 @@ impl SyncEngine {
     /// [`SyncEngine::shutdown`] to stop them.
     pub async fn start(store: Store, config: SyncConfig) -> Result<Self, SyncError> {
         let cancel = CancellationToken::new();
+        // The bus exists for the lifetime of the engine regardless of how many
+        // accounts there are (zero accounts → an idle but valid `/v1/ws`). The
+        // held `_rx` is dropped immediately; `broadcast` keeps the channel open
+        // as long as a `Sender` exists, so this does not close it. Capacity is
+        // configurable (`sync.live_event_buffer`) — see that field's docs.
+        let (live_tx, _rx) = broadcast::channel(config.live_event_buffer);
         if let Some(provision) = &config.account {
             // Validate the credential up front so a misconfiguration fails fast
             // with a readable error rather than inside a spawned task.
@@ -63,11 +74,23 @@ impl SyncEngine {
                 let store = store.clone();
                 let config = config.clone();
                 let cancel = cancel.clone();
-                tokio::spawn(supervise_account(store, config, account, cancel))
+                let live_tx = live_tx.clone();
+                tokio::spawn(supervise_account(store, config, account, cancel, live_tx))
             })
             .collect();
 
-        Ok(SyncEngine { handles, cancel })
+        Ok(SyncEngine {
+            handles,
+            cancel,
+            live_tx,
+        })
+    }
+
+    /// A producer handle for the live-event bus. The API layer holds this in its
+    /// router state and calls [`broadcast::Sender::subscribe`] once per
+    /// `/v1/ws` connection. Cloning is cheap and does not affect delivery.
+    pub fn live_events(&self) -> broadcast::Sender<LiveEvent> {
+        self.live_tx.clone()
     }
 
     /// Cancel all per-account tasks and wait for them to finish. Safe to call
@@ -89,6 +112,7 @@ async fn supervise_account(
     config: SyncConfig,
     account: Account,
     cancel: CancellationToken,
+    live_tx: broadcast::Sender<LiveEvent>,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -97,7 +121,7 @@ async fn supervise_account(
             return;
         }
 
-        match run_account(&store, &config, &account, &cancel).await {
+        match run_account(&store, &config, &account, &cancel, &live_tx).await {
             Ok(()) => {
                 // Clean stop (cancellation requested).
                 return;
@@ -126,6 +150,9 @@ async fn supervise_account(
 struct PersistContext {
     store: Store,
     account_id: Uuid,
+    /// Producer end of the live-event bus; [`persist_timeline_event`] publishes
+    /// each freshly persisted event to it for `/v1/ws` fan-out.
+    live_tx: broadcast::Sender<LiveEvent>,
 }
 
 /// Event handler: persist every synced timeline event to Postgres.
@@ -238,6 +265,25 @@ async fn persist_timeline_event(
         event_type = event_type.as_str(),
         "persisted event"
     );
+
+    // Fan the event out to any live `/v1/ws` subscribers. Skip the work entirely
+    // when nobody is listening (the common case for a headless server) so we
+    // don't clone the content needlessly. `send` errors only when there are no
+    // receivers — harmless to ignore (a receiver may have dropped between the
+    // count check and the send), and never fatal to sync.
+    if ctx.live_tx.receiver_count() > 0 {
+        let _ = ctx.live_tx.send(LiveEvent {
+            account_id: ctx.account_id,
+            event_id: event_id.clone(),
+            room_id: room_id.clone(),
+            sender: ev.sender().as_str().to_owned(),
+            origin_ts,
+            event_type: event_type.clone(),
+            content: new_ev.content.clone(),
+            body: decrypted_body_text.clone(),
+            relates_to: new_ev.relates_to.clone(),
+        });
+    }
 
     // Sibling rows are best-effort: a failure here must not take down sync.
     persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
@@ -411,6 +457,7 @@ async fn run_account(
     config: &SyncConfig,
     account: &Account,
     cancel: &CancellationToken,
+    live_tx: &broadcast::Sender<LiveEvent>,
 ) -> Result<(), SyncError> {
     let credential = credential_for(config, account)?;
     let client = connect_account(store, account, config, credential).await?;
@@ -439,6 +486,7 @@ async fn run_account(
     let persist_ctx = PersistContext {
         store: store.clone(),
         account_id: account.account_id,
+        live_tx: live_tx.clone(),
     };
     client.add_event_handler_context(persist_ctx);
     client.add_event_handler(persist_timeline_event);

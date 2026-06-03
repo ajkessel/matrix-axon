@@ -31,6 +31,12 @@ data_dir = "axon-data/sync"
 # is 1 (latest event only); raising it makes each room archive its last N events,
 # giving the timeline read real depth to page through. Default 20.
 timeline_limit = 20
+# Capacity of the live-event bus feeding the /v1/ws WebSocket: how many recent
+# events the bus holds for a connected client before a client that can't keep up
+# starts dropping the oldest (and is told it lagged). Bigger tolerates slower or
+# burstier clients at the cost of more memory; it never back-pressures sync.
+# Default 1024.
+live_event_buffer = 1024
 # Symmetric key used to (a) encrypt each account's access token at rest via
 # pgcrypto and (b) passphrase the SDK's SQLite store. Required once an account
 # is configured. Keep it secret; prefer setting it via AXON_SYNC__STORE_KEY

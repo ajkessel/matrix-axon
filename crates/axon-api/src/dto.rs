@@ -78,6 +78,28 @@ pub struct EventDto {
     pub redaction_event_id: Option<String>,
 }
 
+impl From<axon_core::LiveEvent> for EventDto {
+    /// Map a live-bus [`LiveEvent`](axon_core::LiveEvent) into the wire DTO — the
+    /// `/v1/ws` payload shape matches the read API's. A freshly synced event is
+    /// never already-redacted (a redaction arrives as its own later event), so
+    /// the redaction fields are always unset here.
+    fn from(e: axon_core::LiveEvent) -> Self {
+        EventDto {
+            account_id: e.account_id,
+            event_id: e.event_id,
+            room_id: e.room_id,
+            sender: e.sender,
+            origin_ts: e.origin_ts,
+            r#type: e.event_type,
+            content: e.content,
+            body: e.body,
+            relates_to: e.relates_to,
+            redacted: false,
+            redaction_event_id: None,
+        }
+    }
+}
+
 impl EventDto {
     /// Map a store [`TimelineRow`] into the wire DTO. `account_id` is threaded in
     /// from the request path because the store row doesn't carry it.
