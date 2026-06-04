@@ -73,11 +73,12 @@ async fn ws_streams_live_events() {
             account_id,
             event_id: event_id.clone(),
             room_id: "!room:localhost".to_owned(),
-            sender: "@alice:localhost".to_owned(),
+            sender: "@jamie:localhost".to_owned(),
+            state_key: Some("@alice:localhost".to_owned()),
             origin_ts: 1234,
-            event_type: "m.room.message".to_owned(),
-            content: Some(json!({ "msgtype": "m.text", "body": "hi" })),
-            body: Some("hi".to_owned()),
+            event_type: "m.room.member".to_owned(),
+            content: Some(json!({ "membership": "join", "displayname": "Alice" })),
+            body: None,
             relates_to: None,
         })
         .expect("a connected subscriber");
@@ -99,9 +100,10 @@ async fn ws_streams_live_events() {
     assert_eq!(envelope["account_id"], account_id.to_string());
     assert_eq!(envelope["payload"]["event_id"], event_id.as_str());
     assert_eq!(envelope["payload"]["room_id"], "!room:localhost");
-    assert_eq!(envelope["payload"]["sender"], "@alice:localhost");
-    assert_eq!(envelope["payload"]["type"], "m.room.message");
-    assert_eq!(envelope["payload"]["body"], "hi");
+    assert_eq!(envelope["payload"]["sender"], "@jamie:localhost");
+    assert_eq!(envelope["payload"]["state_key"], "@alice:localhost");
+    assert_eq!(envelope["payload"]["type"], "m.room.member");
+    assert_eq!(envelope["payload"]["body"], Value::Null);
     assert_eq!(envelope["payload"]["redacted"], false);
 
     ws.close(None).await.ok();

@@ -161,6 +161,8 @@ pub struct TimelineRow {
     pub room_id: String,
     /// Matrix user ID of the sender.
     pub sender: String,
+    /// Matrix state key for state events.
+    pub state_key: Option<String>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type.
@@ -194,6 +196,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             event_id: row.try_get("event_id")?,
             room_id: row.try_get("room_id")?,
             sender: row.try_get("sender")?,
+            state_key: row.try_get("state_key")?,
             origin_ts: row.try_get("origin_ts")?,
             event_type: row.try_get("event_type")?,
             content: row.try_get("content")?,
@@ -213,7 +216,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 /// `account_id` as `$1`) plus any ordering / pagination. Selects exactly the
 /// columns [`TimelineRow`] reads.
 const TIMELINE_SELECT: &str =
-    "SELECT e.id, e.event_id, e.room_id, e.sender, e.origin_ts, e.event_type, \
+    "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
+            e.origin_ts, e.event_type, \
             CASE WHEN r.event_id IS NULL THEN e.content END AS content, \
             CASE WHEN r.event_id IS NULL THEN e.decrypted_body_text END AS decrypted_body_text, \
             e.relates_to, e.redacts, r.event_id AS redaction_event_id \

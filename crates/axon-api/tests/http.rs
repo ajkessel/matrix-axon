@@ -93,6 +93,29 @@ async fn read_api_end_to_end() {
     // Two events; a name so the summary is populated.
     let e1 = insert_message(&store, account_id, &room_id, 1_000, "first").await;
     let e2 = insert_message(&store, account_id, &room_id, 2_000, "second").await;
+    let member_event_id = format!("$member-{}:localhost", Uuid::new_v4());
+    let member_content = json!({ "membership": "join", "displayname": "Alice" });
+    store
+        .upsert_event(&NewEvent {
+            event_id: &member_event_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@jamie:localhost",
+            origin_ts: 1_750,
+            event_type: "m.room.member",
+            content: Some(member_content.clone()),
+            raw_event: json!({
+                "type": "m.room.member",
+                "state_key": "@alice:localhost",
+                "content": member_content
+            }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert membership event");
     store
         .upsert_room_state(&RoomStateUpsert {
             account_id,
@@ -168,7 +191,17 @@ async fn read_api_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ev["data"]["event_id"], e1.as_str());
     assert_eq!(ev["data"]["body"], "first");
+    assert_eq!(ev["data"]["state_key"], Value::Null);
     assert_eq!(ev["data"]["redacted"], false);
+
+    let (status, member) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{member_event_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(member["data"]["state_key"], "@alice:localhost");
+    assert_eq!(member["data"]["sender"], "@jamie:localhost");
 
     // Unknown event -> 404 with not_found code.
     let (status, err) = get(
