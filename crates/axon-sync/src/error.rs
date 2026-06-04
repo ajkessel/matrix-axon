@@ -24,6 +24,12 @@ pub enum GatewayError {
     #[error("room not found: {0}")]
     RoomNotFound(String),
 
+    /// The operation isn't permitted: an attempt to edit a message the account
+    /// didn't author, or a homeserver `M_FORBIDDEN` (e.g. redacting without the
+    /// required power level).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// A malformed parameter (e.g. an unparseable room or event id).
     #[error("invalid request: {0}")]
     Invalid(String),

@@ -28,6 +28,7 @@ use crate::sender::MessageSender;
     responses(
         (status = 200, description = "Message sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
     ),
@@ -55,6 +56,7 @@ pub async fn send_message(
     responses(
         (status = 200, description = "Edit sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
     ),
@@ -84,6 +86,7 @@ pub async fn edit_message(
     responses(
         (status = 200, description = "Redaction sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
     ),
@@ -115,6 +118,7 @@ pub async fn redact_event(
     responses(
         (status = 200, description = "Reaction sent", body = ApiResponse<SendResultDto>),
         (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
         (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
     ),

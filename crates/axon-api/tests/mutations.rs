@@ -165,6 +165,11 @@ async fn send_error_maps_to_status() {
             "not_found",
         ),
         (
+            Outcome::Forbidden("x".into()),
+            StatusCode::FORBIDDEN,
+            "forbidden",
+        ),
+        (
             Outcome::Unavailable("x".into()),
             StatusCode::SERVICE_UNAVAILABLE,
             "service_unavailable",

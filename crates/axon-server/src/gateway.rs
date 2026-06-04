@@ -23,6 +23,7 @@ fn map_err(err: GatewayError) -> SendError {
     match err {
         GatewayError::UnknownAccount(id) => SendError::NotFound(format!("no such account: {id}")),
         GatewayError::RoomNotFound(room) => SendError::NotFound(format!("room not found: {room}")),
+        GatewayError::Forbidden(msg) => SendError::Forbidden(msg),
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),
         GatewayError::Upstream(msg) => SendError::Upstream(msg),

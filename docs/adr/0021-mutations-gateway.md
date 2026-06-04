@@ -105,10 +105,24 @@ the same path any event takes. Edits are sent as a raw `m.replace` envelope
 (`m.new_content` + `m.relates_to`) so we don't need the original event in hand.
 
 `SendError` maps 1:1 to status: `NotFound → 404` (unknown account/room),
-`Unavailable → 503` (couldn't connect), `Invalid → 400` (bad id/body),
-`Upstream → 502` (homeserver rejected). A malformed request body is a `400` in
-the same envelope, via a `Json` extractor wrapper mirroring the existing
-`Path`/`Query` wrappers.
+`Forbidden → 403`, `Unavailable → 503` (couldn't connect), `Invalid → 400`
+(bad id/body), `Upstream → 502` (homeserver rejected). A malformed request body
+is a `400` in the same envelope, via a `Json` extractor wrapper mirroring the
+existing `Path`/`Query` wrappers.
+
+### Edit authorship is enforced by us, not the homeserver
+
+A Matrix edit is an `m.replace` relation on a normal `m.room.message`. The rule
+that *only the original author may edit* is a **client-interpretation** rule
+(MSC2676) — the homeserver does **not** enforce it and will accept (and `200`) an
+`m.replace` pointing at anyone's event. So the gateway's `edit` first fetches the
+target event (`Room::event`) and rejects with `Forbidden` (→ `403`) unless its
+sender is the account's own user. Otherwise we would send a forged edit of
+someone else's message and report success — which a client that applies edits
+without re-checking authorship would render. Redact is *not* analogous: redacting
+others' messages is legitimately power-level-gated and the homeserver enforces it,
+so we surface its `M_FORBIDDEN` as `403` too (via `client_api_error_kind`) rather
+than a generic `502`.
 
 ## Consequences
 

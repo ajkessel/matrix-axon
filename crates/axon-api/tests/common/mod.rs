@@ -47,6 +47,7 @@ pub enum Call {
 pub enum Outcome {
     Ok(String),
     NotFound(String),
+    Forbidden(String),
     Unavailable(String),
     Invalid(String),
     Upstream(String),
@@ -57,6 +58,7 @@ impl Outcome {
         match self {
             Outcome::Ok(id) => Ok(id.clone()),
             Outcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            Outcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
             Outcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
             Outcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
             Outcome::Upstream(m) => Err(SendError::Upstream(m.clone())),

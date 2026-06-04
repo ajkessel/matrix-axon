@@ -21,6 +21,9 @@ use uuid::Uuid;
 pub enum SendError {
     /// The addressed account or room doesn't exist / isn't joined. → `404`.
     NotFound(String),
+    /// The operation isn't permitted (e.g. editing a message the account didn't
+    /// author, or a homeserver permission denial). → `403`.
+    Forbidden(String),
     /// The account couldn't be brought online (homeserver unreachable, auth
     /// failure). Transient and retryable. → `503`.
     Unavailable(String),

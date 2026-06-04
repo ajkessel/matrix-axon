@@ -85,6 +85,12 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
+    /// `403 Forbidden` — the operation isn't permitted (e.g. editing a message
+    /// the account didn't author).
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
     /// `502 Bad Gateway` — the upstream homeserver rejected or failed the request.
     pub fn bad_gateway(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, "bad_gateway", message)
@@ -130,6 +136,7 @@ impl From<crate::sender::SendError> for ApiError {
         use crate::sender::SendError;
         match err {
             SendError::NotFound(msg) => ApiError::not_found(msg),
+            SendError::Forbidden(msg) => ApiError::forbidden(msg),
             SendError::Unavailable(msg) => ApiError::service_unavailable(msg),
             SendError::Invalid(msg) => ApiError::bad_request(msg),
             SendError::Upstream(msg) => ApiError::bad_gateway(msg),

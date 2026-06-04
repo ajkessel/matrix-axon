@@ -130,6 +130,16 @@
               }
             }
           },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Upstream homeserver error",
             "content": {
@@ -210,6 +220,16 @@
           },
           "400": {
             "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
             "content": {
               "application/json": {
                 "schema": {
@@ -309,6 +329,16 @@
               }
             }
           },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
             "description": "Upstream homeserver error",
             "content": {
@@ -383,6 +413,16 @@
           },
           "400": {
             "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
             "content": {
               "application/json": {
                 "schema": {

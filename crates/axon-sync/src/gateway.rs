@@ -12,6 +12,7 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
+use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
@@ -22,6 +23,17 @@ use uuid::Uuid;
 
 use crate::error::GatewayError;
 use crate::manager::ClientManager;
+
+/// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
+/// `M_FORBIDDEN` (e.g. redacting without the required power level) becomes
+/// [`GatewayError::Forbidden`] so it surfaces as `403`, not a generic `502`;
+/// everything else is an upstream failure.
+fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
+    match err.client_api_error_kind() {
+        Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
+        _ => GatewayError::Upstream(err.to_string()),
+    }
+}
 
 /// Sends Matrix message-like events on behalf of an account, routed through that
 /// account's SDK client. Cheap to [`Clone`] (holds only a [`ClientManager`]).
@@ -61,7 +73,7 @@ impl SdkGateway {
         let resp = room
             .send(RoomMessageEventContent::text_plain(body))
             .await
-            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+            .map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 
@@ -77,7 +89,21 @@ impl SdkGateway {
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
-        EventId::parse(event_id).map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
+        let target_id = EventId::parse(event_id)
+            .map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
+
+        // A Matrix edit (m.replace) is only valid from the *original author*, but
+        // the homeserver does not enforce that — it accepts an m.replace pointing
+        // at anyone's event. So we enforce it: fetch the target and refuse to send
+        // a forged edit of a message this account didn't write (which would
+        // otherwise return 200 and could be rendered by a naive client).
+        let target = room.event(&target_id, None).await.map_err(map_sdk_err)?;
+        if target.sender().as_deref() != Some(room.own_user_id()) {
+            return Err(GatewayError::Forbidden(
+                "can only edit your own messages".to_owned(),
+            ));
+        }
+
         let content = json!({
             "msgtype": "m.text",
             // The fallback body convention for clients that don't understand edits.
@@ -88,7 +114,7 @@ impl SdkGateway {
         let resp = room
             .send_raw("m.room.message", content)
             .await
-            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+            .map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 
@@ -106,7 +132,7 @@ impl SdkGateway {
         let resp = room
             .redact(&event_id, reason, None)
             .await
-            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+            .map_err(|e| map_sdk_err(matrix_sdk::Error::from(e)))?;
         Ok(resp.event_id.to_string())
     }
 
@@ -123,10 +149,7 @@ impl SdkGateway {
         let event_id = EventId::parse(event_id)
             .map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
         let content = ReactionEventContent::new(Annotation::new(event_id, key.to_owned()));
-        let resp = room
-            .send(content)
-            .await
-            .map_err(|e| GatewayError::Upstream(e.to_string()))?;
+        let resp = room.send(content).await.map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 }
