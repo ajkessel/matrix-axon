@@ -124,11 +124,13 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
 
     // Newest-activity first: Room B (3000) before Room A (2000).
     assert_eq!(rooms[0].room_id, room_b);
+    assert!(rooms[0].account_user_id.starts_with("@rooms-"));
     assert_eq!(rooms[0].last_activity_ts, 3_000);
     assert_eq!(rooms[0].last_event_id.as_deref(), Some(b_latest.as_str()));
     assert!(rooms[0].name.is_none(), "room B has no name state");
 
     assert_eq!(rooms[1].room_id, room_a);
+    assert!(rooms[1].account_user_id.starts_with("@rooms-"));
     assert_eq!(rooms[1].last_activity_ts, 2_000);
     assert_eq!(rooms[1].last_event_id.as_deref(), Some(a_latest.as_str()));
     assert_eq!(rooms[1].name.as_deref(), Some("Alpha"));
@@ -160,6 +162,7 @@ async fn list_rooms_filters_by_account() {
     assert_eq!(only1.len(), 1);
     assert_eq!(only1[0].room_id, room1);
     assert_eq!(only1[0].account_id, acc1);
+    assert!(only1[0].account_user_id.starts_with("@f1-"));
 
     // None spans accounts; both of ours appear (alongside any others in the DB).
     let all = store.list_rooms(None).await.expect("list all");

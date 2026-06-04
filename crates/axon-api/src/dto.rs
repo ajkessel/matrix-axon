@@ -15,6 +15,8 @@ use uuid::Uuid;
 pub struct RoomDto {
     /// Axon account this room belongs to.
     pub account_id: Uuid,
+    /// Matrix user ID for this Axon account.
+    pub account_user_id: String,
     /// Matrix room ID.
     pub room_id: String,
     /// Room name (`m.room.name`), if set.
@@ -35,6 +37,7 @@ impl From<RoomSummary> for RoomDto {
     fn from(r: RoomSummary) -> Self {
         RoomDto {
             account_id: r.account_id,
+            account_user_id: r.account_user_id,
             room_id: r.room_id,
             name: r.name,
             topic: r.topic,
