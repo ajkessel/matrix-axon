@@ -16,6 +16,12 @@ Homeserver(s)  →  Axon (single binary)  →  axon-web (alpha client)
 
 One Rust binary, one Postgres database, media cached to local disk. See the [architecture diagram](docs/mvp/tech-spec.md#architecture-overview) for detail.
 
+## Clients
+
+| Client | Description |
+| --- | --- |
+| [`axon-tui`](clients/tui/README.md) | Terminal-based client designed to support all functionality exposed by Axon. |
+
 ## Developer quick-start
 
 Prerequisites: Rust (stable), Postgres 16.
