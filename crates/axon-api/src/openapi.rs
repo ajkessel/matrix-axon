@@ -20,17 +20,26 @@ use utoipa::OpenApi;
         crate::routes::rooms::list_rooms,
         crate::routes::rooms::room_timeline,
         crate::routes::events::get_event,
+        crate::routes::messages::send_message,
+        crate::routes::messages::edit_message,
+        crate::routes::messages::redact_event,
+        crate::routes::messages::react,
     ),
     components(schemas(
         crate::dto::RoomDto,
         crate::dto::EventDto,
         crate::dto::TimelinePage,
+        crate::dto::SendMessageRequest,
+        crate::dto::EditRequest,
+        crate::dto::ReactRequest,
+        crate::dto::SendResultDto,
         crate::response::ErrorBody,
         crate::response::ErrorResponse,
     )),
     tags(
         (name = "rooms", description = "Rooms and their timelines"),
         (name = "events", description = "Individual events"),
+        (name = "messages", description = "Sending, editing, redacting, and reacting"),
     ),
 )]
 pub struct ApiDoc;

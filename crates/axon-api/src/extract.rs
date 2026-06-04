@@ -7,7 +7,7 @@
 //! into [`ApiError::bad_request`], so *every* `/v1/` error — handler-raised or
 //! extractor-raised — has the same JSON shape.
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
 
@@ -46,6 +46,27 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match axum::extract::Query::<T>::from_request_parts(parts, state).await {
             Ok(axum::extract::Query(value)) => Ok(Query(value)),
+            Err(rejection) => Err(ApiError::bad_request(rejection.body_text())),
+        }
+    }
+}
+
+/// Drop-in replacement for [`axum::Json`] whose rejection is an [`ApiError`]
+/// (`400`) — a malformed or missing request body returns the same
+/// `{ "error": … }` envelope as every other failure rather than axum's default
+/// plain-text body. Body-consuming, so it must be the last extractor in a handler.
+pub struct Json<T>(pub T);
+
+impl<T, S> FromRequest<S> for Json<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(Json(value)),
             Err(rejection) => Err(ApiError::bad_request(rejection.body_text())),
         }
     }

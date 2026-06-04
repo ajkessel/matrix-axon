@@ -16,14 +16,19 @@ mod extract;
 mod openapi;
 mod response;
 mod routes;
+mod sender;
 mod state;
 mod ws;
 
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
+pub use sender::{MessageSender, SendError};
 pub use state::AppState;
 
-use axum::{routing::get, Json, Router};
+use axum::{
+    routing::{get, post, put},
+    Json, Router,
+};
 use serde_json::{json, Value};
 
 /// Build the top-level application router over the shared [`AppState`].
@@ -42,6 +47,20 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/events/{event_id}",
             get(routes::events::get_event),
+        )
+        // Mutations (M6). account_id is nested in the path; the response is the
+        // created event id. Edit (PUT) and redact (DELETE) share one path.
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/send",
+            post(routes::messages::send_message),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}",
+            put(routes::messages::edit_message).delete(routes::messages::redact_event),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
+            post(routes::messages::react),
         )
         // Live event fan-out. Not in the OpenAPI document — a WebSocket upgrade
         // isn't expressible in OpenAPI 3.1; the frame protocol is documented in

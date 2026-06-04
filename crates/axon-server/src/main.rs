@@ -4,11 +4,17 @@
 //! migrations), build the router, then serve until a shutdown signal arrives.
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
+mod gateway;
+
+use std::sync::Arc;
+
 use anyhow::Context;
 use axon_core::Config;
 use axon_store::Store;
 use axon_sync::SyncEngine;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+use crate::gateway::GatewayAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,8 +39,14 @@ async fn main() -> anyhow::Result<()> {
         .context("starting sync engine")?;
 
     // The API shares the sync engine's live-event bus so `/v1/ws` can fan out
-    // events as they're persisted.
-    let app = axon_api::router(axon_api::AppState::new(store, sync_engine.live_events()));
+    // events as they're persisted, and its message gateway (adapted onto the
+    // API's MessageSender port) so the mutation routes can send via the SDK.
+    let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
+    let app = axon_api::router(axon_api::AppState::new(
+        store,
+        sync_engine.live_events(),
+        sender,
+    ));
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)

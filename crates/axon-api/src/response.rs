@@ -85,6 +85,27 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
+    /// `403 Forbidden` — the operation isn't permitted (e.g. editing a message
+    /// the account didn't author).
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
+    /// `502 Bad Gateway` — the upstream homeserver rejected or failed the request.
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, "bad_gateway", message)
+    }
+
+    /// `503 Service Unavailable` — the account isn't reachable right now (e.g. its
+    /// homeserver is down); the caller should retry.
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            message,
+        )
+    }
+
     /// `500 Internal Server Error` with a generic message; the real cause is
     /// logged, never returned.
     pub fn internal() -> Self {
@@ -107,5 +128,18 @@ impl From<axon_store::StoreError> for ApiError {
         // The store error can carry SQL detail; log it, return a generic body.
         tracing::error!(error = %err, "store error serving request");
         ApiError::internal()
+    }
+}
+
+impl From<crate::sender::SendError> for ApiError {
+    fn from(err: crate::sender::SendError) -> Self {
+        use crate::sender::SendError;
+        match err {
+            SendError::NotFound(msg) => ApiError::not_found(msg),
+            SendError::Forbidden(msg) => ApiError::forbidden(msg),
+            SendError::Unavailable(msg) => ApiError::service_unavailable(msg),
+            SendError::Invalid(msg) => ApiError::bad_request(msg),
+            SendError::Upstream(msg) => ApiError::bad_gateway(msg),
+        }
     }
 }
