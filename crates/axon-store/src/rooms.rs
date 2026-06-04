@@ -20,6 +20,8 @@ use crate::{Store, StoreError};
 pub struct RoomSummary {
     /// Axon account this room belongs to.
     pub account_id: Uuid,
+    /// Matrix user ID for this Axon account.
+    pub account_user_id: String,
     /// Matrix room ID.
     pub room_id: String,
     /// `m.room.name` → `content.name`, if set.
@@ -41,6 +43,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
         Ok(RoomSummary {
             account_id: row.try_get("account_id")?,
+            account_user_id: row.try_get("account_user_id")?,
             room_id: row.try_get("room_id")?,
             name: row.try_get("name")?,
             topic: row.try_get("topic")?,
@@ -66,7 +69,8 @@ impl Store {
         account_id: Option<Uuid>,
     ) -> Result<Vec<RoomSummary>, StoreError> {
         let rows = sqlx_core::query_as::query_as::<Postgres, RoomSummary>(
-            "SELECT a.account_id, a.room_id, a.last_activity_ts, a.last_event_id, \
+            "SELECT a.account_id, ac.user_id AS account_user_id, a.room_id, \
+                    a.last_activity_ts, a.last_event_id, \
                     (SELECT rs.content->>'name'  FROM room_state rs \
                        WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
                          AND rs.event_type = 'm.room.name' AND rs.state_key = '') AS name, \
@@ -88,6 +92,7 @@ impl Store {
                  WHERE ($1::uuid IS NULL OR account_id = $1) \
                  GROUP BY account_id, room_id \
              ) a \
+             JOIN accounts ac ON ac.account_id = a.account_id \
              ORDER BY a.last_activity_ts DESC, a.room_id",
         )
         .bind(account_id)

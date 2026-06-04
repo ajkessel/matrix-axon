@@ -77,11 +77,9 @@ async fn insert_message(
 async fn read_api_end_to_end() {
     let store = store().await;
     let pool = store.pool().clone();
+    let account_user_id = format!("@http-{}:localhost", Uuid::new_v4());
     let account_id = store
-        .upsert_account(
-            &format!("@http-{}:localhost", Uuid::new_v4()),
-            "https://hs.example.org",
-        )
+        .upsert_account(&account_user_id, "https://hs.example.org")
         .await
         .expect("account")
         .account_id;
@@ -121,6 +119,7 @@ async fn read_api_end_to_end() {
     assert_eq!(room["last_activity_ts"], 2_000);
     assert_eq!(room["last_event_id"], e2.as_str());
     assert_eq!(room["account_id"], account_id.to_string());
+    assert_eq!(room["account_user_id"], account_user_id);
 
     // Timeline, page 1 (newest): limit 1 -> [e2] with a next_cursor.
     let base = format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline");
