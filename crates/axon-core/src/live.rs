@@ -30,6 +30,8 @@ pub struct LiveEvent {
     pub room_id: String,
     /// Matrix user ID of the sender.
     pub sender: String,
+    /// Matrix state key for state events. `None` for message-like events.
+    pub state_key: Option<String>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type, e.g. `m.room.message`.

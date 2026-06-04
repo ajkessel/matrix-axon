@@ -256,6 +256,10 @@ async fn persist_timeline_event(
     let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
     let event_id = ev.event_id().as_str().to_owned();
     let room_id = room.room_id().as_str().to_owned();
+    let state_key = raw_val
+        .get("state_key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
 
     let new_ev = NewEvent {
         event_id: &event_id,
@@ -301,6 +305,7 @@ async fn persist_timeline_event(
             event_id: event_id.clone(),
             room_id: room_id.clone(),
             sender: ev.sender().as_str().to_owned(),
+            state_key: state_key.clone(),
             origin_ts,
             event_type: event_type.clone(),
             content: new_ev.content.clone(),

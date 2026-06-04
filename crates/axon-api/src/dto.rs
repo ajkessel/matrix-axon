@@ -62,6 +62,8 @@ pub struct EventDto {
     pub room_id: String,
     /// Matrix user ID of the sender.
     pub sender: String,
+    /// Matrix state key for state events. `null` for message-like events.
+    pub state_key: Option<String>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type, e.g. `m.room.message`.
@@ -92,6 +94,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             event_id: e.event_id,
             room_id: e.room_id,
             sender: e.sender,
+            state_key: e.state_key,
             origin_ts: e.origin_ts,
             r#type: e.event_type,
             content: e.content,
@@ -112,6 +115,7 @@ impl EventDto {
             event_id: row.event_id,
             room_id: row.room_id,
             sender: row.sender,
+            state_key: row.state_key,
             origin_ts: row.origin_ts,
             r#type: row.event_type,
             content: row.content,

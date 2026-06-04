@@ -636,6 +636,13 @@
                 "type": "string",
                 "description": "Matrix user ID of the sender."
               },
+              "state_key": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Matrix state key for state events. `null` for message-like events."
+              },
               "type": {
                 "type": "string",
                 "description": "Matrix event type, e.g. `m.room.message`."
@@ -885,6 +892,13 @@
           "sender": {
             "type": "string",
             "description": "Matrix user ID of the sender."
+          },
+          "state_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Matrix state key for state events. `null` for message-like events."
           },
           "type": {
             "type": "string",
