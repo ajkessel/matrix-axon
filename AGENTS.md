@@ -31,6 +31,7 @@ matrix-axon/
     axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
     axon-itest/              # dev-only: integration-test seeder (the `seed` binary)
   clients/
+    tui/                     # axon-tui — terminal client for the Axon API, should grow to support all API endpoints as they are enabled
     web/                     # axon-web (Vite + React + TS) — alpha client
   openapi/                   # OpenAPI 3.1 spec (source of truth)
   docs/
@@ -48,6 +49,7 @@ matrix-axon/
 ## Key conventions
 
 - **One human per Axon process.** N Matrix accounts inside, every account-scoped table carries `account_id`.
+- **Clients:** client apps live under `clients/`. Follow any subtree `AGENTS.md` there; `clients/tui/AGENTS.md` covers axon-tui-specific conventions.
 - **Sync:** Simplified Sliding Sync (MSC4186) only. No legacy `/sync`.
 - **Event schema:** hybrid hot-columns + JSONB. `origin_ts` is `BIGINT` milliseconds since Unix epoch.
 - **Provenance:** every event row has `provenance = 'upstream_homeserver'` for MVP.
