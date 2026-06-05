@@ -82,7 +82,7 @@ Multi-human-within-one-process is a non-goal (see [`prd.md`](./prd.md)). Operato
 
 Because the data model is N-account from day one, accounts need a real lifecycle rather than a one-shot config provision. Provisioning an account only from config strands the previous row when the config changes, and any row with a decryptable token would otherwise keep syncing and *sending* — a stale, deconfigured account acting on the user's behalf. (Observed in practice; tracked in GH #14 and #24.)
 
-- Each account carries an explicit `state` (`active` / `deactivated` / `deleted`, plus a transient `pending_verification`). The sync engine and the mutations gateway connect and serve **only `active` accounts** — never "anything with a stored token."
+- Each account carries an explicit lifecycle `state` (`active` / `deactivated`), orthogonal to verification status. The sync engine and the mutations gateway connect and serve **only `active` accounts** — never "anything with a stored token." `deactivated` is a reversible pause that retains data; this is not a soft-delete model.
 - Accounts are added at runtime via an account-lifecycle API (`POST /v1/accounts/login`) rather than only at boot, so adding account #2…N never requires swapping config.
 - Device verification is part of the lifecycle: interactive SAS (emoji) over `/v1/ws`, or recovery-key (4S) recovery that both imports the megolm backup and self-verifies the Axon device.
 - Logout deletes the account's data — DB rows (cascades) and the on-disk per-account SDK store dir — and a boot-time reconcile prunes orphan store dirs. This is the supported teardown that replaces manual DB surgery.
