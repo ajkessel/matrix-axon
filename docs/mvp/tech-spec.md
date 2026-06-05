@@ -37,8 +37,8 @@ This document records the architectural decisions for the MVP and the tradeoffs 
                        ┌─────────────┐
                        │  axon-tui   │  (terminal client)
                        │  (deferred: │
-                       │   web, iOS, │
-                       │   clients)  │
+                       │   web,      │
+                       │   mobile)   │
                        └─────────────┘
 ```
 
@@ -125,7 +125,7 @@ The store is append-mostly. Membership changes do not retroactively rewrite hist
 
 The store keeps original event bytes (ciphertext for encrypted events, signed JSON for unencrypted), the megolm session ID and re-decryption metadata, and sender device identity and cross-signing chain at the time of receipt. This means decrypted rows can be re-verified against the cryptographic evidence Matrix already provides; we do not invent a separate HMAC or agent-level signing layer.
 
-Verification is exposed as an opt-in API capability: clients fetch decrypted events normally, or request a verification bundle per event / per query when they need it. Most traffic carries no verification overhead.
+Verification is exposed as an opt-in API capability: clients fetch decrypted events normally, or request a verification bundle per event / per query when they need it. Most traffic carries no verification overhead. This capability — plus a `sender_trust` field on ordinary timeline reads so clients can flag messages from unverified senders — is delivered in **M7c** (sender-device trust & content authentication); the storage it draws on (sender device identity + cross-signing chain at receipt) lands earlier in the event-store schema.
 
 ### Live updates: WebSocket with a custom envelope
 

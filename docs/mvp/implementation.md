@@ -68,6 +68,8 @@ Read the tech spec before starting. Highlights that gate implementation:
 
 Each milestone has explicit deliverables and a verification step that exercises real behavior, not just `cargo check`. Stop and ask before deviating; if an ambiguity arises that the specs do not cover, raise it instead of picking silently.
 
+> **Status:** Milestones 1–6 have shipped; **M7 onward is the forward plan.** This document tracks the *plan*, not live progress — for what's actually built and in flight, see `AGENTS.md` "Current state" (kept here to avoid two sources of truth drifting). The post-M6 resequencing is summarized in the table near the end.
+
 ### 1. Workspace scaffolding
 
 - Create the Cargo workspace per the project layout.
@@ -144,23 +146,26 @@ Each milestone has explicit deliverables and a verification step that exercises 
 
 ### 7. Account lifecycle and auth
 
-Two layers of auth, split into subphases. **7a** brings the *Matrix* accounts under runtime control (login, verify, recover, logout, delete) and finally closes the interactive-verification work deferred from M5 (the old "M5c"). **7b** puts the *client ↔ axon* bearer-token gate in front of the whole API. Said another way: 7a is auth between `axon` and the homeserver(s); 7b is auth between a client and `axon`.
+Auth and trust, split into three subphases. **7a** brings the *Matrix* accounts under runtime control (login, verify, recover, logout, delete) and finally closes the interactive-verification work deferred from M5 (the old "M5c"). **7b** puts the *client ↔ axon* bearer-token gate in front of the whole API. **7c** delivers *sender-device trust*: evaluating and exposing whether the devices that **other** people sent from are cross-signed, so clients can flag messages from unverified senders. Said another way: 7a is auth between `axon` and the homeserver(s), 7b is auth between a client and `axon`, and 7c is the trust `axon` reports about the *senders* of the events it stores.
 
 #### 7a. Homeserver account lifecycle & verification
 
 Today an account is provisioned exactly once from config, and there is no supported way to add, verify, or remove one at runtime. Changing `sync.account.user_id` in config does **not** replace the account — it inserts a new `accounts` row and strands the old one, which keeps syncing and can still *send* (any row with a decryptable token gets connected). This was hit in a real debugging session: a message went out authored by a previously-configured account that was no longer in config. 7a makes the Matrix-account lifecycle a first-class API and folds in the interactive device verification deferred from M5. It is the milestone that closes GH issues #14 (stale-DB cleanup) and #24 (account lifecycle / active-account gating / runtime provisioning).
 
+**Config becomes optional past 7a.** The minimal boot configuration should be just the things that need server-side plumbing before anything else can run — Postgres connection + the `store_key`. Everything account-shaped is then configurable through the API: mint the first token via the `axon` CLI (7b, DB-only), then `POST /v1/accounts/login`. The existing `sync.account.*` config drops from *required* to an optional bootstrap convenience (and is a candidate for removal once the API path is the norm). The design target: `axon` boots clean with no accounts and waits for the API to provision them.
+
 **Account state machine.** Add an explicit lifecycle `state` to `accounts` — `active` or `deactivated` — kept *orthogonal* to verification status (a device can be `active` but not yet verified: it syncs and shows UTDs until it acquires keys). The sync engine **and** the M6 mutations gateway connect and serve **only `active` accounts** — never "any row with a decryptable token," the bug behind #24; `get_or_connect` gates on `state`. `deactivated` is a **reversible pause that retains all data** — a stale or token-expired account stops syncing and sending but is not erased (a natural home for the per-account failure isolation in ADR 0010). This is *not* a soft-delete model: `deactivated` is the soft stop (reached via `logout` or internal token-failure); deletion (via `DELETE`, below) is a hard removal of the row, not a `deleted` tombstone. There are no dedicated state-setter endpoints — `state` is a consequence of the lifecycle verbs (`login` → `active`, `logout` → `deactivated`, re-`login` → `active`) plus internal failure handling, never a value a client PUTs directly.
 
 **Lifecycle endpoints** (account-nested per the M5a convention; behind the 7b token gate once that lands):
 
+- `GET /v1/accounts` and `GET /v1/accounts/{account_id}` — list / read accounts with their lifecycle `state`, verification status (is `axon`'s device cross-signed yet), and sync progress. This is what a client polls to decide whether to prompt the user to verify-or-recover, and it's the read side of the lifecycle (never exposes the token or other secrets).
 - `POST /v1/accounts/login` — body `{ homeserver_url, username, password }`. `axon` logs in as a fresh device, mints an `account_id`, encrypts the access token at rest (ADR 0008), provisions the per-account SDK store dir, and starts sync. This is the supported way to add accounts #2…N without swapping config and stranding the prior account. The `password` is consumed once and never stored (matches the M3 login path) — a crown-jewel secret handled transient-only.
 - `POST /v1/accounts/{account_id}/verify` — drives the interactive SAS (emoji) handshake: relay a `VerificationRequest` to/from another of the user's trusted devices, surface `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. The emoji stream rides `/v1/ws` (the plumbing M4 built and M5 unblocked). After mutual confirm, `axon` is cross-signed and the user's other devices **gossip** the cross-signing secrets and the key-backup key — so the recovery key never has to live server-side. This is the mature key-acquisition path (ADR 0011).
 - `POST /v1/accounts/{account_id}/recover` — the bootstrap path: accept a Secure-Storage (4S) recovery key and call `client.encryption().recovery().recover(key)`, which imports the megolm key **backup** and the cross-signing private keys into the per-account crypto store. Two effects: (1) holding the recovered user-signing key lets `axon` **self-verify its own device** with no interactive partner — "verify a device via backup-key recovery"; and (2) the imported keys let the existing M3c re-decryption queue flip already-stored UTD rows to `decrypted`. It does **not** fetch *history* — recovering *keys* is not the same as fetching *messages* (ADR 0011/0018). Pulling a room's pre-install timeline is **M8 backfill**, which consumes exactly these keys; this is why M7a (acquire keys + verify the device) deliberately precedes M8 (use them). The recovery-key *string* is transient-only — never persisted, consistent with the M3c boot-time `recover()` — but note that is distinct from the imported *backup keys*, which persist durably in the crypto store, so M8 still has them.
 - `POST /v1/accounts/{account_id}/logout` — invalidate the device's access token upstream and move the account to `deactivated`, **retaining all of `axon`'s data** (the decrypted archive, search index, media cache stay). A logged-out device's token is dead, so the account can't sync or send anyway — but the archive is the whole reason `axon` exists, so logout keeps it. Reversible: a fresh `login` re-authenticates and returns the account to `active`. This is the *non-destructive* stop.
 - `DELETE /v1/accounts/{account_id}` — the destructive teardown: invalidate the token if still live, then **hard-delete every trace of the account from `axon`** — the `accounts` row itself (existing cascades drop `events` / `account_data` / `room_state`) **and** the on-disk SDK store at `data_dir/<account_id>/`. No tombstone is kept; re-adding the same Matrix account later is a fresh `login` with a new `account_id`. This replaces today's manual DB surgery (#14). (Client and docs should make the logout/delete distinction explicit — "log out, keep history" vs "delete account, remove everything" — so a user expecting logout to forget them isn't surprised.)
 
-**Store-dir GC.** Deletion removes the per-account store dir; add a boot-time reconcile that prunes orphan dirs under `data_dir/` with no matching active account (5 orphans were observed in #24).
+**Store-dir GC.** Deletion removes the per-account store dir; add a boot-time reconcile that prunes orphan dirs under `data_dir/` with no matching active account (5 orphans were observed in #24). (The location and configurability of `data_dir` itself — it should follow XDG / macOS conventions rather than sitting next to the binary — is tracked separately in #45.)
 
 **Verification status.** Persist per account whether `axon`'s device is verified / cross-signed (distinct from lifecycle `state`), so the API can report key-acquisition state and a client can prompt for verify-or-recover while the device is still unverified.
 
@@ -180,6 +185,19 @@ The local-API gate. (This is the work formerly numbered M8.)
 Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can replace the CLI mint path without breaking the on-the-wire `Authorization` header or any consumer code. The first token is minted by the CLI (bootstrap); clients carry it thereafter. Until 7b lands, the 7a endpoints are unauthenticated like the rest of the pre-auth API — the M13 private-mesh-VPN deployment is the network gate in the interim, and the application gate that makes "no app auth yet" safe earlier.
 
 **Verification (7b):** Issue a token; hit `/v1/rooms` with and without the header; revoke; confirm the next call is rejected. Confirm the M6 txn-id retry-duplication caveat is now attributable to a token.
+
+#### 7c. Sender-device trust & content authentication
+
+7a verifies `axon`'s **own** device. This subphase covers the other half of E2EE trust — *who sent the messages you're reading*: is the sending device cross-signed by its owner, and can a client surface "this came from an unverified device"? E2EE is a core rationale for Matrix, and that means trust in *who else can read and write* an encrypted room, not just securing your own account. ADR 0011 deferred originating verification of other people's devices; 7c is where the *evaluation-and-display* half of that deferral is picked up. (Actively running SAS against another *user* stays out of scope; 7c is about reporting trust, not establishing it interactively.)
+
+The storage already exists but is not yet usable behavior. ADR 0015's `event_sender_device_keys` sibling captures the sending device's identity keys and cross-signing chain at decryption time; the tech-spec's "Content authentication" section already promises an opt-in verification-bundle API. Nothing currently *evaluates* or *exposes* that — 7c closes the gap and makes the tech-spec's promise real.
+
+- **Evaluate sender trust at decryption.** When an event decrypts, record whether the sending device was cross-signed by the sender's own master key (SDK `Encryption`/`Identity` surface) — a `sender_trust` of `verified` / `unverified` / `unknown` (no device keys) / `verification_violation` (the sender's identity changed). Persist it alongside the existing sender-device-keys sibling.
+- **Expose it on reads.** Add a `sender_trust` field to the timeline `EventDto` (and the live `/v1/ws` frames), so a client can badge a message — exactly what lets `axon-tui` put a warning glyph on messages from unverified devices, like it already does for misleading URLs.
+- **Verification bundle (delivers the tech-spec promise).** `GET /v1/accounts/{account_id}/events/{event_id}/verification` returns the per-event cryptographic evidence — sending device identity, cross-signing chain, megolm session provenance — for clients that want to show or audit it. Opt-in; ordinary reads carry no extra overhead.
+- **Trust-state changes after receipt (MVP-lean).** Trust is recorded *at receipt* and exposed as above. Full re-evaluation when a sender later becomes verified/unverified is a fast-follow; the MVP minimum is to surface a `verification_violation` when the SDK reports a sender identity change, so a client isn't silently showing a now-distrusted message as trusted.
+
+**Verification (7c):** in an E2EE room, a message from a cross-signed device reads `sender_trust: verified` and one from an unverified device reads `unverified`; `axon-tui` badges the latter; the verification-bundle endpoint returns the device identity + cross-signing evidence for a given event; a sender identity change flips the affected events to `verification_violation`.
 
 ### 8. History backfill
 
@@ -244,7 +262,7 @@ The Tantivy index. It runs after backfill (M8), so the corpus is deep, and after
 - `axon-media` resolves MXC URLs against the upstream homeserver for the relevant account.
 - Bounded LRU cache on local disk (size configurable; default 5GB).
 - `GET /v1/media/{account_id}/{server}/{media_id}` with proper caching headers and range-request support.
-- No S3 backend. Do not add one.
+- No S3 backend. Do not add one. Off-host/durable media is already solved at the homeserver layer (e.g. [`synapse-s3-storage-provider`](https://github.com/matrix-org/synapse-s3-storage-provider)); there's no case to reinvent it in the agent, whose cache is a bounded LRU with the homeserver as source of truth.
 
 **Verification:** Send a message with an image attachment, fetch the image through `/v1/media/…`, confirm it renders inline in `axon-tui` (or curl the URL and inspect the bytes). Fill the cache past its limit and confirm LRU eviction.
 
@@ -265,8 +283,10 @@ The Tantivy index. It runs after backfill (M8), so the corpus is deep, and after
   - Config reference (every setting from `axon-core`'s config loader).
   - First-run flow: account provisioning via `POST /v1/accounts/login`, device verification (`POST …/verify` or `…/recover`), token minting, running `axon-tui`.
   - Operational basics: backups (`pg_dump` + media cache directory + the per-account SDK store dirs under `data_dir/`), upgrades, logs.
+- **Release automation:** a GitHub Actions workflow that builds tagged-release single-binary artifacts for the common platforms (Linux x86_64/aarch64, macOS arm64), so the install story is "download one binary and run it" — no toolchain required. This is what makes the single-binary premise real for a non-Rust operator.
   - Deployment recipes — at minimum one each for:
-    - Home machine behind a private mesh VPN (the recommended self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the M7b token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
+    - Localhost / same device as your client (the simplest case, and a perfectly normal production setup for one person): `axon` + Postgres on your own machine, `axon-tui` connecting over `localhost`. This is also the dev and first-run path.
+    - Home machine behind a private mesh VPN (the recommended multi-device self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the M7b token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
     - Railway (or a similar Procfile-style PaaS).
     - DigitalOcean droplet (Docker Compose + nginx reverse proxy + Let's Encrypt).
     - AWS (EC2 + RDS Postgres; ECS optional; reference Terraform welcome but not required).
@@ -282,6 +302,7 @@ Milestones 1–6 shipped as originally numbered. After M6, the sequence was reth
 |---|---|---|
 | **7a** Homeserver account lifecycle & verification | — (new) + old "M5c" | Login / verify / recover / logout / delete as a first-class API; closes the interactive verification deferred from M5 and GH issues #14, #24. |
 | **7b** Client ↔ axon bearer-token auth | old M8 (Auth) | Unchanged in substance; renumbered. |
+| **7c** Sender-device trust & content authentication | — (new) | Evaluate + expose whether *other* senders' devices are cross-signed; delivers the verification-bundle API the tech-spec already promises. |
 | **8** History backfill | old M9b | Promoted ahead of search; aggregation and search both depend on it. |
 | **9** Relation aggregation (9a backend, 9b API) | — (new), subsumes old M13 (Threads) | Edits / reactions / replies / threads aggregated server-side (GH issue #22). Threads are the `m.thread` case, no longer a standalone milestone. |
 | **10** Search | old M9a | Renumbered; now runs after backfill + aggregation. |
@@ -317,6 +338,7 @@ Follow Matrix OSS community conventions first; fall back to standard Rust conven
 
 - **Sync milestones (3, 4).** Point at a Synapse-in-docker, watch decrypted rows accumulate in Postgres; query a known room's timeline by SQL; confirm redactions mask content.
 - **Account-lifecycle milestone (7a).** Login a second account at runtime; verify the device (interactive SAS over `/v1/ws`, or recovery-key); logout and confirm it deactivates with its archive retained and a fresh login reactivates it; delete and confirm the DB rows and SDK store dir are gone; confirm a deactivated account neither syncs nor sends.
+- **Sender-trust milestone (7c).** In an E2EE room, confirm `sender_trust` on timeline events distinguishes cross-signed from unverified senders, the verification-bundle endpoint returns per-event evidence, and a sender identity change surfaces as `verification_violation`.
 - **API milestones (5, 6, 9b, 11, 12).** curl against the running server; assert aggregated reads (reactions/threads/edits) resolve outside the timeline window.
 - **Auth milestone (7b).** End-to-end: mint, use, revoke, confirm rejection.
 - **Backfill milestone (8).** Deep-history room: stored count climbs toward full history; restart mid-backfill resumes without duplicates.
