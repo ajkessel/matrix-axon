@@ -4,7 +4,9 @@ Related docs: [`tech-spec.md`](./tech-spec.md), [`implementation.md`](./implemen
 
 ## Project
 
-**Axon** is a self-hosted personal agent for Matrix. It sits between a user's homeserver(s) and their clients, holding the persistent state, search index, and per-device coherence that Matrix clients otherwise reinvent themselves. Clients consume it through a documented, versioned HTTP + WebSocket API.
+**Axon** is a self-hosted **BFF (backend-for-frontend)** for Matrix: a persistent state layer that sits between a user's homeserver(s) and their clients, holding the persistent state, search index, and per-device coherence that Matrix clients otherwise reinvent themselves. Clients consume it through a documented, versioned HTTP + WebSocket API.
+
+> **On "agent."** We sometimes call Axon a "personal agent," but in the [back-end-for-front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) / ZNC-bouncer sense — a passive proxy that runs on your behalf — **not** in the autonomous-AI-agent sense. There is no model or autonomy in the loop; Axon does only what its one human owner tells it. Where the AI connotation risks confusion, prefer "BFF," "bouncer," or "proxy."
 
 **Naming convention:**
 

@@ -161,7 +161,7 @@ Today an account is provisioned exactly once from config, and there is no suppor
 - `GET /v1/accounts` and `GET /v1/accounts/{account_id}` — list / read accounts with their lifecycle `state`, verification status (is `axon`'s device cross-signed yet), and sync progress. This is what a client polls to decide whether to prompt the user to verify-or-recover, and it's the read side of the lifecycle (never exposes the token or other secrets).
 - `POST /v1/accounts/login` — body `{ homeserver_url, username, password }`. `axon` logs in as a fresh device, mints an `account_id`, encrypts the access token at rest (ADR 0008), provisions the per-account SDK store dir, and starts sync. This is the supported way to add accounts #2…N without swapping config and stranding the prior account. The `password` is consumed once and never stored (matches the M3 login path) — a crown-jewel secret handled transient-only.
 - `POST /v1/accounts/{account_id}/verify` — drives the interactive SAS (emoji) handshake: relay a `VerificationRequest` to/from another of the user's trusted devices, surface `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. The emoji stream rides `/v1/ws` (the plumbing M4 built and M5 unblocked). After mutual confirm, `axon` is cross-signed and the user's other devices **gossip** the cross-signing secrets and the key-backup key — so the recovery key never has to live server-side. This is the mature key-acquisition path (ADR 0011).
-- `POST /v1/accounts/{account_id}/recover` — the bootstrap path: accept a Secure-Storage (4S) recovery key and call `client.encryption().recovery().recover(key)`, which imports the megolm key **backup** and the cross-signing private keys into the per-account crypto store. Two effects: (1) holding the recovered user-signing key lets `axon` **self-verify its own device** with no interactive partner — "verify a device via backup-key recovery"; and (2) the imported keys let the existing M3c re-decryption queue flip already-stored UTD rows to `decrypted`. It does **not** fetch *history* — recovering *keys* is not the same as fetching *messages* (ADR 0011/0018). Pulling a room's pre-install timeline is **M8 backfill**, which consumes exactly these keys; this is why M7a (acquire keys + verify the device) deliberately precedes M8 (use them). The recovery-key *string* is transient-only — never persisted, consistent with the M3c boot-time `recover()` — but note that is distinct from the imported *backup keys*, which persist durably in the crypto store, so M8 still has them.
+- `POST /v1/accounts/{account_id}/recover` — the bootstrap path: accept a Secure-Storage (4S) recovery key and call `client.encryption().recovery().recover(key)`, which imports the megolm key **backup** and the cross-signing private keys into the per-account crypto store. Two effects: (1) holding the recovered user-signing key lets `axon` **self-verify its own device** with no interactive partner — "verify a device via backup-key recovery"; and (2) the imported keys let the existing M3c re-decryption queue flip already-stored UTD rows to `decrypted`. It does **not** fetch *history* — recovering *keys* is not the same as fetching *messages* (ADR 0011/0018). Pulling a room's pre-install timeline is **M10 backfill**, which consumes exactly these keys; this is why M7a (acquire keys + verify the device) precedes M10 (use them). The recovery-key *string* is transient-only — never persisted, consistent with the M3c boot-time `recover()` — but note that is distinct from the imported *backup keys*, which persist durably in the crypto store, so M10 still has them.
 - `POST /v1/accounts/{account_id}/logout` — invalidate the device's access token upstream and move the account to `deactivated`, **retaining all of `axon`'s data** (the decrypted archive, search index, media cache stay). A logged-out device's token is dead, so the account can't sync or send anyway — but the archive is the whole reason `axon` exists, so logout keeps it. Reversible: a fresh `login` re-authenticates and returns the account to `active`. This is the *non-destructive* stop.
 - `DELETE /v1/accounts/{account_id}` — the destructive teardown: invalidate the token if still live, then **hard-delete every trace of the account from `axon`** — the `accounts` row itself (existing cascades drop `events` / `account_data` / `room_state`) **and** the on-disk SDK store at `data_dir/<account_id>/`. No tombstone is kept; re-adding the same Matrix account later is a fresh `login` with a new `account_id`. This replaces today's manual DB surgery (#14). (Client and docs should make the logout/delete distinction explicit — "log out, keep history" vs "delete account, remove everything" — so a user expecting logout to forget them isn't surprised.)
 
@@ -171,7 +171,7 @@ Today an account is provisioned exactly once from config, and there is no suppor
 
 Out of scope here but explicitly tracked: `store_key` rotation (one key decrypts every account's token) stays deferred (ADR 0008), noted against #24 so it isn't lost once multi-account raises the stakes. Per-account *authorization* scoping remains a non-goal — one human owns all their accounts.
 
-**Verification (7a):** `POST /v1/accounts/login` against a real homeserver provisions a second account that syncs independently; from a trusted Element session drive `POST …/verify`, watch the SAS emoji arrive over `/v1/ws`, confirm both sides, and see `axon` become cross-signed and subsequently-sent encrypted messages decrypt without a recovery key. Alternatively `POST …/recover` with a 4S key flips already-stored UTD rows to `decrypted` and marks the device verified (without fetching history — that's M8). `POST …/logout` moves the account to `deactivated` — confirm it neither syncs nor sends while its archive is retained, and that a fresh `login` reactivates it. `DELETE /v1/accounts/{id}` removes the `accounts` row and the SDK store dir entirely.
+**Verification (7a):** `POST /v1/accounts/login` against a real homeserver provisions a second account that syncs independently; from a trusted Element session drive `POST …/verify`, watch the SAS emoji arrive over `/v1/ws`, confirm both sides, and see `axon` become cross-signed and subsequently-sent encrypted messages decrypt without a recovery key. Alternatively `POST …/recover` with a 4S key flips already-stored UTD rows to `decrypted` and marks the device verified (without fetching history — that's M10). `POST …/logout` moves the account to `deactivated` — confirm it neither syncs nor sends while its archive is retained, and that a fresh `login` reactivates it. `DELETE /v1/accounts/{id}` removes the `accounts` row and the SDK store dir entirely.
 
 #### 7b. Client ↔ axon bearer-token auth
 
@@ -199,24 +199,13 @@ The storage already exists but is not yet usable behavior. ADR 0015's `event_sen
 
 **Verification (7c):** in an E2EE room, a message from a cross-signed device reads `sender_trust: verified` and one from an unverified device reads `unverified`; `axon-tui` badges the latter; the verification-bundle endpoint returns the device identity + cross-signing evidence for a given event; a sender identity change flips the affected events to `verification_violation`.
 
-### 8. History backfill
+### 8. Relation aggregation
 
-Sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). Backfill is the engine that reaches back for a room's pre-existing history, so the timeline read, the M9 aggregations, and the M10 search index cover more than the post-install slice. `recover()` (M7a) imports the *keys* to decrypt old messages; it does not fetch the *messages* — those must be paged from the room. (ADR 0018.) Backfill runs here, ahead of aggregation and search, because both of those are only as good as the history they can see — together with sync this is what satisfies the PRD's full-history success criterion and the 100–200k-event working-set target.
+Matrix expresses edits, reactions, replies, and threads as *relation* events — `m.relates_to` with `rel_type` `m.replace` (edit) / `m.annotation` (reaction) / `m.in_reply_to` (reply) / `m.thread`. `axon` already stores them as ordinary events with the relation captured in the `relates_to` hot column (ADR 0015). But reading them raw forces every client to re-aggregate over whatever timeline window it happens to hold, which silently breaks for relations that land *outside* that window — a reaction or an edit that arrives long after the original message. The TUI hit exactly this: reactions and edits to messages older than the loaded 50-event slice are dropped (GH issue #22). M8 moves aggregation server-side so the API serves resolved, complete views regardless of pagination.
 
-- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()` / gossip (M7a), and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and (once M10 lands) the search index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
-- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
-- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
-- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
+This **subsumes the formerly-standalone Threads milestone** (old M13): a thread is just the `m.thread` case of the same machinery, and the store already captures `m.thread` generically, so the work is additive and backfill-free — it resolves over whatever rows are stored now, and applies automatically to the deep history M10 backfills in later. Split: 8a builds the store-layer aggregation, 8b exposes it over the API.
 
-**Verification:** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); kill and restart `axon` mid-backfill and confirm it resumes without duplicating rows. (Search over backfilled history is asserted in M10.)
-
-### 9. Relation aggregation
-
-Matrix expresses edits, reactions, replies, and threads as *relation* events — `m.relates_to` with `rel_type` `m.replace` (edit) / `m.annotation` (reaction) / `m.in_reply_to` (reply) / `m.thread`. `axon` already stores them as ordinary events with the relation captured in the `relates_to` hot column (ADR 0015). But reading them raw forces every client to re-aggregate over whatever timeline window it happens to hold, which silently breaks for relations that land *outside* that window — a reaction or an edit that arrives long after the original message. The TUI hit exactly this: reactions and edits to messages older than the loaded 50-event slice are dropped (GH issue #22). M9 moves aggregation server-side so the API serves resolved, complete views regardless of pagination.
-
-This **subsumes the formerly-standalone Threads milestone** (old M13): a thread is just the `m.thread` case of the same machinery, and the store already captures `m.thread` generically, so the work is additive and backfill-free. Split: 9a builds the store-layer aggregation, 9b exposes it over the API.
-
-#### 9a. Aggregation backend
+#### 8a. Aggregation backend
 
 - Expression / partial indexes over `events.relates_to` keyed by the target `event_id` and `rel_type` (generalizing the thread index sketched in ADR 0017), so "all relations pointing at event X" is an indexed lookup rather than a window scan. Applies retroactively to already-stored rows — additive, backfill-free.
 - Store reads, all scoped by `(account_id, …)`:
@@ -226,9 +215,9 @@ This **subsumes the formerly-standalone Threads milestone** (old M13): a thread 
   - **Threads (`m.thread`).** Thread membership; a per-thread summary (root event + latest reply + reply count) and a thread-scoped timeline read (reuse the M5 cursor pagination, scoped to a thread root).
 - Computed at read time for MVP — the indexes make it cheap at Riley scale. Incremental materialization (maintaining tallies on ingest) is a later optimization, not a re-architecture.
 
-**Verification (9a):** Seed a room with a message, then add a reaction and an edit *far outside* the default timeline window; store-layer reads return the correct per-emoji count and the edited body regardless of window position; thread and reply lookups resolve over rows stored *before* this milestone (proving the backfill-free claim).
+**Verification (8a):** Seed a room with a message, then add a reaction and an edit *far outside* the default timeline window; store-layer reads return the correct per-emoji count and the edited body regardless of window position; thread and reply lookups resolve over rows stored *before* this milestone (proving the backfill-free claim).
 
-#### 9b. Aggregation API endpoints
+#### 8b. Aggregation API endpoints
 
 Account-nested per the M5a convention:
 
@@ -239,23 +228,34 @@ Account-nested per the M5a convention:
 - **The M5 timeline read now returns aggregated events:** the latest edited body in place, standalone edit events stripped, plus a per-event `reactions` summary and `edited` / `edit_count` fields on `EventDto` (issue #22 Option B). An optional `GET …/events/{event_id}/edits` exposes the forensic edit history.
 - WS (`/v1/ws`): raw relation events keep flowing live so clients can apply deltas, but the aggregation endpoints and the `EventDto` fields are the authoritative resolved view. Dedicated aggregation-update WS frames (a delivered tally delta) are a later add, not MVP.
 
-**Verification (9b):** `GET …/reactions` returns grouped counts for a message whose reactions arrived in a later page; the timeline read shows the latest edited body with no stray edit rows; `GET …/threads` lists a thread with the correct reply count and its scoped timeline returns only that thread's events, reverse-chronological with stable pagination; an edit / reaction / reply sent over M6 round-trips and shows up aggregated.
+**Verification (8b):** `GET …/reactions` returns grouped counts for a message whose reactions arrived in a later page; the timeline read shows the latest edited body with no stray edit rows; `GET …/threads` lists a thread with the correct reply count and its scoped timeline returns only that thread's events, reverse-chronological with stable pagination; an edit / reaction / reply sent over M6 round-trips and shows up aggregated.
 
-### 10. Search
+### 9. Search
 
-The Tantivy index. It runs after backfill (M8), so the corpus is deep, and after aggregation (M9), so the text it indexes is the *latest* edited body rather than a superseded one.
+The Tantivy index. It runs after aggregation (M8) — so the text it indexes is the *latest* edited body, not a superseded one — and **before** backfill (M10), deliberately: with the index in place first, the deep history that backfill pages in is indexed **incrementally as it arrives**, in the same single pass that stores it, rather than needing a second bulk sweep over the corpus.
 
 - `axon-search` opens a Tantivy index.
 - Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
 - `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
-- Populate on event ingestion in the shared pipeline (so anything ingested — live sync *or* M8 backfill — is indexed by the same path).
-- **Initial index build (one-time).** When M10 ships, the `events` table already holds everything synced (M3+) and backfilled (M8) before the index existed; the live path only indexes events arriving *after* it is wired. So a bulk pass streams the existing `events` rows (batched, ordered) into the index. It runs on first boot after search is enabled, gated by an index-built marker (search-index metadata / a `search_index_built` flag) so it does not repeat on later boots, and is also exposed as an `axon search reindex` CLI subcommand for schema-change rebuilds. The index is derived data keyed by `event_id`, so the pass is idempotent and a from-scratch rebuild is always safe — an interrupted build just re-runs.
-- **Edit / redaction interaction (from M9):** an edit reindexes the target doc to the latest body (M9 makes "latest body" well-defined); a redaction removes the doc so search never surfaces deleted content (tech-spec).
+- Populate on event ingestion in the shared pipeline — so everything that path ingests (live sync, **and the M10 backfill that lands after this milestone**) is indexed as it arrives. Sequencing search before backfill is what makes backfilled history index incrementally instead of being re-read in a separate pass.
+- **Initial index build (one-time).** At this milestone the `events` table already holds the live-synced slice (M3+) that predates the index; a bulk pass streams those existing rows (batched, ordered) in so they're covered too. It runs on first boot after search is enabled, gated by an index-built marker (search-index metadata / a `search_index_built` flag) so it does not repeat, and is also exposed as an `axon search reindex` CLI subcommand for schema-change rebuilds. The index is derived data keyed by `event_id`, so the pass is idempotent and a from-scratch rebuild is always safe. Because backfill comes *later* and indexes incrementally, this one-time build only ever covers the comparatively small pre-backfill slice — not the deep history.
+- **Edit / redaction interaction (from M8):** an edit reindexes the target doc to the latest body (M8 makes "latest body" well-defined); a redaction removes the doc so search never surfaces deleted content (tech-spec).
 - `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
 - BM25 ranking; paginated.
 - No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
 
-**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); confirm a phrase from a **backfilled** pre-install message returns it, and an **edited** message is found by its new text and not its old; latency p95 under 200ms on the Riley-shape target.
+**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); confirm an **edited** message is found by its new text and not its old; latency p95 under 200ms on the Riley-shape target. (That a phrase from a **backfilled** pre-install message becomes searchable is asserted in M10, once backfill has streamed it through the now-existing index.)
+
+### 10. History backfill
+
+Sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). Backfill is the engine that reaches back for a room's pre-existing history, so the timeline read, the M8 aggregations, and the M9 search index cover more than the post-install slice. `recover()` (M7a) imports the *keys* to decrypt old messages; it does not fetch the *messages* — those must be paged from the room. (ADR 0018.) Backfill runs **last** of the read-side milestones on purpose: by now the shared ingestion path already feeds M8 aggregation and the M9 search index, so every event backfill pulls is aggregated and indexed incrementally as it streams in — one pass over the deep history, no separate bulk reindex. Together with sync this is what satisfies the PRD's full-history success criterion and the 100–200k-event working-set target.
+
+- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()` / gossip (M7a), and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, the M8 aggregation indexes, and the M9 search index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
+- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
+- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
+- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
+
+**Verification:** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); confirm a **search** for a phrase from a pre-install message now returns it (proving incremental indexing during backfill); kill and restart `axon` mid-backfill and confirm it resumes without duplicating rows.
 
 ### 11. Media proxy
 
@@ -303,9 +303,9 @@ Milestones 1–6 shipped as originally numbered. After M6, the sequence was reth
 | **7a** Homeserver account lifecycle & verification | — (new) + old "M5c" | Login / verify / recover / logout / delete as a first-class API; closes the interactive verification deferred from M5 and GH issues #14, #24. |
 | **7b** Client ↔ axon bearer-token auth | old M8 (Auth) | Unchanged in substance; renumbered. |
 | **7c** Sender-device trust & content authentication | — (new) | Evaluate + expose whether *other* senders' devices are cross-signed; delivers the verification-bundle API the tech-spec already promises. |
-| **8** History backfill | old M9b | Promoted ahead of search; aggregation and search both depend on it. |
-| **9** Relation aggregation (9a backend, 9b API) | — (new), subsumes old M13 (Threads) | Edits / reactions / replies / threads aggregated server-side (GH issue #22). Threads are the `m.thread` case, no longer a standalone milestone. |
-| **10** Search | old M9a | Renumbered; now runs after backfill + aggregation. |
+| **8** Relation aggregation (8a backend, 8b API) | — (new), subsumes old M13 (Threads) | Edits / reactions / replies / threads aggregated server-side (GH issue #22). Threads are the `m.thread` case, no longer a standalone milestone. |
+| **9** Search | old M9a | Runs after aggregation (indexes latest bodies) and **before** backfill, so backfilled history indexes incrementally. |
+| **10** History backfill | old M9b | Now runs last of the read-side milestones, so it aggregates + indexes incrementally in one pass over the deep history. |
 | **11** Media proxy | old M7 | Unchanged in substance; renumbered. |
 | **12** Drafts & per-device read state | old M10 | Unchanged in substance; renumbered. |
 | **13** Deployment docs | old M12 | Retargeted at `axon-tui`; first-run flow now uses the M7a account endpoints. |
@@ -317,7 +317,7 @@ Older docs (`AGENTS.md` "Current state", the ADR log) still reference the origin
 
 The threads question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
 
-- **Threads — resolved: folded into M9 (Relation aggregation), in MVP.** Rather than a dedicated post-MVP milestone, threads ship as the `m.thread` case of the M9 aggregation machinery. The store captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so this is additive and backfill-free — the thread membership of every already-stored event is recoverable from data on disk. See Milestone 9.
+- **Threads — resolved: folded into M8 (Relation aggregation), in MVP.** Rather than a dedicated post-MVP milestone, threads ship as the `m.thread` case of the M8 aggregation machinery. The store captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so this is additive and backfill-free — the thread membership of every already-stored event is recoverable from data on disk. See Milestone 8.
 
 Everything else is settled. If an ambiguity arises during implementation that neither the PRD nor the tech spec covers, stop and ask rather than picking silently.
 
@@ -339,10 +339,10 @@ Follow Matrix OSS community conventions first; fall back to standard Rust conven
 - **Sync milestones (3, 4).** Point at a Synapse-in-docker, watch decrypted rows accumulate in Postgres; query a known room's timeline by SQL; confirm redactions mask content.
 - **Account-lifecycle milestone (7a).** Login a second account at runtime; verify the device (interactive SAS over `/v1/ws`, or recovery-key); logout and confirm it deactivates with its archive retained and a fresh login reactivates it; delete and confirm the DB rows and SDK store dir are gone; confirm a deactivated account neither syncs nor sends.
 - **Sender-trust milestone (7c).** In an E2EE room, confirm `sender_trust` on timeline events distinguishes cross-signed from unverified senders, the verification-bundle endpoint returns per-event evidence, and a sender identity change surfaces as `verification_violation`.
-- **API milestones (5, 6, 9b, 11, 12).** curl against the running server; assert aggregated reads (reactions/threads/edits) resolve outside the timeline window.
+- **API milestones (5, 6, 8b, 11, 12).** curl against the running server; assert aggregated reads (reactions/threads/edits) resolve outside the timeline window.
 - **Auth milestone (7b).** End-to-end: mint, use, revoke, confirm rejection.
-- **Backfill milestone (8).** Deep-history room: stored count climbs toward full history; restart mid-backfill resumes without duplicates.
-- **Search milestone (10).** Index a known corpus, assert top results (including backfilled and edited messages); measure p95 against the Riley-shape target.
+- **Search milestone (9).** Index a known corpus, assert top results (including edited messages); measure p95 against the Riley-shape target.
+- **Backfill milestone (10).** Deep-history room: stored count climbs toward full history and a pre-install phrase becomes searchable (incremental indexing); restart mid-backfill resumes without duplicates.
 - **Deployment docs (13).** A reader follows the doc on a fresh VM and reaches the daily-driver success criterion in under an hour; at least one cloud recipe is exercised end-to-end.
 
 ## Documentation for agentic contributors
@@ -439,4 +439,4 @@ Mirrors the PRD non-goals and out-of-scope items; the agent should not drift int
 - No S3 / object-store media backend. Local disk LRU cache only.
 - No spaces-specific endpoints. Events flow through.
 - No `store_key` rotation. One key decrypts every account's token; rotation stays deferred (ADR 0008), tracked against #24.
-- No incremental/materialized aggregation tallies in MVP. M9 aggregates at read time over indexed relations; maintaining counters on ingest is a later optimization.
+- No incremental/materialized aggregation tallies in MVP. M8 aggregates at read time over indexed relations; maintaining counters on ingest is a later optimization.
