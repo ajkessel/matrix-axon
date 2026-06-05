@@ -85,7 +85,7 @@ Because the data model is N-account from day one, accounts need a real lifecycle
 - Each account carries an explicit lifecycle `state` (`active` / `deactivated`), orthogonal to verification status. The sync engine and the mutations gateway connect and serve **only `active` accounts** — never "anything with a stored token." `deactivated` is a reversible pause that retains data; this is not a soft-delete model.
 - Accounts are added at runtime via an account-lifecycle API (`POST /v1/accounts/login`) rather than only at boot, so adding account #2…N never requires swapping config.
 - Device verification is part of the lifecycle: interactive SAS (emoji) over `/v1/ws`, or recovery-key (4S) recovery that both imports the megolm backup and self-verifies the Axon device.
-- Logout deletes the account's data — DB rows (cascades) and the on-disk per-account SDK store dir — and a boot-time reconcile prunes orphan store dirs. This is the supported teardown that replaces manual DB surgery.
+- Logout invalidates the upstream token and moves the account to `deactivated`, **retaining** its archive (a persistent state layer shouldn't discard history just because a device logged out); a fresh login reactivates it. Delete is the destructive path — it removes the DB rows (cascades) and the on-disk per-account SDK store dir, and a boot-time reconcile prunes orphan store dirs. Together they replace manual DB surgery.
 
 The single `store_key` that encrypts every account's access token at rest is a known blast-radius concern; rotation stays deferred (ADR 0008) and is tracked against #24.
 
@@ -198,7 +198,7 @@ Almost every architectural question was resolved during planning. The table belo
 | Migration story | Fresh sync only for MVP. |
 | Bridge event handling | Treated as ordinary Matrix events; no normalization. |
 | Media storage backend | Local disk LRU cache for MVP. S3-compatible storage deferred until a hosted deployment needs it. |
-| Account lifecycle | Explicit account states + active-account gating + runtime login/verify/recover/logout. In MVP (resolves GH #14, #24). |
+| Account lifecycle | Explicit account states + active-account gating + runtime login/verify/recover/logout/delete (logout retains the archive; delete purges). In MVP (resolves GH #14, #24). |
 | Relation aggregation | Server-side, read-time aggregation of edits/reactions/replies/threads over stored relations. In MVP (resolves GH #22). |
 | Threads | In MVP, as the `m.thread` case of relation aggregation (no separate milestone). |
 

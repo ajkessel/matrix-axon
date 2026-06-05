@@ -56,8 +56,8 @@ The MVP must let Riley self-host Axon, point it at their homeserver, and use `ax
 ### Axon (the agent)
 
 - **One process per human.** Each Axon instance has a single trust boundary: a single human owner.
-- **Multiple Matrix accounts inside one Axon.** The agent supports N accounts (e.g. personal + work, across different homeservers) under that single owner. The data model and code path are N-account from day one; accounts are managed at runtime through an account-lifecycle API (login / verify / recover / logout) rather than only at boot from config.
-- **Account lifecycle.** Each Matrix account has an explicit lifecycle: log in to a homeserver, verify the Axon device (interactive SAS or recovery-key), and log out — which removes all of that account's data from Axon. Only active accounts sync and send; there is no path for a stale, deconfigured account to keep acting.
+- **Multiple Matrix accounts inside one Axon.** The agent supports N accounts (e.g. personal + work, across different homeservers) under that single owner. The data model and code path are N-account from day one; accounts are managed at runtime through an account-lifecycle API (login / verify / recover / logout / delete) rather than only at boot from config.
+- **Account lifecycle.** Each Matrix account has an explicit lifecycle: log in to a homeserver, verify the Axon device (interactive SAS or recovery-key), log out (which stops the account but **retains** its archive — the point of a persistent state layer), and delete (which removes all of that account's data from Axon). Only active accounts sync and send; there is no path for a stale, deconfigured account to keep acting.
 - **Sync.** Simplified Sliding Sync (MSC4186) against Synapse and Dendrite. Legacy `/sync` is not supported.
 - **E2EE.** olm / megolm, server-side key backup, device verification (interactive SAS and recovery-key) exposed through the account-lifecycle API.
 - **Event store.** Postgres-backed. Decrypted timelines, room state, account data, original ciphertext, megolm metadata, sender device keys preserved for later verification.
