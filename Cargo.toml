@@ -51,10 +51,10 @@ chrono = { version = "0.4", default-features = false }
 include_dir = { version = "0.7" }
 
 # Matrix. Keep the SDK's default features (they carry its intended TLS/HTTP
-# stack — 0.17 exposes no standalone tls feature). Extra features are added at
+# stack — 0.18 exposes no standalone tls feature). Extra features are added at
 # the crate level.
-matrix-sdk    = { version = "0.17" }
-matrix-sdk-ui = { version = "0.17" }
+matrix-sdk    = { version = "0.18" }
+matrix-sdk-ui = { version = "0.18" }
 
 # Config + serialization
 figment    = { version = "0.10" }
