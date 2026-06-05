@@ -35,9 +35,9 @@ This document records the architectural decisions for the MVP and the tradeoffs 
                               │ Axon API (REST + WS, /v1/)
                               ▼
                        ┌─────────────┐
-                       │  axon-web   │  (served by axon)
+                       │  axon-tui   │  (terminal client)
                        │  (deferred: │
-                       │   native    │
+                       │   web, iOS, │
                        │   clients)  │
                        └─────────────┘
 ```
@@ -77,6 +77,23 @@ A single Axon process serves a single human. That human may have N Matrix accoun
 - No cross-human isolation. Accounts inside one Axon share a process, a DB, and a filesystem because they belong to the same human.
 
 Multi-human-within-one-process is a non-goal (see [`prd.md`](./prd.md)). Operators serving multiple humans run one Axon per human.
+
+### Account lifecycle and active-account gating
+
+Because the data model is N-account from day one, accounts need a real lifecycle rather than a one-shot config provision. Provisioning an account only from config strands the previous row when the config changes, and any row with a decryptable token would otherwise keep syncing and *sending* — a stale, deconfigured account acting on the user's behalf. (Observed in practice; tracked in GH #14 and #24.)
+
+- Each account carries an explicit `state` (`active` / `deactivated` / `deleted`, plus a transient `pending_verification`). The sync engine and the mutations gateway connect and serve **only `active` accounts** — never "anything with a stored token."
+- Accounts are added at runtime via an account-lifecycle API (`POST /v1/accounts/login`) rather than only at boot, so adding account #2…N never requires swapping config.
+- Device verification is part of the lifecycle: interactive SAS (emoji) over `/v1/ws`, or recovery-key (4S) recovery that both imports the megolm backup and self-verifies the Axon device.
+- Logout deletes the account's data — DB rows (cascades) and the on-disk per-account SDK store dir — and a boot-time reconcile prunes orphan store dirs. This is the supported teardown that replaces manual DB surgery.
+
+The single `store_key` that encrypts every account's access token at rest is a known blast-radius concern; rotation stays deferred (ADR 0008) and is tracked against #24.
+
+### Relation aggregation: server-side, read-time, over stored relations
+
+Edits (`m.replace`), reactions (`m.annotation`), replies (`m.in_reply_to`), and threads (`m.thread`) are all *relation* events. Axon stores them as ordinary events with the relation in the `relates_to` hot column. Leaving aggregation to clients breaks down because a client only holds a timeline window: a reaction or edit that lands outside that window (e.g. long after the original message) is silently missed, producing wrong reaction counts and stale message bodies (GH #22).
+
+We aggregate server-side instead. The store resolves the latest edit per target, groups reactions by target and emoji, and lists replies and thread members — all via expression/partial indexes over `relates_to`, computed at read time (cheap at Riley scale; materialized counters are a later optimization). Raw relation events stay on disk (append-mostly, provenance preserved — the same philosophy as redaction masking); the timeline read *collapses* edits into their target rather than rewriting rows. Threads are simply the `m.thread` case of this machinery, so they ship in the MVP as part of aggregation rather than as a separate later feature.
 
 ### Event provenance
 
@@ -124,7 +141,7 @@ MVP issues long-lived bearer tokens via an `axon token issue` CLI subcommand. Ea
 Full OAuth 2.0 + PKCE is on the roadmap. The token storage table, the middleware, and the API shape are designed so OAuth issuance can drop in without breaking the wire protocol. Tradeoffs we accepted:
 
 - **Win:** alpha ships without owning a security-sensitive authorization-server implementation.
-- **Cost:** initial onboarding for `axon-web` is "paste the token from your CLI" rather than a login flow. Acceptable for the alpha audience.
+- **Cost:** initial onboarding for `axon-tui` is "paste the token from your CLI" rather than a login flow. Acceptable for the alpha audience.
 
 ### API versioning: path-prefix `/v1/`, SemVer on the spec
 
@@ -181,8 +198,9 @@ Almost every architectural question was resolved during planning. The table belo
 | Migration story | Fresh sync only for MVP. |
 | Bridge event handling | Treated as ordinary Matrix events; no normalization. |
 | Media storage backend | Local disk LRU cache for MVP. S3-compatible storage deferred until a hosted deployment needs it. |
-
-**Open: threads in MVP or immediately after?** Threads are a P0 post-MVP track at minimum. The open question is whether they make MVP. If yes, the schema needs thread-aware indexing (the `relates_to` hot column already captures `m.thread` relations; we'd need API endpoints — `GET /v1/rooms/{id}/threads`, threaded timeline reads, thread-scoped reactions — and a "view in thread" affordance in `axon-web`). If no, they ship in the first release after MVP.
+| Account lifecycle | Explicit account states + active-account gating + runtime login/verify/recover/logout. In MVP (resolves GH #14, #24). |
+| Relation aggregation | Server-side, read-time aggregation of edits/reactions/replies/threads over stored relations. In MVP (resolves GH #22). |
+| Threads | In MVP, as the `m.thread` case of relation aggregation (no separate milestone). |
 
 **Open: how to handle redacted events?** Should Axon expose and index redacted events or hide them from its user? This depends on how we view the purpose of redactions: are they to get rid of bad content that no one should see, or, e.g., moderation decisions that may want to be reviewed/reverted later?
 
@@ -216,12 +234,13 @@ We do not build any federation code in v1.
 Post-MVP, roughly in priority order:
 
 1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP.
-2. **Threads** as first-class API resources (if not pulled into MVP).
-3. **Full OAuth 2.0 + PKCE.**
-4. **Bridge metadata normalization.**
-5. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks).
-6. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it.
-7. **Per-room / per-language search analyzers.**
-8. **Spaces as first-class API resources.**
-9. **Native clients** (iOS first, then desktop).
-10. **Federation of agents v2.**
+2. **Full OAuth 2.0 + PKCE.**
+3. **Bridge metadata normalization.**
+4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks).
+5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it.
+6. **Per-room / per-language search analyzers.**
+7. **Spaces as first-class API resources.**
+8. **Native clients** (iOS first, then desktop) and a web client.
+9. **Federation of agents v2.**
+
+(Threads moved *into* the MVP as part of relation aggregation; they are no longer a post-MVP track.)

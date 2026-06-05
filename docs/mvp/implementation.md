@@ -24,16 +24,16 @@ matrix-axon/
     axon-api/                # axum HTTP + WS handlers, OpenAPI (utoipa)
   (each crate has its own README.md + crate-level //! rustdoc)
   clients/
-    web/                     # axon-web (Vite + React + TS)
+    tui/                     # axon-tui (terminal client; the alpha client)
   openapi/                   # spec source of truth (handwritten + utoipa-emitted)
   docs/
     mvp/                     # this directory
     adr/                     # architecture decision records
-    self-hosting.md          # produced in Milestone 12
+    self-hosting.md          # produced in Milestone 13
   docker-compose.yml         # Postgres for dev
 ```
 
-`axon-web` is the seed of the eventual full web client, not a throwaway. Keep the directory name, evolve the contents.
+`axon-tui` is the alpha client — a terminal client that exercises the full `/v1/` surface end-to-end. It replaced the originally-planned `axon-web` (Vite + React) as the reference client; the API is the deliverable, and the TUI is the integration surface that proves it. A web client remains a credible later addition consuming the same API.
 
 ## Settled stack
 
@@ -43,8 +43,8 @@ matrix-axon/
 - **Matrix:** matrix-rust-sdk (sync, olm/megolm, key backup, cross-signing, verification surface).
 - **Search:** Tantivy.
 - **OpenAPI:** utoipa for type-checked spec emission from handler signatures.
-- **Web alpha:** Vite + React + TypeScript.
-- **Client stubs:** openapi-typescript-codegen (or equivalent) for TypeScript; an OpenAPI-to-Swift generator for the deferred iOS client (run but unused at MVP).
+- **Alpha client:** `axon-tui`, a Rust terminal client, replacing the originally-planned Vite + React web alpha.
+- **Client stubs:** an OpenAPI-to-Swift generator for the deferred iOS client (run but unused at MVP); TypeScript stubs remain available for a future web client. `axon-tui`, being Rust, consumes the API types directly.
 - **Media backend:** local disk LRU cache. No S3 adapter in MVP.
 
 ## Settled decisions inherited from [`tech-spec.md`](./tech-spec.md)
@@ -111,7 +111,7 @@ Each milestone has explicit deliverables and a verification step that exercises 
 **E2EE key acquisition & device trust (ADR 0011).** A fresh `axon` device is unverified, so encrypted rooms show UTDs until it obtains keys. Two complementary paths; this milestone builds both pieces that can stand alone, the rest lands in Milestone 5:
 
 - **Recovery-key bootstrap (build here, end-to-end).** `client.encryption().recovery().recover(key)` restores both the Megolm key backup (history) and the cross-signing private keys (so `axon` self-verifies and future keys flow). Add `sync.account.recovery_key`, encrypted at rest like the access token (ADR 0008) — prefer transient-only handling of this crown-jewel secret. This path needs no client, so it's what lets this milestone **prove decryption end-to-end before any front-end exists**.
-- **Verification plumbing (build here, exercised in M5).** The programmatic SDK flow — surface a `VerificationRequest`, `accept()`, read `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. "Headless" means `axon` has no UI of its own, not that it can't verify; the SDK API is fully programmatic. The user-facing emoji exchange can't be exercised until the M5 WebSocket exists, so this milestone builds the plumbing and M5 wires the UX. Note `axon-crypto` is the "thin verification surface over rust-sdk crypto" from the project layout.
+- **Verification plumbing (build here, exercised in M7a).** The programmatic SDK flow — surface a `VerificationRequest`, `accept()`, read `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. "Headless" means `axon` has no UI of its own, not that it can't verify; the SDK API is fully programmatic. The user-facing emoji exchange can't be exercised until the `/v1/ws` WebSocket exists (M5); the interactive verification UX itself was deferred and now lands in **M7a** alongside the rest of the Matrix-account lifecycle. Note `axon-crypto` is the "thin verification surface over rust-sdk crypto" from the project layout.
 
 **Verification (E2EE):** against a real homeserver with key backup enabled, supply `sync.account.recovery_key`, confirm UTD rows flip to `decrypted = true` as backed-up keys arrive, and that `axon` shows as a verified/cross-signed device.
 
@@ -123,16 +123,14 @@ Each milestone has explicit deliverables and a verification step that exercises 
   - `GET /v1/events/{event_id}`.
 - WebSocket at `/v1/ws`. Envelope: `{type, account_id, payload}`. Live timeline events fan out from the sync engine.
 - OpenAPI spec emitted via utoipa; written in parallel.
-- TypeScript stubs generated into `clients/web/src/api/`.
+- TypeScript stubs (deferred — they targeted the dropped web alpha; `axon-tui` consumes the Rust API types directly, and a future web client can regenerate them from the OpenAPI spec).
 - Define a shared `ApiResponse<T>` / `ApiError` envelope type in `axon-api` and a
   custom `IntoResponse` impl so all handlers return consistent JSON shapes and error
   bodies. (Deferred from M2; designing against zero real handlers is premature.)
 
 **Verification:** Boot the server, `curl /v1/rooms`, hit `/v1/rooms/{id}/timeline`, open a websocat session to `/v1/ws` and see live events arrive tagged with `account_id` as new events come in over sync.
 
-**Interactive verification UX over the WebSocket (consumes the M4 plumbing — ADR 0011).** Wire the verification flow built in Milestone 4 to the client: `axon` relays incoming/outgoing `VerificationRequest`s and streams the SAS emoji/decimals over `/v1/ws`, so the user verifies the `axon` session *from the axon client*, exactly as they would verify any other device. This is the mature E2EE key-acquisition path: once `axon` is interactively verified, the user's other devices **gossip** the cross-signing secrets and key-backup key to it automatically — so the recovery key never has to be stored server-side. (This is the BFF answer to "no verification UI in the alpha" — the API surface ships here; `axon-web` driving it is a later/optional add. QR-code verification is a follow-up.)
-
-**Verification (interactive E2EE):** from a trusted Element session, start verification of the `axon` device; confirm the SAS emoji arrive over `/v1/ws`, that confirming both sides cross-signs `axon`, and that subsequently-sent encrypted messages decrypt without the recovery key.
+**Interactive verification UX deferred to M7a.** The SAS-emoji exchange over `/v1/ws` — formerly planned here as "M5c", consuming the M4 plumbing — was never built. It now lands in **M7a**, where it belongs conceptually: verifying `axon`'s *device* for a *Matrix account* is part of that account's lifecycle. M5 ships the `/v1/ws` channel the exchange rides on; M7a wires the flow. See M7a.
 
 ### 6. Mutations
 
@@ -144,114 +142,160 @@ Each milestone has explicit deliverables and a verification step that exercises 
 
 **Verification:** Send a message via curl, watch it round-trip through sliding sync, appear in the timeline, and arrive over WS. Redact and confirm the timeline read masks content.
 
-### 7. Media proxy
+### 7. Account lifecycle and auth
+
+Two layers of auth, split into subphases. **7a** brings the *Matrix* accounts under runtime control (login, verify, recover, logout) and finally closes the interactive-verification work deferred from M5 (the old "M5c"). **7b** puts the *client ↔ axon* bearer-token gate in front of the whole API. Said another way: 7a is auth between `axon` and the homeserver(s); 7b is auth between a client and `axon`.
+
+#### 7a. Homeserver account lifecycle & verification
+
+Today an account is provisioned exactly once from config, and there is no supported way to add, verify, or remove one at runtime. Changing `sync.account.user_id` in config does **not** replace the account — it inserts a new `accounts` row and strands the old one, which keeps syncing and can still *send* (any row with a decryptable token gets connected). This was hit in a real debugging session: a message went out authored by a previously-configured account that was no longer in config. 7a makes the Matrix-account lifecycle a first-class API and folds in the interactive device verification deferred from M5. It is the milestone that closes GH issues #14 (stale-DB cleanup) and #24 (account lifecycle / active-account gating / runtime provisioning).
+
+**Account state machine.** Add an explicit `state` to `accounts` (`active` / `deactivated` / `deleted`, with a transient `pending_verification` on first login). The sync engine **and** the M6 mutations gateway connect and serve **only `active` accounts** — never "any row with a decryptable token," which is the bug behind #24. `get_or_connect` gates on `state`.
+
+**Lifecycle endpoints** (account-nested per the M5a convention; behind the 7b token gate once that lands):
+
+- `POST /v1/accounts/login` — body `{ homeserver_url, username, password }`. `axon` logs in as a fresh device, mints an `account_id`, encrypts the access token at rest (ADR 0008), provisions the per-account SDK store dir, and starts sync. This is the supported way to add accounts #2…N without swapping config and stranding the prior account. The `password` is consumed once and never stored (matches the M3 login path) — a crown-jewel secret handled transient-only.
+- `POST /v1/accounts/{account_id}/verify` — drives the interactive SAS (emoji) handshake: relay a `VerificationRequest` to/from another of the user's trusted devices, surface `sas.emoji()` / `sas.decimals()`, `confirm()` / `cancel()`. The emoji stream rides `/v1/ws` (the plumbing M4 built and M5 unblocked). After mutual confirm, `axon` is cross-signed and the user's other devices **gossip** the cross-signing secrets and the key-backup key — so the recovery key never has to live server-side. This is the mature key-acquisition path (ADR 0011).
+- `POST /v1/accounts/{account_id}/recovery` — the bootstrap path: accept a Secure-Storage (4S) recovery key and call `client.encryption().recovery().recover(key)`, which imports the megolm key backup **and** the cross-signing private keys. Holding the recovered user-signing key lets `axon` **self-verify its own device** with no interactive partner — "verify a device via backup-key recovery." It both back-fills history keys and marks `axon` a verified/cross-signed device. The recovery key is transient-only (never persisted), consistent with the M3c `recover()` that already lands on boot.
+- `POST /v1/accounts/{account_id}/logout` — log the device out upstream, then **delete every trace of the account from `axon`**: DB rows (existing cascades cover `events` / `account_data` / `room_state`) **and** the on-disk SDK store at `data_dir/<account_id>/`. Sets `state = deleted`. This is the supported teardown that replaces today's manual DB surgery (#14).
+
+**Store-dir GC.** Deletion removes the per-account store dir; add a boot-time reconcile that prunes orphan dirs under `data_dir/` with no matching active account (5 orphans were observed in #24).
+
+**Verification status.** Persist per account whether `axon`'s device is verified / cross-signed, so the API can report key-acquisition state and a client can prompt for verify-or-recover while an account is `pending_verification`.
+
+Out of scope here but explicitly tracked: `store_key` rotation (one key decrypts every account's token) stays deferred (ADR 0008), noted against #24 so it isn't lost once multi-account raises the stakes. Per-account *authorization* scoping remains a non-goal — one human owns all their accounts.
+
+**Verification (7a):** `POST /v1/accounts/login` against a real homeserver provisions a second account that syncs independently; from a trusted Element session drive `POST …/verify`, watch the SAS emoji arrive over `/v1/ws`, confirm both sides, and see `axon` become cross-signed and subsequently-sent encrypted messages decrypt without a recovery key. Alternatively `POST …/recovery` with a 4S key flips UTD rows to `decrypted` and marks the device verified. `POST …/logout` removes the DB rows and the SDK store dir; confirm a non-`active` account neither syncs nor can send.
+
+#### 7b. Client ↔ axon bearer-token auth
+
+The local-API gate. (This is the work formerly numbered M8.)
+
+- `axon token issue --label <name>` CLI subcommand: mints a random token, stores a hash, prints the token once. `axon token list` and `axon token revoke <id>`.
+- `tokens` table: `(id, label, hash, created_at, last_used_at, revoked_at)`.
+- axum middleware validates `Authorization: Bearer …` on every `/v1/…` route — including the 7a lifecycle endpoints — updates `last_used_at`, and rejects revoked tokens.
+- WebSocket auth: token in `Sec-WebSocket-Protocol` or the initial envelope, validated on accept.
+
+Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can replace the CLI mint path without breaking the on-the-wire `Authorization` header or any consumer code. The first token is minted by the CLI (bootstrap); clients carry it thereafter. Until 7b lands, the 7a endpoints are unauthenticated like the rest of the pre-auth API — the M13 private-mesh-VPN deployment is the network gate in the interim, and the application gate that makes "no app auth yet" safe earlier.
+
+**Verification (7b):** Issue a token; hit `/v1/rooms` with and without the header; revoke; confirm the next call is rejected. Confirm the M6 txn-id retry-duplication caveat is now attributable to a token.
+
+### 8. History backfill
+
+Sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). Backfill is the engine that reaches back for a room's pre-existing history, so the timeline read, the M9 aggregations, and the M10 search index cover more than the post-install slice. `recover()` (M7a) imports the *keys* to decrypt old messages; it does not fetch the *messages* — those must be paged from the room. (ADR 0018.) Backfill runs here, ahead of aggregation and search, because both of those are only as good as the history they can see — together with sync this is what satisfies the PRD's full-history success criterion and the 100–200k-event working-set target.
+
+- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()` / gossip (M7a), and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and (once M10 lands) the search index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
+- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
+- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
+- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
+
+**Verification:** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); kill and restart `axon` mid-backfill and confirm it resumes without duplicating rows. (Search over backfilled history is asserted in M10.)
+
+### 9. Relation aggregation
+
+Matrix expresses edits, reactions, replies, and threads as *relation* events — `m.relates_to` with `rel_type` `m.replace` (edit) / `m.annotation` (reaction) / `m.in_reply_to` (reply) / `m.thread`. `axon` already stores them as ordinary events with the relation captured in the `relates_to` hot column (ADR 0015). But reading them raw forces every client to re-aggregate over whatever timeline window it happens to hold, which silently breaks for relations that land *outside* that window — a reaction or an edit that arrives long after the original message. The TUI hit exactly this: reactions and edits to messages older than the loaded 50-event slice are dropped (GH issue #22). M9 moves aggregation server-side so the API serves resolved, complete views regardless of pagination.
+
+This **subsumes the formerly-standalone Threads milestone** (old M13): a thread is just the `m.thread` case of the same machinery, and the store already captures `m.thread` generically, so the work is additive and backfill-free. Split: 9a builds the store-layer aggregation, 9b exposes it over the API.
+
+#### 9a. Aggregation backend
+
+- Expression / partial indexes over `events.relates_to` keyed by the target `event_id` and `rel_type` (generalizing the thread index sketched in ADR 0017), so "all relations pointing at event X" is an indexed lookup rather than a window scan. Applies retroactively to already-stored rows — additive, backfill-free.
+- Store reads, all scoped by `(account_id, …)`:
+  - **Edits (`m.replace`).** Resolve the latest edit per target by `origin_ts`; surface the replaced content plus edit metadata (`edited`, `edit_count`, `latest_edit_ts`). The raw edit events stay on disk (append-mostly; provenance and original ciphertext preserved — the same philosophy as redaction masking). The timeline read *collapses* them into the target rather than emitting standalone edit rows. matrix-rust-sdk has relation-aggregation support we can lean on, but the durable resolution is a store concern so it holds for events outside any client window.
+  - **Reactions (`m.annotation`).** Group by target, then by `key`; per-emoji counts (plus the senders, for "did I react / who reacted").
+  - **Replies (`m.in_reply_to`).** Direct replies to an event.
+  - **Threads (`m.thread`).** Thread membership; a per-thread summary (root event + latest reply + reply count) and a thread-scoped timeline read (reuse the M5 cursor pagination, scoped to a thread root).
+- Computed at read time for MVP — the indexes make it cheap at Riley scale. Incremental materialization (maintaining tallies on ingest) is a later optimization, not a re-architecture.
+
+**Verification (9a):** Seed a room with a message, then add a reaction and an edit *far outside* the default timeline window; store-layer reads return the correct per-emoji count and the edited body regardless of window position; thread and reply lookups resolve over rows stored *before* this milestone (proving the backfill-free claim).
+
+#### 9b. Aggregation API endpoints
+
+Account-nested per the M5a convention:
+
+- `GET /v1/accounts/{account_id}/events/{event_id}/reactions` — per-emoji tallies (issue #22 Option A): `{ "👍": { "count": 2, "me": true, "senders": […] }, "❤️": { … } }`.
+- `GET /v1/accounts/{account_id}/events/{event_id}/replies` — direct replies to an event.
+- `GET /v1/accounts/{account_id}/rooms/{room_id}/threads` — thread list (root + latest reply + reply count).
+- `GET /v1/accounts/{account_id}/rooms/{room_id}/threads/{root_id}/timeline` — thread-scoped timeline, reverse-chronological with the same cursor pagination as the room timeline.
+- **The M5 timeline read now returns aggregated events:** the latest edited body in place, standalone edit events stripped, plus a per-event `reactions` summary and `edited` / `edit_count` fields on `EventDto` (issue #22 Option B). An optional `GET …/events/{event_id}/edits` exposes the forensic edit history.
+- WS (`/v1/ws`): raw relation events keep flowing live so clients can apply deltas, but the aggregation endpoints and the `EventDto` fields are the authoritative resolved view. Dedicated aggregation-update WS frames (a delivered tally delta) are a later add, not MVP.
+
+**Verification (9b):** `GET …/reactions` returns grouped counts for a message whose reactions arrived in a later page; the timeline read shows the latest edited body with no stray edit rows; `GET …/threads` lists a thread with the correct reply count and its scoped timeline returns only that thread's events, reverse-chronological with stable pagination; an edit / reaction / reply sent over M6 round-trips and shows up aggregated.
+
+### 10. Search
+
+The Tantivy index. It runs after backfill (M8), so the corpus is deep, and after aggregation (M9), so the text it indexes is the *latest* edited body rather than a superseded one.
+
+- `axon-search` opens a Tantivy index.
+- Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
+- `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
+- Populate on event ingestion in the shared pipeline (so anything ingested — live sync *or* M8 backfill — is indexed by the same path).
+- One-time **initial index build** over events already in the store, so search covers all ingested history, not just events arriving after the index exists.
+- **Edit / redaction interaction (from M9):** an edit reindexes the target doc to the latest body (M9 makes "latest body" well-defined); a redaction removes the doc so search never surfaces deleted content (tech-spec).
+- `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
+- BM25 ranking; paginated.
+- No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
+
+**Verification:** Index a known corpus (e.g. dump 1000 events from a test room); assert an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); confirm a phrase from a **backfilled** pre-install message returns it, and an **edited** message is found by its new text and not its old; latency p95 under 200ms on the Riley-shape target.
+
+### 11. Media proxy
 
 - `axon-media` resolves MXC URLs against the upstream homeserver for the relevant account.
 - Bounded LRU cache on local disk (size configurable; default 5GB).
 - `GET /v1/media/{account_id}/{server}/{media_id}` with proper caching headers and range-request support.
 - No S3 backend. Do not add one.
 
-**Verification:** Send a message with an image attachment, fetch the image through `/v1/media/…`, confirm it renders inline in `axon-web` (once Milestone 11 lands; until then, curl the URL and inspect the bytes). Fill the cache past its limit and confirm LRU eviction.
+**Verification:** Send a message with an image attachment, fetch the image through `/v1/media/…`, confirm it renders inline in `axon-tui` (or curl the URL and inspect the bytes). Fill the cache past its limit and confirm LRU eviction.
 
-### 8. Auth
-
-- `axon token issue --label <name>` CLI subcommand. Mints a random token, stores a hash, prints the token once.
-- `axon token list` and `axon token revoke <id>` subcommands.
-- `tokens` table: `(id, label, hash, created_at, last_used_at, revoked_at)`.
-- axum middleware validates `Authorization: Bearer …` on every `/v1/…` route; updates `last_used_at`; rejects revoked tokens.
-- WebSocket auth: token in `Sec-WebSocket-Protocol` or initial envelope, validated on accept.
-
-Design the token storage and middleware so a future OAuth 2.0 + PKCE issuer can replace the CLI mint path without breaking the on-the-wire `Authorization` header or any consumer code.
-
-**Verification:** Issue a token; hit `/v1/rooms` with and without the header; revoke; confirm the next call is rejected.
-
-### 9. Search & history backfill
-
-Search is only as good as the history it can see, and sync alone only ingests events *going forward* (plus the shallow `sync.timeline_limit` window on a room's first sync — ADR 0015). So this milestone is two parts: build the index (9a), then make it cover a room's full upstream history (9b) — together they satisfy the PRD's "full-history search" success criterion and its 100–200k-event working-set target. The split mirrors the M4a/M4b pattern.
-
-#### 9a. Search ingestion & indexing
-
-- `axon-search` opens a Tantivy index.
-- Schema fields: `event_id`, `account_id` (facet), `room_id` (facet), `sender` (facet), `origin_ts` (date), `body` (text).
-- `body` analyzer chain: default tokenizer + `LowerCaser` + `AsciiFoldingFilter` + `Stemmer` (English). All built-in Tantivy token filters — register the analyzer once and reference it from the field schema.
-- Populate on event ingestion in the sync pipeline (so anything ingested — live sync *or* 9b backfill — is indexed by the same path).
-- One-time **initial index build** over events already in the store. By the time this milestone runs the store already holds everything live-synced since Milestone 5, which predates the index; a bulk pass indexes that existing corpus so search covers all ingested history, not just events arriving after the index exists.
-- `GET /v1/search?q=…&account_id=…&room_id=…&sender=…&from=…&to=…`.
-- BM25 ranking; paginated.
-- No fuzzy/typo, synonym, or semantic search in MVP (see tech-spec search section). If a bounded fuzzy mode is wanted later, it's a query-time `FuzzyTermQuery` toggle on this endpoint, not an analyzer change.
-
-**Verification (9a):** Index a known corpus (e.g. dump 1000 events from a test room); assert that an exact phrase query returns the expected top hit; confirm case- and diacritic-insensitivity (`cafe` matches `café`) and plural matching (`cat` matches `cats`); latency p95 under 200ms on the Riley-shape target. (Redacted-event behavior is an open question — see tech-spec; don't bake an assertion in here yet.)
-
-#### 9b. History backfill
-
-The engine that reaches back for a room's pre-existing history, so the 9a index (and the timeline read) covers more than the post-install slice. `recover()` (ADR 0011/0014) imports the *keys* to decrypt old messages, but not the *messages* — those must be fetched by paging the room. (ADR 0018.)
-
-- A bounded, **resumable** engine that pages backward through each room's timeline via the SDK's room pagination (`/messages`), decrypting with the keys already imported by `recover()`, and persisting through the **same ingestion path** as live sync — so hot columns, crypto siblings, redaction handling, and the 9a index all apply uniformly, and re-runs are idempotent (`ON CONFLICT DO NOTHING`).
-- Per-room backfill state (e.g. a `room_backfill` table: `(account_id, room_id, oldest_seen_token, complete, updated_at)`) so progress survives restarts and the engine knows where to resume and when a room is exhausted.
-- Background + throttled: rate-limited so it never starves live sync; configurable target depth (a bounded number of events/days, or "to room start").
-- This retires the `sync.timeline_limit` bump as the "bounded substitute" for real backfill (ADR 0015).
-
-**Verification (9b):** Point `axon` at a room with substantial pre-existing history; confirm the stored event count climbs toward the room's full history rather than the initial window; confirm backfilled *encrypted* events decrypt (keys via `recover()`); confirm a search for a phrase from a pre-install message now returns it; kill and restart axon mid-backfill and confirm it resumes without duplicating rows.
-
-### 10. Drafts and per-device read state
+### 12. Drafts and per-device read state
 
 - Tables: `device_state` keyed by `(account_id, device_id, namespace, key)` with an opaque value blob and `updated_at`.
 - Devices are identified by a client-supplied UUID at first registration.
 - Endpoints: `GET/PUT /v1/devices/{device_id}/state/{namespace}`.
 - Live sync via WS: changes broadcast to other devices owned by the same human; last-write-wins by `updated_at`.
 
-**Verification:** Two `axon-web` tabs (acting as separate devices); typing a draft in one updates the other within a second.
+**Verification:** Two `axon-tui` instances (acting as separate devices); typing a draft in one updates the other within a second.
 
-### 11. Web alpha (`axon-web`)
-
-- Vite + React + TypeScript app under `clients/web/`.
-- Uses generated API stubs.
-- Bundled as a static asset and served by `axon` from the same origin in production. In development, Vite's dev server proxies API calls back to a local `axon`.
-- Views:
-  - Login (paste-token form).
-  - Rooms list, sorted by most-recent activity (rooms from all accounts in one list — the data model supports N accounts; the alpha doesn't expose account-switching controls).
-  - Room view: timeline reverse-chronological by default; infinite scroll backwards for history.
-  - Composer: send, edit, redact, react.
-  - Inline media (images, video, audio) via `/v1/media/…`.
-  - Minimal search input that hits `/v1/search`, scoped to active room or all rooms.
-- No verification UI.
-
-**Verification:** Start docker-compose Postgres, start `axon`, issue a token, paste it into `axon-web`, exercise the chat loop in a real browser against a Synapse with real messages. Run a search query through the input and confirm a known phrase returns the expected hit. Screenshot the working timeline.
-
-### 12. Self-hosting docs
+### 13. Deployment docs
 
 - `docs/self-hosting.md` covering:
   - Prerequisites (Postgres, Synapse / Dendrite accessible).
   - Build / install (Cargo + Docker options).
   - Config reference (every setting from `axon-core`'s config loader).
-  - First-run flow: account provisioning, token minting, accessing `axon-web`.
-  - Operational basics: backups (`pg_dump` + media cache directory), upgrades, logs.
+  - First-run flow: account provisioning via `POST /v1/accounts/login`, device verification (`POST …/verify` or `…/recovery`), token minting, running `axon-tui`.
+  - Operational basics: backups (`pg_dump` + media cache directory + the per-account SDK store dirs under `data_dir/`), upgrades, logs.
   - Deployment recipes — at minimum one each for:
-    - Home machine behind a private mesh VPN (the recommended self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the Milestone 8 token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
+    - Home machine behind a private mesh VPN (the recommended self-host path). axon + Postgres on hardware you own — the box under your desk, a home server, a NAS — reached from your other devices over a private network such as Tailscale, with **no port ever exposed to the public internet**. This best fits axon's premise: your data stays on your hardware. It also pairs with the M7b token auth as defense-in-depth — the VPN is the network gate, the token is the application gate (and the gate that makes "no app auth yet" safe in earlier milestones).
     - Railway (or a similar Procfile-style PaaS).
     - DigitalOcean droplet (Docker Compose + nginx reverse proxy + Let's Encrypt).
     - AWS (EC2 + RDS Postgres; ECS optional; reference Terraform welcome but not required).
     - Bare Linux VPS (covered in the operational basics above).
 
-**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver in a browser" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
+**Verification:** A reader who has not touched the codebase follows the doc top to bottom on a fresh VM and reaches the "daily-driver through `axon-tui`" PRD success criterion. At least one deployment recipe is exercised end-to-end (any of them) by someone other than the author.
 
-### 13. Threads (post-MVP)
+## Milestone resequencing (post-M6)
 
-Deferred out of the MVP and handled as a self-contained milestone after the web alpha ships. The store already captures `m.relates_to` generically — including `m.thread` — in `events.relates_to` (ADR 0015), so this milestone is **additive and backfill-free**: the thread membership of every already-stored event is recoverable from data on disk, with no re-sync or re-parse. The deferral cost is a future index + endpoints, not a re-architecture.
+Milestones 1–6 shipped as originally numbered. After M6, the sequence was rethought to reflect what the project actually needs next — a real account lifecycle, server-side relation aggregation, and a terminal client in place of the planned web alpha. The current plan (this document) supersedes the original M7–M13 ordering:
 
-- Migration: a thread lookup over `events.relates_to` — an expression/partial index (or a generated column) keyed on the thread root, e.g. over `relates_to->>'event_id' WHERE relates_to->>'rel_type' = 'm.thread'`. Applies retroactively to existing rows.
-- `axon-store` reads: list a room's threads (root event + latest reply + reply count) and a thread-scoped timeline read (reuse the cursor pagination from the timeline read, scoped to a thread root).
-- Endpoints: `GET /v1/rooms/{room_id}/threads` and a thread-scoped timeline (e.g. `GET /v1/rooms/{room_id}/threads/{root_id}/timeline`).
-- Mutations: thread-aware send (set `m.relates_to` with `rel_type: m.thread`) on the existing send path (Milestone 6).
-- `axon-web`: a "view in thread" affordance and a thread panel.
+| Now | Was | Change |
+|---|---|---|
+| **7a** Homeserver account lifecycle & verification | — (new) + old "M5c" | Login / verify / recover / logout as a first-class API; closes the interactive verification deferred from M5 and GH issues #14, #24. |
+| **7b** Client ↔ axon bearer-token auth | old M8 (Auth) | Unchanged in substance; renumbered. |
+| **8** History backfill | old M9b | Promoted ahead of search; aggregation and search both depend on it. |
+| **9** Relation aggregation (9a backend, 9b API) | — (new), subsumes old M13 (Threads) | Edits / reactions / replies / threads aggregated server-side (GH issue #22). Threads are the `m.thread` case, no longer a standalone milestone. |
+| **10** Search | old M9a | Renumbered; now runs after backfill + aggregation. |
+| **11** Media proxy | old M7 | Unchanged in substance; renumbered. |
+| **12** Drafts & per-device read state | old M10 | Unchanged in substance; renumbered. |
+| **13** Deployment docs | old M12 | Retargeted at `axon-tui`; first-run flow now uses the M7a account endpoints. |
+| _(dropped)_ | old M11 (Web alpha) | `axon-tui` replaced `axon-web` as the alpha/reference client; it is tracked outside the milestone sequence. |
 
-**Verification:** In a room with a threaded conversation, `GET …/threads` lists the thread with the correct reply count; the thread-scoped timeline returns only that thread's events, reverse-chronological with stable pagination; a reply sent into the thread round-trips and appears under the right root. Confirm the thread index resolves over events stored *before* this milestone (proving the backfill-free claim).
+Older docs (`AGENTS.md` "Current state", the ADR log) still reference the original numbers as historical context; this table is the bridge. References to milestone numbers in those frozen/append-only docs are not retro-renumbered.
 
 ## Open decisions that gate milestones
 
-The one genuinely open question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
+The threads question carried over from [`tech-spec.md`](./tech-spec.md) is now resolved:
 
-- **Threads — resolved: deferred to a dedicated post-MVP Milestone 13.** Rather than thread the feature through Milestone 4 (indexing), Milestone 5 (endpoints), and Milestone 11 (UI), it is handled as one self-contained milestone after the MVP ships. The MVP store deliberately captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so the deferral is forward-compatible — Milestone 13 is additive and backfill-free, not a re-architecture. See Milestone 13.
+- **Threads — resolved: folded into M9 (Relation aggregation), in MVP.** Rather than a dedicated post-MVP milestone, threads ship as the `m.thread` case of the M9 aggregation machinery. The store captures `m.relates_to` generically (incl. `m.thread`) in `events.relates_to` (ADR 0015), so this is additive and backfill-free — the thread membership of every already-stored event is recoverable from data on disk. See Milestone 9.
 
 Everything else is settled. If an ambiguity arises during implementation that neither the PRD nor the tech spec covers, stop and ask rather than picking silently.
 
@@ -271,11 +315,12 @@ Follow Matrix OSS community conventions first; fall back to standard Rust conven
 ## Verification per milestone (end-to-end, not just `cargo check`)
 
 - **Sync milestones (3, 4).** Point at a Synapse-in-docker, watch decrypted rows accumulate in Postgres; query a known room's timeline by SQL; confirm redactions mask content.
-- **API milestones (5, 6, 7, 9, 10).** curl against the running server using the generated TypeScript types as fixtures.
-- **Auth milestone (8).** End-to-end: mint, use, revoke, confirm rejection.
-- **Search milestone (9).** Index a known corpus, assert top results; measure p95 against the Riley-shape target.
-- **Web alpha (11).** Real dev server, real browser, real Synapse; exercise send / edit / redact / react / media / search; screenshot the timeline.
-- **Self-hosting (12).** A reader follows the doc on a fresh VM and reaches the daily-driver success criterion in under an hour; at least one cloud recipe is exercised end-to-end.
+- **Account-lifecycle milestone (7a).** Login a second account at runtime; verify the device (interactive SAS over `/v1/ws`, or recovery-key); logout and confirm the DB rows and SDK store dir are gone and a stale account neither syncs nor sends.
+- **API milestones (5, 6, 9b, 11, 12).** curl against the running server; assert aggregated reads (reactions/threads/edits) resolve outside the timeline window.
+- **Auth milestone (7b).** End-to-end: mint, use, revoke, confirm rejection.
+- **Backfill milestone (8).** Deep-history room: stored count climbs toward full history; restart mid-backfill resumes without duplicates.
+- **Search milestone (10).** Index a known corpus, assert top results (including backfilled and edited messages); measure p95 against the Riley-shape target.
+- **Deployment docs (13).** A reader follows the doc on a fresh VM and reaches the daily-driver success criterion in under an hour; at least one cloud recipe is exercised end-to-end.
 
 ## Documentation for agentic contributors
 
@@ -367,8 +412,8 @@ Mirrors the PRD non-goals and out-of-scope items; the agent should not drift int
 - No bridge metadata normalization.
 - No importers from existing clients.
 - No full OAuth 2.0 server. Bearer tokens via CLI only.
-- No advanced search UI (faceted, semantic). Backend ships; a minimal search input in `axon-web` ships; rich UI does not.
-- No verification UI in the alpha. The API surface ships; the client doesn't drive it.
+- No advanced search UI (faceted, semantic). Backend ships; a minimal search input in `axon-tui` ships; rich UI does not.
 - No S3 / object-store media backend. Local disk LRU cache only.
 - No spaces-specific endpoints. Events flow through.
-- **Threads:** see "Open decisions that gate milestones." Default to "not in MVP" unless the human confirms a scope expansion.
+- No `store_key` rotation. One key decrypts every account's token; rotation stays deferred (ADR 0008), tracked against #24.
+- No incremental/materialized aggregation tallies in MVP. M9 aggregates at read time over indexed relations; maintaining counters on ingest is a later optimization.
