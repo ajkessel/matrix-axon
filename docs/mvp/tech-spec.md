@@ -6,7 +6,7 @@ Related docs: [`prd.md`](./prd.md), [`implementation.md`](./implementation.md).
 
 ## Context & goals
 
-Axon is the agent described in [`prd.md`](./prd.md): a self-hosted persistent state layer for one human's Matrix accounts, consumed by arbitrary clients (web alpha at MVP; native clients later) through a stable HTTP + WebSocket API.
+Axon is the agent described in [`prd.md`](./prd.md): a self-hosted persistent state layer for one human's Matrix accounts, consumed by arbitrary clients (`axon-tui`, a terminal client, is the MVP reference client; web and native clients are deferred) through a stable HTTP + WebSocket API.
 
 This document records the architectural decisions for the MVP and the tradeoffs we weighed. It is not an implementation guide — that is [`implementation.md`](./implementation.md).
 
