@@ -1,16 +1,28 @@
 use std::collections::HashMap;
-use std::ops::Range;
-use std::time::{Duration, UNIX_EPOCH};
-
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
 use uuid::Uuid;
 
-use crate::api::{AxonClient, EventDto, LiveFrame, RoomDto};
-use crate::command::{Command, SlashCommand, SLASH_COMMANDS};
-use crate::config::{ColorScheme, DisplayOptions, SenderNameStyle, Shortcuts, TuiConfig};
-use crate::html::formatted_message_body_lines;
-use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
+#[cfg(test)]
+use crate::api::LiveFrame;
+use crate::api::{AxonClient, EventDto, RoomDto};
+use crate::command::Command;
+#[cfg(test)]
+use crate::config::SenderNameStyle;
+use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
+#[cfg(test)]
+use ratatui::style::Modifier;
+mod completion;
+mod reactions;
+mod render;
+mod rooms;
+mod timeline;
+
+pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
+pub(crate) use render::{
+    display_body_with_sender, format_time, message_display_lines, message_index_at_line,
+    message_line_ranges,
+};
+#[cfg(test)]
+use timeline::should_show_event;
 
 const TIMELINE_LIMIT: usize = 50;
 
@@ -20,9 +32,24 @@ pub(crate) enum Mode {
     RoomList,
     MessageList,
     Search(SearchKind, String),
-    Editing { event_id: String },
-    Reacting { event_id: String },
+    Editing {
+        event_id: String,
+    },
+    Reacting {
+        event_id: String,
+    },
+    Unreacting {
+        target_event_id: String,
+        choices: Vec<OwnReaction>,
+        selected: usize,
+    },
     Popup(PopupKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnReaction {
+    pub(crate) key: String,
+    pub(crate) event_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +67,11 @@ pub(crate) enum PopupKind {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Status {
+    /// Transient guidance or general operation feedback.
     Info(String),
+    /// Diagnostics hidden unless debug display is enabled.
     Debug(String),
+    /// Feedback for an action tied to a specific event, with identifiers hidden by default.
     EventAction {
         debug: String,
         redacted: &'static str,
@@ -52,6 +82,13 @@ pub(crate) enum Status {
 pub(crate) enum LiveFrameAction {
     None,
     RefreshRooms,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoomTargetResolution {
+    Match(usize),
+    Ambiguous(Vec<String>),
+    Missing,
 }
 
 impl Status {
@@ -168,6 +205,8 @@ pub(crate) struct InputState {
     pub(crate) buffer: String,
     pub(crate) cursor: usize,
     pub(crate) react_tab: Option<usize>,
+    pub(crate) react_command_completion: Option<(String, usize)>,
+    pub(crate) partial_switch_completions: Option<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -208,102 +247,20 @@ impl App {
         std::mem::take(&mut self.redraw_requested)
     }
 
-    pub(crate) async fn refresh_rooms(&mut self) {
-        match self.client.list_rooms(self.account_filter).await {
-            Ok(rooms) => {
-                self.apply_room_refresh(rooms);
-            }
-            Err(err) => {
-                self.status = Status::from(format!("room refresh failed: {err}"));
-            }
-        }
-    }
-
-    pub(crate) fn apply_room_refresh(&mut self, rooms: Vec<RoomDto>) {
-        let selected_key = self.selected_room().map(RoomKey::from);
-        self.rooms.rooms = rooms;
-        self.rooms.unread.retain(|key, _| {
-            self.rooms
-                .rooms
-                .iter()
-                .any(|room| RoomKey::from(room) == *key)
-        });
-        self.rooms.selected = selected_key
-            .and_then(|key| {
-                self.rooms
-                    .rooms
-                    .iter()
-                    .position(|room| RoomKey::from(room) == key)
-            })
-            .or_else(|| {
-                self.rooms
-                    .selected
-                    .filter(|index| *index < self.rooms.rooms.len())
-            });
-        self.seed_own_senders_from_rooms();
-        if self.rooms.rooms.is_empty() {
-            self.rooms.selected = None;
-            self.status = Status::from("no rooms returned by Axon".to_owned());
-        } else if self.rooms.selected.is_none() {
-            self.rooms.selected = Some(0);
-            self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
-        } else {
-            self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
-        }
-    }
-
-    pub(crate) fn seed_own_senders_from_rooms(&mut self) {
-        self.live
-            .own_senders
-            .extend(self.rooms.rooms.iter().filter_map(|room| {
-                room.account_user_id
-                    .as_ref()
-                    .map(|user_id| (room.account_id, user_id.clone()))
-            }));
-    }
-
-    pub(crate) async fn load_selected_timeline(&mut self) {
-        let Some(room) = self.selected_room().cloned() else {
-            return;
-        };
-        self.messages.selection = None;
-        self.messages.scroll = usize::MAX;
-        match self
-            .client
-            .room_timeline(room.account_id, &room.room_id, None, TIMELINE_LIMIT)
-            .await
-        {
-            Ok(mut page) => {
-                page.events.reverse();
-                apply_edits(&mut page.events);
-                let has_more = page.next_cursor.is_some();
-                self.rebuild_display_names(&room, &page.events);
-                self.messages
-                    .events
-                    .insert(RoomKey::from(&room), page.events);
-                self.rooms.unread.remove(&RoomKey::from(&room));
-                self.status = Status::Info(if has_more {
-                    format!("showing {} (older history available later)", room.title())
-                } else {
-                    format!("showing {}", room.title())
-                });
-            }
-            Err(err) => {
-                self.status = Status::from(format!("timeline load failed: {err}"));
-            }
-        }
-    }
-
     pub(crate) fn dismiss_input_help(&mut self) {
         self.show_input_help = false;
     }
 
     pub(crate) fn insert_char(&mut self, ch: char) {
+        self.input.react_command_completion = None;
+        self.input.partial_switch_completions = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
 
     pub(crate) fn backspace(&mut self) {
+        self.input.react_command_completion = None;
+        self.input.partial_switch_completions = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -319,6 +276,8 @@ impl App {
     }
 
     pub(crate) fn delete_forward(&mut self) {
+        self.input.react_command_completion = None;
+        self.input.partial_switch_completions = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -449,6 +408,32 @@ impl App {
             Command::Event(event_id) => self.show_event(&event_id).await,
             Command::Whoami => self.show_whoami(),
             Command::Whereami => self.show_whereami(),
+            Command::React(None) => {
+                self.select_most_recent_message_if_needed();
+                self.start_react_to_selected_message();
+            }
+            Command::React(Some(input)) => {
+                let (event_id, reaction_key) = match self.prepare_reaction(&input) {
+                    Ok(reaction) => reaction,
+                    Err(message) => {
+                        self.status = Status::from(message);
+                        return;
+                    }
+                };
+                self.send_react(&event_id, &reaction_key).await;
+            }
+            Command::Unreact => {
+                self.select_most_recent_message_if_needed();
+                self.start_unreact_from_selected_message().await;
+            }
+            Command::Reply => {
+                self.select_most_recent_message_if_needed();
+                self.start_reply_to_selected_message();
+            }
+            Command::Thread => {
+                self.select_most_recent_message_if_needed();
+                self.start_thread_from_selected_message();
+            }
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
             Command::Refresh => {
@@ -506,600 +491,6 @@ impl App {
         ));
     }
 
-    async fn switch_room(&mut self, target: &str) {
-        let Some(index) = self.find_room(target) else {
-            self.status = Status::from(format!("room not found: {target}"));
-            return;
-        };
-        self.rooms.selected = Some(index);
-        self.load_selected_timeline().await;
-    }
-
-    pub(crate) async fn switch_relative_room(&mut self, offset: isize) {
-        if self.rooms.rooms.is_empty() {
-            self.status = Status::from("no rooms to switch".to_owned());
-            return;
-        }
-        let current = self.rooms.selected.unwrap_or(0);
-        let len = self.rooms.rooms.len();
-        let next = relative_room_index(current, len, offset);
-        self.rooms.selected = Some(next);
-        self.load_selected_timeline().await;
-    }
-
-    async fn show_event(&mut self, event_id: &str) {
-        let Some(room) = self.selected_room() else {
-            self.status = Status::from("select a room before using /event".to_owned());
-            return;
-        };
-        match self.client.get_event(room.account_id, event_id).await {
-            Ok(event) => {
-                let sender = self.sender_label(&event);
-                let relation = if event.relates_to.is_some() {
-                    " related"
-                } else {
-                    ""
-                };
-                let redaction = event
-                    .redaction_event_id
-                    .as_deref()
-                    .map(|id| format!(" redacted_by={id}"))
-                    .unwrap_or_default();
-                self.status = Status::Info(format!(
-                    "{} {} {} {}{}{}",
-                    format_time(event.origin_ts),
-                    sender,
-                    event.event_id,
-                    display_body_with_sender(&event, &sender)
-                        .chars()
-                        .take(120)
-                        .collect::<String>(),
-                    relation,
-                    redaction
-                ));
-            }
-            Err(err) => self.status = Status::Info(format!("event read failed: {err}")),
-        }
-    }
-
-    pub(crate) fn complete_input(&mut self) {
-        if self.complete_command_input() {
-            return;
-        }
-        self.complete_switch_input();
-    }
-
-    pub(crate) fn complete_command_input(&mut self) -> bool {
-        let Some(prefix) = slash_command_prefix(&self.input.buffer) else {
-            return false;
-        };
-        let candidates = slash_command_candidates(prefix);
-        match candidates.as_slice() {
-            [] => {
-                self.status = Status::from(format!("no command matches: /{prefix}"));
-            }
-            [command] => {
-                self.input.buffer = if command.takes_argument {
-                    format!("{} ", command.name)
-                } else {
-                    command.name.to_owned()
-                };
-                self.move_cursor_to_end();
-                self.status = Status::from(format!("completed command: {}", command.name));
-            }
-            _ => {
-                self.status = Status::Info(format!(
-                    "command matches: {}",
-                    candidates
-                        .iter()
-                        .map(|command| command.name)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-        }
-        true
-    }
-
-    pub(crate) fn complete_switch_input(&mut self) {
-        let Some(target) = switch_target_prefix(&self.input.buffer) else {
-            return;
-        };
-        let candidates = self.switch_completion_candidates(target);
-        match candidates.as_slice() {
-            [] => self.status = Status::Info(format!("no room matches: {target}")),
-            [completion] => {
-                self.input.buffer = format!("/switch {completion}");
-                self.move_cursor_to_end();
-                self.status = Status::from(format!("completed room: {completion}"));
-            }
-            _ => {
-                let shown = candidates
-                    .iter()
-                    .take(5)
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let more = candidates.len().saturating_sub(5);
-                self.status = Status::Info(if more == 0 {
-                    format!("room matches: {shown}")
-                } else {
-                    format!("room matches: {shown}, +{more} more")
-                });
-            }
-        }
-    }
-
-    fn switch_completion_candidates(&self, target: &str) -> Vec<String> {
-        self.rooms
-            .rooms
-            .iter()
-            .filter(|room| room_matches_completion(room, target))
-            .map(room_completion_value)
-            .collect()
-    }
-
-    pub(crate) fn find_room(&self, target: &str) -> Option<usize> {
-        if let Ok(index) = target.parse::<usize>() {
-            return index
-                .checked_sub(1)
-                .filter(|index| *index < self.rooms.rooms.len());
-        }
-        let target_lower = target.to_lowercase();
-        if let Some(index) = self.rooms.rooms.iter().position(|room| {
-            room.room_id == target
-                || room.canonical_alias.as_deref() == Some(target)
-                || room.name.as_deref().map(str::to_lowercase).as_deref()
-                    == Some(target_lower.as_str())
-        }) {
-            return Some(index);
-        }
-
-        if let Some(alias) = room_alias_with_hash(target) {
-            if let Some(index) = self
-                .rooms
-                .rooms
-                .iter()
-                .position(|room| room.canonical_alias.as_deref() == Some(alias.as_str()))
-            {
-                return Some(index);
-            }
-        }
-
-        let target_local = incomplete_matrix_room_name(target)?;
-        self.rooms.rooms.iter().position(|room| {
-            room.canonical_alias
-                .as_deref()
-                .and_then(matrix_room_local_name)
-                .is_some_and(|local| local.eq_ignore_ascii_case(target_local))
-                || matrix_room_local_name(&room.room_id)
-                    .is_some_and(|local| local.eq_ignore_ascii_case(target_local))
-        })
-    }
-
-    pub(crate) fn handle_live_frame(&mut self, frame: LiveFrame) -> LiveFrameAction {
-        match frame {
-            LiveFrame::Connected => {
-                self.status = Status::Debug("live WebSocket connected".to_owned());
-                LiveFrameAction::None
-            }
-            LiveFrame::Reconnecting { reason, delay } => {
-                self.status = Status::Info(format!(
-                    "live WebSocket reconnecting in {}s: {reason}",
-                    delay.as_secs()
-                ));
-                LiveFrameAction::None
-            }
-            LiveFrame::Disconnected(reason) => {
-                self.status = Status::Debug(format!("live WebSocket disconnected: {reason}"));
-                LiveFrameAction::None
-            }
-            LiveFrame::ProtocolError(err) => {
-                self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
-                LiveFrameAction::None
-            }
-            LiveFrame::Timeline(event) => self.append_live_event(*event),
-        }
-    }
-
-    fn append_live_event(&mut self, event: EventDto) -> LiveFrameAction {
-        let key = RoomKey {
-            account_id: event.account_id,
-            room_id: event.room_id.clone(),
-        };
-        if let Some((target_id, new_body)) = event.edit_relation() {
-            let target_id = target_id.to_owned();
-            let new_body = new_body.to_owned();
-            if let Some(events) = self.messages.events.get_mut(&key) {
-                if let Some(e) = events.iter_mut().find(|e| e.event_id == target_id) {
-                    e.body = Some(new_body);
-                }
-            }
-            return LiveFrameAction::None;
-        }
-        let known_room = self
-            .rooms
-            .rooms
-            .iter()
-            .any(|room| RoomKey::from(room) == key);
-        if self
-            .selected_room()
-            .is_some_and(|room| RoomKey::from(room) == key)
-        {
-            let visible_before = self.selected_display_line_count();
-            let old_scroll_bottom = visible_before.saturating_sub(self.messages.page_size);
-            let should_follow_tail =
-                self.messages.scroll == usize::MAX || self.messages.scroll >= old_scroll_bottom;
-            let should_select =
-                self.messages.selection.is_none() && should_show_event(&event, &self.display);
-            let event_id = event.event_id.clone();
-            if self.live.pending_own_event_id.as_deref() == Some(&event_id) {
-                self.live
-                    .own_senders
-                    .insert(event.account_id, event.sender.clone());
-                self.live.pending_own_event_id = None;
-            }
-            self.remember_display_name_from_event(&key, &event);
-            self.messages
-                .events
-                .entry(key.clone())
-                .or_default()
-                .push(event);
-            if should_follow_tail {
-                self.messages.scroll = usize::MAX;
-            }
-            if should_select {
-                self.messages.selection = Some(event_id);
-            }
-            self.rooms.unread.remove(&key);
-            LiveFrameAction::None
-        } else {
-            if should_show_event(&event, &self.display) {
-                *self.rooms.unread.entry(key).or_default() += 1;
-            }
-            if known_room {
-                LiveFrameAction::None
-            } else {
-                LiveFrameAction::RefreshRooms
-            }
-        }
-    }
-
-    pub(crate) fn rebuild_display_names(&mut self, room: &RoomDto, events: &[EventDto]) {
-        let key = RoomKey::from(room);
-        self.rooms.display_names.remove(&key);
-        for event in events {
-            self.remember_display_name_from_event(&key, event);
-        }
-    }
-
-    fn remember_display_name_from_event(&mut self, key: &RoomKey, event: &EventDto) {
-        if event.event_type != "m.room.member" {
-            return;
-        }
-        let user_id = event.state_key().unwrap_or(&event.sender);
-        let Some(display_name) = event.membership_display_name() else {
-            return;
-        };
-        self.rooms
-            .display_names
-            .entry(key.clone())
-            .or_default()
-            .insert(user_id.to_owned(), display_name.to_owned());
-    }
-
-    pub(crate) fn sender_label(&self, event: &EventDto) -> String {
-        if self.display.sender_name == SenderNameStyle::MatrixAddress {
-            return event.sender.clone();
-        }
-        let key = RoomKey {
-            account_id: event.account_id,
-            room_id: event.room_id.clone(),
-        };
-        self.rooms
-            .display_names
-            .get(&key)
-            .and_then(|names| names.get(&event.sender))
-            .filter(|name| !name.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| event.sender.clone())
-    }
-
-    pub(crate) fn selected_room(&self) -> Option<&RoomDto> {
-        self.rooms
-            .selected
-            .and_then(|index| self.rooms.rooms.get(index))
-    }
-
-    pub(crate) fn selected_raw_events(&self) -> &[EventDto] {
-        self.selected_room()
-            .and_then(|room| self.messages.events.get(&RoomKey::from(room)))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn selected_reactions(&self) -> HashMap<String, Vec<(String, usize)>> {
-        collect_reactions(self.selected_raw_events())
-    }
-
-    pub(crate) fn selected_events(&self) -> Vec<&EventDto> {
-        self.selected_room()
-            .and_then(|room| self.messages.events.get(&RoomKey::from(room)))
-            .map(|events| {
-                events
-                    .iter()
-                    .filter(|event| should_show_event(event, &self.display))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn selected_message_id(&self) -> Option<&str> {
-        self.messages.selection.as_deref()
-    }
-
-    fn selected_message_event(&self) -> Option<&EventDto> {
-        let selected_message = self.messages.selection.as_deref()?;
-        self.selected_events()
-            .into_iter()
-            .find(|event| event.event_id == selected_message)
-    }
-
-    pub(crate) fn move_selected_message(&mut self, offset: isize) {
-        let Some((event_id, next, event_count)) = ({
-            let events = self.selected_events();
-            if events.is_empty() {
-                None
-            } else {
-                let next = selected_message_target_index(
-                    events.as_slice(),
-                    self.messages.selection.as_deref(),
-                    offset,
-                );
-                Some((events[next].event_id.clone(), next, events.len()))
-            }
-        }) else {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        };
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
-    }
-
-    pub(crate) fn page_selected_message(&mut self, direction: isize) {
-        let page = self.messages.page_size.max(1);
-        let Some((event_id, next, event_count)) = ({
-            let events = self.selected_events();
-            if events.is_empty() {
-                None
-            } else {
-                let sender_labels = self.sender_labels(events.as_slice());
-                let reactions = self.selected_reactions();
-                let ranges = message_line_ranges(
-                    events.as_slice(),
-                    sender_labels.as_slice(),
-                    self.messages.width,
-                    &reactions,
-                    &self.colors,
-                );
-                let total_lines = ranges
-                    .last()
-                    .map(|range| range.end)
-                    .unwrap_or_default()
-                    .max(1);
-                let current_index = self
-                    .messages
-                    .selection
-                    .as_deref()
-                    .and_then(|event_id| events.iter().position(|event| event.event_id == event_id))
-                    .unwrap_or_else(|| {
-                        if direction.is_negative() {
-                            message_index_at_line(
-                                ranges.as_slice(),
-                                self.messages.scroll.saturating_add(page.saturating_sub(1)),
-                            )
-                        } else {
-                            message_index_at_line(ranges.as_slice(), self.messages.scroll)
-                        }
-                    });
-                let current_line = ranges
-                    .get(current_index)
-                    .map(|range| range.start)
-                    .unwrap_or_default();
-                let target_line = if direction.is_negative() {
-                    current_line.saturating_sub(page)
-                } else {
-                    current_line
-                        .saturating_add(page)
-                        .min(total_lines.saturating_sub(1))
-                };
-                let next = message_index_at_line(ranges.as_slice(), target_line);
-                Some((events[next].event_id.clone(), next, events.len()))
-            }
-        }) else {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        };
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
-    }
-
-    fn ensure_message_index_visible(&mut self, index: usize) {
-        let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
-        let reactions = self.selected_reactions();
-        let ranges = message_line_ranges(
-            events.as_slice(),
-            sender_labels.as_slice(),
-            self.messages.width,
-            &reactions,
-            &self.colors,
-        );
-        let Some(range) = ranges.get(index) else {
-            return;
-        };
-        let page_size = self.messages.page_size.max(1);
-        let total_lines = ranges.last().map(|range| range.end).unwrap_or_default();
-        let max_scroll = total_lines.saturating_sub(page_size);
-        let mut scroll = self.messages.scroll.min(max_scroll);
-        if range.start < scroll || range.end > scroll.saturating_add(page_size) {
-            scroll = range.start;
-        }
-        self.messages.scroll = scroll.min(max_scroll);
-    }
-
-    pub(crate) async fn commit_room_search(&mut self, query: String) {
-        if query.is_empty() {
-            return;
-        }
-        let q = query.to_ascii_lowercase();
-        let start = self.rooms.selected.map(|i| i + 1).unwrap_or(0);
-        let count = self.rooms.rooms.len();
-        let found = (start..count).find(|&i| room_matches_search(&self.rooms.rooms[i], &q));
-        self.last_search = Some(query);
-        match found {
-            Some(idx) => {
-                self.rooms.selected = Some(idx);
-                self.load_selected_timeline().await;
-                self.status = Status::from(format!("room match {} of {}", idx + 1, count));
-            }
-            None => self.status = Status::Info("no match".to_owned()),
-        }
-    }
-
-    pub(crate) async fn search_adjacent_room(&mut self, query: &str, forward: bool) {
-        let q = query.to_ascii_lowercase();
-        let count = self.rooms.rooms.len();
-        if count == 0 {
-            return;
-        }
-        let found = if forward {
-            let start = self.rooms.selected.map(|i| i + 1).unwrap_or(0);
-            (start..count).find(|&i| room_matches_search(&self.rooms.rooms[i], &q))
-        } else {
-            let end = self.rooms.selected.unwrap_or(0);
-            (0..end)
-                .rev()
-                .find(|&i| room_matches_search(&self.rooms.rooms[i], &q))
-        };
-        match found {
-            Some(idx) => {
-                self.rooms.selected = Some(idx);
-                self.load_selected_timeline().await;
-                self.status = Status::from(format!("room match {} of {}", idx + 1, count));
-            }
-            None => self.status = Status::Info("no more matches".to_owned()),
-        }
-    }
-
-    pub(crate) fn commit_message_search(&mut self, query: String) {
-        if query.is_empty() {
-            return;
-        }
-        let q = query.to_ascii_lowercase();
-        let current_id = self.messages.selection.clone();
-        let (found, count) = {
-            let events = self.selected_events();
-            let count = events.len();
-            let start = current_id
-                .as_deref()
-                .and_then(|id| events.iter().position(|e| e.event_id == id))
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let found = events[start..]
-                .iter()
-                .enumerate()
-                .find(|(_, e)| message_matches_search(e, &q))
-                .map(|(i, e)| (i + start, e.event_id.clone()));
-            (found, count)
-        };
-        self.last_search = Some(query);
-        match found {
-            Some((idx, event_id)) => {
-                self.messages.selection = Some(event_id);
-                self.ensure_message_index_visible(idx);
-                self.status = Status::from(format!("message match {} of {}", idx + 1, count));
-            }
-            None => self.status = Status::Info("no match".to_owned()),
-        }
-    }
-
-    pub(crate) fn search_adjacent_message(&mut self, query: &str, forward: bool) {
-        let q = query.to_ascii_lowercase();
-        let current_id = self.messages.selection.clone();
-        let (found, count) = {
-            let events = self.selected_events();
-            let count = events.len();
-            let current_pos = current_id
-                .as_deref()
-                .and_then(|id| events.iter().position(|e| e.event_id == id));
-            let found = if forward {
-                let start = current_pos.map(|i| i + 1).unwrap_or(0);
-                events[start..]
-                    .iter()
-                    .enumerate()
-                    .find(|(_, e)| message_matches_search(e, &q))
-                    .map(|(i, e)| (i + start, e.event_id.clone()))
-            } else {
-                let end = current_pos.unwrap_or(count);
-                events[..end]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, e)| message_matches_search(e, &q))
-                    .map(|(i, e)| (i, e.event_id.clone()))
-            };
-            (found, count)
-        };
-        match found {
-            Some((idx, event_id)) => {
-                self.messages.selection = Some(event_id);
-                self.ensure_message_index_visible(idx);
-                self.status = Status::from(format!("message match {} of {}", idx + 1, count));
-            }
-            None => self.status = Status::Info("no more matches".to_owned()),
-        }
-    }
-
-    fn selected_display_line_count(&self) -> usize {
-        let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
-        let reactions = self.selected_reactions();
-        message_line_ranges(
-            events.as_slice(),
-            sender_labels.as_slice(),
-            self.messages.width,
-            &reactions,
-            &self.colors,
-        )
-        .last()
-        .map(|range| range.end)
-        .unwrap_or_default()
-    }
-
-    pub(crate) fn sender_labels(&self, events: &[&EventDto]) -> Vec<String> {
-        events
-            .iter()
-            .map(|event| self.sender_label(event))
-            .collect()
-    }
-
-    pub(crate) fn set_message_viewport(&mut self, page_size: usize, width: usize) {
-        self.messages.page_size = page_size.max(1);
-        self.messages.width = width.max(1);
-        let line_count = self.selected_display_line_count();
-        let max_scroll = line_count.saturating_sub(self.messages.page_size);
-        self.messages.scroll = if self.messages.scroll == usize::MAX {
-            max_scroll
-        } else {
-            self.messages.scroll.min(max_scroll)
-        };
-    }
-
     pub(crate) fn start_reply_to_selected_message(&mut self) {
         let Some(event) = self.selected_message_event() else {
             self.status = Status::from("select a displayed message before replying".to_owned());
@@ -1109,6 +500,28 @@ impl App {
             debug: format!("reply to {} waits for the Axon write API", event.event_id),
             redacted: "reply to message waits for the Axon write API",
         };
+    }
+
+    fn select_most_recent_message_if_needed(&mut self) {
+        if self.selected_message_event().is_some() {
+            return;
+        }
+        self.messages.selection = self
+            .selected_events()
+            .last()
+            .map(|event| event.event_id.clone());
+    }
+
+    fn prepare_reaction(&mut self, input: &str) -> Result<(String, String), String> {
+        self.select_most_recent_message_if_needed();
+        let event_id = self
+            .selected_message_id()
+            .map(str::to_owned)
+            .ok_or_else(|| "no displayed messages".to_owned())?;
+        let reaction_key = self
+            .take_reaction_key(input)
+            .ok_or_else(|| format!("unknown or ambiguous emoji: {input}"))?;
+        Ok((event_id, reaction_key))
     }
 
     pub(crate) fn start_thread_from_selected_message(&mut self) {
@@ -1141,24 +554,6 @@ impl App {
         self.status = Status::EventAction {
             debug: format!("editing {} - Esc to cancel", event_id),
             redacted: "editing message - Esc to cancel",
-        };
-    }
-
-    pub(crate) fn start_react_to_selected_message(&mut self) {
-        let Some(event) = self.selected_message_event() else {
-            self.status = Status::from("select a displayed message before reacting".to_owned());
-            return;
-        };
-        let event_id = event.event_id.clone();
-        self.input.buffer.clear();
-        self.input.cursor = 0;
-        self.input.react_tab = None;
-        self.mode = Mode::Reacting {
-            event_id: event_id.clone(),
-        };
-        self.status = Status::EventAction {
-            debug: format!("react to {} - type emoji, Enter to send", event_id),
-            redacted: "react to message - type emoji, Enter to send",
         };
     }
 
@@ -1237,100 +632,6 @@ impl App {
             Err(err) => self.status = Status::Info(format!("redact failed: {err}")),
         }
     }
-
-    pub(crate) async fn send_react(&mut self, event_id: &str, key: &str) {
-        if key.is_empty() {
-            self.status = Status::from("reaction key cannot be empty".to_owned());
-            return;
-        }
-        let Some(room) = self.selected_room().cloned() else {
-            self.status = Status::from("no room selected".to_owned());
-            return;
-        };
-        self.status = match self
-            .client
-            .react(room.account_id, &room.room_id, event_id, key)
-            .await
-        {
-            Ok(r) => Status::EventAction {
-                debug: format!("reacted: {}", r.event_id),
-                redacted: "reacted",
-            },
-            Err(err) => Status::Info(format!("react failed: {err}")),
-        };
-    }
-
-    pub(crate) fn update_react_status(&mut self, event_id: &str) {
-        if self.input.buffer.is_empty() {
-            self.status = Status::EventAction {
-                debug: format!("react to {event_id} - type emoji name, Enter to send"),
-                redacted: "react to message - type emoji name, Enter to send",
-            };
-            return;
-        }
-        let matches = emoji_matches(&self.input.buffer);
-        self.status = Status::Info(match matches.as_slice() {
-            [] => format!("no emoji matches '{}'", self.input.buffer),
-            [single] => format!("{} {} - Enter to send", single.as_str(), single.name()),
-            _ => {
-                let shown: Vec<_> = matches
-                    .iter()
-                    .take(5)
-                    .map(|e| format!("{} {}", e.as_str(), e.name()))
-                    .collect();
-                let more = matches.len().saturating_sub(5);
-                if more == 0 {
-                    format!("matches: {} - Tab to select", shown.join(", "))
-                } else {
-                    format!(
-                        "matches: {}, +{more} more - Tab to select",
-                        shown.join(", ")
-                    )
-                }
-            }
-        });
-    }
-
-    pub(crate) fn complete_react_input(&mut self, event_id: &str) {
-        let matches = emoji_matches(&self.input.buffer);
-        if matches.len() < 2 {
-            return;
-        }
-        let count = matches.len();
-        let next = self.input.react_tab.map(|i| (i + 1) % count).unwrap_or(0);
-        self.input.react_tab = Some(next);
-        let selected = &matches[next];
-        self.status = Status::EventAction {
-            debug: format!(
-                "[{}/{}] react to {} with {} {} - Tab for next, Enter to send",
-                next + 1,
-                count,
-                event_id,
-                selected.as_str(),
-                selected.name()
-            ),
-            redacted: "reaction selected - Tab for next, Enter to send",
-        };
-    }
-}
-
-pub(crate) fn format_time(origin_ts: i64) -> String {
-    let Ok(millis) = u64::try_from(origin_ts) else {
-        return "--:--:--".to_owned();
-    };
-    let Some(time) = UNIX_EPOCH.checked_add(Duration::from_millis(millis)) else {
-        return "--:--:--".to_owned();
-    };
-    let Ok(since_midnight) = time.duration_since(UNIX_EPOCH) else {
-        return "--:--:--".to_owned();
-    };
-    let seconds = since_midnight.as_secs() % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        seconds / 3600,
-        (seconds / 60) % 60,
-        seconds % 60
-    )
 }
 
 pub(crate) fn relative_room_index(current: usize, len: usize, offset: isize) -> usize {
@@ -1343,6 +644,14 @@ pub(crate) fn relative_room_index(current: usize, len: usize, offset: isize) -> 
             .unwrap_or(len.saturating_sub(1))
     } else {
         (current + offset as usize) % len
+    }
+}
+
+pub(crate) fn cycle_index(current: usize, len: usize, reverse: bool) -> usize {
+    if reverse {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
     }
 }
 
@@ -1370,358 +679,6 @@ pub(crate) fn selected_message_target_index(
             .saturating_add(offset as usize)
             .min(events.len().saturating_sub(1))
     }
-}
-
-pub(crate) fn message_line_ranges(
-    events: &[&EventDto],
-    sender_labels: &[String],
-    width: usize,
-    reactions: &HashMap<String, Vec<(String, usize)>>,
-    colors: &ColorScheme,
-) -> Vec<Range<usize>> {
-    let empty = vec![];
-    let mut start = 0;
-    events
-        .iter()
-        .zip(sender_labels)
-        .map(|(event, sender_label)| {
-            let event_reactions = reactions
-                .get(&event.event_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&empty);
-            let count =
-                message_display_line_count(event, sender_label, width, event_reactions, colors);
-            let range = start..start + count;
-            start += count;
-            range
-        })
-        .collect()
-}
-
-pub(crate) fn message_index_at_line(ranges: &[Range<usize>], line: usize) -> usize {
-    ranges
-        .iter()
-        .position(|range| line < range.end)
-        .unwrap_or_else(|| ranges.len().saturating_sub(1))
-}
-
-fn message_display_line_count(
-    event: &EventDto,
-    sender_label: &str,
-    width: usize,
-    event_reactions: &[(String, usize)],
-    colors: &ColorScheme,
-) -> usize {
-    let body_lines = message_body_lines(
-        event,
-        sender_label,
-        first_body_width(sender_label, event.origin_ts, width),
-        continuation_body_width(width),
-        colors,
-    )
-    .len()
-    .max(1);
-    body_lines + usize::from(!event_reactions.is_empty())
-}
-
-pub(crate) fn message_display_lines(
-    events: &[&EventDto],
-    sender_labels: &[String],
-    selected_message: Option<&str>,
-    colors: &ColorScheme,
-    width: usize,
-    reactions: &HashMap<String, Vec<(String, usize)>>,
-    own_senders: &HashMap<Uuid, String>,
-) -> Vec<Line<'static>> {
-    let reaction_style = Style::default().fg(colors.input_hint);
-    events
-        .iter()
-        .zip(sender_labels)
-        .flat_map(|(event, sender_label)| {
-            let is_selected = selected_message == Some(event.event_id.as_str());
-            let is_own = own_senders.get(&event.account_id) == Some(&event.sender);
-            let marker = if is_selected { "> " } else { "  " };
-            let time_style = if is_selected {
-                Style::default().fg(colors.selected_room)
-            } else {
-                Style::default()
-            };
-            let sender_color = if is_own {
-                colors.own_message_sender
-            } else {
-                colors.message_sender
-            };
-            let body_lines = message_body_lines(
-                event,
-                sender_label,
-                first_body_width(sender_label, event.origin_ts, width),
-                continuation_body_width(width),
-                colors,
-            );
-            let event_reactions = reactions.get(&event.event_id).cloned().unwrap_or_default();
-            let reaction_line = if event_reactions.is_empty() {
-                None
-            } else {
-                let text = event_reactions
-                    .iter()
-                    .map(|(key, count)| format!("{key} {count}"))
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                Some(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(text, reaction_style),
-                ]))
-            };
-            let body_iter = body_lines
-                .into_iter()
-                .enumerate()
-                .map(move |(index, body)| {
-                    if index == 0 {
-                        let mut spans = vec![
-                            Span::styled(marker, time_style),
-                            Span::styled(format!("{} ", format_time(event.origin_ts)), time_style),
-                            Span::styled(
-                                format!("{sender_label}: "),
-                                Style::default()
-                                    .fg(sender_color)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ];
-                        spans.extend(body);
-                        Line::from(spans)
-                    } else {
-                        let mut spans = vec![Span::raw("  ")];
-                        spans.extend(body);
-                        Line::from(spans)
-                    }
-                });
-            body_iter.chain(reaction_line)
-        })
-        .collect()
-}
-
-fn first_body_width(sender_label: &str, origin_ts: i64, width: usize) -> usize {
-    let prefix_width =
-        2 + format_time(origin_ts).chars().count() + 1 + sender_label.chars().count() + 2;
-    width.saturating_sub(prefix_width).max(1)
-}
-
-pub(crate) fn display_body_with_sender(event: &EventDto, sender_label: &str) -> String {
-    if event.redacted {
-        return "[redacted]".to_owned();
-    }
-    if let Some(membership) = event.membership_change() {
-        return match membership.as_str() {
-            "join" => format!("{sender_label} joined the room"),
-            "leave" => format!("{sender_label} left the room"),
-            "ban" => format!("{sender_label} was banned from the room"),
-            "invite" => format!("{sender_label} was invited to the room"),
-            _ => format!("{sender_label} membership changed: {membership}"),
-        };
-    }
-    event.display_body()
-}
-
-fn message_body_lines(
-    event: &EventDto,
-    sender_label: &str,
-    first_width: usize,
-    continuation_width: usize,
-    colors: &ColorScheme,
-) -> Vec<Vec<Span<'static>>> {
-    if !event.redacted && event.membership_change().is_none() {
-        if let Some(lines) = event.formatted_body().and_then(|html| {
-            formatted_message_body_lines(html, first_width, continuation_width, colors)
-        }) {
-            return lines;
-        }
-    }
-
-    rich_lines_to_spans(wrap_rich_lines(
-        plain_rich_lines(&display_body_with_sender(event, sender_label)),
-        first_width,
-        continuation_width,
-    ))
-}
-
-fn continuation_body_width(width: usize) -> usize {
-    width.saturating_sub(2).max(1)
-}
-
-fn apply_edits(events: &mut Vec<EventDto>) {
-    let edits: Vec<(String, String)> = events
-        .iter()
-        .filter_map(|e| {
-            let (target, body) = e.edit_relation()?;
-            Some((target.to_owned(), body.to_owned()))
-        })
-        .collect();
-    for (target_id, new_body) in &edits {
-        if let Some(e) = events.iter_mut().find(|e| &e.event_id == target_id) {
-            e.body = Some(new_body.clone());
-        }
-    }
-    events.retain(|e| e.edit_relation().is_none());
-}
-
-fn collect_reactions(events: &[EventDto]) -> HashMap<String, Vec<(String, usize)>> {
-    let mut map: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for event in events {
-        if let Some((target, key)) = event.reaction_annotation() {
-            *map.entry(target.to_owned())
-                .or_default()
-                .entry(key.to_owned())
-                .or_default() += 1;
-        }
-    }
-    map.into_iter()
-        .map(|(event_id, counts)| {
-            let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
-            pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            (event_id, pairs)
-        })
-        .collect()
-}
-
-pub(crate) fn should_show_event(event: &EventDto, display: &DisplayOptions) -> bool {
-    if event.event_type == "m.reaction" {
-        return false;
-    }
-    display.show_state_events || !event.is_state_event() || event.is_membership_event()
-}
-
-fn room_matches_search(room: &RoomDto, query: &str) -> bool {
-    [
-        Some(room.room_id.as_str()),
-        room.canonical_alias.as_deref(),
-        room.name.as_deref(),
-        room.topic.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|field| field.to_ascii_lowercase().contains(query))
-}
-
-fn message_matches_search(event: &EventDto, query: &str) -> bool {
-    if event.redacted {
-        return false;
-    }
-    event
-        .body
-        .as_deref()
-        .is_some_and(|body| body.to_ascii_lowercase().contains(query))
-}
-
-pub(crate) fn emoji_matches(query: &str) -> Vec<&'static emojis::Emoji> {
-    if query.is_empty() {
-        return vec![];
-    }
-    let q = query.to_ascii_lowercase();
-    emojis::iter()
-        .filter(|e| e.name().to_ascii_lowercase().contains(q.as_str()))
-        .collect()
-}
-
-fn slash_command_prefix(input: &str) -> Option<&str> {
-    let input = input.trim_start();
-    let without_slash = input.strip_prefix('/')?;
-    (!without_slash.chars().any(char::is_whitespace)).then_some(without_slash)
-}
-
-fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {
-    let command_prefix = format!("/{prefix}");
-    SLASH_COMMANDS
-        .iter()
-        .copied()
-        .filter(|command| command.name.starts_with(&command_prefix))
-        .collect()
-}
-
-fn switch_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/switch")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
-}
-
-fn room_completion_value(room: &RoomDto) -> String {
-    room.canonical_alias
-        .as_deref()
-        .or(room.name.as_deref())
-        .unwrap_or(&room.room_id)
-        .to_owned()
-}
-
-fn room_matches_completion(room: &RoomDto, target: &str) -> bool {
-    let target = target.trim();
-    if target.is_empty() {
-        return true;
-    }
-
-    let target_lower = target.to_lowercase();
-    if [
-        Some(room.room_id.as_str()),
-        room.canonical_alias.as_deref(),
-        room.name.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|field| field.to_lowercase().starts_with(&target_lower))
-    {
-        return true;
-    }
-
-    if let Some(alias) = room_alias_with_hash(target) {
-        if room
-            .canonical_alias
-            .as_deref()
-            .is_some_and(|field| field.to_lowercase().starts_with(&alias.to_lowercase()))
-        {
-            return true;
-        }
-    }
-
-    let Some(target_local) = incomplete_matrix_room_name(target) else {
-        return false;
-    };
-    room.canonical_alias
-        .as_deref()
-        .and_then(matrix_room_local_name)
-        .is_some_and(|local| {
-            local
-                .to_lowercase()
-                .starts_with(&target_local.to_lowercase())
-        })
-        || matrix_room_local_name(&room.room_id).is_some_and(|local| {
-            local
-                .to_lowercase()
-                .starts_with(&target_local.to_lowercase())
-        })
-}
-
-fn incomplete_matrix_room_name(target: &str) -> Option<&str> {
-    let target = target.trim();
-    if target.is_empty() || target.contains(':') {
-        return None;
-    }
-    Some(target.trim_start_matches(['#', '!'])).filter(|target| !target.is_empty())
-}
-
-fn room_alias_with_hash(target: &str) -> Option<String> {
-    let target = target.trim();
-    if target.is_empty() || target.starts_with(['#', '!']) || !target.contains(':') {
-        return None;
-    }
-    Some(format!("#{target}"))
-}
-
-fn matrix_room_local_name(value: &str) -> Option<&str> {
-    let value = value.strip_prefix(['#', '!'])?;
-    value.split_once(':').map(|(local, _server)| local)
 }
 
 #[cfg(test)]
@@ -1784,6 +741,17 @@ mod tests {
             body,
             content,
         )
+    }
+
+    fn reaction_event(event_id: &str, sender: &str, target: &str, key: &str) -> EventDto {
+        let mut event = event_with_id(event_id, "m.reaction", None, serde_json::json!({}));
+        event.sender = sender.to_owned();
+        event.relates_to = Some(serde_json::json!({
+            "rel_type": "m.annotation",
+            "event_id": target,
+            "key": key
+        }));
+        event
     }
 
     fn app_with_rooms(rooms: Vec<RoomDto>) -> App {
@@ -1898,9 +866,18 @@ mod tests {
             Some("Test Room"),
         )]);
 
-        assert_eq!(app.find_room("test"), Some(0));
-        assert_eq!(app.find_room("#test"), Some(0));
-        assert_eq!(app.find_room("TEST"), Some(0));
+        assert_eq!(
+            app.resolve_room_target("test"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target("#test"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target("TEST"),
+            RoomTargetResolution::Match(0)
+        );
     }
 
     #[test]
@@ -1910,10 +887,10 @@ mod tests {
             room("!two:example.com", Some("#two:example.com"), Some("Two")),
         ]);
 
-        assert_eq!(app.find_room("1"), Some(0));
-        assert_eq!(app.find_room("2"), Some(1));
-        assert_eq!(app.find_room("0"), None);
-        assert_eq!(app.find_room("3"), None);
+        assert_eq!(app.resolve_room_target("1"), RoomTargetResolution::Match(0));
+        assert_eq!(app.resolve_room_target("2"), RoomTargetResolution::Match(1));
+        assert_eq!(app.resolve_room_target("0"), RoomTargetResolution::Missing);
+        assert_eq!(app.resolve_room_target("3"), RoomTargetResolution::Missing);
     }
 
     #[test]
@@ -2464,6 +1441,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn message_action_commands_target_most_recent_message_without_selection() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$older:example.com",
+                    "m.room.message",
+                    Some("older"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "older" }),
+                ),
+                event_with_id(
+                    "$newest:example.com",
+                    "m.room.message",
+                    Some("newest"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "newest" }),
+                ),
+            ],
+        );
+
+        app.handle_command(Command::React(None)).await;
+        assert_eq!(app.selected_message_id(), Some("$newest:example.com"));
+        assert_eq!(
+            app.mode,
+            Mode::Reacting {
+                event_id: "$newest:example.com".to_owned()
+            }
+        );
+
+        app.mode = Mode::Compose;
+        app.messages.selection = None;
+        app.handle_command(Command::Reply).await;
+        assert_eq!(app.selected_message_id(), Some("$newest:example.com"));
+        assert_eq!(
+            app.status,
+            "reply to $newest:example.com waits for the Axon write API"
+        );
+
+        app.messages.selection = None;
+        app.handle_command(Command::Thread).await;
+        assert_eq!(app.selected_message_id(), Some("$newest:example.com"));
+        assert_eq!(
+            app.status,
+            "thread from $newest:example.com waits for the Axon write API"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_action_commands_preserve_an_existing_selection() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$selected:example.com",
+                    "m.room.message",
+                    Some("selected"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "selected" }),
+                ),
+                event_with_id(
+                    "$newest:example.com",
+                    "m.room.message",
+                    Some("newest"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "newest" }),
+                ),
+            ],
+        );
+        app.messages.selection = Some("$selected:example.com".to_owned());
+
+        app.handle_command(Command::React(None)).await;
+
+        assert_eq!(app.selected_message_id(), Some("$selected:example.com"));
+        assert_eq!(
+            app.mode,
+            Mode::Reacting {
+                event_id: "$selected:example.com".to_owned()
+            }
+        );
+    }
+
     #[test]
     fn entry_status_hides_event_codes_unless_debug_is_enabled() {
         let mut app = app_with_rooms(Vec::new());
@@ -2676,6 +1738,302 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reaction_tab_completion_shows_and_cycles_matching_emoji() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::Reacting {
+            event_id: "$message:example.com".to_owned(),
+        };
+        app.input.buffer = "face".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        let first_status = app.status.text(false);
+        assert_eq!(app.input.react_tab, Some(0));
+        assert!(first_status.contains("[1/"));
+        assert!(first_status.contains("Tab/Shift-Tab to cycle, Enter to send"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        let second_status = app.status.text(false);
+        assert_eq!(app.input.react_tab, Some(1));
+        assert!(second_status.contains("[2/"));
+        assert_ne!(second_status, first_status);
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+        assert_eq!(app.input.react_tab, Some(0));
+        assert_eq!(app.status.text(false), first_status);
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+        assert_eq!(app.input.react_tab, Some(emoji_matches("face").len() - 1));
+        assert!(app.status.text(false).contains(&format!(
+            "[{}/{}]",
+            emoji_matches("face").len(),
+            emoji_matches("face").len()
+        )));
+    }
+
+    #[tokio::test]
+    async fn reaction_submit_rejects_unknown_text_without_leaving_reacting_mode() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::Reacting {
+            event_id: "$message:example.com".to_owned(),
+        };
+        app.input.buffer = "not-a-known-emoji".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(
+            app.mode,
+            Mode::Reacting {
+                event_id: "$message:example.com".to_owned()
+            }
+        );
+        assert_eq!(app.input.buffer, "not-a-known-emoji");
+        assert_eq!(
+            app.status.text(false),
+            "no emoji matches 'not-a-known-emoji'"
+        );
+    }
+
+    #[test]
+    fn reaction_input_accepts_only_known_or_selected_emoji() {
+        let mut app = app_with_rooms(Vec::new());
+
+        assert_eq!(app.take_reaction_key("🚀"), Some("🚀".to_owned()));
+        assert_eq!(app.take_reaction_key("rocket"), Some("🚀".to_owned()));
+        assert_eq!(app.take_reaction_key("not-a-known-emoji"), None);
+
+        let matches = emoji_matches("face");
+        assert!(matches.len() > 1);
+        assert_eq!(app.take_reaction_key("face"), None);
+
+        app.input.react_tab = Some(1);
+        assert_eq!(
+            app.take_reaction_key("face"),
+            Some(matches[1].as_str().to_owned())
+        );
+    }
+
+    #[test]
+    fn react_command_argument_prepares_immediate_reaction_for_most_recent_message() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$message:example.com",
+                "m.room.message",
+                Some("message"),
+                serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+            )],
+        );
+
+        assert_eq!(
+            app.prepare_reaction("+1"),
+            Ok(("$message:example.com".to_owned(), "👍".to_owned()))
+        );
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[test]
+    fn react_command_argument_rejects_unknown_emoji() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$message:example.com",
+                "m.room.message",
+                Some("message"),
+                serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+            )],
+        );
+
+        assert_eq!(
+            app.prepare_reaction("not-a-known-emoji"),
+            Err("unknown or ambiguous emoji: not-a-known-emoji".to_owned())
+        );
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[test]
+    fn own_reactions_group_duplicate_keys_and_ignore_other_or_redacted_reactions() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let mut redacted = reaction_event(
+            "$redacted:example.com",
+            "@alice:example.com",
+            "$message:example.com",
+            "🚀",
+        );
+        redacted.redacted = true;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                reaction_event(
+                    "$one:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "👍",
+                ),
+                reaction_event(
+                    "$two:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "👍",
+                ),
+                reaction_event(
+                    "$other:example.com",
+                    "@bob:example.com",
+                    "$message:example.com",
+                    "🎉",
+                ),
+                redacted,
+            ],
+        );
+
+        assert_eq!(
+            app.own_reactions_for("$message:example.com"),
+            Ok(vec![OwnReaction {
+                key: "👍".to_owned(),
+                event_ids: vec!["$one:example.com".to_owned(), "$two:example.com".to_owned()],
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn unreact_with_multiple_reactions_enters_and_cycles_selection_mode() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.selection = Some("$message:example.com".to_owned());
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$message:example.com",
+                    "m.room.message",
+                    Some("message"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+                ),
+                reaction_event(
+                    "$rocket:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "🚀",
+                ),
+                reaction_event(
+                    "$thumb:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "👍",
+                ),
+            ],
+        );
+
+        app.start_unreact_from_selected_message().await;
+
+        let Mode::Unreacting {
+            choices, selected, ..
+        } = &app.mode
+        else {
+            panic!("expected unreact selection mode");
+        };
+        assert_eq!(choices.len(), 2);
+        assert_eq!(*selected, 0);
+        let first_status = app.status.text(false);
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+
+        let Mode::Unreacting { selected, .. } = app.mode else {
+            panic!("expected unreact selection mode");
+        };
+        assert_eq!(selected, 1);
+        assert_ne!(app.status.text(false), first_status);
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+
+        let Mode::Unreacting { selected, .. } = app.mode else {
+            panic!("expected unreact selection mode");
+        };
+        assert_eq!(selected, 0);
+        assert_eq!(app.status.text(false), first_status);
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+
+        let Mode::Unreacting { selected, .. } = app.mode else {
+            panic!("expected unreact selection mode");
+        };
+        assert_eq!(selected, 1);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.status.text(false), "unreact canceled");
+    }
+
+    #[tokio::test]
+    async fn unreact_hotkey_targets_selected_message() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.selection = Some("$message:example.com".to_owned());
+        app.mode = Mode::MessageList;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$message:example.com",
+                    "m.room.message",
+                    Some("message"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+                ),
+                reaction_event(
+                    "$rocket:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "🚀",
+                ),
+                reaction_event(
+                    "$thumb:example.com",
+                    "@alice:example.com",
+                    "$message:example.com",
+                    "👍",
+                ),
+            ],
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT))
+            .await;
+
+        assert!(matches!(app.mode, Mode::Unreacting { .. }));
+    }
+
+    #[test]
+    fn redacted_reactions_are_not_rendered_in_counts() {
+        let mut visible = reaction_event(
+            "$visible:example.com",
+            "@alice:example.com",
+            "$message:example.com",
+            "👍",
+        );
+        let mut redacted = visible.clone();
+        redacted.event_id = "$redacted:example.com".to_owned();
+        redacted.redacted = true;
+
+        let reactions = collect_reactions(&[visible.clone(), redacted]);
+
+        assert_eq!(
+            reactions.get("$message:example.com"),
+            Some(&vec![("👍".to_owned(), 1)])
+        );
+        visible.redacted = true;
+        assert!(collect_reactions(&[visible]).is_empty());
+    }
+
     #[test]
     fn switch_completion_fills_unique_room_alias_match() {
         let mut app = app_with_rooms(vec![
@@ -2730,6 +2088,95 @@ mod tests {
     }
 
     #[test]
+    fn tab_completion_fills_react_command_with_argument_space() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/rea".to_owned();
+
+        app.complete_input();
+
+        assert_eq!(app.input.buffer, "/react ");
+    }
+
+    #[test]
+    fn tab_completion_cycles_emoji_matches_after_react_command() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/react face".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.complete_input();
+        let first = app.input.buffer.clone();
+        assert!(first.starts_with("/react "));
+        assert!(app.status.text(false).contains("[1/"));
+
+        app.complete_input();
+        let second = app.input.buffer.clone();
+        assert!(app.status.text(false).contains("[2/"));
+        assert_ne!(second, first);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_cycles_react_command_emoji_matches_backward() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/react face".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        let first = app.input.buffer.clone();
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_ne!(app.input.buffer, first);
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+        assert_eq!(app.input.buffer, first);
+        assert!(app.status.text(false).contains("[1/"));
+
+        app.handle_key(KeyEvent::from(KeyCode::BackTab)).await;
+        let match_count = emoji_matches("face").len();
+        assert!(app
+            .status
+            .text(false)
+            .contains(&format!("[{match_count}/{match_count}]")));
+    }
+
+    #[tokio::test]
+    async fn compose_tab_completes_react_emoji_and_edit_resets_cycle() {
+        let mut app = app_with_rooms(Vec::new());
+        for ch in "/react face".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch))).await;
+        }
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert!(app.input.react_command_completion.is_some());
+        assert!(app.input.buffer.starts_with("/react "));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('x'))).await;
+        assert!(app.input.react_command_completion.is_none());
+    }
+
+    #[test]
+    fn react_command_emoji_completion_reports_no_matches() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/react not-a-known-emoji".to_owned();
+
+        app.complete_input();
+
+        assert_eq!(
+            app.status.text(false),
+            "no emoji matches 'not-a-known-emoji'"
+        );
+        assert_eq!(app.input.buffer, "/react not-a-known-emoji");
+    }
+
+    #[test]
+    fn tab_completion_fills_unreact_command() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/unr".to_owned();
+
+        app.complete_input();
+
+        assert_eq!(app.input.buffer, "/unreact");
+    }
+
+    #[test]
     fn tab_completion_reports_ambiguous_slash_command() {
         let mut app = app_with_rooms(Vec::new());
         app.input.buffer = "/".to_owned();
@@ -2742,6 +2189,10 @@ mod tests {
         assert!(app.status.text(false).contains("/event"));
         assert!(app.status.text(false).contains("/whoami"));
         assert!(app.status.text(false).contains("/whereami"));
+        assert!(app.status.text(false).contains("/react"));
+        assert!(app.status.text(false).contains("/unreact"));
+        assert!(app.status.text(false).contains("/reply"));
+        assert!(app.status.text(false).contains("/thread"));
         assert!(app.status.text(false).contains("/help"));
         assert!(app.status.text(false).contains("/shortcuts"));
         assert!(app.status.text(false).contains("/refresh"));
@@ -2961,6 +2412,153 @@ mod tests {
     }
 
     #[test]
+    fn switch_completion_extends_to_common_prefix_and_shows_suffixes() {
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("axontest")),
+            room("!two:example.com", None, Some("axondev")),
+        ]);
+        app.input.buffer = "/switch ax".to_owned();
+
+        app.complete_switch_input();
+
+        assert_eq!(app.input.buffer, "/switch axon");
+        assert!(app.status.text(false).contains("test"));
+        assert!(app.status.text(false).contains("dev"));
+    }
+
+    #[tokio::test]
+    async fn enter_does_not_submit_partial_switch_completion() {
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("axontest")),
+            room("!two:example.com", None, Some("axondev")),
+        ]);
+        app.input.buffer = "/switch ax".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(
+            app.input.partial_switch_completions,
+            Some(vec!["test".to_owned(), "dev".to_owned()])
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(app.rooms.selected, None);
+        assert_eq!(
+            app.status.text(false),
+            "room completion is partial: test, dev - type more or press Tab"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('t'))).await;
+        assert!(app.input.partial_switch_completions.is_none());
+    }
+
+    #[test]
+    fn switch_completion_uses_matching_names_when_rooms_have_aliases() {
+        let mut app = app_with_rooms(vec![
+            room(
+                "!one:example.com",
+                Some("#test:example.com"),
+                Some("axontest"),
+            ),
+            room(
+                "!two:example.com",
+                Some("#dev:example.com"),
+                Some("axondev"),
+            ),
+        ]);
+        app.input.buffer = "/switch ax".to_owned();
+
+        app.complete_switch_input();
+
+        assert_eq!(app.input.buffer, "/switch axon");
+        assert!(app.status.text(false).contains("test"));
+        assert!(app.status.text(false).contains("dev"));
+    }
+
+    #[test]
+    fn switch_completion_still_completes_unique_match_fully() {
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("axontest")),
+            room("!two:example.com", None, Some("axondev")),
+        ]);
+        app.input.buffer = "/switch axont".to_owned();
+
+        app.complete_switch_input();
+
+        assert_eq!(app.input.buffer, "/switch axontest");
+    }
+
+    #[test]
+    fn switch_completion_replaces_unique_name_match_with_canonical_alias() {
+        let mut app = app_with_rooms(vec![
+            room(
+                "!one:example.com",
+                Some("#test:example.com"),
+                Some("axontest"),
+            ),
+            room(
+                "!two:example.com",
+                Some("#dev:example.com"),
+                Some("axondev"),
+            ),
+        ]);
+        app.input.buffer = "/switch axont".to_owned();
+
+        app.complete_switch_input();
+
+        assert_eq!(app.input.buffer, "/switch #test:example.com");
+    }
+
+    #[test]
+    fn room_resolution_accepts_unique_name_prefix() {
+        let app = app_with_rooms(vec![
+            room(
+                "!one:example.com",
+                Some("#test:example.com"),
+                Some("axontest"),
+            ),
+            room(
+                "!two:example.com",
+                Some("#dev:example.com"),
+                Some("axondev"),
+            ),
+        ]);
+
+        assert_eq!(
+            app.resolve_room_target("axont"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target("axon"),
+            RoomTargetResolution::Ambiguous(vec!["test".to_owned(), "dev".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_command_reports_ambiguous_name_suffixes() {
+        let mut app = app_with_rooms(vec![
+            room(
+                "!one:example.com",
+                Some("#test:example.com"),
+                Some("axontest"),
+            ),
+            room(
+                "!two:example.com",
+                Some("#dev:example.com"),
+                Some("axondev"),
+            ),
+        ]);
+
+        app.handle_command(Command::Switch("axon".to_owned())).await;
+
+        assert_eq!(app.status.text(false), "room name is ambiguous: test, dev");
+        assert_eq!(app.rooms.selected, None);
+    }
+
+    #[test]
     fn switch_completion_only_runs_for_switch_command() {
         let mut app = app_with_rooms(vec![room(
             "!test:example.com",
@@ -2982,8 +2580,14 @@ mod tests {
             Some("Test Room"),
         )]);
 
-        assert_eq!(app.find_room("test:example.com"), Some(0));
-        assert_eq!(app.find_room("test:other.example"), None);
+        assert_eq!(
+            app.resolve_room_target("test:example.com"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target("test:other.example"),
+            RoomTargetResolution::Missing
+        );
     }
 
     #[test]
@@ -2994,8 +2598,14 @@ mod tests {
             Some("Friendly Name"),
         )]);
 
-        assert_eq!(app.find_room("#test:example.com"), Some(0));
-        assert_eq!(app.find_room("friendly name"), Some(0));
+        assert_eq!(
+            app.resolve_room_target("#test:example.com"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target("friendly name"),
+            RoomTargetResolution::Match(0)
+        );
     }
 
     #[test]
@@ -3006,6 +2616,9 @@ mod tests {
             Some("Test Room"),
         )]);
 
-        assert_eq!(app.find_room("#test:other.example"), None);
+        assert_eq!(
+            app.resolve_room_target("#test:other.example"),
+            RoomTargetResolution::Missing
+        );
     }
 }

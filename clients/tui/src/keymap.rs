@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::emoji_matches;
-use crate::app::{App, Mode, PopupKind, SearchKind};
+use crate::app::{cycle_index, App, Mode, PopupKind, SearchKind};
 use crate::command;
 use crate::command::HELP_COMMANDS;
 
@@ -37,6 +37,14 @@ impl App {
                 Mode::Search(kind, query) => self.handle_search_key(key, kind, query).await,
                 Mode::Editing { event_id } => self.handle_editing_key(key, event_id).await,
                 Mode::Reacting { event_id } => self.handle_reacting_key(key, event_id).await,
+                Mode::Unreacting {
+                    target_event_id,
+                    choices,
+                    selected,
+                } => {
+                    self.handle_unreacting_key(key, target_event_id, choices, selected)
+                        .await
+                }
                 Mode::Popup(kind) => self.handle_popup_key(key, kind),
             }
         }
@@ -171,6 +179,9 @@ impl App {
         } else if self.shortcuts.react_message.matches(key) {
             self.dismiss_input_help();
             self.start_react_to_selected_message();
+        } else if self.shortcuts.unreact_message.matches(key) {
+            self.dismiss_input_help();
+            self.start_unreact_from_selected_message().await;
         } else if self.shortcuts.clear_input.matches(key) {
             self.mode = Mode::Compose;
         }
@@ -194,6 +205,14 @@ impl App {
             self.page_selected_message(1);
         } else if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
+            if let Some(completions) = self.input.partial_switch_completions.as_ref() {
+                self.status = format!(
+                    "room completion is partial: {} - type more or press Tab",
+                    completions.join(", ")
+                )
+                .into();
+                return;
+            }
             let input = self.take_input_for_submit();
             self.handle_command(command::parse(&input)).await;
         } else if self.shortcuts.clear_input.matches(key) {
@@ -201,6 +220,10 @@ impl App {
         } else if self.shortcuts.complete.matches(key) {
             self.dismiss_input_help();
             self.complete_input();
+        } else if key.code == KeyCode::BackTab {
+            // BackTab is the fixed reverse gesture for the configurable completion key.
+            self.dismiss_input_help();
+            self.complete_input_reverse();
         } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
             self.clear_input_buffer();
         } else if let KeyCode::Char(ch) = key.code {
@@ -258,15 +281,24 @@ impl App {
         }
         if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
-            let input = self.take_input_for_submit();
-            let reaction_key = self.reaction_key_from_input(&input);
+            let input = self.input.buffer.clone();
+            let Some(reaction_key) = self.take_reaction_key(&input) else {
+                self.input.react_tab = None;
+                self.update_react_status(&event_id);
+                return;
+            };
+            self.take_input_for_submit();
             self.mode = Mode::Compose;
             self.send_react(&event_id, &reaction_key).await;
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_input_and_selection();
         } else if self.shortcuts.complete.matches(key) {
             self.dismiss_input_help();
-            self.complete_react_input(&event_id);
+            self.complete_react_input(false);
+        } else if key.code == KeyCode::BackTab {
+            // BackTab is the fixed reverse gesture for the configurable completion key.
+            self.dismiss_input_help();
+            self.complete_react_input(true);
         } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
             self.clear_input_buffer();
             self.input.react_tab = None;
@@ -278,6 +310,32 @@ impl App {
                 self.input.react_tab = None;
                 self.update_react_status(&event_id);
             }
+        }
+    }
+
+    async fn handle_unreacting_key(
+        &mut self,
+        key: KeyEvent,
+        target_event_id: String,
+        choices: Vec<crate::app::OwnReaction>,
+        selected: usize,
+    ) {
+        if self.shortcuts.clear_input.matches(key) {
+            self.mode = Mode::Compose;
+            self.status = "unreact canceled".into();
+        } else if self.shortcuts.complete.matches(key) || key.code == KeyCode::BackTab {
+            // BackTab is the fixed reverse gesture for the configurable completion key.
+            let next = cycle_index(selected, choices.len(), key.code == KeyCode::BackTab);
+            self.status = crate::app::unreact_selection_status(&choices, next);
+            self.mode = Mode::Unreacting {
+                target_event_id,
+                choices,
+                selected: next,
+            };
+        } else if self.shortcuts.submit.matches(key) {
+            let reaction = choices[selected].clone();
+            self.mode = Mode::Compose;
+            self.withdraw_reaction(reaction).await;
         }
     }
 
@@ -309,22 +367,24 @@ impl App {
     fn take_input_for_submit(&mut self) -> String {
         let input = std::mem::take(&mut self.input.buffer);
         self.input.cursor = 0;
+        self.input.react_command_completion = None;
+        self.input.partial_switch_completions = None;
         input
     }
 
-    fn reaction_key_from_input(&mut self, input: &str) -> String {
+    pub(crate) fn take_reaction_key(&mut self, input: &str) -> Option<String> {
+        let input = input.trim();
+        if let Some(emoji) = emojis::get(input).or_else(|| emojis::get_by_shortcode(input)) {
+            self.input.react_tab = None;
+            return Some(emoji.as_str().to_owned());
+        }
         if let Some(idx) = self.input.react_tab.take() {
-            emoji_matches(input)
-                .get(idx)
-                .map(|e| e.as_str().to_owned())
-                .unwrap_or_else(|| input.to_owned())
-        } else {
-            let matches = emoji_matches(input);
-            if matches.len() == 1 {
-                matches[0].as_str().to_owned()
-            } else {
-                input.to_owned()
-            }
+            return emoji_matches(input).get(idx).map(|e| e.as_str().to_owned());
+        }
+        let matches = emoji_matches(input);
+        match matches.as_slice() {
+            [single] => Some(single.as_str().to_owned()),
+            _ => None,
         }
     }
 
@@ -332,6 +392,8 @@ impl App {
         self.dismiss_input_help();
         self.input.buffer.clear();
         self.input.cursor = 0;
+        self.input.react_command_completion = None;
+        self.input.partial_switch_completions = None;
     }
 
     fn clear_input_and_selection(&mut self) {
@@ -343,7 +405,10 @@ impl App {
     }
 
     fn abandon_transient_input_mode(&mut self) {
-        if matches!(self.mode, Mode::Editing { .. } | Mode::Reacting { .. }) {
+        if matches!(
+            self.mode,
+            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. }
+        ) {
             self.clear_input_buffer();
             self.input.react_tab = None;
             self.mode = Mode::Compose;
@@ -351,7 +416,10 @@ impl App {
     }
 
     fn cycle_focus(&mut self) {
-        if matches!(self.mode, Mode::Editing { .. } | Mode::Reacting { .. }) {
+        if matches!(
+            self.mode,
+            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. }
+        ) {
             self.abandon_transient_input_mode();
             return;
         }
@@ -361,7 +429,7 @@ impl App {
             Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
                 Mode::Compose
             }
-            Mode::Editing { .. } | Mode::Reacting { .. } => Mode::Compose,
+            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. } => Mode::Compose,
         };
     }
 }

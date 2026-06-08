@@ -28,6 +28,7 @@ Options:
 - Edits the selected message (`PUT /v1/.../events/{event_id}`).
 - Redacts the selected message (`DELETE /v1/.../events/{event_id}`).
 - Reacts to the selected message with an emoji (`POST /v1/.../events/{event_id}/reactions`).
+- Withdraws the current user's reactions by redacting their reaction events.
 - Three-pane focus system: Input, Room List, and Message List, with keyboard navigation and search in each list.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
@@ -50,6 +51,10 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/event <event_id>` | Show a compact status-line summary of one event in the selected account. |
 | `/whoami` | Show your Matrix ID and display name for the selected room's account. |
 | `/whereami` | Show a room information popup for the selected room. Up/Down/PageUp/PageDown scroll the popup. |
+| `/react [emoji]` | React to the selected message, or the most recent displayed message when none is selected. With an emoji or shortcode such as `/react +1`, send immediately; without one, open the selector. |
+| `/unreact` | Withdraw one of your reactions from the selected or most recent displayed message. A sole reaction is withdrawn immediately; Tab cycles when several exist. |
+| `/reply` | Reply to the selected or most recent displayed message; pending Axon API support. |
+| `/thread` | Start a thread from the selected or most recent displayed message; pending Axon API support. |
 | `/shortcuts` | Show active keyboard shortcuts from the config file. |
 | `/help`, `/?` | Show available slash commands. |
 | `/refresh` | Clear and redraw the terminal display. |
@@ -68,7 +73,13 @@ Room switching is forgiving. For a room with canonical alias
 /switch #test:example.com
 ```
 
-Use Tab to complete slash commands and `/switch` room names.
+Use Tab to complete slash commands, `/switch` room names, and emoji names after
+`/react`; use Shift-Tab to cycle backward through matching options. When several
+rooms match `/switch`, completion advances to their
+longest common prefix and lists the remaining suffixes. Enter reports an
+ambiguity until the text identifies one room. While Tab completion is partial,
+Enter keeps the command open instead of submitting it. A unique Tab match is
+replaced with that room's canonical alias or room ID.
 
 ## Keyboard Shortcuts
 
@@ -104,6 +115,7 @@ When focus is on the **Input** pane:
 | `e` | Edit the selected message (pre-fills the input; `Esc` to cancel). |
 | `d` | Redact the selected message immediately. |
 | `Shift-R` | React to the selected message: type an emoji name, `Tab` to cycle matches, `Enter` to send. |
+| `Shift-U` | Withdraw one of your reactions from the selected message; `Tab` cycles when several exist. |
 | `r` | Reply to the selected message (pending Axon API support). |
 | `t` | Start a thread (pending Axon API support). |
 | `Ctrl-A`, `Home` | Move to start of the entry line. |
@@ -157,6 +169,7 @@ thread = "t"
 edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
+unreact_message = "shift-u"
 focus_next = "ctrl-space"
 
 [colors]
@@ -177,7 +190,7 @@ input_lines = 1
 
 Supported key forms include `ctrl-n`, `ctrl-j`, `ctrl-k`, `ctrl-space`, `tab`,
 `enter`, `esc`, `backspace`, `home`, `end`, `up`, `down`, `left`, `right`,
-`pageup`, `pagedown`, `space`, `r`, `t`, `shift-r`.
+`pageup`, `pagedown`, `space`, `r`, `t`, `shift-r`, `shift-u`.
 
 Supported color names are `black`, `red`, `green`, `yellow`, `blue`, `magenta`,
 `cyan`, `gray`, `dark-gray`, `light-red`, `light-green`, `light-yellow`,

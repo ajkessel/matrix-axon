@@ -5,6 +5,10 @@ pub enum Command {
     Event(String),
     Whoami,
     Whereami,
+    React(Option<String>),
+    Unreact,
+    Reply,
+    Thread,
     Help,
     Shortcuts,
     Refresh,
@@ -54,6 +58,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/event", true),
     SlashCommand::supported("/whoami", false),
     SlashCommand::supported("/whereami", false),
+    SlashCommand::supported("/react", true),
+    SlashCommand::supported("/unreact", false),
+    SlashCommand::supported("/reply", false),
+    SlashCommand::supported("/thread", false),
     SlashCommand::supported("/help", false),
     SlashCommand::supported("/shortcuts", false),
     SlashCommand::supported("/refresh", false),
@@ -93,6 +101,27 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/whereami",
         insert_text: "/whereami",
         description: "show room information",
+    },
+    HelpCommand {
+        label: "/react [emoji]",
+        insert_text: "/react ",
+        description: "react to the selected or most recent message",
+    },
+    HelpCommand {
+        label: "/unreact",
+        insert_text: "/unreact",
+        description: "withdraw one of your reactions",
+    },
+    HelpCommand {
+        label: "/reply",
+        insert_text: "/reply",
+        description: "reply to the selected or most recent message (pending API support)",
+    },
+    HelpCommand {
+        label: "/thread",
+        insert_text: "/thread",
+        description:
+            "start a thread from the selected or most recent message (pending API support)",
     },
     HelpCommand {
         label: "/help, /?",
@@ -148,6 +177,10 @@ pub fn parse(input: &str) -> Command {
         "event" => Command::Invalid("/event requires an event id".to_owned()),
         "whoami" => Command::Whoami,
         "whereami" => Command::Whereami,
+        "react" => Command::React((!arg.is_empty()).then(|| arg.to_owned())),
+        "unreact" => Command::Unreact,
+        "reply" => Command::Reply,
+        "thread" => Command::Thread,
         "help" | "?" => Command::Help,
         "shortcuts" => Command::Shortcuts,
         "refresh" => Command::Refresh,
@@ -211,6 +244,16 @@ mod tests {
     #[test]
     fn parses_whereami() {
         assert_eq!(parse("/whereami"), Command::Whereami);
+    }
+
+    #[test]
+    fn parses_message_action_commands() {
+        assert_eq!(parse("/react"), Command::React(None));
+        assert_eq!(parse("/react +1"), Command::React(Some("+1".to_owned())));
+        assert_eq!(parse("/react 🚀"), Command::React(Some("🚀".to_owned())));
+        assert_eq!(parse("/unreact"), Command::Unreact);
+        assert_eq!(parse("/reply"), Command::Reply);
+        assert_eq!(parse("/thread"), Command::Thread);
     }
 
     #[test]

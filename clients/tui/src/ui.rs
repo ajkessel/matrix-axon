@@ -190,7 +190,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     };
     let input_border = if matches!(
         app.mode,
-        Mode::Compose | Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Search(_, _)
+        Mode::Compose
+            | Mode::Editing { .. }
+            | Mode::Reacting { .. }
+            | Mode::Unreacting { .. }
+            | Mode::Search(_, _)
     ) {
         Style::default()
             .fg(app.colors.selected_room)
@@ -449,6 +453,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             shortcuts.react_message.label()
         ),
         format!(
+            "  {}   withdraw one of your reactions",
+            shortcuts.unreact_message.label()
+        ),
+        format!(
             "  {}   reply (pending API support)",
             shortcuts.reply.label()
         ),
@@ -464,7 +472,7 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             shortcuts.clear_input.label()
         ),
         format!(
-            "  {}   tab complete command or emoji",
+            "  {} / Shift-Tab   complete forward / backward",
             shortcuts.complete.label()
         ),
         format!("  {}   backspace", shortcuts.backspace.label()),
@@ -509,6 +517,7 @@ mod tests {
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("edit message"));
         assert!(text.contains("react to message"));
+        assert!(text.contains("withdraw one of your reactions"));
     }
 
     #[test]

@@ -43,6 +43,7 @@ thread = "t"
 edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
+unreact_message = "shift-u"
 focus_next = "ctrl-space"
 
 [colors]
@@ -139,6 +140,7 @@ pub struct Shortcuts {
     pub edit_message: KeyBinding,
     pub redact_message: KeyBinding,
     pub react_message: KeyBinding,
+    pub unreact_message: KeyBinding,
     pub focus_next: KeyBinding,
 }
 
@@ -261,6 +263,7 @@ impl RawConfig {
                 edit_message: "e".to_owned(),
                 redact_message: "d".to_owned(),
                 react_message: "shift-r".to_owned(),
+                unreact_message: "shift-u".to_owned(),
                 focus_next: "ctrl-space".to_owned(),
             },
             colors: RawColorScheme {
@@ -318,6 +321,7 @@ thread = "{thread}"
 edit_message = "{edit_message}"
 redact_message = "{redact_message}"
 react_message = "{react_message}"
+unreact_message = "{unreact_message}"
 focus_next = "{focus_next}"
 
 [colors]
@@ -357,6 +361,7 @@ input_lines = {input_lines}
             edit_message = self.shortcuts.edit_message,
             redact_message = self.shortcuts.redact_message,
             react_message = self.shortcuts.react_message,
+            unreact_message = self.shortcuts.unreact_message,
             focus_next = self.shortcuts.focus_next,
             border = self.colors.border,
             selected_room = self.colors.selected_room,
@@ -404,6 +409,7 @@ struct RawShortcuts {
     edit_message: String,
     redact_message: String,
     react_message: String,
+    unreact_message: String,
     focus_next: String,
 }
 
@@ -434,6 +440,7 @@ impl RawShortcuts {
         assign_if_some(&mut self.edit_message, partial.edit_message);
         assign_if_some(&mut self.redact_message, partial.redact_message);
         assign_if_some(&mut self.react_message, partial.react_message);
+        assign_if_some(&mut self.unreact_message, partial.unreact_message);
         assign_if_some(&mut self.focus_next, partial.focus_next);
     }
 
@@ -464,6 +471,7 @@ impl RawShortcuts {
             edit_message: parse_key_binding("shortcuts.edit_message", &self.edit_message)?,
             redact_message: parse_key_binding("shortcuts.redact_message", &self.redact_message)?,
             react_message: parse_key_binding("shortcuts.react_message", &self.react_message)?,
+            unreact_message: parse_key_binding("shortcuts.unreact_message", &self.unreact_message)?,
             focus_next: parse_key_binding("shortcuts.focus_next", &self.focus_next)?,
         })
     }
@@ -495,6 +503,7 @@ struct PartialRawShortcuts {
     edit_message: Option<String>,
     redact_message: Option<String>,
     react_message: Option<String>,
+    unreact_message: Option<String>,
     focus_next: Option<String>,
 }
 
@@ -792,6 +801,7 @@ status = "cyan"
         assert!(repaired.contains("message_down = \"ctrl-j\""));
         assert!(repaired.contains("message_page_up = \"pageup\""));
         assert!(repaired.contains("thread = \"t\""));
+        assert!(repaired.contains("unreact_message = \"shift-u\""));
         assert!(repaired.contains("focus_next = \"ctrl-space\""));
         assert!(repaired.contains("own_message_sender = \"light-cyan\""));
         assert!(repaired.contains("[display]"));

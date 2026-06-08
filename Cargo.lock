@@ -402,7 +402,7 @@ dependencies = [
  "futures-util",
  "ratatui",
  "reqwest",
- "ruma-html",
+ "ruma-html 0.7.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3771,7 +3771,7 @@ dependencies = [
  "ruma-client-api",
  "ruma-common",
  "ruma-events",
- "ruma-html",
+ "ruma-html 0.8.0",
  "web-time",
 ]
 
@@ -3843,7 +3843,7 @@ dependencies = [
  "js_int",
  "js_option",
  "ruma-common",
- "ruma-html",
+ "ruma-html 0.8.0",
  "ruma-macros",
  "serde",
  "serde_json",
@@ -3852,6 +3852,18 @@ dependencies = [
  "web-time",
  "wildmatch",
  "zeroize",
+]
+
+[[package]]
+name = "ruma-html"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1d81a7300e8623dbf5e6d73e700f0277fce6824849d77779ed997ec4e280b97"
+dependencies = [
+ "as_variant",
+ "html5ever",
+ "tracing",
+ "wildmatch",
 ]
 
 [[package]]

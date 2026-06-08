@@ -11,9 +11,10 @@
 ## Terminal UX
 
 - Treat the entry line like a small readline-style prompt: visible cursor, editable text, Tab completion, familiar terminal shortcuts (`Ctrl-A`, `Ctrl-E`, `Ctrl-U`), and `Up`/`Down` navigation through timeline messages for quick editing.
-- The three-pane layout (Room List, Message List, Input) uses a `Focus` enum state machine. Ctrl-Space cycles focus; the focused pane border is highlighted. In Room List and Message List focus, arrow keys navigate items, `/` enters a search sub-mode, and `n`/`N` move to adjacent matches.
+- The three-pane layout (Room List, Message List, Input) uses an explicit `Mode` state machine. Ctrl-Space cycles focus; the focused pane border is highlighted. In Room List and Message List modes, arrow keys navigate items, `/` enters a search sub-mode, and `n`/`N` move to adjacent matches. Editing, reacting, unreacting, search, and popup interactions each have explicit modes.
 - Keep keyboard shortcuts configurable through the config layer. When adding a new shortcut: add a default key to `RawConfig::default_values()` and all related structs (`RawShortcuts`, `PartialRawShortcuts`, `Shortcuts`), wire it through `into_shortcuts()`, `merge()`, and `to_toml()`, add it to the `DEFAULT_CONFIG` constant, include it in `popup_shortcuts_lines()`, and write a test.
 - Keep slash commands discoverable through `/help`, `/?`, and Tab completion, including commands the TUI knows about but the current Axon API does not support yet. `/help` and `/shortcuts` open popup overlays dismissed with `Esc`.
+- Keep argument completion consistent with command resolution. `/switch` accepts list numbers, room IDs, aliases, display names, and unique prefixes; ambiguous Tab completion advances only to the longest common prefix and blocks Enter until the target identifies one room. `/react` completes known emoji names and never sends arbitrary reaction text.
 - `/whereami` shows the current room summary from Axon and any members learned from loaded timeline membership events. Do not present that derived member list as complete until Axon exposes a room-info or room-state API with full aliases, members, power levels, encryption, and access settings.
 - Room switching should remain forgiving: list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
@@ -28,7 +29,7 @@ The four write operations map to these Axon API endpoints:
 
 All return `{ "data": { "event_id": "..." } }`.
 
-A `PendingAction` enum in `App` tracks whether the next `Enter` should send, edit, or react. Redact fires immediately with no pending state.
+`Mode::Editing`, `Mode::Reacting`, and `Mode::Unreacting` own their respective input flows. Redact fires immediately with no pending state. Unreact uses the redaction endpoint against the current user's reaction event ID; when several distinct reactions exist, Tab cycles the choices before Enter confirms.
 
 ## Own-message identification
 
