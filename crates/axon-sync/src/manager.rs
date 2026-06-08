@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axon_core::SyncConfig;
-use axon_store::Store;
+use axon_store::{AccountState, Store};
 use matrix_sdk::Client;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -71,9 +71,10 @@ impl ClientManager {
     /// if the account isn't connected yet. Single-flight per account: concurrent
     /// callers coalesce onto a single connect.
     ///
-    /// An unknown account id is [`GatewayError::UnknownAccount`]; a connect that
-    /// fails (homeserver unreachable, auth/restore error, store error) is
-    /// [`GatewayError::NotConnected`] — both retryable from the caller's side.
+    /// An unknown account id is [`GatewayError::UnknownAccount`]; a non-`active`
+    /// account is [`GatewayError::AccountNotActive`] (not retryable without a
+    /// login); a connect that fails (homeserver unreachable, auth/restore error,
+    /// store error) is [`GatewayError::NotConnected`] — retryable.
     pub async fn get_or_connect(&self, account_id: Uuid) -> Result<Client, GatewayError> {
         let slot = self.slot(account_id);
         let mut guard = slot.lock().await;
@@ -87,6 +88,18 @@ impl ClientManager {
             .await
             .map_err(|e| GatewayError::NotConnected(e.to_string()))?
             .ok_or(GatewayError::UnknownAccount(account_id))?;
+
+        // Only `active` accounts get a *new* client. The supervisor lists only
+        // active rows, but the gateway connects lazily for any id an API send
+        // names, so the cold-connect gate lives here too. Note this runs only on a
+        // cache miss: an account that already has a cached client (above) is not
+        // re-checked, so flipping a *connected* account to non-`active` does not
+        // sever it here — evicting the cached client and cancelling its task is the
+        // job of the lifecycle verbs (7a-3/7a-4), which call `evict` on transition
+        // (ADR 0022).
+        if account.state != AccountState::Active {
+            return Err(GatewayError::AccountNotActive(account_id));
+        }
 
         let credential = credential_for(&self.config, &account)?;
         let client = connect_account(&self.store, &account, &self.config, credential).await?;

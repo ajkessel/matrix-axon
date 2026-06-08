@@ -13,7 +13,7 @@ mod migrations;
 mod rooms;
 mod state;
 
-pub use accounts::Account;
+pub use accounts::{Account, AccountState};
 pub use error::StoreError;
 pub use events::{EventCiphertext, EventCrypto, NewEvent, PendingUtd, TimelineCursor, TimelineRow};
 pub use rooms::RoomSummary;

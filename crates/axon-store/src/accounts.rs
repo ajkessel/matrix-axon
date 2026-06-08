@@ -18,6 +18,56 @@ use uuid::Uuid;
 
 use crate::{Store, StoreError};
 
+/// An account's lifecycle state, kept orthogonal to verification (ADR 0022).
+///
+/// The sync engine and the mutations gateway connect and serve **only**
+/// `Active` accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountState {
+    /// The normal state: the account syncs and can send.
+    Active,
+    /// A reversible pause that retains all of axon's data, reached via logout or
+    /// an internal token failure. Does not sync or send; a fresh login
+    /// reactivates the same row.
+    Deactivated,
+    /// A transient teardown breadcrumb set while a delete is in flight. A
+    /// boot-time reconcile drives any row left here to completion; it is never a
+    /// resting state a client observes long-term.
+    Deleting,
+}
+
+impl AccountState {
+    /// The on-disk / on-the-wire string form (matches the migration's `CHECK`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccountState::Active => "active",
+            AccountState::Deactivated => "deactivated",
+            AccountState::Deleting => "deleting",
+        }
+    }
+
+    /// Parse the stored string back into a state, failing as a column-decode
+    /// error so an unexpected value surfaces as a read error rather than a
+    /// silent default.
+    fn from_db(s: &str) -> Result<Self, sqlx_core::Error> {
+        match s {
+            "active" => Ok(AccountState::Active),
+            "deactivated" => Ok(AccountState::Deactivated),
+            "deleting" => Ok(AccountState::Deleting),
+            other => Err(sqlx_core::Error::ColumnDecode {
+                index: "state".to_owned(),
+                source: format!("unknown account state {other:?}").into(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for AccountState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A Matrix account row. The encrypted access token is deliberately absent —
 /// it is only ever read back through [`Store::account_token`], which decrypts
 /// in SQL, so the plaintext never lingers on this struct.
@@ -31,6 +81,12 @@ pub struct Account {
     pub homeserver_url: String,
     /// Device ID assigned at login (or supplied with a pre-provisioned token).
     pub device_id: Option<String>,
+    /// Lifecycle state (ADR 0022). The sync engine connects only [`AccountState::Active`] rows.
+    pub state: AccountState,
+    /// Whether axon's own device is currently cross-signed (orthogonal to
+    /// [`state`](Self::state)). Derived from the SDK's cross-signing state; the
+    /// derivation is wired up in a later subphase, so this is `false` until then.
+    pub verified: bool,
     /// Reserved sync-position cursor; the SyncService manages its own position
     /// in its SQLite store, so this currently stays `NULL`.
     pub sync_token: Option<String>,
@@ -42,11 +98,14 @@ pub struct Account {
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
     fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        let state: String = row.try_get("state")?;
         Ok(Account {
             account_id: row.try_get("account_id")?,
             user_id: row.try_get("user_id")?,
             homeserver_url: row.try_get("homeserver_url")?,
             device_id: row.try_get("device_id")?,
+            state: AccountState::from_db(&state)?,
+            verified: row.try_get("verified")?,
             sync_token: row.try_get("sync_token")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -56,7 +115,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Account {
 
 /// Columns selected for an [`Account`] (no encrypted token).
 const ACCOUNT_COLUMNS: &str = "account_id, user_id, homeserver_url, device_id, \
-    sync_token, created_at, updated_at";
+    state, verified, sync_token, created_at, updated_at";
 
 impl Store {
     /// Insert the account for `(user_id, homeserver_url)`, or return the
@@ -93,14 +152,39 @@ impl Store {
         Ok(account)
     }
 
-    /// All provisioned accounts, oldest first. The sync engine iterates these to
-    /// spawn one task per account.
+    /// The `active` accounts, oldest first — the safe default for the connect
+    /// path. The sync engine iterates these to spawn one task per account, so a
+    /// `deactivated` or `deleting` row is never brought online (ADR 0022).
+    ///
+    /// "List accounts" deliberately means "the accounts you act on", not "every
+    /// row": surfacing `deactivated`/`deleting` rows (e.g. the read API showing a
+    /// logged-out account, or the teardown reconcile finding `deleting` rows) is
+    /// a separate, explicitly-named query added when such a caller lands — so the
+    /// default can never silently include a stale row.
     pub async fn list_accounts(&self) -> Result<Vec<Account>, StoreError> {
-        let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY created_at ASC");
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE state = 'active' ORDER BY created_at ASC"
+        );
         let accounts = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
             .fetch_all(&self.pool)
             .await?;
         Ok(accounts)
+    }
+
+    /// Move an account to a new lifecycle state (ADR 0022). The lifecycle verbs
+    /// (login/logout/delete) own these transitions; clients never set `state`
+    /// directly. The `updated_at` trigger maintains the timestamp.
+    pub async fn set_account_state(
+        &self,
+        account_id: Uuid,
+        state: AccountState,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query("UPDATE accounts SET state = $2 WHERE account_id = $1")
+            .bind(account_id)
+            .bind(state.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Persist a login session: encrypt the access token with `key` (pgcrypto

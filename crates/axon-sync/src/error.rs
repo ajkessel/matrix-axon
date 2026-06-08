@@ -15,6 +15,12 @@ pub enum GatewayError {
     #[error("no such account: {0}")]
     UnknownAccount(Uuid),
 
+    /// The account row exists but is not `active` (it is deactivated or being
+    /// deleted), so it will not connect or send. Not retryable without a login
+    /// to reactivate it (ADR 0022).
+    #[error("account not active: {0}")]
+    AccountNotActive(Uuid),
+
     /// The account exists but could not be brought online (homeserver
     /// unreachable, auth/restore failed, store error). Transient — retryable.
     #[error("account not connected: {0}")]

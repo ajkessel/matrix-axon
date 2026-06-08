@@ -17,6 +17,8 @@ use utoipa::OpenApi;
                        the cross-account aggregate.",
     ),
     paths(
+        crate::routes::accounts::list_accounts,
+        crate::routes::accounts::get_account,
         crate::routes::rooms::list_rooms,
         crate::routes::rooms::room_timeline,
         crate::routes::events::get_event,
@@ -26,6 +28,8 @@ use utoipa::OpenApi;
         crate::routes::messages::react,
     ),
     components(schemas(
+        crate::dto::AccountDto,
+        crate::dto::AccountStateDto,
         crate::dto::RoomDto,
         crate::dto::EventDto,
         crate::dto::TimelinePage,
@@ -37,6 +41,7 @@ use utoipa::OpenApi;
         crate::response::ErrorResponse,
     )),
     tags(
+        (name = "accounts", description = "The Matrix accounts this Axon manages"),
         (name = "rooms", description = "Rooms and their timelines"),
         (name = "events", description = "Individual events"),
         (name = "messages", description = "Sending, editing, redacting, and reacting"),

@@ -22,6 +22,9 @@ pub struct GatewayAdapter(pub SdkGateway);
 fn map_err(err: GatewayError) -> SendError {
     match err {
         GatewayError::UnknownAccount(id) => SendError::NotFound(format!("no such account: {id}")),
+        GatewayError::AccountNotActive(id) => {
+            SendError::Forbidden(format!("account not active: {id}"))
+        }
         GatewayError::RoomNotFound(room) => SendError::NotFound(format!("room not found: {room}")),
         GatewayError::Forbidden(msg) => SendError::Forbidden(msg),
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),

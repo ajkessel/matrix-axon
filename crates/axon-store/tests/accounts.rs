@@ -10,6 +10,7 @@
 
 mod common;
 
+use axon_store::AccountState;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -78,6 +79,62 @@ async fn session_token_encrypts_and_round_trips() {
         .account_token(account.account_id, "wrong-key")
         .await
         .is_err());
+
+    common::cleanup_account(&common::raw_pool().await, account.account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deactivation_drops_from_listing_but_retains_row() {
+    let store = common::migrated_store().await;
+    let user = format!("@state-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert");
+
+    // New accounts default to active and unverified, and `list_accounts` (the
+    // connect-path default) returns them.
+    assert_eq!(account.state, AccountState::Active);
+    assert!(!account.verified);
+    assert!(store
+        .list_accounts()
+        .await
+        .expect("list")
+        .iter()
+        .any(|a| a.account_id == account.account_id));
+
+    // Deactivating drops the row from `list_accounts` — so the sync engine never
+    // brings it online — while the row itself is retained (visible via
+    // `get_account`, in its new state).
+    store
+        .set_account_state(account.account_id, AccountState::Deactivated)
+        .await
+        .expect("deactivate");
+    assert!(!store
+        .list_accounts()
+        .await
+        .expect("list")
+        .iter()
+        .any(|a| a.account_id == account.account_id));
+    let retained = store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .expect("row retained");
+    assert_eq!(retained.state, AccountState::Deactivated);
+
+    // Reactivating returns it to the listing.
+    store
+        .set_account_state(account.account_id, AccountState::Active)
+        .await
+        .expect("reactivate");
+    assert!(store
+        .list_accounts()
+        .await
+        .expect("list")
+        .iter()
+        .any(|a| a.account_id == account.account_id));
 
     common::cleanup_account(&common::raw_pool().await, account.account_id).await;
 }

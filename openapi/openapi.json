@@ -10,6 +10,71 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/v1/accounts": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "List the accounts this Axon manages, oldest first — the `active` ones.",
+        "description": "Logged-out (`deactivated`) accounts are not yet surfaced here: nothing can\nproduce one until the logout verb lands, and showing them is part of that\nreactivation UX (a later subphase will widen this list, likely behind an\nexplicit filter). A specific account can still be read in any state by id\nvia [`get_account`].",
+        "operationId": "list_accounts",
+        "responses": {
+          "200": {
+            "description": "Active accounts, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_AccountDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Read a single account by id, in whatever lifecycle state it is — unlike the\nlist, a direct by-id read is not filtered to `active` (so a client can poll\nan account it knows and watch it transition). An unknown id is a 404.",
+        "operationId": "get_account",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_AccountDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/events/{event_id}": {
       "get": {
         "tags": [
@@ -562,6 +627,130 @@
   },
   "components": {
     "schemas": {
+      "AccountDto": {
+        "type": "object",
+        "description": "An account in the lifecycle read API (`GET /v1/accounts`,\n`GET /v1/accounts/{account_id}`). The encrypted access token is deliberately\nabsent — only public lifecycle facts are exposed, never a secret.",
+        "required": [
+          "account_id",
+          "user_id",
+          "homeserver_url",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable Axon account id."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "Row creation time, RFC 3339."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Device ID of axon's current session, once it has logged in."
+          },
+          "homeserver_url": {
+            "type": "string",
+            "description": "Homeserver base URL."
+          },
+          "state": {
+            "$ref": "#/components/schemas/AccountStateDto",
+            "description": "Lifecycle state. The list endpoint returns only `active` accounts; a by-id\nread can return any state."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "Last update time, RFC 3339."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Full Matrix user ID, e.g. `@alice:example.org`."
+          },
+          "verified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+          }
+        }
+      },
+      "AccountStateDto": {
+        "type": "string",
+        "description": "Lifecycle state on the wire — the constrained enum form of\n[`axon_store::AccountState`], so the OpenAPI schema advertises the closed set\n(`active` / `deactivated` / `deleting`) and generated clients can model it\nexhaustively rather than seeing an open `string`. Serialize-only: unknown\n*stored* values are still rejected at the store boundary\n(`AccountState::from_db`), so widening the wire vocabulary can't smuggle one in.",
+        "enum": [
+          "active",
+          "deactivated",
+          "deleting"
+        ]
+      },
+      "ApiResponse_AccountDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "An account in the lifecycle read API (`GET /v1/accounts`,\n`GET /v1/accounts/{account_id}`). The encrypted access token is deliberately\nabsent — only public lifecycle facts are exposed, never a secret.",
+            "required": [
+              "account_id",
+              "user_id",
+              "homeserver_url",
+              "state",
+              "created_at",
+              "updated_at"
+            ],
+            "properties": {
+              "account_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Stable Axon account id."
+              },
+              "created_at": {
+                "type": "string",
+                "description": "Row creation time, RFC 3339."
+              },
+              "device_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Device ID of axon's current session, once it has logged in."
+              },
+              "homeserver_url": {
+                "type": "string",
+                "description": "Homeserver base URL."
+              },
+              "state": {
+                "$ref": "#/components/schemas/AccountStateDto",
+                "description": "Lifecycle state. The list endpoint returns only `active` accounts; a by-id\nread can return any state."
+              },
+              "updated_at": {
+                "type": "string",
+                "description": "Last update time, RFC 3339."
+              },
+              "user_id": {
+                "type": "string",
+                "description": "Full Matrix user ID, e.g. `@alice:example.org`."
+              },
+              "verified": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_EventDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -700,6 +889,71 @@
                   "null"
                 ],
                 "description": "Opaque cursor for the next (older) page, or `null` at the end."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_AccountDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "An account in the lifecycle read API (`GET /v1/accounts`,\n`GET /v1/accounts/{account_id}`). The encrypted access token is deliberately\nabsent — only public lifecycle facts are exposed, never a secret.",
+              "required": [
+                "account_id",
+                "user_id",
+                "homeserver_url",
+                "state",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Stable Axon account id."
+                },
+                "created_at": {
+                  "type": "string",
+                  "description": "Row creation time, RFC 3339."
+                },
+                "device_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Device ID of axon's current session, once it has logged in."
+                },
+                "homeserver_url": {
+                  "type": "string",
+                  "description": "Homeserver base URL."
+                },
+                "state": {
+                  "$ref": "#/components/schemas/AccountStateDto",
+                  "description": "Lifecycle state. The list endpoint returns only `active` accounts; a by-id\nread can return any state."
+                },
+                "updated_at": {
+                  "type": "string",
+                  "description": "Last update time, RFC 3339."
+                },
+                "user_id": {
+                  "type": "string",
+                  "description": "Full Matrix user ID, e.g. `@alice:example.org`."
+                },
+                "verified": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+                }
               }
             }
           }
@@ -1036,6 +1290,10 @@
     }
   },
   "tags": [
+    {
+      "name": "accounts",
+      "description": "The Matrix accounts this Axon manages"
+    },
     {
       "name": "rooms",
       "description": "Rooms and their timelines"

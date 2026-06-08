@@ -72,9 +72,11 @@ impl SyncEngine {
             tracing::info!(account_id = %account.account_id, user_id = %account.user_id, "provisioned account");
         }
 
+        // `list_accounts` returns only `active` rows, so a `deactivated` or
+        // `deleting` account never gets a supervised task (ADR 0022).
         let accounts = store.list_accounts().await?;
         if accounts.is_empty() {
-            tracing::warn!("no accounts configured; sync engine idle");
+            tracing::warn!("no active accounts; sync engine idle");
         }
 
         let handles = accounts

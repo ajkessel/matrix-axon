@@ -67,7 +67,15 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 ## Current state
 
-**Milestone 6 complete; Milestone 5c deferred** — mutations landed ahead of 5c. M6 adds the write half of the client API: `POST …/send`, `PUT …/events/{id}` (edit), `DELETE …/events/{id}` (redact), and `POST …/events/{id}/reactions` (react), each routed through matrix-rust-sdk's send path. **5c** (interactive SAS verification, `axon-crypto` still a stub) is the one remaining M5 subphase and comes next.
+**Milestone 7a in flight** (PR 1 of ~6) — M6 (mutations) is complete and the post-M6 sequence was rethought (see `docs/mvp/implementation.md` "Milestone resequencing" + ADR 0022). **M7** is account lifecycle & auth, in three phases: **7a** the Matrix-account lifecycle (login/verify/recover/logout/delete) — which also folds in the interactive SAS verification deferred from M5 (the old "5c") as its *last* PR; **7b** the client↔axon bearer-token gate (was M8); **7c** sender-device trust. The interactive-verification work and `axon-crypto` remain a stub until 7a's final PR.
+
+PR 1 of 7a (the account state machine) is the only part landed so far — see its notes immediately below.
+
+Non-obvious choices made in 7a (state machine — see ADR 0022):
+
+- **Explicit `accounts.state` (`active` / `deactivated` / `deleting`), orthogonal to a `verified` flag.** `active` syncs+sends; `deactivated` is a reversible pause that **retains all data** (logout / token loss); `deleting` is a *transient* teardown breadcrumb a later boot reconcile completes (deletion is a hard row removal, no resting tombstone). A separate `verified` bool caches whether axon's own device is cross-signed (re-derived from the SDK, not write-once; its derivation is stubbed to `false` until a later 7a PR). `state` is never set directly by a client — it's a consequence of the lifecycle verbs.
+- **Connection gated on `state = active` at the single choke point.** `Store::list_accounts()` returns **only `active` rows** (the safe default the sync boot loop iterates); `ClientManager::get_or_connect` refuses a non-active account with `GatewayError::AccountNotActive` (→ `403`), so the lazy gateway send path is gated too. This is the **groundwork** for #24, not the whole fix: the gate is **cold-connect only** (an already-cached client isn't re-checked), and nothing deactivates a stale row yet — so the invariant today is "a non-active row gets no *new* client", and the eviction-on-transition + stale-row reconcile/orphan-GC that actually retire #24's rows land in 7a-3/7a-4. Surfacing `deactivated`/`deleting` rows (read API, teardown reconcile, orphan GC) is a separate, explicitly-named accessor added when that caller lands — there is deliberately no shared "all rows" method to misfire from the connect path.
+- **`AccountState` is a Rust enum in `axon-store`** (re-exported), stored as `TEXT` + `CHECK` (matches the rest of the schema, not a PG `ENUM`); an unknown stored value is a column-decode error, not a silent default.
 
 Non-obvious choices made in 6 (see ADR 0021):
 

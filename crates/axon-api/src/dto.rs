@@ -3,7 +3,7 @@
 //! The store rows (`RoomSummary`, `TimelineRow`) are store-internal and don't
 //! derive `Serialize`; these are the public JSON shapes, owned by the API layer.
 
-use axon_store::{RoomSummary, TimelineRow};
+use axon_store::{Account, AccountState, RoomSummary, TimelineRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -164,6 +164,74 @@ pub struct RedactQuery {
 pub struct SendResultDto {
     /// The created Matrix event id.
     pub event_id: String,
+}
+
+/// Lifecycle state on the wire — the constrained enum form of
+/// [`axon_store::AccountState`], so the OpenAPI schema advertises the closed set
+/// (`active` / `deactivated` / `deleting`) and generated clients can model it
+/// exhaustively rather than seeing an open `string`. Serialize-only: unknown
+/// *stored* values are still rejected at the store boundary
+/// (`AccountState::from_db`), so widening the wire vocabulary can't smuggle one in.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountStateDto {
+    Active,
+    Deactivated,
+    Deleting,
+}
+
+impl From<AccountState> for AccountStateDto {
+    fn from(s: AccountState) -> Self {
+        match s {
+            AccountState::Active => AccountStateDto::Active,
+            AccountState::Deactivated => AccountStateDto::Deactivated,
+            AccountState::Deleting => AccountStateDto::Deleting,
+        }
+    }
+}
+
+/// An account in the lifecycle read API (`GET /v1/accounts`,
+/// `GET /v1/accounts/{account_id}`). The encrypted access token is deliberately
+/// absent — only public lifecycle facts are exposed, never a secret.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccountDto {
+    /// Stable Axon account id.
+    pub account_id: Uuid,
+    /// Full Matrix user ID, e.g. `@alice:example.org`.
+    pub user_id: String,
+    /// Homeserver base URL.
+    pub homeserver_url: String,
+    /// Device ID of axon's current session, once it has logged in.
+    pub device_id: Option<String>,
+    /// Lifecycle state. The list endpoint returns only `active` accounts; a by-id
+    /// read can return any state.
+    pub state: AccountStateDto,
+    /// Whether axon's own device is currently cross-signed (orthogonal to
+    /// `state`). `null` until the derivation lands (a later subphase) — a real
+    /// `false` would wrongly read as "known unverified", so we expose "unknown"
+    /// as absence rather than a misleading boolean.
+    pub verified: Option<bool>,
+    /// Row creation time, RFC 3339.
+    pub created_at: String,
+    /// Last update time, RFC 3339.
+    pub updated_at: String,
+}
+
+impl From<Account> for AccountDto {
+    fn from(a: Account) -> Self {
+        AccountDto {
+            account_id: a.account_id,
+            user_id: a.user_id,
+            homeserver_url: a.homeserver_url,
+            device_id: a.device_id,
+            state: a.state.into(),
+            // The `verified` column is unwritten groundwork until derivation
+            // lands; surface "unknown" as `null` rather than the stored `false`.
+            verified: None,
+            created_at: a.created_at.to_rfc3339(),
+            updated_at: a.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 /// One page of a room timeline: the events plus the cursor to fetch the next

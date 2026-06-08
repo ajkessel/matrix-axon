@@ -16,7 +16,7 @@ mod common;
 use std::sync::Arc;
 
 use axon_api::AppState;
-use axon_store::{NewEvent, RoomStateUpsert, Store};
+use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::StubSender;
@@ -90,9 +90,13 @@ async fn read_api_end_to_end() {
         .account_id;
     let room_id = format!("!http-{}:localhost", Uuid::new_v4());
 
-    // Two events; a name so the summary is populated.
+    // Two messages; a name so the summary is populated.
     let e1 = insert_message(&store, account_id, &room_id, 1_000, "first").await;
     let e2 = insert_message(&store, account_id, &room_id, 2_000, "second").await;
+    // A state event, used below to assert `state_key` is exposed on reads. Its
+    // ts sits *below* both messages so it doesn't interleave with the message
+    // pagination assertions — `room_timeline` includes state events, so a member
+    // event between e1 and e2 would land in the limit-1 page 2 instead of e1.
     let member_event_id = format!("$member-{}:localhost", Uuid::new_v4());
     let member_content = json!({ "membership": "join", "displayname": "Alice" });
     store
@@ -101,7 +105,7 @@ async fn read_api_end_to_end() {
             room_id: &room_id,
             account_id,
             sender: "@jamie:localhost",
-            origin_ts: 1_750,
+            origin_ts: 500,
             event_type: "m.room.member",
             content: Some(member_content.clone()),
             raw_event: json!({
@@ -219,4 +223,106 @@ async fn read_api_end_to_end() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn accounts_read_api() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    // Three accounts in distinct lifecycle states. Unique user ids per run so the
+    // assertions hold regardless of whatever else is in the shared test DB.
+    let hs = "https://hs.example.org";
+    let active_user = format!("@active-{}:localhost", Uuid::new_v4());
+    let deactivated_user = format!("@deactivated-{}:localhost", Uuid::new_v4());
+    let deleting_user = format!("@deleting-{}:localhost", Uuid::new_v4());
+
+    let active = store
+        .upsert_account(&active_user, hs)
+        .await
+        .expect("active");
+    let deactivated = store
+        .upsert_account(&deactivated_user, hs)
+        .await
+        .expect("deactivated");
+    let deleting = store
+        .upsert_account(&deleting_user, hs)
+        .await
+        .expect("deleting");
+    store
+        .set_account_state(deactivated.account_id, AccountState::Deactivated)
+        .await
+        .expect("deactivate");
+    store
+        .set_account_state(deleting.account_id, AccountState::Deleting)
+        .await
+        .expect("set deleting");
+
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    let app = axon_api::router(AppState::new(
+        store.clone(),
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+    ));
+
+    // GET /v1/accounts — only active accounts are listed; deactivated and
+    // deleting are both excluded.
+    let (status, body) = get(&app, "/v1/accounts").await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body["data"].as_array().expect("data array");
+    let find = |id: Uuid| rows.iter().find(|a| a["account_id"] == id.to_string());
+
+    let active_row = find(active.account_id).expect("active listed");
+    assert_eq!(active_row["state"], "active");
+    // `verified` is `null` (unknown) until derivation lands, not a bare `false`.
+    assert!(active_row["verified"].is_null());
+    assert_eq!(active_row["user_id"], active_user);
+    assert_eq!(active_row["homeserver_url"], hs);
+    // The token is never exposed, under any key.
+    assert!(active_row.get("access_token").is_none());
+    assert!(active_row.get("access_token_encrypted").is_none());
+
+    assert!(
+        find(deactivated.account_id).is_none(),
+        "deactivated account must not appear in the list"
+    );
+    assert!(
+        find(deleting.account_id).is_none(),
+        "deleting account must not appear in the list"
+    );
+
+    // GET /v1/accounts/{id} — 200 for a known account, in whatever state. The
+    // list filters to active, but a by-id read is not filtered.
+    let (status, one) = get(&app, &format!("/v1/accounts/{}", active.account_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(one["data"]["account_id"], active.account_id.to_string());
+    assert_eq!(one["data"]["state"], "active");
+
+    let (status, deactivated_by_id) =
+        get(&app, &format!("/v1/accounts/{}", deactivated.account_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deactivated_by_id["data"]["state"], "deactivated");
+
+    // Unknown account id -> 404 with not_found code.
+    let (status, err) = get(&app, &format!("/v1/accounts/{}", Uuid::new_v4())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(err["error"]["code"], "not_found");
+
+    // A non-UUID id -> 400 in the envelope (not axum's plain-text rejection).
+    let (status, err) = get(&app, "/v1/accounts/not-a-uuid").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+
+    for id in [
+        active.account_id,
+        deactivated.account_id,
+        deleting.account_id,
+    ] {
+        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
 }

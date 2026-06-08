@@ -39,6 +39,12 @@ use serde_json::{json, Value};
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        // Account read API: the cross-account list and a single account.
+        .route("/v1/accounts", get(routes::accounts::list_accounts))
+        .route(
+            "/v1/accounts/{account_id}",
+            get(routes::accounts::get_account),
+        )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/timeline",
