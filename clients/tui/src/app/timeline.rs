@@ -70,6 +70,14 @@ impl App {
                 self.live.pending_own_event_id = None;
             }
             self.remember_display_name_from_event(&key, &event);
+            if self
+                .messages
+                .events
+                .get(&key)
+                .is_some_and(|events| events.iter().any(|e| e.event_id == event.event_id))
+            {
+                return LiveFrameAction::None;
+            }
             self.messages
                 .events
                 .entry(key.clone())
