@@ -24,7 +24,25 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Developer quick-start
 
-Prerequisites: Rust (stable), Postgres 16.
+Prerequisites: Rust (stable), Docker.
+
+Once prerequisites are installed, the quickest path is:
+
+```bash
+./run.sh          # macOS / Linux / WSL  — starts axon-server (default)
+./run.sh tui      # starts axon-tui instead
+.\run.ps1         # Windows (PowerShell) — starts axon-server (default)
+.\run.ps1 tui     # starts axon-tui instead
+```
+
+The run script handles the rest automatically: validates that required
+environment variables are set (offering to create `.env` from `.env.example`
+if neither exists), starts Postgres via Docker Compose, runs the chosen
+target, and stops Docker when it exits — whether by Ctrl-C, SIGTERM, or any
+other cause.
+
+The steps below explain what the run scripts do and how to configure the pieces
+individually.
 
 ### 1. Install Prerequisites
 
@@ -47,6 +65,25 @@ brew install --cask docker
 ```
 
 You likely need to start Docker from the MacOS desktop the first time and grant it administrative privileges to run.
+
+#### Windows (PowerShell)
+
+> WSL2 users should follow the Ubuntu path above instead.
+
+Install Rust and Docker Desktop via [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/):
+
+```powershell
+winget install Rustlang.Rustup
+winget install Docker.DockerDesktop
+```
+
+You likely need to start Docker Desktop from the Start menu the first time and grant it administrative privileges to run.
+
+PowerShell restricts running local scripts by default. Allow it for your user account once:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
 
 ### 2. Install and Start Postgres
 
@@ -83,7 +120,15 @@ The server loads `.env` automatically on startup. The defaults in `.env.example`
 # Enable the git pre-commit hook (fmt + clippy) — once per clone
 ./scripts/setup-hooks.sh
 
+# Quick path — starts Docker, runs the target, tears down Docker on exit:
+./run.sh          # macOS / Linux / WSL  — axon-server (default)
+./run.sh tui      # axon-tui
+.\run.ps1         # Windows (PowerShell) — axon-server (default)
+.\run.ps1 tui     # axon-tui
+
+# Or run directly if Postgres is already up:
 cargo run -p axon-server
+cargo run -p axon-tui
 ```
 
 In another shell:
