@@ -15,7 +15,7 @@ use api::{websocket_task, AxonClient};
 use app::{App, LiveFrameAction};
 use args::Args;
 use config::TuiConfig;
-use crossterm::event::{self, Event, KeyEvent};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -86,7 +86,7 @@ async fn run_app(
 fn input_task(tx: mpsc::UnboundedSender<KeyEvent>) {
     loop {
         match event::read() {
-            Ok(Event::Key(key)) => {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 if tx.send(key).is_err() {
                     break;
                 }
