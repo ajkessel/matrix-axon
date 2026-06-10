@@ -18,13 +18,14 @@ use matrix_sdk::ruma::events::{
 use matrix_sdk::Room;
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::client::matches_account;
 use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
+use crate::lifecycle::AccountLifecycle;
 use crate::manager::ClientManager;
 use crate::redecrypt;
 
@@ -35,7 +36,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// Owns the per-account sync tasks. Dropping it does not stop the tasks; call
 /// [`SyncEngine::shutdown`] to cancel and join them cleanly.
 pub struct SyncEngine {
-    handles: Vec<JoinHandle<()>>,
+    /// Tracks every supervised task — both the ones spawned at boot and the ones
+    /// the lifecycle layer spawns at runtime on a successful login. `shutdown`
+    /// closes and waits on it. A [`TaskTracker`] (vs. a `Vec<JoinHandle>`) is what
+    /// lets tasks be added after `start` returns.
+    tracker: TaskTracker,
     cancel: CancellationToken,
     /// Producer end of the live-event bus. The sync tasks publish through clones
     /// of this; [`SyncEngine::live_events`] hands a clone to the API layer so
@@ -45,6 +50,11 @@ pub struct SyncEngine {
     /// drive connects + retry) and the message gateway handed to the API layer
     /// (see [`SyncEngine::gateway`]).
     manager: ClientManager,
+    /// Store + config handles retained so [`SyncEngine::lifecycle`] can build the
+    /// runtime login port with everything a freshly logged-in account's
+    /// supervised task needs.
+    store: Store,
+    config: SyncConfig,
 }
 
 impl SyncEngine {
@@ -79,25 +89,28 @@ impl SyncEngine {
             tracing::warn!("no active accounts; sync engine idle");
         }
 
-        let handles = accounts
-            .into_iter()
-            .map(|account| {
-                let store = store.clone();
-                let config = config.clone();
-                let cancel = cancel.clone();
-                let live_tx = live_tx.clone();
-                let manager = manager.clone();
-                tokio::spawn(supervise_account(
-                    store, config, account, cancel, live_tx, manager,
-                ))
-            })
-            .collect();
+        // One tracker holds every task; the runtime login verb spawns onto the
+        // same tracker so a logged-in-at-runtime account shuts down with the rest.
+        let tracker = TaskTracker::new();
+        for account in accounts {
+            spawn_supervised(
+                &tracker,
+                store.clone(),
+                config.clone(),
+                account,
+                cancel.clone(),
+                live_tx.clone(),
+                manager.clone(),
+            );
+        }
 
         Ok(SyncEngine {
-            handles,
+            tracker,
             cancel,
             live_tx,
             manager,
+            store,
+            config,
         })
     }
 
@@ -115,16 +128,49 @@ impl SyncEngine {
         self.live_tx.clone()
     }
 
+    /// The runtime account-lifecycle port (login, …), for the API layer's
+    /// lifecycle routes. `axon-server` wraps this in an adapter implementing its
+    /// `AccountLifecycle` port; the returned value shares this engine's task
+    /// tracker, so an account logged in at runtime is supervised and shut down
+    /// alongside the boot-time ones.
+    pub fn lifecycle(&self) -> AccountLifecycle {
+        AccountLifecycle::new(
+            self.store.clone(),
+            self.config.clone(),
+            self.manager.clone(),
+            self.live_tx.clone(),
+            self.cancel.clone(),
+            self.tracker.clone(),
+        )
+    }
+
     /// Cancel all per-account tasks and wait for them to finish. Safe to call
     /// without canceling the token first — this method cancels it internally.
     pub async fn shutdown(self) {
         self.cancel.cancel();
-        for handle in self.handles {
-            if let Err(err) = handle.await {
-                tracing::warn!(error = %err, "sync task did not shut down cleanly");
-            }
-        }
+        // Close the tracker so `wait` can complete; no new tasks are spawned after
+        // shutdown begins (the lifecycle port would spawn onto a closed tracker,
+        // which is a no-op-and-error it already guards against).
+        self.tracker.close();
+        self.tracker.wait().await;
     }
+}
+
+/// Spawn a supervised sync task for `account` onto `tracker`. Shared by boot
+/// (one call per active account) and the runtime login verb (one call when a
+/// login succeeds), so both paths get identical supervision + shutdown.
+pub(crate) fn spawn_supervised(
+    tracker: &TaskTracker,
+    store: Store,
+    config: SyncConfig,
+    account: Account,
+    cancel: CancellationToken,
+    live_tx: broadcast::Sender<LiveEvent>,
+    manager: ClientManager,
+) {
+    tracker.spawn(supervise_account(
+        store, config, account, cancel, live_tx, manager,
+    ));
 }
 
 /// Supervise a single account: run it, and on failure restart with exponential

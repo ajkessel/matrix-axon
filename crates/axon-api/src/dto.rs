@@ -234,6 +234,19 @@ impl From<Account> for AccountDto {
     }
 }
 
+/// Request body for runtime login (`POST /v1/accounts/login`). Adds or
+/// reactivates a Matrix account keyed by `(homeserver_url, username)`. The
+/// password is used once to authenticate and is never stored or echoed back.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LoginRequest {
+    /// Homeserver base URL, e.g. `https://matrix.example.org`.
+    pub homeserver_url: String,
+    /// Full Matrix user ID, e.g. `@alice:example.org`.
+    pub username: String,
+    /// Account password. Consumed once at login; never persisted.
+    pub password: String,
+}
+
 /// One page of a room timeline: the events plus the cursor to fetch the next
 /// (older) page. `next_cursor` is `null` when the last page has been reached.
 #[derive(Debug, Serialize, ToSchema)]

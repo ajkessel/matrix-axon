@@ -85,10 +85,21 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
     }
 
+    /// `401 Unauthorized` — the supplied credentials were rejected.
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+    }
+
     /// `403 Forbidden` — the operation isn't permitted (e.g. editing a message
     /// the account didn't author).
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
+    /// `409 Conflict` — the request collides with the resource's current state
+    /// (e.g. logging in an account that is already active).
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
     /// `502 Bad Gateway` — the upstream homeserver rejected or failed the request.
@@ -140,6 +151,20 @@ impl From<crate::sender::SendError> for ApiError {
             SendError::Unavailable(msg) => ApiError::service_unavailable(msg),
             SendError::Invalid(msg) => ApiError::bad_request(msg),
             SendError::Upstream(msg) => ApiError::bad_gateway(msg),
+        }
+    }
+}
+
+impl From<crate::lifecycle::LoginError> for ApiError {
+    fn from(err: crate::lifecycle::LoginError) -> Self {
+        use crate::lifecycle::LoginError;
+        match err {
+            LoginError::InvalidRequest(msg) => ApiError::bad_request(msg),
+            LoginError::AuthFailed(msg) => ApiError::unauthorized(msg),
+            LoginError::Conflict(msg) => ApiError::conflict(msg),
+            LoginError::Upstream(msg) => ApiError::bad_gateway(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            LoginError::Internal => ApiError::internal(),
         }
     }
 }

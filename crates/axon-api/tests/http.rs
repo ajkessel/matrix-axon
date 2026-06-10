@@ -13,13 +13,15 @@
 
 mod common;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axon_api::AppState;
+use axon_api::{AccountLifecycle, AppState};
 use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use common::StubSender;
+use common::{LoginCall, LoginOutcome, StubLifecycle, StubSender};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -141,6 +143,7 @@ async fn read_api_end_to_end() {
         store.clone(),
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
     ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
@@ -264,10 +267,12 @@ async fn accounts_read_api() {
         store.clone(),
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
     ));
 
-    // GET /v1/accounts — only active accounts are listed; deactivated and
-    // deleting are both excluded.
+    // GET /v1/accounts — the client-visible set: `active` and `deactivated` are
+    // both listed (so a logged-out account is discoverable for re-login), but the
+    // transient `deleting` teardown state is excluded.
     let (status, body) = get(&app, "/v1/accounts").await;
     assert_eq!(status, StatusCode::OK);
     let rows = body["data"].as_array().expect("data array");
@@ -283,17 +288,16 @@ async fn accounts_read_api() {
     assert!(active_row.get("access_token").is_none());
     assert!(active_row.get("access_token_encrypted").is_none());
 
-    assert!(
-        find(deactivated.account_id).is_none(),
-        "deactivated account must not appear in the list"
-    );
+    let deactivated_row = find(deactivated.account_id).expect("deactivated listed");
+    assert_eq!(deactivated_row["state"], "deactivated");
+
     assert!(
         find(deleting.account_id).is_none(),
         "deleting account must not appear in the list"
     );
 
     // GET /v1/accounts/{id} — 200 for a known account, in whatever state. The
-    // list filters to active, but a by-id read is not filtered.
+    // list omits `deleting`, but a by-id read is not filtered at all.
     let (status, one) = get(&app, &format!("/v1/accounts/{}", active.account_id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(one["data"]["account_id"], active.account_id.to_string());
@@ -303,6 +307,13 @@ async fn accounts_read_api() {
         get(&app, &format!("/v1/accounts/{}", deactivated.account_id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deactivated_by_id["data"]["state"], "deactivated");
+
+    // The `deleting` account is absent from the list but still readable by id —
+    // the by-id read is unfiltered.
+    let (status, deleting_by_id) =
+        get(&app, &format!("/v1/accounts/{}", deleting.account_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleting_by_id["data"]["state"], "deleting");
 
     // Unknown account id -> 404 with not_found code.
     let (status, err) = get(&app, &format!("/v1/accounts/{}", Uuid::new_v4())).await;
@@ -324,5 +335,194 @@ async fn accounts_read_api() {
             .execute(&pool)
             .await
             .expect("cleanup");
+    }
+}
+
+/// Build a router whose login route is backed by `lifecycle`. The sender and live
+/// bus are unused by the login path.
+fn login_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        lifecycle,
+    ))
+}
+
+/// `POST /v1/accounts/login` with an optional peer address (installed as the
+/// `ConnectInfo<SocketAddr>` extension the loopback guard reads, mirroring
+/// `into_make_service_with_connect_info`). Returns `(status, parsed body)`.
+async fn post_login(
+    app: &axum::Router,
+    peer: Option<SocketAddr>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/v1/accounts/login")
+        .header("content-type", "application/json");
+    if let Some(addr) = peer {
+        builder = builder.extension(ConnectInfo(addr));
+    }
+    let req = builder.body(Body::from(body.to_string())).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body")
+    };
+    (status, json)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn login_succeeds_routes_to_port_and_envelopes_account() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    // Seed the account the stub will "log in" — the handler reads it back by id to
+    // build the response, so it must exist. Unique id keeps the shared DB clean.
+    let hs = "https://hs.example.org";
+    let user = format!("@login-{}:localhost", Uuid::new_v4());
+    let account = store.upsert_account(&user, hs).await.expect("seed");
+
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = login_app(store.clone(), stub.clone());
+
+    let loopback = Some("127.0.0.1:54321".parse().unwrap());
+    let (status, body) = post_login(
+        &app,
+        loopback,
+        json!({ "homeserver_url": hs, "username": user, "password": "hunter2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["account_id"], account.account_id.to_string());
+    assert_eq!(body["data"]["user_id"], user);
+    // The password is never echoed back in the account view.
+    assert!(body["data"].get("password").is_none());
+
+    // The handler passed the decoded request straight through to the port.
+    assert_eq!(
+        stub.calls(),
+        vec![LoginCall {
+            homeserver_url: hs.to_owned(),
+            username: user.clone(),
+            password: "hunter2".to_owned(),
+        }]
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn login_requires_loopback_peer() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+    let body = json!({
+        "homeserver_url": "https://hs.example.org",
+        "username": "@a:localhost",
+        "password": "pw",
+    });
+
+    // A non-loopback peer is rejected before the handler runs.
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = post_login(&app, off_box, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+
+    // No peer address at all also fails closed.
+    let (status, _) = post_login(&app, None, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The guard short-circuited both times: the lifecycle port was never invoked.
+    assert!(stub.calls().is_empty());
+
+    // A loopback peer passes the guard through to the (stubbed) port. The id is
+    // nil and not seeded, so the read-back 404s into a 500 — but the guard let it
+    // through, which is what this asserts.
+    let loopback = Some("127.0.0.1:12000".parse().unwrap());
+    let (status, _) = post_login(&app, loopback, body).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(stub.calls().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn login_malformed_body_is_enveloped_400_and_skips_port() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+
+    // Missing the required `password` field → JSON decode failure, but only after
+    // the loopback guard has admitted the request.
+    let loopback = Some("127.0.0.1:13000".parse().unwrap());
+    let (status, err) = post_login(
+        &app,
+        loopback,
+        json!({ "homeserver_url": "https://hs.example.org", "username": "@a:localhost" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+    assert!(stub.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn login_error_maps_to_status() {
+    let store = store().await;
+    let loopback: Option<SocketAddr> = Some("127.0.0.1:14000".parse().unwrap());
+    let body = json!({
+        "homeserver_url": "https://hs.example.org",
+        "username": "@a:localhost",
+        "password": "pw",
+    });
+
+    let cases = [
+        (
+            LoginOutcome::InvalidRequest("bad".into()),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            LoginOutcome::AuthFailed("nope".into()),
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+        ),
+        (
+            LoginOutcome::Conflict("already".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            LoginOutcome::Upstream("hs down".into()),
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+        ),
+        (
+            LoginOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = login_app(store.clone(), Arc::new(StubLifecycle::failing(outcome)));
+        let (status, err) = post_login(&app, loopback, body.clone()).await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
     }
 }

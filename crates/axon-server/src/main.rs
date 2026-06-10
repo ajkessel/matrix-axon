@@ -5,7 +5,9 @@
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
 mod gateway;
+mod lifecycle;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -15,6 +17,7 @@ use axon_sync::SyncEngine;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::gateway::GatewayAdapter;
+use crate::lifecycle::LifecycleAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,13 +42,17 @@ async fn main() -> anyhow::Result<()> {
         .context("starting sync engine")?;
 
     // The API shares the sync engine's live-event bus so `/v1/ws` can fan out
-    // events as they're persisted, and its message gateway (adapted onto the
-    // API's MessageSender port) so the mutation routes can send via the SDK.
+    // events as they're persisted, its message gateway (adapted onto the API's
+    // MessageSender port) so the mutation routes can send via the SDK, and its
+    // lifecycle engine (adapted onto the AccountLifecycle port) so the login route
+    // can add/reactivate accounts at runtime.
     let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
+    let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let app = axon_api::router(axon_api::AppState::new(
         store,
         sync_engine.live_events(),
         sender,
+        lifecycle,
     ));
 
     let addr = config.socket_addr();
@@ -55,10 +62,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "axon listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    // `into_make_service_with_connect_info` exposes each connection's peer
+    // address to handlers/middleware (the loopback guard on the lifecycle routes
+    // reads it via `ConnectInfo<SocketAddr>`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     // HTTP has drained; now wind down the sync tasks and wait for them to flush
     // their SDK stores before exiting.

@@ -22,10 +22,16 @@ matrix-sdk = { workspace = true, features = [
 matrix-sdk-ui = { workspace = true }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
-tokio-util = { workspace = true }
+# `rt` gives TaskTracker (dynamic supervised-task spawning at runtime login).
+tokio-util = { workspace = true, features = ["rt"] }
 # StreamExt::next for the room-key arrival stream.
 futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# DB-gated lifecycle tests: seed/clean account rows directly through the pool
+# (the active no-op / deleting-conflict / invalid-MXID branches need no homeserver).
+sqlx-core = { workspace = true }

@@ -5,36 +5,82 @@
 //! logout / delete, later subphases), are ordinary `/v1/` routes, not
 //! loopback-restricted.
 
+use std::sync::Arc;
+
 use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
-use crate::dto::AccountDto;
-use crate::extract::Path;
+use crate::dto::{AccountDto, LoginRequest};
+use crate::extract::{Json, Path};
+use crate::lifecycle::AccountLifecycle;
 use crate::response::{ApiError, ApiResponse};
 
-/// List the accounts this Axon manages, oldest first — the `active` ones.
+/// List the accounts this Axon manages, oldest first — the **client-visible**
+/// set: `active` and `deactivated`.
 ///
-/// Logged-out (`deactivated`) accounts are not yet surfaced here: nothing can
-/// produce one until the logout verb lands, and showing them is part of that
-/// reactivation UX (a later subphase will widen this list, likely behind an
-/// explicit filter). A specific account can still be read in any state by id
-/// via [`get_account`].
+/// Logged-out (`deactivated`) accounts are included so a client that has lost the
+/// `account_id` can still discover one to offer re-login (the login verb both
+/// produces and reactivates them). The transient `deleting` teardown state is
+/// excluded — a row mid-removal isn't something to act on — but any account, in
+/// any state, can still be read by id via [`get_account`].
 #[utoipa::path(
     get,
     path = "/v1/accounts",
     responses(
-        (status = 200, description = "Active accounts, oldest first", body = ApiResponse<Vec<AccountDto>>),
+        (status = 200, description = "Client-visible accounts (active + deactivated), oldest first", body = ApiResponse<Vec<AccountDto>>),
     ),
     tag = "accounts",
 )]
 pub async fn list_accounts(
     State(store): State<Store>,
 ) -> Result<ApiResponse<Vec<AccountDto>>, ApiError> {
-    let accounts = store.list_accounts().await?;
+    let accounts = store.list_client_visible_accounts().await?;
     Ok(ApiResponse::new(
         accounts.into_iter().map(AccountDto::from).collect(),
     ))
+}
+
+/// Add or reactivate a Matrix account at runtime, then return the resulting
+/// active account. Idempotent by `(homeserver_url, username)`: a new identity is
+/// minted, a logged-out (`deactivated`) account is reactivated, and an
+/// already-`active` account is returned **unchanged** (a no-op — the desired end
+/// state already holds, so the password isn't consulted and nothing is touched).
+/// An account mid-deletion (`deleting`) is a `409`. `username` must be a full
+/// Matrix user ID (a malformed one is a `400`); bad credentials are a `401`. The
+/// password is used once and never stored.
+///
+/// Secret-bearing, so this route is loopback-only until the auth layer lands (see
+/// the `route_layer` in [`router`](crate::router)).
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "The active account (newly logged in, reactivated, or already active)", body = ApiResponse<AccountDto>),
+        (status = 400, description = "Malformed request (e.g. invalid user ID)", body = crate::response::ErrorResponse),
+        (status = 401, description = "Credentials rejected by the homeserver", body = crate::response::ErrorResponse),
+        (status = 409, description = "The account is being deleted", body = crate::response::ErrorResponse),
+        (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn login(
+    State(store): State<Store>,
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<ApiResponse<AccountDto>, ApiError> {
+    let account_id = lifecycle
+        .login(&req.homeserver_url, &req.username, &req.password)
+        .await?;
+    // Read the row back so the response reflects the persisted state (device id,
+    // timestamps) rather than re-deriving it. It was just made active, so a
+    // missing row here is a real internal inconsistency.
+    let account = store
+        .get_account(account_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(ApiResponse::new(AccountDto::from(account)))
 }
 
 /// Read a single account by id, in whatever lifecycle state it is — unlike the

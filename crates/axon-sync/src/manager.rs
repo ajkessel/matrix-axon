@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axon_core::SyncConfig;
-use axon_store::{AccountState, Store};
+use axon_store::{Account, AccountState, Store};
 use matrix_sdk::Client;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::client::{connect_account, credential_for};
-use crate::error::GatewayError;
+use crate::client::{connect_account, credential_for, login_new_device};
+use crate::error::{GatewayError, SyncError};
 
 /// A per-account connection slot. The slot's [`AsyncMutex`] is what makes a
 /// connect single-flight: the first caller holds it across the (awaiting)
@@ -103,6 +103,25 @@ impl ClientManager {
 
         let credential = credential_for(&self.config, &account)?;
         let client = connect_account(&self.store, &account, &self.config, credential).await?;
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Log `account` in as a fresh device and cache the resulting live client in
+    /// its connection slot, so the supervised sync task's first
+    /// [`get_or_connect`](Self::get_or_connect) reuses this client rather than
+    /// building a second one (ADR 0021). The lifecycle layer calls this under its
+    /// per-identity lock, having already resolved/minted the row; the caller flips
+    /// the row to `active` and spawns the task only on success.
+    ///
+    /// Holding the slot lock across the login makes it single-flight with any
+    /// concurrent `get_or_connect`. Any previously cached client is discarded
+    /// first (a reactivated row may carry a stale slot from a prior session).
+    pub async fn login(&self, account: &Account, password: &str) -> Result<Client, SyncError> {
+        let slot = self.slot(account.account_id);
+        let mut guard = slot.lock().await;
+        *guard = None;
+        let client = login_new_device(&self.store, account, &self.config, password).await?;
         *guard = Some(client.clone());
         Ok(client)
     }

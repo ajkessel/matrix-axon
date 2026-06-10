@@ -19,7 +19,7 @@ use std::time::Duration;
 use axon_api::AppState;
 use axon_core::LiveEvent;
 use axon_store::Store;
-use common::StubSender;
+use common::{StubLifecycle, StubSender};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -44,6 +44,7 @@ async fn ws_streams_live_events() {
         store,
         live.clone(),
         Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
     ));
 
     // Serve on an ephemeral port in the background.

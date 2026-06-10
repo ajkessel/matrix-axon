@@ -18,6 +18,7 @@ use utoipa::OpenApi;
     ),
     paths(
         crate::routes::accounts::list_accounts,
+        crate::routes::accounts::login,
         crate::routes::accounts::get_account,
         crate::routes::rooms::list_rooms,
         crate::routes::rooms::room_timeline,
@@ -33,6 +34,7 @@ use utoipa::OpenApi;
         crate::dto::RoomDto,
         crate::dto::EventDto,
         crate::dto::TimelinePage,
+        crate::dto::LoginRequest,
         crate::dto::SendMessageRequest,
         crate::dto::EditRequest,
         crate::dto::ReactRequest,

@@ -154,10 +154,12 @@ the rows behind #24 land in **7a-4** (see the groundwork caveats under
     introduced with the lifecycle verbs (**7a-3/7a-4**). Until then the invariant is
     the narrower "a non-`active` row gets no *new* client", not "no live client".
 - **Con:** the broad "every row regardless of state" set is intentionally *not*
-  exposed yet — `list_accounts` is the active-only default. The read API,
-  teardown reconcile, and orphan-dir GC each need a wider/by-state view, so each
-  lands its own explicitly-named accessor when it arrives, rather than one shared
-  "all rows" method that would be a footgun to call from the connect path.
+  exposed — `list_accounts` is the active-only connect/boot default. Each caller
+  that needs a wider view gets its **own** explicitly-named accessor rather than a
+  shared "all rows" method that would be a footgun on the connect path: the read
+  API uses `list_client_visible_accounts` (active + deactivated, so a logged-out
+  account is discoverable; landed in 7a-2), and the teardown reconcile + orphan-dir
+  GC will add their own (`deleting`-only / by-existence) when they land in 7a-4.
 - **Scope (this PR):** schema + store + the gate only. No new HTTP surface; the
   lifecycle verbs, the lock, reconcile/GC, recovery, and SAS are the later 7a PRs
   above. `verified` is persisted but its derivation is a stub (defaults `false`)

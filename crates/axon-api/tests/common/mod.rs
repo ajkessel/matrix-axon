@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use axon_api::{MessageSender, SendError};
+use axon_api::{AccountLifecycle, LoginError, MessageSender, SendError};
 use uuid::Uuid;
 
 /// One recorded call to the stub, with the arguments the handler passed through.
@@ -92,6 +92,87 @@ impl StubSender {
     /// The calls recorded so far, in order.
     pub fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+/// The outcome the [`StubLifecycle`] returns for every `login` call. `Clone` so
+/// one stub can answer repeated calls; mirrors [`LoginError`]'s variants.
+#[derive(Clone)]
+pub enum LoginOutcome {
+    Ok(Uuid),
+    InvalidRequest(String),
+    AuthFailed(String),
+    Conflict(String),
+    Upstream(String),
+    Internal,
+}
+
+impl LoginOutcome {
+    fn to_result(&self) -> Result<Uuid, LoginError> {
+        match self {
+            LoginOutcome::Ok(id) => Ok(*id),
+            LoginOutcome::InvalidRequest(m) => Err(LoginError::InvalidRequest(m.clone())),
+            LoginOutcome::AuthFailed(m) => Err(LoginError::AuthFailed(m.clone())),
+            LoginOutcome::Conflict(m) => Err(LoginError::Conflict(m.clone())),
+            LoginOutcome::Upstream(m) => Err(LoginError::Upstream(m.clone())),
+            LoginOutcome::Internal => Err(LoginError::Internal),
+        }
+    }
+}
+
+/// One recorded `login` call, with the arguments the handler passed through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginCall {
+    pub homeserver_url: String,
+    pub username: String,
+    pub password: String,
+}
+
+/// An in-memory [`AccountLifecycle`] for tests: records each `login` call and
+/// returns a preset outcome, so the login route can be exercised (loopback guard,
+/// request decoding, `LoginError` → status mapping) without a real homeserver.
+pub struct StubLifecycle {
+    outcome: LoginOutcome,
+    calls: Mutex<Vec<LoginCall>>,
+}
+
+impl StubLifecycle {
+    /// A stub that returns `Ok(account_id)` for every login.
+    pub fn ok(account_id: Uuid) -> Self {
+        Self {
+            outcome: LoginOutcome::Ok(account_id),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every login.
+    pub fn failing(outcome: LoginOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The login calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<LoginCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AccountLifecycle for StubLifecycle {
+    async fn login(
+        &self,
+        homeserver_url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<Uuid, LoginError> {
+        self.calls.lock().unwrap().push(LoginCall {
+            homeserver_url: homeserver_url.to_owned(),
+            username: username.to_owned(),
+            password: password.to_owned(),
+        });
+        self.outcome.to_result()
     }
 }
 

@@ -385,6 +385,7 @@ dependencies = [
  "matrix-sdk",
  "matrix-sdk-ui",
  "serde_json",
+ "sqlx-core",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -4855,6 +4856,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

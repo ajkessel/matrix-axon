@@ -20,7 +20,7 @@ use axon_api::{AppState, MessageSender};
 use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{Call, Outcome, StubSender};
+use common::{Call, Outcome, StubLifecycle, StubSender};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -31,10 +31,12 @@ async fn store() -> Store {
     Store::connect(&url, 5).await.expect("connect + migrate")
 }
 
-/// Build the router around a given sender. The live bus is unused here.
+/// Build the router around a given sender. The live bus and lifecycle port are
+/// unused here.
 fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
-    axon_api::router(AppState::new(store, live, sender))
+    let lifecycle = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    axon_api::router(AppState::new(store, live, sender, lifecycle))
 }
 
 /// Issue a request (optional JSON body) and return `(status, parsed body)`.

@@ -13,6 +13,8 @@
 mod cursor;
 mod dto;
 mod extract;
+mod lifecycle;
+mod loopback;
 mod openapi;
 mod response;
 mod routes;
@@ -20,12 +22,14 @@ mod sender;
 mod state;
 mod ws;
 
+pub use lifecycle::{AccountLifecycle, LoginError};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
 pub use state::AppState;
 
 use axum::{
+    middleware::from_fn,
     routing::{get, post, put},
     Json, Router,
 };
@@ -41,6 +45,13 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         // Account read API: the cross-account list and a single account.
         .route("/v1/accounts", get(routes::accounts::list_accounts))
+        // Runtime login. Secret-bearing, so it is restricted to loopback clients
+        // until the bearer-token auth layer lands (a per-route guard, so the read
+        // routes above/below are unaffected).
+        .route(
+            "/v1/accounts/login",
+            post(routes::accounts::login).route_layer(from_fn(loopback::require_loopback)),
+        )
         .route(
             "/v1/accounts/{account_id}",
             get(routes::accounts::get_account),

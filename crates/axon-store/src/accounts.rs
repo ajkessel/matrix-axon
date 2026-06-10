@@ -171,6 +171,50 @@ impl Store {
         Ok(accounts)
     }
 
+    /// The client-visible accounts — `active` **and** `deactivated`, oldest
+    /// first — backing the lifecycle read API (`GET /v1/accounts`). It includes
+    /// logged-out (`deactivated`) accounts so a client that has lost the
+    /// `account_id` can still discover one to offer re-login, but excludes the
+    /// transient `deleting` teardown state (a row mid-removal is not something to
+    /// act on; a by-id [`get_account`](Self::get_account) read still surfaces it).
+    ///
+    /// Deliberately distinct from [`list_accounts`](Self::list_accounts), which is
+    /// active-only for the connect/boot path — the two callers want different
+    /// slices, so neither rides on a shared "all rows" accessor (ADR 0022).
+    pub async fn list_client_visible_accounts(&self) -> Result<Vec<Account>, StoreError> {
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts \
+             WHERE state IN ('active', 'deactivated') ORDER BY created_at ASC"
+        );
+        let accounts = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(accounts)
+    }
+
+    /// Look up an account by its Matrix identity `(user_id, homeserver_url)` —
+    /// the natural key the login verb starts from, before any `account_id`
+    /// exists. Returns the row in **any** lifecycle state (so a caller can
+    /// distinguish "new identity" from a `deactivated` row to reactivate or an
+    /// `active` one to reject); `None` means no such account. Read-only — unlike
+    /// [`upsert_account`](Self::upsert_account) it never inserts.
+    pub async fn find_account_by_identity(
+        &self,
+        user_id: &str,
+        homeserver_url: &str,
+    ) -> Result<Option<Account>, StoreError> {
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts \
+             WHERE user_id = $1 AND homeserver_url = $2"
+        );
+        let account = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
+            .bind(user_id)
+            .bind(homeserver_url)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(account)
+    }
+
     /// Move an account to a new lifecycle state (ADR 0022). The lifecycle verbs
     /// (login/logout/delete) own these transitions; clients never set `state`
     /// directly. The `updated_at` trigger maintains the timestamp.

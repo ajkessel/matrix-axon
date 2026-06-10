@@ -70,6 +70,13 @@ pub enum SyncError {
     #[error("matrix sdk error: {0}")]
     Sdk(String),
 
+    /// A login was rejected by the homeserver because the credentials were wrong
+    /// (an `M_FORBIDDEN` / `M_UNAUTHORIZED` from the login call), as opposed to a
+    /// transient connection failure. Lets the lifecycle layer return `401` rather
+    /// than a generic upstream error.
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
+
     /// A storage-layer error while provisioning accounts or persisting tokens.
     #[error("store error: {0}")]
     Store(#[from] axon_store::StoreError),

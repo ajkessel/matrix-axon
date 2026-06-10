@@ -15,16 +15,88 @@
         "tags": [
           "accounts"
         ],
-        "summary": "List the accounts this Axon manages, oldest first — the `active` ones.",
-        "description": "Logged-out (`deactivated`) accounts are not yet surfaced here: nothing can\nproduce one until the logout verb lands, and showing them is part of that\nreactivation UX (a later subphase will widen this list, likely behind an\nexplicit filter). A specific account can still be read in any state by id\nvia [`get_account`].",
+        "summary": "List the accounts this Axon manages, oldest first — the **client-visible**\nset: `active` and `deactivated`.",
+        "description": "Logged-out (`deactivated`) accounts are included so a client that has lost the\n`account_id` can still discover one to offer re-login (the login verb both\nproduces and reactivates them). The transient `deleting` teardown state is\nexcluded — a row mid-removal isn't something to act on — but any account, in\nany state, can still be read by id via [`get_account`].",
         "operationId": "list_accounts",
         "responses": {
           "200": {
-            "description": "Active accounts, oldest first",
+            "description": "Client-visible accounts (active + deactivated), oldest first",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse_Vec_AccountDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/login": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by `(homeserver_url, username)`: a new identity is\nminted, a logged-out (`deactivated`) account is reactivated, and an\nalready-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.",
+        "description": "Secret-bearing, so this route is loopback-only until the auth layer lands (see\nthe `route_layer` in [`router`](crate::router)).",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The active account (newly logged in, reactivated, or already active)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_AccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request (e.g. invalid user ID)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Credentials rejected by the homeserver",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1157,6 +1229,29 @@
           "type": {
             "type": "string",
             "description": "Matrix event type, e.g. `m.room.message`."
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by `(homeserver_url, username)`. The\npassword is used once to authenticate and is never stored or echoed back.",
+        "required": [
+          "homeserver_url",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "homeserver_url": {
+            "type": "string",
+            "description": "Homeserver base URL, e.g. `https://matrix.example.org`."
+          },
+          "password": {
+            "type": "string",
+            "description": "Account password. Consumed once at login; never persisted."
+          },
+          "username": {
+            "type": "string",
+            "description": "Full Matrix user ID, e.g. `@alice:example.org`."
           }
         }
       },
