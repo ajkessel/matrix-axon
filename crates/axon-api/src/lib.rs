@@ -22,7 +22,7 @@ mod sender;
 mod state;
 mod ws;
 
-pub use lifecycle::{AccountLifecycle, LoginError};
+pub use lifecycle::{AccountLifecycle, LoginError, LogoutError};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
@@ -51,6 +51,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/login",
             post(routes::accounts::login).route_layer(from_fn(loopback::require_loopback)),
+        )
+        // Runtime logout. Like login it is a state-changing lifecycle verb, so it is
+        // loopback-restricted until the bearer-token auth layer lands.
+        .route(
+            "/v1/accounts/{account_id}/logout",
+            post(routes::accounts::logout).route_layer(from_fn(loopback::require_loopback)),
         )
         .route(
             "/v1/accounts/{account_id}",

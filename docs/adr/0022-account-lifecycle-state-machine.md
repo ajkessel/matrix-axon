@@ -147,12 +147,26 @@ the rows behind #24 land in **7a-4** (see the groundwork caveats under
     has actually moved a row out of `active` — the reconcile + orphan-dir GC that
     structurally retire stale rows land in **7a-4**.
   - **The gate is cold-connect only.** `get_or_connect` returns an already-cached
-    client before it rereads `state`, so flipping a *connected* account to
-    non-`active` does not by itself sever the live client or stop its supervised
-    task. Making a transition take effect on a live account requires evicting the
-    cached client and cancelling its task atomically — per-account cancellation is
-    introduced with the lifecycle verbs (**7a-3/7a-4**). Until then the invariant is
-    the narrower "a non-`active` row gets no *new* client", not "no live client".
+    client before it rereads `state`, so the gate *alone* doesn't sever a
+    *connected* account on a state change. Severing a live account is instead done
+    actively by the lifecycle verbs: **`logout` (landed in 7a-3)** flips the row to
+    `deactivated` *first* (so the gate refuses any new connect from that point on),
+    then cancels that account's supervised task and **awaits its drain** (the
+    per-account cancellation + join handles introduced there — cancellation is
+    cooperative, and the task holds the account's SDK store dir until the drain
+    finishes, so a re-login must not restage it earlier; an overrunning drain is
+    escalated to an abort, and a task that survives even that fails the verb
+    with the task left registered, which `login` refuses until a retry reaps
+    it — the quiescent-store postcondition is never traded for a return), then
+    takes the cached
+    client out of its slot and best-effort invalidates the device token upstream;
+    `DELETE` (7a-4) reuses the same mechanism. Flip-then-take closes the
+    logout-side reconnect race (a connect that read `active` pre-flip has its
+    freshly cached client taken right back out — `take` serializes on the slot
+    lock); the only residual is the login-side microseconds between caching a
+    freshly-logged-in client and that row's flip *to* `active`, so the gate's own
+    structural invariant stays the narrower "a non-`active` row gets no *new*
+    client".
 - **Con:** the broad "every row regardless of state" set is intentionally *not*
   exposed — `list_accounts` is the active-only connect/boot default. Each caller
   that needs a wider view gets its **own** explicitly-named accessor rather than a

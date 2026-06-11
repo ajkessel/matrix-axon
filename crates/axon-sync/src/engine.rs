@@ -6,6 +6,8 @@
 //! If the service errors or terminates unexpectedly the task restarts it with
 //! exponential backoff; a cancellation token drives graceful shutdown.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{LiveEvent, SyncConfig};
@@ -33,6 +35,28 @@ use crate::redecrypt;
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// A supervised task's stop handles: the per-account cancellation token plus
+/// the task's join handle. Both are needed because cancellation is cooperative —
+/// `cancel` only *requests* the stop; the task then drains its sync service and
+/// re-decryption queue (still holding open SQLite handles under the account's
+/// store dir) before exiting. A lifecycle verb that must know the store dir is
+/// quiescent (logout, ahead of a possible re-login restaging it) awaits `handle`.
+pub(crate) struct AccountTask {
+    pub(crate) cancel: CancellationToken,
+    pub(crate) handle: tokio::task::JoinHandle<()>,
+}
+
+/// `account_id → stop handles` for the per-account supervised tasks.
+///
+/// Each task runs under a child of the engine-wide cancel token, registered here
+/// when it is spawned. The engine-wide token still cascades to every child on
+/// [`SyncEngine::shutdown`], but a single account can also be stopped on its own
+/// (the logout/delete lifecycle verbs cancel just that account's token and await
+/// its handle). Shared (clone of the `Arc`) between the engine and the
+/// [`AccountLifecycle`] so both the boot loop and the runtime login verb register
+/// onto the same map.
+pub(crate) type TaskRegistry = Arc<Mutex<HashMap<Uuid, AccountTask>>>;
+
 /// Owns the per-account sync tasks. Dropping it does not stop the tasks; call
 /// [`SyncEngine::shutdown`] to cancel and join them cleanly.
 pub struct SyncEngine {
@@ -42,6 +66,10 @@ pub struct SyncEngine {
     /// lets tasks be added after `start` returns.
     tracker: TaskTracker,
     cancel: CancellationToken,
+    /// Per-account cancellation handles, so a single account's task can be stopped
+    /// without touching the others (the logout/delete verbs). Populated by
+    /// [`spawn_supervised`] for both boot-time and runtime-login tasks.
+    tasks: TaskRegistry,
     /// Producer end of the live-event bus. The sync tasks publish through clones
     /// of this; [`SyncEngine::live_events`] hands a clone to the API layer so
     /// each WebSocket connection can `subscribe()`.
@@ -91,10 +119,14 @@ impl SyncEngine {
 
         // One tracker holds every task; the runtime login verb spawns onto the
         // same tracker so a logged-in-at-runtime account shuts down with the rest.
+        // The task registry is shared the same way, so the lifecycle verbs can
+        // cancel a single account's task.
         let tracker = TaskTracker::new();
+        let tasks: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         for account in accounts {
             spawn_supervised(
                 &tracker,
+                &tasks,
                 store.clone(),
                 config.clone(),
                 account,
@@ -107,6 +139,7 @@ impl SyncEngine {
         Ok(SyncEngine {
             tracker,
             cancel,
+            tasks,
             live_tx,
             manager,
             store,
@@ -141,6 +174,7 @@ impl SyncEngine {
             self.live_tx.clone(),
             self.cancel.clone(),
             self.tracker.clone(),
+            self.tasks.clone(),
         )
     }
 
@@ -159,8 +193,19 @@ impl SyncEngine {
 /// Spawn a supervised sync task for `account` onto `tracker`. Shared by boot
 /// (one call per active account) and the runtime login verb (one call when a
 /// login succeeds), so both paths get identical supervision + shutdown.
+///
+/// The task runs under a fresh child of the engine-wide `cancel` token; its
+/// token + join handle are registered in `tasks` under the account id so a
+/// lifecycle verb can stop just this account *and await its drain*. A stale
+/// entry for the id should not exist (logout awaits termination before the
+/// identity can log back in), but if one does it is cancelled and replaced as a
+/// backstop, so an account can never end up with two registered tasks.
+// The supervised task genuinely needs every one of these handles; bundling them
+// into a context struct would only move the same fields behind one more name.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_supervised(
     tracker: &TaskTracker,
+    tasks: &TaskRegistry,
     store: Store,
     config: SyncConfig,
     account: Account,
@@ -168,9 +213,25 @@ pub(crate) fn spawn_supervised(
     live_tx: broadcast::Sender<LiveEvent>,
     manager: ClientManager,
 ) {
-    tracker.spawn(supervise_account(
-        store, config, account, cancel, live_tx, manager,
+    let task_cancel = cancel.child_token();
+    let account_id = account.account_id;
+    let handle = tracker.spawn(supervise_account(
+        store,
+        config,
+        account,
+        task_cancel.clone(),
+        live_tx,
+        manager,
     ));
+    if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
+        account_id,
+        AccountTask {
+            cancel: task_cancel,
+            handle,
+        },
+    ) {
+        stale.cancel.cancel();
+    }
 }
 
 /// Supervise a single account: run it, and on failure restart with exponential

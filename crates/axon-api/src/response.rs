@@ -168,3 +168,15 @@ impl From<crate::lifecycle::LoginError> for ApiError {
         }
     }
 }
+
+impl From<crate::lifecycle::LogoutError> for ApiError {
+    fn from(err: crate::lifecycle::LogoutError) -> Self {
+        use crate::lifecycle::LogoutError;
+        match err {
+            LogoutError::NotFound(msg) => ApiError::not_found(msg),
+            LogoutError::Conflict(msg) => ApiError::conflict(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            LogoutError::Internal => ApiError::internal(),
+        }
+    }
+}

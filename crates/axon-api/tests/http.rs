@@ -21,7 +21,7 @@ use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use common::{LoginCall, LoginOutcome, StubLifecycle, StubSender};
+use common::{LoginCall, LoginOutcome, LogoutOutcome, StubLifecycle, StubSender};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -522,6 +522,125 @@ async fn login_error_maps_to_status() {
     for (outcome, want_status, want_code) in cases {
         let app = login_app(store.clone(), Arc::new(StubLifecycle::failing(outcome)));
         let (status, err) = post_login(&app, loopback, body.clone()).await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+/// `POST /v1/accounts/{account_id}/logout` with an optional peer address (the
+/// `ConnectInfo<SocketAddr>` the loopback guard reads). Returns `(status, body)`.
+async fn post_logout(
+    app: &axum::Router,
+    peer: Option<SocketAddr>,
+    account_id: Uuid,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/accounts/{account_id}/logout"));
+    if let Some(addr) = peer {
+        builder = builder.extension(ConnectInfo(addr));
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body")
+    };
+    (status, json)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn logout_succeeds_and_envelopes_deactivated_account() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    // Seed the account already `deactivated` to mirror the post-logout row the
+    // handler reads back (the stubbed port doesn't touch the DB — the real
+    // transition is covered by the axon-sync lifecycle tests).
+    let hs = "https://hs.example.org";
+    let user = format!("@logout-{}:localhost", Uuid::new_v4());
+    let account = store.upsert_account(&user, hs).await.expect("seed");
+    store
+        .set_account_state(account.account_id, AccountState::Deactivated)
+        .await
+        .expect("deactivate");
+
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = login_app(store.clone(), stub.clone());
+
+    let loopback = Some("127.0.0.1:54300".parse().unwrap());
+    let (status, body) = post_logout(&app, loopback, account.account_id).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["account_id"], account.account_id.to_string());
+    assert_eq!(body["data"]["state"], "deactivated");
+    // The handler routed the id straight through to the port.
+    assert_eq!(stub.logout_calls(), vec![account.account_id]);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn logout_requires_loopback_peer() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+
+    // Non-loopback and missing-peer both fail closed before the handler runs.
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = post_logout(&app, off_box, Uuid::new_v4()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+
+    let (status, _) = post_logout(&app, None, Uuid::new_v4()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The guard short-circuited: the lifecycle port was never invoked.
+    assert!(stub.logout_calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn logout_error_maps_to_status() {
+    let store = store().await;
+    let loopback: Option<SocketAddr> = Some("127.0.0.1:14100".parse().unwrap());
+    let id = Uuid::new_v4();
+
+    let cases = [
+        (
+            LogoutOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            LogoutOutcome::Conflict("deleting".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            LogoutOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = login_app(
+            store.clone(),
+            Arc::new(StubLifecycle::logout_failing(outcome)),
+        );
+        let (status, err) = post_logout(&app, loopback, id).await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }

@@ -93,10 +93,11 @@ impl ClientManager {
         // active rows, but the gateway connects lazily for any id an API send
         // names, so the cold-connect gate lives here too. Note this runs only on a
         // cache miss: an account that already has a cached client (above) is not
-        // re-checked, so flipping a *connected* account to non-`active` does not
-        // sever it here — evicting the cached client and cancelling its task is the
-        // job of the lifecycle verbs (7a-3/7a-4), which call `evict` on transition
-        // (ADR 0022).
+        // re-checked, so this gate alone doesn't sever a *connected* account on a
+        // state change. The lifecycle verbs do that actively — logout/delete flip
+        // the row out of `active` *first* (so this gate refuses any new connect),
+        // then stop the account's supervised task and take its cached client out
+        // of the slot (see `take`) (ADR 0022).
         if account.state != AccountState::Active {
             return Err(GatewayError::AccountNotActive(account_id));
         }
@@ -124,6 +125,28 @@ impl ClientManager {
         let client = login_new_device(&self.store, account, &self.config, password).await?;
         *guard = Some(client.clone());
         Ok(client)
+    }
+
+    /// Take the cached client for `account_id` out of its slot, returning it (or
+    /// `None` if nothing is cached). This both *yields* the client — so the caller
+    /// can do one last thing with it, e.g. invalidate the device token upstream on
+    /// logout — and *evicts* it (the slot is left empty), atomically under the slot
+    /// lock so a concurrent [`get_or_connect`](Self::get_or_connect) can't observe a
+    /// half-removed client. Unlike [`evict`](Self::evict) this awaits the slot lock
+    /// rather than skipping a slot that is mid-connect.
+    pub async fn take(&self, account_id: Uuid) -> Option<Client> {
+        let slot = self.slot(account_id);
+        let mut guard = slot.lock().await;
+        guard.take()
+    }
+
+    /// Put a client straight into an account's slot, standing in for a connect.
+    /// Lets a test exercise the cached-client paths (eviction on logout, the
+    /// cache-hit fast path) without a reachable homeserver.
+    #[cfg(test)]
+    pub(crate) async fn inject_for_test(&self, account_id: Uuid, client: Client) {
+        let slot = self.slot(account_id);
+        *slot.lock().await = Some(client);
     }
 
     /// Drop the cached client for `account_id` so the next

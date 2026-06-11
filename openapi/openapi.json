@@ -199,6 +199,60 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/logout": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Log a Matrix account out, then return the resulting (now `deactivated`)\naccount. Stops syncing it, invalidates its device token upstream (best-effort\n— an unreachable homeserver never fails the logout), and moves it to a\nlogged-out state, **retaining all of its data** (archive, search, media) so a\nlater login reactivates the same `account_id`. Idempotent: logging out an\nalready-logged-out account is a `200` no-op. An account mid-deletion\n(`deleting`) is a `409`; an unknown id is a `404`.",
+        "description": "Secret-bearing / destructive, so this route is loopback-only until the auth\nlayer lands (see the `route_layer` in [`router`](crate::router)).",
+        "operationId": "logout",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The logged-out (deactivated) account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_AccountDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
       "put": {
         "tags": [

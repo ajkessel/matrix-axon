@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, LoginError, MessageSender, SendError};
+use axon_api::{AccountLifecycle, LoginError, LogoutError, MessageSender, SendError};
 use uuid::Uuid;
 
 /// One recorded call to the stub, with the arguments the handler passed through.
@@ -128,34 +128,76 @@ pub struct LoginCall {
     pub password: String,
 }
 
-/// An in-memory [`AccountLifecycle`] for tests: records each `login` call and
-/// returns a preset outcome, so the login route can be exercised (loopback guard,
-/// request decoding, `LoginError` → status mapping) without a real homeserver.
+/// The outcome the [`StubLifecycle`] returns for every `logout` call. `Clone` so
+/// one stub can answer repeated calls; mirrors [`LogoutError`]'s variants.
+#[derive(Clone)]
+pub enum LogoutOutcome {
+    Ok,
+    NotFound(String),
+    Conflict(String),
+    Internal,
+}
+
+impl LogoutOutcome {
+    fn to_result(&self) -> Result<(), LogoutError> {
+        match self {
+            LogoutOutcome::Ok => Ok(()),
+            LogoutOutcome::NotFound(m) => Err(LogoutError::NotFound(m.clone())),
+            LogoutOutcome::Conflict(m) => Err(LogoutError::Conflict(m.clone())),
+            LogoutOutcome::Internal => Err(LogoutError::Internal),
+        }
+    }
+}
+
+/// An in-memory [`AccountLifecycle`] for tests: records each `login`/`logout` call
+/// and returns a preset outcome, so the lifecycle routes can be exercised (loopback
+/// guard, request decoding, error → status mapping) without a real homeserver.
 pub struct StubLifecycle {
-    outcome: LoginOutcome,
-    calls: Mutex<Vec<LoginCall>>,
+    login_outcome: LoginOutcome,
+    logout_outcome: LogoutOutcome,
+    login_calls: Mutex<Vec<LoginCall>>,
+    logout_calls: Mutex<Vec<Uuid>>,
 }
 
 impl StubLifecycle {
-    /// A stub that returns `Ok(account_id)` for every login.
+    /// A stub that returns `Ok(account_id)` for every login and `Ok` for logout.
     pub fn ok(account_id: Uuid) -> Self {
         Self {
-            outcome: LoginOutcome::Ok(account_id),
-            calls: Mutex::new(Vec::new()),
+            login_outcome: LoginOutcome::Ok(account_id),
+            logout_outcome: LogoutOutcome::Ok,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
         }
     }
 
-    /// A stub that returns the given failure for every login.
+    /// A stub whose login returns the given failure (logout succeeds).
     pub fn failing(outcome: LoginOutcome) -> Self {
         Self {
-            outcome,
-            calls: Mutex::new(Vec::new()),
+            login_outcome: outcome,
+            logout_outcome: LogoutOutcome::Ok,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose logout returns the given failure (login returns a nil id).
+    pub fn logout_failing(outcome: LogoutOutcome) -> Self {
+        Self {
+            login_outcome: LoginOutcome::Ok(Uuid::nil()),
+            logout_outcome: outcome,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
         }
     }
 
     /// The login calls recorded so far, in order.
     pub fn calls(&self) -> Vec<LoginCall> {
-        self.calls.lock().unwrap().clone()
+        self.login_calls.lock().unwrap().clone()
+    }
+
+    /// The account ids passed to logout, in order.
+    pub fn logout_calls(&self) -> Vec<Uuid> {
+        self.logout_calls.lock().unwrap().clone()
     }
 }
 
@@ -167,12 +209,17 @@ impl AccountLifecycle for StubLifecycle {
         username: &str,
         password: &str,
     ) -> Result<Uuid, LoginError> {
-        self.calls.lock().unwrap().push(LoginCall {
+        self.login_calls.lock().unwrap().push(LoginCall {
             homeserver_url: homeserver_url.to_owned(),
             username: username.to_owned(),
             password: password.to_owned(),
         });
-        self.outcome.to_result()
+        self.login_outcome.to_result()
+    }
+
+    async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError> {
+        self.logout_calls.lock().unwrap().push(account_id);
+        self.logout_outcome.to_result()
     }
 }
 

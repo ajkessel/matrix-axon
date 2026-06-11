@@ -33,8 +33,26 @@ pub enum LoginError {
     Internal,
 }
 
-/// Adds or reactivates a Matrix account at runtime. Implemented outside this
-/// crate; held in [`AppState`](crate::AppState) as `Arc<dyn AccountLifecycle>`.
+/// What can go wrong logging an account out. Like [`LoginError`], small and
+/// HTTP-shaped; the adapter collapses its backend error into one of these.
+#[derive(Debug)]
+pub enum LogoutError {
+    /// No account exists for the given id. → `404`.
+    NotFound(String),
+    /// The account is mid-teardown (a delete is in flight), so it can't be logged
+    /// out. → `409`.
+    Conflict(String),
+    /// An internal failure (e.g. the store). The detail is logged, not returned.
+    /// → `500`.
+    ///
+    /// There is deliberately no upstream/502 variant: the backend invalidates the
+    /// device token upstream best-effort and never fails logout over it, so such
+    /// a variant would be unreachable API surface.
+    Internal,
+}
+
+/// Adds, reactivates, or stops a Matrix account at runtime. Implemented outside
+/// this crate; held in [`AppState`](crate::AppState) as `Arc<dyn AccountLifecycle>`.
 #[async_trait]
 pub trait AccountLifecycle: Send + Sync {
     /// Log in (or reactivate) the account identified by `(homeserver_url,
@@ -46,4 +64,10 @@ pub trait AccountLifecycle: Send + Sync {
         username: &str,
         password: &str,
     ) -> Result<Uuid, LoginError>;
+
+    /// Log the account `account_id` out: stop syncing it, invalidate its device
+    /// token upstream, and move it to a logged-out (`deactivated`) state, retaining
+    /// all of its data so a later [`login`](Self::login) reactivates it. Idempotent
+    /// — logging out an already-logged-out account succeeds.
+    async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError>;
 }

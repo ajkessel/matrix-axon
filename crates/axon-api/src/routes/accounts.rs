@@ -83,6 +83,44 @@ pub async fn login(
     Ok(ApiResponse::new(AccountDto::from(account)))
 }
 
+/// Log a Matrix account out, then return the resulting (now `deactivated`)
+/// account. Stops syncing it, invalidates its device token upstream (best-effort
+/// — an unreachable homeserver never fails the logout), and moves it to a
+/// logged-out state, **retaining all of its data** (archive, search, media) so a
+/// later login reactivates the same `account_id`. Idempotent: logging out an
+/// already-logged-out account is a `200` no-op. An account mid-deletion
+/// (`deleting`) is a `409`; an unknown id is a `404`.
+///
+/// Secret-bearing / destructive, so this route is loopback-only until the auth
+/// layer lands (see the `route_layer` in [`router`](crate::router)).
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/logout",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    responses(
+        (status = 200, description = "The logged-out (deactivated) account", body = ApiResponse<AccountDto>),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 409, description = "The account is being deleted", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn logout(
+    State(store): State<Store>,
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    Path(account_id): Path<Uuid>,
+) -> Result<ApiResponse<AccountDto>, ApiError> {
+    lifecycle.logout(account_id).await?;
+    // Read the row back so the response reflects the persisted (deactivated) state.
+    // It was just transitioned, so a missing row here is a real inconsistency.
+    let account = store
+        .get_account(account_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(ApiResponse::new(AccountDto::from(account)))
+}
+
 /// Read a single account by id, in whatever lifecycle state it is — unlike the
 /// list, a direct by-id read is not filtered to `active` (so a client can poll
 /// an account it knows and watch it transition). An unknown id is a 404.
