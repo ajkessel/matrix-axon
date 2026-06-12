@@ -412,7 +412,50 @@ async fn login_succeeds_routes_to_port_and_envelopes_account() {
     assert_eq!(
         stub.calls(),
         vec![LoginCall {
-            homeserver_url: hs.to_owned(),
+            homeserver_url: Some(hs.to_owned()),
+            username: user.clone(),
+            password: "hunter2".to_owned(),
+        }]
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn login_without_homeserver_url_forwards_none_for_discovery() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    let user = format!("@discover-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("seed");
+
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = login_app(store.clone(), stub.clone());
+
+    // No `homeserver_url` in the body: the handler must accept the request and
+    // forward `None` so the lifecycle backend performs discovery.
+    let loopback = Some("127.0.0.1:54322".parse().unwrap());
+    let (status, body) = post_login(
+        &app,
+        loopback,
+        json!({ "username": user, "password": "hunter2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["account_id"], account.account_id.to_string());
+    assert_eq!(
+        stub.calls(),
+        vec![LoginCall {
+            homeserver_url: None,
             username: user.clone(),
             password: "hunter2".to_owned(),
         }]

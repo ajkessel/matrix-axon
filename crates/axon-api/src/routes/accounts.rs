@@ -50,6 +50,17 @@ pub async fn list_accounts(
 /// Matrix user ID (a malformed one is a `400`); bad credentials are a `401`. The
 /// password is used once and never stored.
 ///
+/// `homeserver_url` is optional: when omitted, the server discovers the
+/// canonical homeserver from the user ID's server name (`.well-known/matrix/client`,
+/// falling back to the server name itself) — so clients need only username +
+/// password, and one canonical URL keys the identity no matter who logs it in.
+/// A failed discovery is a `502`. The `username` domain is then checked against
+/// the homeserver's own declared server name (best-effort): a user ID written
+/// with the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose
+/// message suggests the ID they almost certainly meant (`@adam:example.org`),
+/// rather than a misleading `401` — and never a silent login as a different
+/// identity.
+///
 /// Secret-bearing, so this route is loopback-only until the auth layer lands (see
 /// the `route_layer` in [`router`](crate::router)).
 #[utoipa::path(
@@ -58,10 +69,10 @@ pub async fn list_accounts(
     request_body = LoginRequest,
     responses(
         (status = 200, description = "The active account (newly logged in, reactivated, or already active)", body = ApiResponse<AccountDto>),
-        (status = 400, description = "Malformed request (e.g. invalid user ID)", body = crate::response::ErrorResponse),
+        (status = 400, description = "Malformed request (e.g. invalid user ID, or a user ID written with the homeserver's hostname — the message suggests the canonical spelling)", body = crate::response::ErrorResponse),
         (status = 401, description = "Credentials rejected by the homeserver", body = crate::response::ErrorResponse),
         (status = 409, description = "The account is being deleted", body = crate::response::ErrorResponse),
-        (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
+        (status = 502, description = "Upstream homeserver error (including failed homeserver discovery)", body = crate::response::ErrorResponse),
     ),
     tag = "accounts",
 )]
@@ -71,7 +82,7 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<ApiResponse<AccountDto>, ApiError> {
     let account_id = lifecycle
-        .login(&req.homeserver_url, &req.username, &req.password)
+        .login(req.homeserver_url.as_deref(), &req.username, &req.password)
         .await?;
     // Read the row back so the response reflects the persisted state (device id,
     // timestamps) rather than re-deriving it. It was just made active, so a

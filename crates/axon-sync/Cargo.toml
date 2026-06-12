@@ -35,3 +35,7 @@ thiserror = { workspace = true }
 # DB-gated lifecycle tests: seed/clean account rows directly through the pool
 # (the active no-op / deleting-conflict / invalid-MXID branches need no homeserver).
 sqlx-core = { workspace = true }
+# Homeserver-discovery tests: a tiny loopback HTTP server standing in for the
+# mxdomain (well-known) and the homeserver (versions probe).
+axum = { workspace = true }
+tokio = { workspace = true, features = ["net"] }

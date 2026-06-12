@@ -56,11 +56,16 @@ pub enum LogoutError {
 #[async_trait]
 pub trait AccountLifecycle: Send + Sync {
     /// Log in (or reactivate) the account identified by `(homeserver_url,
-    /// username)`, where `username` is a full Matrix user ID. Returns the Axon
+    /// username)`, where `username` is a full Matrix user ID. When
+    /// `homeserver_url` is `None`, the implementation discovers the canonical
+    /// homeserver from the user ID's server name (`.well-known/matrix/client`,
+    /// falling back to the server name itself); a username whose domain is the
+    /// homeserver's hostname is an [`InvalidRequest`](LoginError::InvalidRequest)
+    /// whose message suggests the canonical spelling. Returns the Axon
     /// `account_id` of the now-active account.
     async fn login(
         &self,
-        homeserver_url: &str,
+        homeserver_url: Option<&str>,
         username: &str,
         password: &str,
     ) -> Result<Uuid, LoginError>;

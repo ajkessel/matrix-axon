@@ -14,6 +14,7 @@
 //! restarts failed syncs with exponential backoff.
 
 mod client;
+mod discovery;
 mod engine;
 mod error;
 mod gateway;

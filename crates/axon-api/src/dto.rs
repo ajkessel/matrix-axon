@@ -239,9 +239,15 @@ impl From<Account> for AccountDto {
 /// password is used once to authenticate and is never stored or echoed back.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
-    /// Homeserver base URL, e.g. `https://matrix.example.org`.
-    pub homeserver_url: String,
-    /// Full Matrix user ID, e.g. `@alice:example.org`.
+    /// Homeserver base URL, e.g. `https://matrix.example.org`. Optional: when
+    /// omitted, the server discovers it from the user ID's server name via
+    /// `.well-known/matrix/client` (falling back to `https://<server name>`).
+    /// Supply it explicitly to skip discovery (e.g. `http://localhost:8008`
+    /// for a local dev homeserver).
+    pub homeserver_url: Option<String>,
+    /// Full Matrix user ID, e.g. `@alice:example.org`. A user ID written with
+    /// the homeserver's hostname as its domain (`@alice:matrix.example.org`)
+    /// is rejected with a 400 whose message suggests the canonical spelling.
     pub username: String,
     /// Account password. Consumed once at login; never persisted.
     pub password: String,

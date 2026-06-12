@@ -77,7 +77,7 @@ fn map_logout_err(err: LifecycleError) -> LogoutError {
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
         &self,
-        homeserver_url: &str,
+        homeserver_url: Option<&str>,
         username: &str,
         password: &str,
     ) -> Result<Uuid, LoginError> {

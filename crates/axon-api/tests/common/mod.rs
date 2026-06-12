@@ -121,9 +121,11 @@ impl LoginOutcome {
 }
 
 /// One recorded `login` call, with the arguments the handler passed through.
+/// `homeserver_url` is `None` when the request omitted it (server-side
+/// discovery — the stub records exactly what the handler forwarded).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginCall {
-    pub homeserver_url: String,
+    pub homeserver_url: Option<String>,
     pub username: String,
     pub password: String,
 }
@@ -205,12 +207,12 @@ impl StubLifecycle {
 impl AccountLifecycle for StubLifecycle {
     async fn login(
         &self,
-        homeserver_url: &str,
+        homeserver_url: Option<&str>,
         username: &str,
         password: &str,
     ) -> Result<Uuid, LoginError> {
         self.login_calls.lock().unwrap().push(LoginCall {
-            homeserver_url: homeserver_url.to_owned(),
+            homeserver_url: homeserver_url.map(str::to_owned),
             username: username.to_owned(),
             password: password.to_owned(),
         });

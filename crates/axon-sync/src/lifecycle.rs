@@ -63,7 +63,9 @@ const UPSTREAM_LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// upstream/homeserver failure → 502, a store failure → 500.
 #[derive(Debug, thiserror::Error)]
 pub enum LifecycleError {
-    /// `username` was not a syntactically valid full Matrix user ID.
+    /// `username` is not a usable Matrix user ID: either syntactically invalid,
+    /// or its domain is the homeserver's hostname rather than the server name
+    /// its user IDs use (the message then suggests the canonical spelling).
     #[error("invalid matrix user id: {0}")]
     InvalidUserId(String),
 
@@ -138,6 +140,9 @@ pub struct AccountLifecycle {
     /// lock; the verb runs under the per-identity async mutex, so verbs for
     /// different accounts never block each other.
     locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    /// HTTP client for homeserver discovery (see [`discovery`](crate::discovery)).
+    /// Cheap to clone (an `Arc` internally), shared across logins.
+    http: matrix_sdk::reqwest::Client,
 }
 
 impl AccountLifecycle {
@@ -160,6 +165,7 @@ impl AccountLifecycle {
             tracker,
             tasks,
             locks: Arc::new(Mutex::new(HashMap::new())),
+            http: crate::discovery::http_client(),
         }
     }
 
@@ -193,16 +199,51 @@ impl AccountLifecycle {
     /// and never deletes the row. On success it flips to `active` and a supervised
     /// sync task is spawned. `username` must be a full MXID; the password is
     /// consumed once, never stored (and not consulted at all for the active no-op).
+    ///
+    /// `homeserver_url` is optional: when absent it is resolved from the MXID's
+    /// server name (see [`discovery`](crate::discovery)), so the canonical URL —
+    /// not whatever each client guessed — keys the identity. A failed discovery
+    /// is an upstream error and touches nothing. On both paths the MXID's domain
+    /// is then checked against the homeserver's own declared server name
+    /// (best-effort): an MXID written with the homeserver's hostname
+    /// (`@adam:matrix.example.org` for `@adam:example.org`) is rejected with a
+    /// did-you-mean error naming the canonical spelling, rather than failing as
+    /// a misleading auth error — or, worse, being logged in as an identity other
+    /// than the one typed.
     pub async fn login(
         &self,
-        homeserver_url: &str,
+        homeserver_url: Option<&str>,
         username: &str,
         password: &str,
     ) -> Result<Uuid, LifecycleError> {
         // Validate the MXID up front so identity resolves before we touch the DB
-        // or build an SDK store. We don't need the parsed value — just the check.
-        OwnedUserId::try_from(username)
+        // or build an SDK store.
+        let user_id = OwnedUserId::try_from(username)
             .map_err(|e| LifecycleError::InvalidUserId(format!("{username}: {e}")))?;
+
+        // Resolve the canonical homeserver before taking the identity lock — the
+        // lock is keyed by `(user_id, homeserver_url)`, and discovery is a pure
+        // read of external state.
+        let homeserver_url = match homeserver_url {
+            // Normalize + scheme-check the caller's URL (trailing slash trimmed
+            // so it keys identically to a discovered one; plain-HTTP public hosts
+            // refused so the password can't leave in cleartext). Not probed —
+            // it's caller-asserted; a bad URL surfaces at the SDK login below.
+            Some(url) => crate::discovery::accept_explicit_homeserver(user_id.server_name(), url)
+                .map_err(|e| LifecycleError::Upstream(e.to_string()))?,
+            None => crate::discovery::resolve_homeserver(&self.http, user_id.server_name())
+                .await
+                .map_err(|e| LifecycleError::Upstream(e.to_string()))?,
+        };
+        let homeserver_url = homeserver_url.as_str();
+
+        // Refuse an MXID whose domain is actually the homeserver's hostname —
+        // no such user can exist there, so fail now with the spelling they
+        // meant instead of a misleading auth error. Also pre-lock: nothing has
+        // been touched yet.
+        crate::discovery::check_user_id_domain(&self.http, homeserver_url, &user_id)
+            .await
+            .map_err(|e| LifecycleError::InvalidUserId(e.to_string()))?;
 
         let lock = self.lock_for(username, homeserver_url);
         let _guard = lock.lock().await;
@@ -515,7 +556,7 @@ mod tests {
 
         // Deliberately wrong password — an active account never consults it.
         let id = lc
-            .login(hs, &user, "not-the-password")
+            .login(Some(hs), &user, "not-the-password")
             .await
             .expect("active login is a no-op");
         assert_eq!(id, acct.account_id);
@@ -545,7 +586,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = lc.login(hs, &user, "pw").await.unwrap_err();
+        let err = lc.login(Some(hs), &user, "pw").await.unwrap_err();
         assert!(matches!(err, LifecycleError::BeingDeleted(id) if id == acct.account_id));
 
         delete_account(&lc.store, acct.account_id).await;
@@ -558,7 +599,7 @@ mod tests {
     async fn login_with_invalid_mxid_is_rejected() {
         let lc = lifecycle().await;
         let err = lc
-            .login("https://hs.example.org", "not-an-mxid", "pw")
+            .login(Some("https://hs.example.org"), "not-an-mxid", "pw")
             .await
             .unwrap_err();
         assert!(matches!(err, LifecycleError::InvalidUserId(_)));
@@ -841,7 +882,7 @@ mod tests {
         assert_eq!(after.state, AccountState::Deactivated);
         // ...but reactivating it is refused before any store-dir or homeserver
         // work, while the old task may still be using the dir.
-        let err = lc.login(hs, &user, "pw").await.unwrap_err();
+        let err = lc.login(Some(hs), &user, "pw").await.unwrap_err();
         assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
 
         // Let the task die, then retry: the leftover is reaped and logout
