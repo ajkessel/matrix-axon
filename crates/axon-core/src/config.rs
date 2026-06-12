@@ -297,6 +297,7 @@ mod tests {
     #[test]
     fn defaults_apply_with_only_database_url() {
         figment::Jail::expect_with(|jail| {
+            jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             let config = Config::load(None).expect("load");
             assert_eq!(config.server.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
@@ -310,7 +311,8 @@ mod tests {
 
     #[test]
     fn missing_database_url_is_an_error() {
-        figment::Jail::expect_with(|_jail| {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
             assert!(Config::load(None).is_err());
             Ok(())
         });
@@ -319,6 +321,7 @@ mod tests {
     #[test]
     fn env_overrides_file_and_defaults() {
         figment::Jail::expect_with(|jail| {
+            jail.clear_env();
             jail.create_file(
                 "axon.toml",
                 r#"
@@ -358,6 +361,7 @@ mod tests {
     #[test]
     fn sync_defaults_when_absent() {
         figment::Jail::expect_with(|jail| {
+            jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             let config = Config::load(None).expect("load");
             assert_eq!(config.sync.data_dir, PathBuf::from("axon-data/sync"));
@@ -370,6 +374,7 @@ mod tests {
     #[test]
     fn sync_account_loads_from_file() {
         figment::Jail::expect_with(|jail| {
+            jail.clear_env();
             jail.create_file(
                 "axon.toml",
                 r#"

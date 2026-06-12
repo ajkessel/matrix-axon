@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[cfg(test)]
 use crate::api::LiveFrame;
-use crate::api::{AxonClient, EventDto, RoomDto};
+use crate::api::{AccountDto, AxonClient, EventDto, RoomDto};
 use crate::command::Command;
 #[cfg(test)]
 use crate::config::SenderNameStyle;
@@ -11,6 +12,8 @@ use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
 #[cfg(test)]
 use ratatui::style::Modifier;
 mod completion;
+mod lifecycle;
+pub(crate) use lifecycle::LifecycleOutcome;
 mod reactions;
 mod render;
 mod rooms;
@@ -29,6 +32,16 @@ const TIMELINE_LIMIT: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
     Compose,
+    LoginUsername,
+    LoginPassword {
+        username: String,
+        /// Homeserver override carried from the username step, if the user gave
+        /// one there. `None` means Axon resolves the homeserver.
+        homeserver: Option<String>,
+    },
+    ConfirmLogout {
+        account: AccountDto,
+    },
     RoomList,
     MessageList,
     Search(SearchKind, String),
@@ -159,6 +172,7 @@ pub(crate) struct App {
     pub(crate) colors: ColorScheme,
     pub(crate) display: DisplayOptions,
     pub(crate) rooms: RoomsState,
+    pub(crate) accounts: AccountsState,
     pub(crate) messages: MessagePane,
     pub(crate) input: InputState,
     pub(crate) live: LiveState,
@@ -169,6 +183,12 @@ pub(crate) struct App {
     pub(crate) show_input_help: bool,
     pub(crate) status: Status,
     pub(crate) should_quit: bool,
+    /// Sender for results of in-flight login/logout work spawned off the event
+    /// loop. `None` until the main loop wires up the channel (and in unit tests).
+    pub(crate) lifecycle_tx: Option<mpsc::UnboundedSender<LifecycleOutcome>>,
+    /// True while a login or logout request is awaiting its result, so the UI
+    /// stays responsive but a second lifecycle verb can't race the first.
+    pub(crate) lifecycle_busy: bool,
     redraw_requested: bool,
 }
 
@@ -178,6 +198,11 @@ pub(crate) struct RoomsState {
     pub(crate) selected: Option<usize>,
     pub(crate) display_names: HashMap<RoomKey, HashMap<String, String>>,
     pub(crate) unread: HashMap<RoomKey, usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct AccountsState {
+    pub(crate) accounts: Vec<AccountDto>,
 }
 
 pub(crate) struct MessagePane {
@@ -207,6 +232,7 @@ pub(crate) struct InputState {
     pub(crate) react_tab: Option<usize>,
     pub(crate) react_command_completion: Option<(String, usize)>,
     pub(crate) partial_switch_completions: Option<Vec<String>>,
+    pub(crate) logout_command_completion: Option<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -229,6 +255,7 @@ impl App {
             colors: config.colors,
             display: config.display,
             rooms: RoomsState::default(),
+            accounts: AccountsState::default(),
             messages: MessagePane::default(),
             input: InputState::default(),
             live: LiveState::default(),
@@ -239,8 +266,15 @@ impl App {
             show_input_help: true,
             status: Status::Info(config_status),
             should_quit: false,
+            lifecycle_tx: None,
+            lifecycle_busy: false,
             redraw_requested: false,
         }
+    }
+
+    /// Wire up the channel the main loop drains for spawned login/logout results.
+    pub(crate) fn set_lifecycle_sender(&mut self, tx: mpsc::UnboundedSender<LifecycleOutcome>) {
+        self.lifecycle_tx = Some(tx);
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
@@ -254,6 +288,7 @@ impl App {
     pub(crate) fn insert_char(&mut self, ch: char) {
         self.input.react_command_completion = None;
         self.input.partial_switch_completions = None;
+        self.input.logout_command_completion = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
@@ -261,6 +296,7 @@ impl App {
     pub(crate) fn backspace(&mut self) {
         self.input.react_command_completion = None;
         self.input.partial_switch_completions = None;
+        self.input.logout_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -278,6 +314,7 @@ impl App {
     pub(crate) fn delete_forward(&mut self) {
         self.input.react_command_completion = None;
         self.input.partial_switch_completions = None;
+        self.input.logout_command_completion = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -401,6 +438,14 @@ impl App {
 
     pub(crate) async fn handle_command(&mut self, command: Command) {
         match command {
+            Command::Login {
+                username,
+                password,
+                homeserver,
+            } => {
+                self.start_login(username, password, homeserver).await;
+            }
+            Command::Logout(target) => self.start_logout(target),
             Command::Switch(target) => self.switch_room(&target).await,
             Command::Rooms => {
                 self.refresh_rooms().await;
@@ -684,6 +729,7 @@ pub(crate) fn selected_message_target_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{AccountDto, AccountState};
     use crate::command::HELP_COMMANDS;
     use crate::ui::{entry_status_text, popup_shortcuts_lines};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -766,6 +812,14 @@ mod tests {
         app
     }
 
+    fn account(user_id: &str, state: AccountState) -> AccountDto {
+        AccountDto {
+            account_id: Uuid::from_u128(1),
+            user_id: user_id.to_owned(),
+            state,
+        }
+    }
+
     #[test]
     fn room_refresh_preserves_selected_room_by_key() {
         let first = room("!one:example.com", Some("#one:example.com"), Some("One"));
@@ -780,6 +834,54 @@ mod tests {
             Some("!two:example.com")
         );
         assert_eq!(app.rooms.selected, Some(0));
+    }
+
+    #[test]
+    fn room_refresh_drops_rooms_for_logged_out_accounts() {
+        let active_id = Uuid::from_u128(1);
+        let logged_out_id = Uuid::from_u128(2);
+
+        let mut active_room = room("!active:example.com", None, Some("Active"));
+        active_room.account_id = active_id;
+        let mut stale_room = room("!stale:example.com", None, Some("Stale"));
+        stale_room.account_id = logged_out_id;
+
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            AccountDto {
+                account_id: active_id,
+                user_id: "@alice:example.com".to_owned(),
+                state: AccountState::Active,
+            },
+            AccountDto {
+                account_id: logged_out_id,
+                user_id: "@bob:example.com".to_owned(),
+                state: AccountState::Deactivated,
+            },
+        ];
+
+        app.apply_room_refresh(vec![active_room, stale_room]);
+
+        assert_eq!(
+            app.rooms
+                .rooms
+                .iter()
+                .map(|room| room.room_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["!active:example.com"]
+        );
+    }
+
+    #[test]
+    fn room_refresh_keeps_rooms_for_accounts_not_yet_listed() {
+        // An empty/stale account list must not blank the whole room list.
+        let mut unknown_room = room("!unknown:example.com", None, Some("Unknown"));
+        unknown_room.account_id = Uuid::from_u128(9);
+        let mut app = app_with_rooms(Vec::new());
+
+        app.apply_room_refresh(vec![unknown_room]);
+
+        assert_eq!(app.rooms.rooms.len(), 1);
     }
 
     #[test]
@@ -908,6 +1010,7 @@ mod tests {
             show_state_events: false,
             sender_name: SenderNameStyle::DisplayName,
             input_lines: 1,
+            confirm_logout: true,
         };
         let state = event_with_state_key(
             "$m.room.topic:example.com",
@@ -2058,6 +2161,218 @@ mod tests {
     }
 
     #[test]
+    fn logout_completion_cycles_only_matching_active_accounts() {
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account("@alice:example.com", AccountState::Active),
+            account("@alice:work.example", AccountState::Active),
+            account("@bob:example.com", AccountState::Active),
+            account("@alice:old.example", AccountState::Deactivated),
+        ];
+        app.input.buffer = "/logout alice".to_owned();
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/logout @alice:example.com");
+        assert!(app.status.text(false).contains("[1/2]"));
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/logout @alice:work.example");
+        assert!(app.status.text(false).contains("[2/2]"));
+
+        app.complete_input_reverse();
+        assert_eq!(app.input.buffer, "/logout @alice:example.com");
+    }
+
+    #[test]
+    fn logout_completion_without_target_cycles_all_active_accounts() {
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account("@alice:example.com", AccountState::Active),
+            account("@bob:example.com", AccountState::Active),
+            account("@old:example.com", AccountState::Deactivated),
+        ];
+        app.input.buffer = "/logout".to_owned();
+
+        app.complete_input();
+
+        assert_eq!(app.input.buffer, "/logout @alice:example.com");
+        assert!(app.status.text(false).contains("[1/2]"));
+    }
+
+    #[test]
+    fn logout_completion_normalizes_server_qualified_username_forms() {
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![account("@alice:example.com", AccountState::Active)];
+
+        app.input.buffer = "/logout alice:example.com".to_owned();
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/logout @alice:example.com");
+
+        app.input.logout_command_completion = None;
+        app.input.buffer = "/logout alice@example.com".to_owned();
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/logout @alice:example.com");
+    }
+
+    #[test]
+    fn logout_prompts_for_confirmation_when_enabled() {
+        let mut app = app_with_rooms(Vec::new());
+        app.display.confirm_logout = true;
+
+        app.request_logout(account("@alice:example.com", AccountState::Active));
+
+        assert!(matches!(app.mode, Mode::ConfirmLogout { .. }));
+        assert!(app
+            .status
+            .text(false)
+            .contains("Log out @alice:example.com"));
+    }
+
+    #[test]
+    fn logout_skips_confirmation_when_disabled() {
+        let mut app = app_with_rooms(Vec::new());
+        app.display.confirm_logout = false;
+
+        app.request_logout(account("@alice:example.com", AccountState::Active));
+
+        // Without a lifecycle sender the spawned logout is a no-op in tests, but
+        // we should never have entered the confirmation prompt.
+        assert!(!matches!(app.mode, Mode::ConfirmLogout { .. }));
+        assert_eq!(app.mode, Mode::Compose);
+    }
+
+    #[tokio::test]
+    async fn logout_confirmation_cancels_on_no() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::ConfirmLogout {
+            account: account("@alice:example.com", AccountState::Active),
+        };
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('n'))).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.status.text(false), "logout canceled");
+    }
+
+    #[tokio::test]
+    async fn logout_confirmation_ignores_unrelated_keys() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::ConfirmLogout {
+            account: account("@alice:example.com", AccountState::Active),
+        };
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('x'))).await;
+
+        assert!(matches!(app.mode, Mode::ConfirmLogout { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_flight_lifecycle_rejects_new_login_and_logout() {
+        let mut app = app_with_rooms(Vec::new());
+        app.lifecycle_busy = true;
+
+        app.handle_command(Command::Login {
+            username: None,
+            password: None,
+            homeserver: None,
+        })
+        .await;
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.status.text(false).contains("already in progress"));
+
+        app.status = Status::Info(String::new());
+        app.handle_command(Command::Logout(None)).await;
+        assert!(app.status.text(false).contains("already in progress"));
+    }
+
+    #[tokio::test]
+    async fn login_without_arguments_prompts_for_username_and_escape_clears_it() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.handle_command(Command::Login {
+            username: None,
+            password: None,
+            homeserver: None,
+        })
+        .await;
+        assert_eq!(app.mode, Mode::LoginUsername);
+
+        app.input.buffer = "@alice:example.com".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.input.buffer.is_empty());
+        assert_eq!(app.status.text(false), "login canceled");
+    }
+
+    #[tokio::test]
+    async fn invalid_login_username_stays_editable() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "alice".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.mode = Mode::LoginUsername;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.mode, Mode::LoginUsername);
+        assert_eq!(app.input.buffer, "alice");
+        assert!(app.status.text(false).contains("name@domain"));
+    }
+
+    #[tokio::test]
+    async fn login_username_prompt_canonicalizes_common_email_style() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "alice@example.com".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.mode = Mode::LoginUsername;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(
+            app.mode,
+            Mode::LoginPassword {
+                username: "@alice:example.com".to_owned(),
+                homeserver: None,
+            }
+        );
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_username_prompt_captures_optional_homeserver() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "@alice:example.com hs.example.org".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.mode = Mode::LoginUsername;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(
+            app.mode,
+            Mode::LoginPassword {
+                username: "@alice:example.com".to_owned(),
+                homeserver: Some("https://hs.example.org".to_owned()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn login_username_prompt_rejects_extra_tokens() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "@alice:example.com hs.example.org junk".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.mode = Mode::LoginUsername;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        // Stays on the username step with the input intact for correction.
+        assert_eq!(app.mode, Mode::LoginUsername);
+        assert_eq!(app.input.buffer, "@alice:example.com hs.example.org junk");
+        assert!(app.status.text(false).contains("at most"));
+    }
+
+    #[test]
     fn tab_completion_fills_no_argument_slash_command_without_space() {
         let mut app = app_with_rooms(Vec::new());
         app.input.buffer = "/ro".to_owned();
@@ -2270,9 +2585,12 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
 
         assert_eq!(app.mode, Mode::Compose);
-        assert_eq!(app.input.buffer, "/switch ");
-        assert_eq!(app.input.cursor, "/switch ".len());
-        assert_eq!(app.status.text(false), "selected command: /switch <room>");
+        assert_eq!(app.input.buffer, "/login ");
+        assert_eq!(app.input.cursor, "/login ".len());
+        assert_eq!(
+            app.status.text(false),
+            "selected command: /login [user] [password] [homeserver]"
+        );
     }
 
     #[tokio::test]

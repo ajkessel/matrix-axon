@@ -5,7 +5,7 @@
 ## Scope
 
 - Slash commands and keyboard shortcuts should reflect the Axon API surface. Unsupported Matrix actions should report that the current Axon API does not support them yet.
-- The client reads rooms and timeline history over HTTP, live events over `/v1/ws`, and sends mutations (send, edit, redact, react) over HTTP.
+- The client reads accounts, rooms, and timeline history over HTTP, live events over `/v1/ws`, and sends lifecycle and message mutations over HTTP.
 - Preserve the future path for reply threading, search, scrolling back, and terminal media rendering, but do not add server-side assumptions before endpoints exist.
 
 ## Terminal UX
@@ -14,11 +14,21 @@
 - The three-pane layout (Room List, Message List, Input) uses an explicit `Mode` state machine. Ctrl-Space cycles focus; the focused pane border is highlighted. In Room List and Message List modes, arrow keys navigate items, `/` enters a search sub-mode, and `n`/`N` move to adjacent matches. Editing, reacting, unreacting, search, and popup interactions each have explicit modes.
 - Keep keyboard shortcuts configurable through the config layer. When adding a new shortcut: add a default key to `RawConfig::default_values()` and all related structs (`RawShortcuts`, `PartialRawShortcuts`, `Shortcuts`), wire it through `into_shortcuts()`, `merge()`, and `to_toml()`, add it to the `DEFAULT_CONFIG` constant, include it in `popup_shortcuts_lines()`, and write a test.
 - Keep slash commands discoverable through `/help`, `/?`, and Tab completion, including commands the TUI knows about but the current Axon API does not support yet. `/help` and `/shortcuts` open popup overlays dismissed with `Esc`.
-- Keep argument completion consistent with command resolution. `/switch` accepts list numbers, room IDs, aliases, display names, and unique prefixes; ambiguous Tab completion advances only to the longest common prefix and blocks Enter until the target identifies one room. `/react` completes known emoji names and never sends arbitrary reaction text.
+- Keep argument completion consistent with command resolution. `/switch` accepts list numbers, room IDs, aliases, display names, and unique prefixes; ambiguous Tab completion advances only to the longest common prefix and blocks Enter until the target identifies one room. `/react` completes known emoji names and never sends arbitrary reaction text. `/logout` resolves only active accounts and cycles ambiguous full Matrix IDs with Tab/Shift-Tab.
+- Login credentials are transient. Normalize `user:domain` and `user@domain` to canonical `@user:domain`, validate with `ruma`, mask prompted and inline passwords, and clear password state on submission, failure, cancellation, or focus changes. Use the same normalization for logout targeting. Never send the password anywhere except Axon's login endpoint, and never talk to a homeserver directly: homeserver discovery is Axon's job (ADR 0023) — login forwards the Matrix ID and password, and `homeserver_url` only when the user supplies the optional `/login` third argument to override resolution (a bare host is given `https://`; an explicit scheme is preserved for loopback). A space-bearing password can't be given inline (the inline password is a single token); such users reach the hidden prompt via `/login` or `/login <user> [homeserver]`, where the username step also accepts an optional homeserver. Axon rejects an MXID written with the homeserver's hostname (`@user:matrix.domain`) with a 400 whose message suggests the canonical Matrix ID; the TUI shows API error messages verbatim, so no client-side handling is needed.
 - `/whereami` shows the current room summary from Axon and any members learned from loaded timeline membership events. Do not present that derived member list as complete until Axon exposes a room-info or room-state API with full aliases, members, power levels, encryption, and access settings.
 - Room switching should remain forgiving: list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
 ## Mutations
+
+Account lifecycle operations map to:
+
+- Login: `POST /v1/accounts/login`
+- Logout: `POST /v1/accounts/{account_id}/logout`
+
+Both return `{ "data": <AccountDto> }`. Logout is non-destructive: the returned account is `deactivated` and its archive remains available for a later login.
+
+Login and logout run off the event loop: the slow login round-trip (which includes Axon's server-side homeserver discovery) is spawned as a task that owns and then drops the password, and its result lands back through a channel the main loop drains, so the UI keeps redrawing (the `logging in…`/`logging out…` status is visible) and a second lifecycle verb is refused while one is in flight. Login is idempotent server-side — an already-`active` account is returned unchanged with the password never consulted — so the client reports that no-op distinctly (`already logged in: … (no changes)`) by comparing the returned `account_id` against the accounts that were active before the attempt. Logout asks for `[y/N]` confirmation unless `display.confirm_logout = false`.
 
 The four write operations map to these Axon API endpoints:
 

@@ -60,6 +60,7 @@ debug = false
 show_state_events = false
 sender_name = "display_name"
 input_lines = 1
+confirm_logout = true
 "#;
 
 #[derive(Debug, Clone)]
@@ -161,6 +162,7 @@ pub struct DisplayOptions {
     pub show_state_events: bool,
     pub sender_name: SenderNameStyle,
     pub input_lines: u16,
+    pub confirm_logout: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +282,7 @@ impl RawConfig {
                 show_state_events: false,
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
+                confirm_logout: true,
             },
         }
     }
@@ -338,6 +341,7 @@ debug = {debug}
 show_state_events = {show_state_events}
 sender_name = "{sender_name}"
 input_lines = {input_lines}
+confirm_logout = {confirm_logout}
 "#,
             next_room = self.shortcuts.next_room,
             previous_room = self.shortcuts.previous_room,
@@ -374,6 +378,7 @@ input_lines = {input_lines}
             show_state_events = self.display.show_state_events,
             sender_name = self.display.sender_name,
             input_lines = self.display.input_lines,
+            confirm_logout = self.display.confirm_logout,
         )
     }
 }
@@ -562,6 +567,7 @@ struct RawDisplayOptions {
     show_state_events: bool,
     sender_name: String,
     input_lines: u16,
+    confirm_logout: bool,
 }
 
 impl RawDisplayOptions {
@@ -581,6 +587,9 @@ impl RawDisplayOptions {
         if let Some(input_lines) = partial.input_lines {
             self.input_lines = input_lines.max(1);
         }
+        if let Some(confirm_logout) = partial.confirm_logout {
+            self.confirm_logout = confirm_logout;
+        }
     }
 
     fn into_display_options(self) -> Result<DisplayOptions, ConfigError> {
@@ -589,6 +598,7 @@ impl RawDisplayOptions {
             show_state_events: self.show_state_events,
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
             input_lines: self.input_lines.max(1),
+            confirm_logout: self.confirm_logout,
         })
     }
 }
@@ -599,6 +609,7 @@ struct PartialDisplayOptions {
     show_state_events: Option<bool>,
     sender_name: Option<String>,
     input_lines: Option<u16>,
+    confirm_logout: Option<bool>,
 }
 
 fn assign_if_some(target: &mut String, value: Option<String>) {
@@ -808,6 +819,7 @@ status = "cyan"
         assert!(repaired.contains("debug = false"));
         assert!(repaired.contains("show_state_events = false"));
         assert!(repaired.contains("sender_name = \"display_name\""));
+        assert!(repaired.contains("confirm_logout = true"));
         let _ = fs::remove_file(path);
     }
 

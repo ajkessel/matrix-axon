@@ -24,4 +24,5 @@ uuid = { workspace = true, features = ["serde"] }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 emojis = "0.8"
+ruma = "0.16"
 ruma-html = "0.8"

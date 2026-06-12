@@ -154,6 +154,34 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ]);
             (line, "Search", Some(col))
         }
+        Mode::LoginPassword { .. } => {
+            let masked = "•".repeat(app.input.buffer.chars().count());
+            let col = 2u16 + app.input.buffer[..app.input.cursor].chars().count() as u16;
+            let line = Line::from(vec![
+                Span::raw("> "),
+                Span::raw(masked),
+                Span::raw("  "),
+                Span::styled(
+                    entry_status_text(app),
+                    Style::default()
+                        .fg(app.colors.status)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+            (line, "Password", Some(col))
+        }
+        Mode::ConfirmLogout { account } => {
+            let line = Line::from(vec![
+                Span::raw("> "),
+                Span::styled(
+                    format!("Log out {}? [y/N]", account.user_id),
+                    Style::default()
+                        .fg(app.colors.status)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+            (line, "Confirm logout", None)
+        }
         _ => {
             let input_text = if app.show_input_help && app.input.buffer.is_empty() {
                 Span::styled(
@@ -163,7 +191,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         .add_modifier(Modifier::ITALIC),
                 )
             } else {
-                Span::raw(app.input.buffer.clone())
+                Span::raw(mask_login_command(&app.input.buffer))
             };
             let line = Line::from(vec![
                 Span::raw("> "),
@@ -178,7 +206,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ]);
             let col = if matches!(
                 app.mode,
-                Mode::Compose | Mode::Editing { .. } | Mode::Reacting { .. }
+                Mode::Compose | Mode::LoginUsername | Mode::Editing { .. } | Mode::Reacting { .. }
             ) && !(app.show_input_help && app.input.buffer.is_empty())
             {
                 Some(2u16 + app.input.buffer[..app.input.cursor].chars().count() as u16)
@@ -191,6 +219,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let input_border = if matches!(
         app.mode,
         Mode::Compose
+            | Mode::LoginUsername
+            | Mode::LoginPassword { .. }
+            | Mode::ConfirmLogout { .. }
             | Mode::Editing { .. }
             | Mode::Reacting { .. }
             | Mode::Unreacting { .. }
@@ -275,6 +306,32 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .wrap(Wrap { trim: false });
         frame.render_widget(popup, area);
     }
+}
+
+fn mask_login_command(input: &str) -> String {
+    let trimmed = input.trim_start();
+    let leading_len = input.len() - trimmed.len();
+    let Some(rest) = trimmed.strip_prefix("/login") else {
+        return input.to_owned();
+    };
+    let Some(first_space) = rest.find(char::is_whitespace) else {
+        return input.to_owned();
+    };
+    let after_command = &rest[first_space..];
+    let credentials = after_command.trim_start();
+    let Some(username_end) = credentials.find(char::is_whitespace) else {
+        return input.to_owned();
+    };
+    let password_start = leading_len + trimmed.len() - credentials.len() + username_end;
+    let prefix = &input[..password_start];
+    let password = &input[password_start..];
+    format!(
+        "{prefix}{}",
+        password
+            .chars()
+            .map(|ch| if ch.is_whitespace() { ch } else { '•' })
+            .collect::<String>()
+    )
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -518,6 +575,23 @@ mod tests {
         assert!(text.contains("edit message"));
         assert!(text.contains("react to message"));
         assert!(text.contains("withdraw one of your reactions"));
+    }
+
+    #[test]
+    fn masks_inline_login_password_without_hiding_username() {
+        assert_eq!(
+            mask_login_command("/login @alice:example.com secret phrase"),
+            "/login @alice:example.com •••••• ••••••"
+        );
+        assert_eq!(
+            mask_login_command("  /login @alice:example.com secret"),
+            "  /login @alice:example.com ••••••"
+        );
+        assert_eq!(
+            mask_login_command("/login @alice:example.com"),
+            "/login @alice:example.com"
+        );
+        assert_eq!(mask_login_command("/logout alice"), "/logout alice");
     }
 
     #[test]

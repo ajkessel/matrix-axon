@@ -50,7 +50,10 @@ async fn run_app(
     let (key_tx, mut key_rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || input_task(key_tx));
 
+    let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config);
+    app.set_lifecycle_sender(lifecycle_tx);
+    app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
 
@@ -76,6 +79,9 @@ async fn run_app(
                         app.load_selected_timeline().await;
                     }
                 }
+            }
+            Some(outcome) = lifecycle_rx.recv() => {
+                app.handle_lifecycle_outcome(outcome).await;
             }
         }
     }

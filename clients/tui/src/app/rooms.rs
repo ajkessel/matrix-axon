@@ -1,4 +1,6 @@
-use crate::api::{EventDto, RoomDto};
+use uuid::Uuid;
+
+use crate::api::{AccountState, EventDto, RoomDto};
 
 use super::{
     display_body_with_sender, format_time, relative_room_index, App, RoomKey, RoomTargetResolution,
@@ -15,7 +17,14 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_room_refresh(&mut self, rooms: Vec<RoomDto>) {
+    pub(crate) fn apply_room_refresh(&mut self, mut rooms: Vec<RoomDto>) {
+        // A logged-out (deactivated) account keeps its rows in Axon's `events`
+        // table, and `GET /v1/rooms` joins accounts without a state filter, so it
+        // still lists that account's rooms. Drop rooms for any account we know is
+        // not active so a logout actually clears them. Rooms for accounts we don't
+        // know about are kept, so a stale or failed account fetch never blanks the
+        // whole list.
+        rooms.retain(|room| !self.is_known_inactive_account(room.account_id));
         let selected_key = self.selected_room().map(RoomKey::from);
         self.rooms.rooms = rooms;
         self.rooms.unread.retain(|key, _| {
@@ -46,6 +55,15 @@ impl App {
         } else {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
+    }
+
+    /// Whether `account_id` is an account we've listed and that is *not* active
+    /// (e.g. logged out). Unknown accounts return `false` so we never hide a
+    /// room just because our account list is empty or stale.
+    fn is_known_inactive_account(&self, account_id: Uuid) -> bool {
+        self.accounts.accounts.iter().any(|account| {
+            account.account_id == account_id && account.state != AccountState::Active
+        })
     }
 
     pub(crate) fn seed_own_senders_from_rooms(&mut self) {

@@ -1,5 +1,13 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Login {
+        username: Option<String>,
+        password: Option<String>,
+        /// Optional homeserver base URL override (the inline third argument).
+        /// When `None`, Axon resolves the homeserver from the Matrix ID.
+        homeserver: Option<String>,
+    },
+    Logout(Option<String>),
     Switch(String),
     Rooms,
     Event(String),
@@ -53,6 +61,8 @@ impl SlashCommand {
 }
 
 pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand::supported("/login", true),
+    SlashCommand::supported("/logout", true),
     SlashCommand::supported("/switch", true),
     SlashCommand::supported("/rooms", false),
     SlashCommand::supported("/event", true),
@@ -76,6 +86,16 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "plain text",
         insert_text: "",
         description: "send a message to the current room",
+    },
+    HelpCommand {
+        label: "/login [user] [password] [homeserver]",
+        insert_text: "/login ",
+        description: "log in a Matrix account; prompts for missing credentials",
+    },
+    HelpCommand {
+        label: "/logout [user]",
+        insert_text: "/logout ",
+        description: "log out an active account while retaining its archive",
     },
     HelpCommand {
         label: "/switch <room>",
@@ -168,6 +188,30 @@ pub fn parse(input: &str) -> Command {
     let name = parts.next().unwrap_or_default();
     let arg = parts.next().unwrap_or_default().trim();
     match name {
+        "login" => {
+            // Positional: <user> <password> [homeserver]. The inline password is
+            // a single token; a password with spaces is rejected here so it can be
+            // typed at the hidden prompt (see the `/login` flow). The homeserver,
+            // when present, is the third token and overrides Axon's resolution.
+            let mut tokens = arg.split_whitespace();
+            let username = tokens.next().map(str::to_owned);
+            let password = tokens.next().map(str::to_owned);
+            let homeserver = tokens.next().map(str::to_owned);
+            if tokens.next().is_some() {
+                return Command::Invalid(
+                    "/login takes at most <user> <password> [homeserver]; for a password with \
+                     spaces run `/login` (or `/login <user> [homeserver]`) and type it at the \
+                     hidden prompt"
+                        .to_owned(),
+                );
+            }
+            Command::Login {
+                username,
+                password,
+                homeserver,
+            }
+        }
+        "logout" => Command::Logout((!arg.is_empty()).then(|| arg.to_owned())),
         "switch" if !arg.is_empty() => Command::Switch(arg.to_owned()),
         "switch" => {
             Command::Invalid("/switch requires a room id, alias, name, or index".to_owned())
@@ -212,6 +256,66 @@ mod tests {
             parse("/switch #room:localhost"),
             Command::Switch("#room:localhost".to_owned())
         );
+    }
+
+    #[test]
+    fn parses_login_forms() {
+        assert_eq!(
+            parse("/login"),
+            Command::Login {
+                username: None,
+                password: None,
+                homeserver: None,
+            }
+        );
+        assert_eq!(
+            parse("/login @me:example.com"),
+            Command::Login {
+                username: Some("@me:example.com".to_owned()),
+                password: None,
+                homeserver: None,
+            }
+        );
+        assert_eq!(
+            parse("/login @me:example.com hunter2"),
+            Command::Login {
+                username: Some("@me:example.com".to_owned()),
+                password: Some("hunter2".to_owned()),
+                homeserver: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_login_with_homeserver_override() {
+        assert_eq!(
+            parse("/login @me:example.com hunter2 homeserver.example.org"),
+            Command::Login {
+                username: Some("@me:example.com".to_owned()),
+                password: Some("hunter2".to_owned()),
+                homeserver: Some("homeserver.example.org".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_inline_password_with_spaces() {
+        // The single-token inline password means extra tokens are a mistake
+        // (most likely a space in the password) — steer to the hidden prompt.
+        assert!(matches!(
+            parse("/login @me:example.com a password with spaces"),
+            Command::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn parses_logout_forms() {
+        assert_eq!(parse("/logout"), Command::Logout(None));
+        assert_eq!(
+            parse("/logout @me:example.com"),
+            Command::Logout(Some("@me:example.com".to_owned()))
+        );
+        assert_eq!(parse("/logout me"), Command::Logout(Some("me".to_owned())));
     }
 
     #[test]

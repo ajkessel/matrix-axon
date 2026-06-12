@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::api::AccountDto;
 use crate::app::emoji_matches;
 use crate::app::{cycle_index, App, Mode, PopupKind, SearchKind};
 use crate::command;
@@ -32,6 +33,15 @@ impl App {
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
+                Mode::LoginUsername => self.handle_login_username_key(key).await,
+                Mode::LoginPassword {
+                    username,
+                    homeserver,
+                } => {
+                    self.handle_login_password_key(key, username, homeserver)
+                        .await
+                }
+                Mode::ConfirmLogout { account } => self.handle_confirm_logout_key(key, account),
                 Mode::RoomList => self.handle_room_list_key(key).await,
                 Mode::MessageList => self.handle_message_list_key(key).await,
                 Mode::Search(kind, query) => self.handle_search_key(key, kind, query).await,
@@ -234,6 +244,58 @@ impl App {
         }
     }
 
+    async fn handle_login_username_key(&mut self, key: KeyEvent) {
+        if self.handle_input_navigation_key(key) {
+            return;
+        }
+        if self.shortcuts.submit.matches(key) {
+            self.submit_login_username().await;
+        } else if self.shortcuts.clear_input.matches(key) {
+            self.cancel_lifecycle_input();
+        } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            self.clear_input_buffer();
+        } else if let KeyCode::Char(ch) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                self.insert_char(ch);
+            }
+        }
+    }
+
+    async fn handle_login_password_key(
+        &mut self,
+        key: KeyEvent,
+        username: String,
+        homeserver: Option<String>,
+    ) {
+        if self.handle_input_navigation_key(key) {
+            return;
+        }
+        if self.shortcuts.submit.matches(key) {
+            self.submit_login_password(username, homeserver).await;
+        } else if self.shortcuts.clear_input.matches(key) {
+            self.cancel_lifecycle_input();
+        } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            self.clear_input_buffer();
+        } else if let KeyCode::Char(ch) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                self.insert_char(ch);
+            }
+        }
+    }
+
+    fn handle_confirm_logout_key(&mut self, key: KeyEvent, account: AccountDto) {
+        // Safe default: only an explicit "y" confirms; "n", Esc, or the
+        // clear-input shortcut cancel; every other key is ignored so a stray
+        // press can't log anyone out.
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.perform_logout(account);
+        } else if matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
+            || self.shortcuts.clear_input.matches(key)
+        {
+            self.cancel_logout_confirmation();
+        }
+    }
+
     async fn handle_editing_key(&mut self, key: KeyEvent, event_id: String) {
         if self.handle_input_navigation_key(key) {
             return;
@@ -364,11 +426,12 @@ impl App {
         true
     }
 
-    fn take_input_for_submit(&mut self) -> String {
+    pub(crate) fn take_input_for_submit(&mut self) -> String {
         let input = std::mem::take(&mut self.input.buffer);
         self.input.cursor = 0;
         self.input.react_command_completion = None;
         self.input.partial_switch_completions = None;
+        self.input.logout_command_completion = None;
         input
     }
 
@@ -388,12 +451,13 @@ impl App {
         }
     }
 
-    fn clear_input_buffer(&mut self) {
+    pub(crate) fn clear_input_buffer(&mut self) {
         self.dismiss_input_help();
         self.input.buffer.clear();
         self.input.cursor = 0;
         self.input.react_command_completion = None;
         self.input.partial_switch_completions = None;
+        self.input.logout_command_completion = None;
     }
 
     fn clear_input_and_selection(&mut self) {
@@ -407,7 +471,12 @@ impl App {
     fn abandon_transient_input_mode(&mut self) {
         if matches!(
             self.mode,
-            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. }
+            Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::ConfirmLogout { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::Unreacting { .. }
         ) {
             self.clear_input_buffer();
             self.input.react_tab = None;
@@ -418,7 +487,12 @@ impl App {
     fn cycle_focus(&mut self) {
         if matches!(
             self.mode,
-            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. }
+            Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::ConfirmLogout { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::Unreacting { .. }
         ) {
             self.abandon_transient_input_mode();
             return;
@@ -429,7 +503,12 @@ impl App {
             Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
                 Mode::Compose
             }
-            Mode::Editing { .. } | Mode::Reacting { .. } | Mode::Unreacting { .. } => Mode::Compose,
+            Mode::LoginUsername
+            | Mode::LoginPassword { .. }
+            | Mode::ConfirmLogout { .. }
+            | Mode::Editing { .. }
+            | Mode::Reacting { .. }
+            | Mode::Unreacting { .. } => Mode::Compose,
         };
     }
 }

@@ -29,6 +29,8 @@ Options:
 - Redacts the selected message (`DELETE /v1/.../events/{event_id}`).
 - Reacts to the selected message with an emoji (`POST /v1/.../events/{event_id}/reactions`).
 - Withdraws the current user's reactions by redacting their reaction events.
+- Logs Matrix accounts in through Axon's lifecycle API (Axon resolves the homeserver server-side), with masked password entry.
+- Logs active accounts out while retaining their archived data.
 - Three-pane focus system: Input, Room List, and Message List, with keyboard navigation and search in each list.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
@@ -46,6 +48,8 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | Command | Behavior |
 | --- | --- |
 | plain text | Send a message to the current room. |
+| `/login [user] [password] [homeserver]` | Log in a Matrix account. Usernames accept `@user:domain`, `user:domain`, or `user@domain`; typing the homeserver host (e.g. `@user:matrix.domain`) is rejected with a hint naming your canonical Matrix ID. The optional third argument overrides homeserver resolution — e.g. `/login @user:example.com pw matrix.example.com` (a bare host gains `https://`; pass an explicit scheme for loopback, e.g. `http://localhost:8008`). The inline password is a single token; for a password with spaces, omit it (and optionally give the homeserver after the Matrix ID, e.g. `/login @user:example.com hs.example.com`) to type it at the hidden prompt. Missing fields are prompted for and passwords are always masked. |
+| `/logout [user]` | Log out an active account while retaining its archive. Accepts `@user:domain`, `user:domain`, `user@domain`, or a unique localpart; Tab/Shift-Tab cycles matches. Prompts for `[y/N]` confirmation unless `display.confirm_logout = false`. |
 | `/switch <room>` | Switch rooms by list number, room id, canonical alias, display name, or shortened alias. |
 | `/rooms` | Refresh the room list. |
 | `/event <event_id>` | Show a compact status-line summary of one event in the selected account. |
@@ -74,7 +78,8 @@ Room switching is forgiving. For a room with canonical alias
 ```
 
 Use Tab to complete slash commands, `/switch` room names, and emoji names after
-`/react`; use Shift-Tab to cycle backward through matching options. When several
+`/react`; it also cycles active accounts for `/logout`. Use Shift-Tab to cycle
+backward through matching options. When several
 rooms match `/switch`, completion advances to their
 longest common prefix and lists the remaining suffixes. Enter reports an
 ambiguity until the text identifies one room. While Tab completion is partial,
@@ -186,6 +191,7 @@ debug = false
 show_state_events = false
 sender_name = "display_name"
 input_lines = 1
+confirm_logout = true
 ```
 
 Supported key forms include `ctrl-n`, `ctrl-j`, `ctrl-k`, `ctrl-space`, `tab`,
@@ -207,6 +213,9 @@ known.
 
 Set `display.input_lines` to control the height of the command/entry box.
 The default is `1`; set it higher for composing multi-line messages.
+
+Set `display.confirm_logout = false` to skip the `[y/N]` confirmation prompt
+and log out immediately. The default is `true`.
 
 Set `display.debug = true` to show Matrix event IDs in the command/entry box
 status text. The default is `false`, which hides those event codes.

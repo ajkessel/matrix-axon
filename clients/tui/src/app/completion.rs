@@ -16,10 +16,54 @@ impl App {
         if self.complete_react_command_input(reverse) {
             return;
         }
+        if self.complete_logout_command_input(reverse) {
+            return;
+        }
         if self.complete_command_input() {
             return;
         }
         self.complete_switch_input();
+    }
+
+    pub(crate) fn complete_logout_command_input(&mut self, reverse: bool) -> bool {
+        let Some(target) = logout_target_prefix(&self.input.buffer) else {
+            return false;
+        };
+        let query = self
+            .input
+            .logout_command_completion
+            .as_ref()
+            .map(|(query, _)| query.clone())
+            .unwrap_or_else(|| target.to_owned());
+        let candidates = self.active_logout_candidates(&query);
+        if candidates.is_empty() {
+            self.input.logout_command_completion = None;
+            self.status = Status::Info(if query.is_empty() {
+                "no active accounts".to_owned()
+            } else {
+                format!("no active account matches: {query}")
+            });
+            return true;
+        }
+
+        let selected = if let Some((_, current)) = self.input.logout_command_completion.as_ref() {
+            cycle_index(*current, candidates.len(), reverse)
+        } else if reverse {
+            candidates.len() - 1
+        } else {
+            0
+        };
+        let user_id = &candidates[selected];
+        self.input.buffer = format!("/logout {user_id}");
+        self.move_cursor_to_end();
+        self.input.logout_command_completion = Some((query, selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to log out",
+            selected + 1,
+            candidates.len(),
+            user_id
+        ));
+        true
     }
 
     pub(crate) fn complete_react_command_input(&mut self, reverse: bool) -> bool {
@@ -273,6 +317,17 @@ fn react_command_emoji_prefix(input: &str) -> Option<&str> {
     let input = input.trim_start();
     let query = input.strip_prefix("/react ")?.trim();
     (!query.is_empty() && !query.chars().any(char::is_whitespace)).then_some(query)
+}
+
+fn logout_target_prefix(input: &str) -> Option<&str> {
+    let rest = input.strip_prefix("/logout")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| rest.trim_start())
 }
 
 fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {

@@ -38,6 +38,43 @@ impl AxonClient {
         self.send(request).await
     }
 
+    pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
+        let request = self.http.get(format!("{}/v1/accounts", self.base_url));
+        self.send(request).await
+    }
+
+    /// Log a Matrix account in through Axon. `homeserver_url` is sent only when
+    /// the caller supplies an override (the inline `/login` third argument);
+    /// otherwise it is omitted and Axon resolves the canonical homeserver from
+    /// the Matrix ID's server name (ADR 0023). Either way the TUI talks only to
+    /// Axon.
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+        homeserver_url: Option<&str>,
+    ) -> Result<AccountDto, ApiError> {
+        let mut body = serde_json::json!({
+            "username": username,
+            "password": password,
+        });
+        if let Some(homeserver_url) = homeserver_url {
+            body["homeserver_url"] = serde_json::Value::String(homeserver_url.to_owned());
+        }
+        let request = self
+            .http
+            .post(format!("{}/v1/accounts/login", self.base_url))
+            .json(&body);
+        self.send(request).await
+    }
+
+    pub async fn logout(&self, account_id: Uuid) -> Result<AccountDto, ApiError> {
+        let request = self
+            .http
+            .post(format!("{}/v1/accounts/{account_id}/logout", self.base_url));
+        self.send(request).await
+    }
+
     pub async fn room_timeline(
         &self,
         account_id: Uuid,
@@ -278,6 +315,21 @@ struct ErrorBody {
 #[derive(Debug, Deserialize)]
 pub struct SendResultDto {
     pub event_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AccountDto {
+    pub account_id: Uuid,
+    pub user_id: String,
+    pub state: AccountState,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountState {
+    Active,
+    Deactivated,
+    Deleting,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -637,5 +689,24 @@ mod tests {
             path_segment("$event:local/host").to_string(),
             "%24event%3Alocal%2Fhost"
         );
+    }
+
+    #[test]
+    fn deserializes_account_response() {
+        let body = r#"{
+            "data": {
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "user_id": "@alice:example.com",
+                "homeserver_url": "https://example.com",
+                "device_id": "DEVICE",
+                "state": "active",
+                "verified": null,
+                "created_at": "2026-06-10T00:00:00Z",
+                "updated_at": "2026-06-10T00:00:00Z"
+            }
+        }"#;
+        let response: ApiResponse<AccountDto> = serde_json::from_str(body).unwrap();
+        assert_eq!(response.data.user_id, "@alice:example.com");
+        assert_eq!(response.data.state, AccountState::Active);
     }
 }
