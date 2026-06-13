@@ -1,3 +1,4 @@
+use ratatui_image::picker::Picker;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -15,6 +16,8 @@ use std::path::PathBuf;
 mod completion;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleOutcome;
+pub(crate) mod media;
+pub(crate) use media::{ImageFetchResult, ImageState};
 mod reactions;
 mod render;
 mod rooms;
@@ -262,6 +265,18 @@ pub(crate) struct App {
     pub(crate) edit_config_requested: bool,
     /// When true, the room list shows only rooms with unread messages.
     pub(crate) unread_filter: bool,
+    /// In-flight and decoded image cache, keyed by `mxc://` URL. Populated by
+    /// background tasks triggered whenever an image event becomes visible.
+    pub(crate) image_cache: HashMap<String, ImageState>,
+    /// Sender end of the channel the main loop listens on for completed image
+    /// downloads. `None` until `set_image_sender` is called (unit tests may
+    /// omit it).
+    pub(crate) image_tx: Option<mpsc::UnboundedSender<ImageFetchResult>>,
+    /// Terminal image protocol picker. Initialized to halfblocks (safe
+    /// universal fallback); upgraded to Kitty/Sixel/iTerm2 at startup when
+    /// the terminal supports them (future work). Used by the render layer to
+    /// encode decoded images into the right wire format each frame.
+    pub(crate) picker: Picker,
 }
 
 #[derive(Default)]
@@ -373,6 +388,9 @@ impl App {
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
+            image_cache: HashMap::new(),
+            image_tx: None,
+            picker: Picker::halfblocks(),
             redraw_requested: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
@@ -385,6 +403,40 @@ impl App {
     /// Wire up the channel the main loop drains for spawned login/logout results.
     pub(crate) fn set_lifecycle_sender(&mut self, tx: mpsc::UnboundedSender<LifecycleOutcome>) {
         self.lifecycle_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed image downloads.
+    pub(crate) fn set_image_sender(&mut self, tx: mpsc::UnboundedSender<ImageFetchResult>) {
+        self.image_tx = Some(tx);
+    }
+
+    /// Request a background download of `mxc_url` if it is not already cached
+    /// or in flight. Does nothing if the image channel has not been wired up.
+    pub(crate) fn request_image(&mut self, account_id: uuid::Uuid, mxc_url: String) {
+        if self.image_cache.contains_key(&mxc_url) {
+            return;
+        }
+        let Some(tx) = self.image_tx.clone() else {
+            return;
+        };
+        self.image_cache
+            .insert(mxc_url.clone(), ImageState::Fetching);
+        media::spawn_image_fetch(self.client.clone(), account_id, mxc_url, tx);
+    }
+
+    /// Handle the result of a completed image download: decode the bytes and
+    /// store the image (or failure) in the cache, then request a redraw.
+    pub(crate) fn handle_image_result(&mut self, result: ImageFetchResult) {
+        let (mxc_url, outcome) = result;
+        let state = match outcome {
+            Ok(bytes) => match image::load_from_memory(&bytes) {
+                Ok(img) => ImageState::Ready(img),
+                Err(e) => ImageState::Failed(e.to_string()),
+            },
+            Err(e) => ImageState::Failed(e),
+        };
+        self.image_cache.insert(mxc_url, state);
+        self.redraw_requested = true;
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {

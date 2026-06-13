@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use ratatui_image::{Image, Resize};
 
 use crate::api::RoomDto;
 use crate::app::{
-    account_localpart, format_time, message_display_lines, AccountSelection, App, Mode, PopupKind,
-    RoomKey, SearchKind,
+    account_localpart, format_time, message_display_lines, AccountSelection, App, ImageState, Mode,
+    PopupKind, RoomKey, SearchKind,
 };
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
@@ -314,6 +315,41 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(rooms, rooms_area);
     }
 
+
+    // Check whether the selected event has a cached image result. Clone the
+    // owned values now so no borrow is held across the later &mut calls.
+    // `Ok` = decoded image ready to render; `Err` = download/decode failed.
+    let image_preview: Option<Result<image::DynamicImage, String>> = {
+        let mxc = app.messages.selection.as_deref().and_then(|id| {
+            app.selected_events()
+                .into_iter()
+                .find(|e| e.event_id == id)
+                .and_then(|e| e.image_mxc())
+                .map(|(_, url)| url)
+        });
+        mxc.as_deref()
+            .and_then(|url| match app.image_cache.get(url) {
+                Some(ImageState::Ready(img)) => Some(Ok(img.clone())),
+                Some(ImageState::Failed(msg)) => Some(Err(msg.clone())),
+                _ => None,
+            })
+    };
+
+    // Reserve space at the bottom of the message pane for image preview when
+    // an image is available. 30% of the height, at least 6 rows, at most 24.
+    let (messages_area, image_preview_area) = if image_preview.is_some() {
+        let total = body[1].height;
+        let preview_h = (total / 3).clamp(6, 24);
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(preview_h)])
+            .split(body[1]);
+        (panes[0], Some(panes[1]))
+    } else {
+        (body[1], None)
+    };
+
+
     let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
     let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
     app.set_message_viewport(message_page_size, message_width);
@@ -372,6 +408,23 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .border_style(messages_border),
     );
     frame.render_widget(messages, messages_area);
+
+    if let Some(preview_area) = image_preview_area {
+        match image_preview {
+            Some(Ok(img)) => {
+                let size = Size::new(preview_area.width, preview_area.height);
+                if let Ok(protocol) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
+                    frame.render_widget(Image::new(&protocol), preview_area);
+                }
+            }
+            Some(Err(msg)) => {
+                let err = Paragraph::new(format!("Image: {msg}"))
+                    .block(Block::default().borders(Borders::TOP));
+                frame.render_widget(err, preview_area);
+            }
+            None => {}
+        }
+    }
 
     let (command_line, command_title, mut cursor_col) = match &app.mode {
         Mode::Search(kind, q) => {

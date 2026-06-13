@@ -92,8 +92,10 @@ async fn run_app(
     });
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
+    let (image_tx, mut image_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config);
     app.set_lifecycle_sender(lifecycle_tx);
+    app.set_image_sender(image_tx);
     app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
@@ -150,6 +152,9 @@ async fn run_app(
             }
             Some(outcome) = lifecycle_rx.recv() => {
                 app.handle_lifecycle_outcome(outcome).await;
+            }
+            Some(result) = image_rx.recv() => {
+                app.handle_image_result(result);
             }
         }
     }

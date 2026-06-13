@@ -93,6 +93,10 @@ impl App {
             {
                 return LiveFrameAction::None;
             }
+            // Kick off a background download for incoming image events.
+            if let Some((account_id, mxc_url)) = event.image_mxc() {
+                self.request_image(account_id, mxc_url);
+            }
             self.messages
                 .events
                 .entry(key.clone())

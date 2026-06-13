@@ -222,6 +222,37 @@ impl AxonClient {
         self.send(request).await
     }
 
+    /// Download media identified by an `mxc://` URI, routed through the Axon
+    /// server's authenticated media proxy. The server name and media ID are
+    /// extracted from the URI and placed in the path; returns the raw bytes on
+    /// success.
+    pub async fn get_media(&self, account_id: Uuid, mxc_url: &str) -> Result<Vec<u8>, ApiError> {
+        let rest = mxc_url
+            .strip_prefix("mxc://")
+            .ok_or_else(|| ApiError::Url("not an mxc:// URI".to_owned()))?;
+        let (server, media_id) = rest
+            .split_once('/')
+            .ok_or_else(|| ApiError::Url("malformed mxc:// URI".to_owned()))?;
+        let request = self.http.get(format!(
+            "{}/v1/media/{}/{}/{}",
+            self.base_url,
+            account_id,
+            path_segment(server),
+            path_segment(media_id),
+        ));
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(response.bytes().await?.to_vec())
+        } else {
+            let text = response.text().await?;
+            Err(ApiError::Status {
+                status,
+                message: text,
+            })
+        }
+    }
+
     pub async fn get_event(&self, account_id: Uuid, event_id: &str) -> Result<EventDto, ApiError> {
         let request = self.http.get(format!(
             "{}/v1/accounts/{}/events/{}",
@@ -491,6 +522,11 @@ impl EventDto {
                 _ => format!("{} membership changed: {membership}", self.sender),
             };
         }
+        // Describe media messages by type + filename instead of falling through
+        // to the raw event-type label.
+        if let Some(label) = self.media_label() {
+            return label;
+        }
         if let Some(body) = &self.body {
             return body.clone();
         }
@@ -498,6 +534,46 @@ impl EventDto {
             return "[unable to decrypt]".to_owned();
         }
         format!("[{}]", self.event_type)
+    }
+
+    /// A human-readable label for media message types (`m.image`, `m.file`,
+    /// `m.audio`, `m.video`, `m.sticker`). Returns `None` for text messages
+    /// and non-message events.
+    fn media_label(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
+        // m.sticker events don't have a msgtype but have their own event type
+        let is_sticker = self.event_type == "m.sticker";
+        let filename = content
+            .get("filename")
+            .or_else(|| content.get("body"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("media");
+        match (msgtype, is_sticker) {
+            (Some("m.image"), _) => Some(format!("[image: {filename}]")),
+            (Some("m.file"), _) => Some(format!("[file: {filename}]")),
+            (Some("m.audio"), _) => Some(format!("[audio: {filename}]")),
+            (Some("m.video"), _) => Some(format!("[video: {filename}]")),
+            (_, true) => Some(format!("[sticker: {filename}]")),
+            _ => None,
+        }
+    }
+
+    /// Extract the `mxc://` URI and account from an image or sticker event.
+    /// Returns `(account_id, mxc_url)` when the event carries a downloadable
+    /// image, `None` otherwise.
+    pub fn image_mxc(&self) -> Option<(Uuid, String)> {
+        let content = self.content.as_ref()?;
+        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
+        let is_image = matches!(msgtype, Some("m.image")) || self.event_type == "m.sticker";
+        if !is_image {
+            return None;
+        }
+        let url = content.get("url").and_then(|v| v.as_str())?;
+        if !url.starts_with("mxc://") {
+            return None;
+        }
+        Some((self.account_id, url.to_owned()))
     }
 
     pub fn formatted_body(&self) -> Option<&str> {
