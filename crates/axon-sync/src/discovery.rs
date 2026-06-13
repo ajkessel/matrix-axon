@@ -4,9 +4,8 @@
 //! URL: fetch `https://<server name>/.well-known/matrix/client` and use its
 //! `m.homeserver.base_url`, falling back to `https://<server name>` when no
 //! document is published. Either candidate must pass validation — HTTPS
-//! (loopback may be plain HTTP, matching the local-dev allowance everywhere
-//! else) and a non-empty `GET /_matrix/client/versions` — before it is
-//! accepted.
+//! (plain HTTP is allowed only when the MXID server name itself is loopback)
+//! and a non-empty `GET /_matrix/client/versions` — before it is accepted.
 //!
 //! Discovery lives here, not in clients, so egress to user-named hosts stays
 //! out of every client and exactly one canonical `homeserver_url` keys each
@@ -107,7 +106,7 @@ pub(crate) fn accept_explicit_homeserver(
     url: &str,
 ) -> Result<String, DiscoveryError> {
     let base_url = url.trim_end_matches('/').to_owned();
-    check_scheme(server_name, &base_url)?;
+    check_explicit_scheme(server_name, &base_url)?;
     Ok(base_url)
 }
 
@@ -231,11 +230,15 @@ async fn read_json(response: reqwest::Response) -> Result<serde_json::Value, Str
 }
 
 /// Enforce a sane scheme on `base_url`: HTTPS, except plain HTTP to a loopback
-/// host (the local-dev allowance honored everywhere else). Pure parse work, no
-/// network — shared by discovery's candidate validation and the explicit-URL
-/// escape hatch ([`accept_explicit_homeserver`]), so the latter can refuse a
-/// cleartext password before any request leaves.
-fn check_scheme(server_name: &ServerName, base_url: &str) -> Result<(), DiscoveryError> {
+/// host when `allow_http_loopback` is true. Explicit overrides allow that local
+/// dev escape hatch regardless of the MXID domain; discovery enables it only
+/// when the MXID server name itself is loopback, so a public well-known cannot
+/// redirect credentials into axon's own loopback. Pure parse work, no network.
+fn check_scheme(
+    server_name: &ServerName,
+    base_url: &str,
+    allow_http_loopback: bool,
+) -> Result<(), DiscoveryError> {
     let invalid = |detail: String| DiscoveryError::InvalidHomeserver {
         server_name: server_name.to_string(),
         detail,
@@ -243,22 +246,32 @@ fn check_scheme(server_name: &ServerName, base_url: &str) -> Result<(), Discover
     let parsed = reqwest::Url::parse(base_url)
         .map_err(|err| invalid(format!("invalid base URL {base_url}: {err}")))?;
     let loopback = parsed.host_str().is_some_and(is_loopback_host);
-    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback && allow_http_loopback)
+    {
         return Err(invalid(format!(
-            "{base_url} must use HTTPS unless it is loopback"
+            "{base_url} must use HTTPS unless plain-HTTP loopback is explicitly allowed"
         )));
     }
     Ok(())
 }
 
-/// Accept `base_url` only if it has a sane scheme (HTTPS, or HTTP to loopback)
-/// and answers `GET /_matrix/client/versions` with a non-empty version list.
+fn check_explicit_scheme(server_name: &ServerName, base_url: &str) -> Result<(), DiscoveryError> {
+    check_scheme(server_name, base_url, true)
+}
+
+fn check_discovered_scheme(server_name: &ServerName, base_url: &str) -> Result<(), DiscoveryError> {
+    check_scheme(server_name, base_url, is_loopback_host(server_name.host()))
+}
+
+/// Accept `base_url` only if it has a sane scheme (HTTPS, or HTTP to loopback
+/// when the MXID server name is itself loopback) and answers
+/// `GET /_matrix/client/versions` with a non-empty version list.
 async fn validate_homeserver(
     http: &reqwest::Client,
     server_name: &ServerName,
     base_url: &str,
 ) -> Result<(), DiscoveryError> {
-    check_scheme(server_name, base_url)?;
+    check_discovered_scheme(server_name, base_url)?;
     let invalid = |detail: String| DiscoveryError::InvalidHomeserver {
         server_name: server_name.to_string(),
         detail,
@@ -405,6 +418,14 @@ mod tests {
         let err = resolve_homeserver(&http_client(), &server_name(mxdomain))
             .await
             .unwrap_err();
+        assert!(err.to_string().contains("must use HTTPS"), "got: {err}");
+    }
+
+    #[test]
+    fn public_server_name_cannot_discover_plain_http_loopback() {
+        let public = OwnedServerName::try_from("example.org").unwrap();
+
+        let err = check_discovered_scheme(&public, "http://127.0.0.1:8008").unwrap_err();
         assert!(err.to_string().contains("must use HTTPS"), "got: {err}");
     }
 

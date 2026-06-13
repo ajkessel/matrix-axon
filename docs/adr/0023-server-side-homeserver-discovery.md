@@ -35,7 +35,8 @@ Discovery moves into axon; clients send credentials only.
   the escape hatch for homeservers without (or with broken) well-known, and the
   only way to reach a plain-HTTP local dev homeserver (`http://localhost:8008`).
 - **Validation, by path:** a *discovered* candidate is accepted only if it uses
-  HTTPS (loopback may be plain HTTP, matching the local-dev allowance elsewhere)
+  HTTPS (plain HTTP is allowed only when the MXID server name itself is loopback,
+  so a public well-known cannot redirect credentials into axon's own loopback)
   *and* answers `GET /_matrix/client/versions` with a non-empty version list —
   discovery is *guessing* (well-known vs. fallback), so the probe confirms which
   guess is a real homeserver. An *explicit* URL is normalized and scheme-checked

@@ -245,20 +245,12 @@ impl AccountLifecycle {
         };
         let homeserver_url = homeserver_url.as_str();
 
-        // Refuse an MXID whose domain is actually the homeserver's hostname —
-        // no such user can exist there, so fail now with the spelling they
-        // meant instead of a misleading auth error. Also pre-lock: nothing has
-        // been touched yet.
-        crate::discovery::check_user_id_domain(&self.http, homeserver_url, &user_id)
-            .await
-            .map_err(|e| LifecycleError::InvalidUserId(e.to_string()))?;
-
         let lock = self.lock_for(username, homeserver_url);
         let _guard = lock.lock().await;
 
         // Resolve the target row: no-op on an already-active one, reactivate a
-        // deactivated one, reject one mid-deletion, or mint a new one held
-        // `deactivated` until login succeeds.
+        // deactivated one, reject one mid-deletion, or prepare to mint a new
+        // one. Keep the new-row write until after the domain check below.
         let account = match self
             .store
             .find_account_by_identity(username, homeserver_url)
@@ -289,9 +281,24 @@ impl AccountLifecycle {
                     {
                         return Err(LifecycleError::Draining(existing.account_id));
                     }
-                    existing
+                    Some(existing)
                 }
             },
+            None => None,
+        };
+
+        // Refuse an MXID whose domain is actually the homeserver's hostname —
+        // no such user can exist there, so fail with the spelling they meant
+        // instead of a misleading auth error. This probe is deliberately after
+        // the active/deleting/draining short-circuits: an idempotent active
+        // login stays a pure local no-op. It is still before any new row or SDK
+        // store is created.
+        crate::discovery::check_user_id_domain(&self.http, homeserver_url, &user_id)
+            .await
+            .map_err(|e| LifecycleError::InvalidUserId(e.to_string()))?;
+
+        let account = match account {
+            Some(existing) => existing,
             None => {
                 let minted = self.store.upsert_account(username, homeserver_url).await?;
                 // A freshly inserted row defaults to `active`; hold it
