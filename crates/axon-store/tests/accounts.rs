@@ -138,3 +138,76 @@ async fn deactivation_drops_from_listing_but_retains_row() {
 
     common::cleanup_account(&common::raw_pool().await, account.account_id).await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delete_removes_row_and_is_idempotent() {
+    let store = common::migrated_store().await;
+    let user = format!("@delete-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert");
+
+    store
+        .delete_account_row(account.account_id)
+        .await
+        .expect("delete");
+    assert!(store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .is_none());
+
+    // Idempotent: deleting an already-gone row affects zero rows, not an error —
+    // the property the boot reconcile and a client retry both lean on.
+    store
+        .delete_account_row(account.account_id)
+        .await
+        .expect("second delete is a no-op");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deleting_rows_listed_only_by_the_reconcile_accessor() {
+    let store = common::migrated_store().await;
+    let user = format!("@deleting-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert");
+    store
+        .set_account_state(account.account_id, AccountState::Deleting)
+        .await
+        .expect("mark deleting");
+
+    // A `deleting` row is invisible to both the connect-path and client-facing
+    // listings, but the reconcile accessor finds it (and a by-id read still does).
+    let id = account.account_id;
+    assert!(!store
+        .list_accounts()
+        .await
+        .expect("list")
+        .iter()
+        .any(|a| a.account_id == id));
+    assert!(!store
+        .list_client_visible_accounts()
+        .await
+        .expect("list")
+        .iter()
+        .any(|a| a.account_id == id));
+    assert!(store
+        .list_deleting_accounts()
+        .await
+        .expect("list deleting")
+        .iter()
+        .any(|a| a.account_id == id));
+    // It is a real row in any state, so the orphan-GC's existence check sees it.
+    assert!(store
+        .list_all_account_ids()
+        .await
+        .expect("all ids")
+        .contains(&id));
+
+    common::cleanup_account(&common::raw_pool().await, id).await;
+}

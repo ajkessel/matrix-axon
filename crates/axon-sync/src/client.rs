@@ -220,6 +220,24 @@ async fn remove_dir_if_present(path: &Path) -> Result<(), SyncError> {
     }
 }
 
+/// Remove an account's on-disk SDK store: both the live store dir
+/// (`data_dir/<account_id>/`) and any staging backup (`data_dir/<account_id>.prev`)
+/// left by [`with_staged_store_dir`]. Used by the account-delete teardown (it owns
+/// the same `<account_id>` / `<account_id>.prev` naming as login's staging, so the
+/// removal is colocated here). Idempotent — an absent dir is success — so a delete
+/// retry or the boot reconcile can re-run it. The two paths mirror the
+/// construction in [`connect_account`] and [`login_new_device`].
+pub(crate) async fn remove_account_store_dirs(
+    config: &SyncConfig,
+    account_id: uuid::Uuid,
+) -> Result<(), SyncError> {
+    let data_dir = config.data_dir.join(account_id.to_string());
+    let backup = config.data_dir.join(format!("{account_id}.prev"));
+    remove_dir_if_present(&data_dir).await?;
+    remove_dir_if_present(&backup).await?;
+    Ok(())
+}
+
 /// Run a fresh-device login (`build`) against an empty store at `data_dir`,
 /// preserving any existing store until the login is known to have succeeded.
 ///

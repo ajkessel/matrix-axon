@@ -145,6 +145,51 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Permanently delete an account and every trace of it: stops syncing it,\ninvalidates its device token upstream, removes its on-disk SDK store, and drops\nits row (cascading away its archived events, room state, and account data).\nReturns `204 No Content` — the resource is gone, so there is nothing to return.",
+        "description": "Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account\nlater is a fresh login with a new `account_id`. Idempotent and crash-safe — a\ndelete of an account already mid-teardown resumes it, and an interrupted delete\nis finished by the next boot's reconcile. An unknown id is a `404`. A `409` means\neither the account's sync task has not finished shutting down (transient, retry)\nor the account is still named by `sync.account` — boot provisioning would\nrecreate it, so remove it from config before deleting.\n\nDestructive, so this route is loopback-only until the auth layer lands (see the\nper-method `route_layer` in [`router`](crate::router)) — the sibling `GET` on\nthis path stays open.",
+        "operationId": "delete_account",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The account was deleted (or was already gone after a resumed teardown)"
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The sync task is still shutting down (retry), or the account is provisioned from config (remove it from sync.account first)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/accounts/{account_id}/events/{event_id}": {

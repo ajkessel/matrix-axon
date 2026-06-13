@@ -21,6 +21,7 @@ use utoipa::OpenApi;
         crate::routes::accounts::login,
         crate::routes::accounts::logout,
         crate::routes::accounts::get_account,
+        crate::routes::accounts::delete_account,
         crate::routes::rooms::list_rooms,
         crate::routes::rooms::room_timeline,
         crate::routes::events::get_event,

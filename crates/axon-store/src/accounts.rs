@@ -192,6 +192,33 @@ impl Store {
         Ok(accounts)
     }
 
+    /// The accounts mid-teardown (`deleting`), oldest first — the explicitly-named
+    /// accessor the boot reconcile uses to re-find rows a crash left in flight
+    /// (ADR 0022 / 0024). Distinct from the active-only [`list_accounts`](Self::list_accounts)
+    /// and the client-facing [`list_client_visible_accounts`](Self::list_client_visible_accounts),
+    /// so a stale `deleting` row can never leak onto the connect or read paths.
+    pub async fn list_deleting_accounts(&self) -> Result<Vec<Account>, StoreError> {
+        let sql = format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE state = 'deleting' ORDER BY created_at ASC"
+        );
+        let accounts = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(accounts)
+    }
+
+    /// Every account id, in **any** lifecycle state — the set the orphan-store-dir
+    /// GC checks each `data_dir/<id>/` against (ADR 0024). Keyed off row existence,
+    /// not state: a `deactivated` row is real and its dir must be kept, so GC prunes
+    /// only dirs whose id matches *no* row here (the #24-safe distinction).
+    pub async fn list_all_account_ids(&self) -> Result<Vec<Uuid>, StoreError> {
+        let ids = sqlx_core::query::query("SELECT account_id FROM accounts")
+            .try_map(|row: PgRow| row.try_get::<Uuid, _>("account_id"))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(ids)
+    }
+
     /// Look up an account by its Matrix identity `(user_id, homeserver_url)` —
     /// the natural key the login verb starts from, before any `account_id`
     /// exists. Returns the row in **any** lifecycle state (so a caller can
@@ -226,6 +253,24 @@ impl Store {
         sqlx_core::query::query("UPDATE accounts SET state = $2 WHERE account_id = $1")
             .bind(account_id)
             .bind(state.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Hard-delete the account row. The FK cascades (`ON DELETE CASCADE` on
+    /// `events`, `room_state`, `account_data`, and the event crypto siblings)
+    /// remove all of its Postgres-resident data in the same statement. Idempotent:
+    /// deleting an already-gone row affects zero rows and is not an error.
+    ///
+    /// This is the **last** step of the account-delete teardown (in `axon-sync`) —
+    /// the row is the durable key a boot reconcile uses to re-find external
+    /// resources, so the external cleanup (SDK store dir, and later the search
+    /// index / media cache) runs first and the row is dropped only once it has
+    /// (ADR 0024).
+    pub async fn delete_account_row(&self, account_id: Uuid) -> Result<(), StoreError> {
+        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+            .bind(account_id)
             .execute(&self.pool)
             .await?;
         Ok(())

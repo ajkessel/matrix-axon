@@ -88,6 +88,14 @@ pub enum LifecycleError {
     #[error("sync task for account {0} is still draining; retry shortly")]
     Draining(Uuid),
 
+    /// The account is still named by `sync.account`, so a `DELETE` is refused: boot
+    /// provisioning would `upsert` the identity straight back as a fresh active row,
+    /// making the deletion non-durable. Remove it from config first. Carries the
+    /// account's id. → 409. (A transitional guard — it becomes a no-op once
+    /// config-based provisioning is retired; see ADR 0024.)
+    #[error("account {0} is provisioned from config; remove it from sync.account before deleting")]
+    Provisioned(Uuid),
+
     /// The homeserver rejected the supplied credentials.
     #[error("authentication failed: {0}")]
     AuthFailed(String),
@@ -410,19 +418,38 @@ impl AccountLifecycle {
             AccountState::Deactivated => {}
         }
 
-        // Stop supervision and wait until the task has *terminated* (not merely
-        // been asked to stop) — see `reap_task`. A re-login restages the store
-        // dir the draining task still holds, so logout must not return (releasing
-        // the identity lock) while the task may still be using it.
+        // Sever the live session: reap the supervised task (awaiting its drain)
+        // and take + upstream-invalidate the cached client. Shared with `delete`.
+        // A wedged task surfaces as `Draining` and leaves the row `deactivated` for
+        // a retry to reap.
+        self.sever_session(account_id).await?;
+
+        tracing::info!(%account_id, user_id = %account.user_id, "account logged out");
+        Ok(())
+    }
+
+    /// Stop an account's live session: reap its supervised task **awaiting its
+    /// drain** (cooperative cancel → abort escalation; a task that survives both
+    /// is left registered and surfaces as [`LifecycleError::Draining`]), then take
+    /// its cached client out of the connection slot and best-effort, time-capped,
+    /// invalidate the device token upstream. Shared by [`logout`](Self::logout)
+    /// and [`delete`](Self::delete) — the "sever the running session" tail both
+    /// need.
+    ///
+    /// Preconditions (the caller's job): the row has already been flipped out of
+    /// `active` (so the cold-connect gate refuses any *new* client — this is the
+    /// flip-before-take that closes the reconnect race), and the per-identity lock
+    /// is held. `take` awaits the slot lock, so a connect that read `active` before
+    /// the flip and cached a client has it taken right back out here.
+    ///
+    /// Returns the reap result: on `Draining` the caller must **not** proceed to
+    /// remove or restage anything the still-live task may hold — its store dir is
+    /// not quiescent. The upstream call never fails the verb: an unreachable or
+    /// stalled homeserver must not stall it (the local state is already changed),
+    /// so the device merely lingers upstream until reachable.
+    async fn sever_session(&self, account_id: Uuid) -> Result<(), LifecycleError> {
         self.reap_task(account_id).await?;
 
-        // Take the cached client out of its slot (this also evicts it) and use it
-        // to invalidate the device token upstream. `take` awaits the slot lock, so
-        // a connect that read `active` before the flip above finishes caching and
-        // then has its client taken right back out here. The upstream call is
-        // best-effort with a short cap: an unreachable or stalled homeserver must
-        // not stall logout (the row is already deactivated) — the device then
-        // lingers upstream until reachable.
         if let Some(client) = self.manager.take(account_id).await {
             match tokio::time::timeout(UPSTREAM_LOGOUT_TIMEOUT, client.matrix_auth().logout()).await
             {
@@ -430,18 +457,132 @@ impl AccountLifecycle {
                 Ok(Err(err)) => tracing::warn!(
                     %account_id,
                     error = %err,
-                    "upstream logout failed; account deactivated locally"
+                    "upstream logout failed; session severed locally"
                 ),
                 Err(_) => tracing::warn!(
                     %account_id,
                     timeout_secs = UPSTREAM_LOGOUT_TIMEOUT.as_secs(),
-                    "upstream logout timed out; account deactivated locally"
+                    "upstream logout timed out; session severed locally"
                 ),
             }
         }
-
-        tracing::info!(%account_id, user_id = %account.user_id, "account logged out");
         Ok(())
+    }
+
+    /// Permanently delete a Matrix account and every trace of it — an **ordered,
+    /// idempotent, crash-recoverable** teardown (ADR 0024). Unlike
+    /// [`logout`](Self::logout), which is a reversible pause that *retains* all
+    /// data, this is a hard removal: the row, its Postgres archive (via FK
+    /// cascade), and its on-disk SDK store are gone, and re-adding the same Matrix
+    /// account later is a fresh [`login`](Self::login) with a new `account_id`.
+    ///
+    /// The order is load-bearing — the row is the only durable key a boot reconcile
+    /// can re-find the external resources from, so it is deleted **last**:
+    /// 1. flip the row to `deleting` (a durable "external cleanup owed" marker;
+    ///    also moves it out of `active` so the cold-connect gate refuses any new
+    ///    client *before* the cached one is taken — flip-before-take);
+    /// 2. [`sever_session`](Self::sever_session) the live session;
+    /// 3. remove the on-disk SDK store dir (and its staging backup);
+    /// 4. delete the row (FK cascade drops events/account_data/room_state).
+    ///
+    /// Then the identity's lock-map entry is pruned (it is retired for good). Two
+    /// steps the spec orders in here — search-index doc deletion and media-cache
+    /// purge — are deferred until those subsystems exist; see ADR 0024.
+    ///
+    /// Idempotent and resumable, keyed by id:
+    /// - **`active` / `deactivated` row** → full teardown.
+    /// - **`deleting` row** → resume it (a crash or earlier failure left it
+    ///   mid-flight); every step is idempotent. This is the branch the boot
+    ///   reconcile and a client retry hit.
+    /// - **no such row** → [`LifecycleError::NotFound`] (404): already gone. A
+    ///   second concurrent delete observes this once the first completes.
+    ///
+    /// If the supervised task cannot be made to terminate (survives cancel **and**
+    /// abort — see [`reap_task`](Self::reap_task)), this fails with
+    /// [`LifecycleError::Draining`] **before** the store dir is touched, leaving the
+    /// row `deleting` for a retry — a live task's store dir is never removed out
+    /// from under it.
+    pub async fn delete(&self, account_id: Uuid) -> Result<(), LifecycleError> {
+        // Resolve identity to take the per-identity lock; a 404 needs no lock.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+
+        let lock = self.lock_for(&account.user_id, &account.homeserver_url);
+        let _guard = lock.lock().await;
+
+        // Re-read under the lock: a concurrent verb may have moved or removed the
+        // row between the unlocked resolve and acquiring the lock.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+
+        // Refuse to *initiate* a delete on an account `sync.account` still names:
+        // boot provisioning `upsert`s it straight back as a fresh active row, so the
+        // deletion wouldn't survive a restart. The fix is to remove it from config
+        // first (or retire config provisioning entirely — ADR 0024). A row already
+        // `deleting` is exempt: that delete is in flight (and is what the boot
+        // reconcile resumes), so it must be allowed to finish rather than wedge.
+        if account.state != AccountState::Deleting {
+            if let Some(provision) = &self.config.account {
+                if crate::client::matches_account(provision, &account) {
+                    return Err(LifecycleError::Provisioned(account_id));
+                }
+            }
+        }
+
+        // Flip to `deleting` first (unless already there — a resume). Durably marks
+        // that external cleanup is owed, and — like logout's flip — moves the row
+        // out of `active` so `get_or_connect`'s cold-connect gate refuses any new
+        // client before `sever_session` takes the cached one.
+        if account.state != AccountState::Deleting {
+            self.store
+                .set_account_state(account_id, AccountState::Deleting)
+                .await?;
+        }
+
+        // Sever the live session. A wedged task returns `Draining` and we stop here
+        // — the row stays `deleting`, nothing on disk is touched, and a retry (or
+        // the boot reconcile) finishes once the task finally dies. This is why the
+        // store-dir removal below sits *after* a successful sever.
+        self.sever_session(account_id).await?;
+
+        // External resources before the row (the row is the reconcile's only handle
+        // to them): the SDK store dir + its staging backup. Idempotent on a resume.
+        crate::client::remove_account_store_dirs(&self.config, account_id).await?;
+
+        // Only now drop the row — FK cascades remove events/account_data/room_state.
+        self.store.delete_account_row(account_id).await?;
+
+        // The identity is retired for good, so prune its lock-map entry — but only
+        // if no other verb is parked on it (see `prune_lock`).
+        self.prune_lock(&account.user_id, &account.homeserver_url, &lock);
+
+        tracing::info!(%account_id, user_id = %account.user_id, "account deleted");
+        Ok(())
+    }
+
+    /// Prune the per-identity lock-map entry for a retired (deleted) identity —
+    /// but only when no other verb still holds the lock `Arc`. ADR 0024: pruning
+    /// while a verb is *parked* on the same `Arc` would let a later
+    /// [`lock_for`](Self::lock_for) mint a *fresh* lock for the identity and run
+    /// without mutual exclusion against that waiter. Performed under the std map
+    /// mutex so no new waiter can clone the `Arc` between the count check and the
+    /// removal.
+    fn prune_lock(&self, user_id: &str, homeserver_url: &str, lock: &Arc<AsyncMutex<()>>) {
+        let key = format!("{user_id}\u{0}{homeserver_url}");
+        let mut map = self.locks.lock().expect("lifecycle lock map poisoned");
+        // Live strong refs: the map entry (1) + our own `lock` handle (1) + one per
+        // parked waiter. `== 2` ⇒ only map + us, so removing the entry can't strand
+        // a waiter on an orphaned lock. `> 2` ⇒ leave it (a tiny bounded leak,
+        // reclaimed by the next delete of this identity — correctness over a slot).
+        if Arc::strong_count(lock) == 2 {
+            map.remove(&key);
+        }
     }
 
     /// Stop the account's supervised task and wait until it has actually
@@ -520,6 +661,40 @@ mod tests {
             data_dir: std::env::temp_dir().join("axon-lifecycle-test"),
             store_key: Some("test-key".to_owned()),
             account: None,
+            timeline_limit: 1,
+            live_event_buffer: 16,
+        };
+        let manager = ClientManager::new(store.clone(), config.clone());
+        let (live_tx, _rx) = broadcast::channel(16);
+        AccountLifecycle::new(
+            store,
+            config,
+            manager,
+            live_tx,
+            CancellationToken::new(),
+            TaskTracker::new(),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
+    }
+
+    /// A lifecycle whose `sync.account` names `(user_id, homeserver_url)`, for the
+    /// configured-account delete guard. The credential is unused (these paths return
+    /// before any login), but `matches_account` keys on the identity fields.
+    async fn lifecycle_with_provision(user_id: &str, homeserver_url: &str) -> AccountLifecycle {
+        let url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let store = Store::connect(&url, 5).await.expect("connect + migrate");
+        let config = SyncConfig {
+            data_dir: std::env::temp_dir().join("axon-lifecycle-test"),
+            store_key: Some("test-key".to_owned()),
+            account: Some(axon_core::AccountProvision {
+                user_id: user_id.to_owned(),
+                homeserver_url: homeserver_url.to_owned(),
+                password: Some("unused".to_owned()),
+                access_token: None,
+                device_id: None,
+                recovery_key: None,
+            }),
             timeline_limit: 1,
             live_event_buffer: 16,
         };
@@ -895,5 +1070,295 @@ mod tests {
         assert!(!lc.tasks.lock().unwrap().contains_key(&acct.account_id));
 
         delete_account(&lc.store, acct.account_id).await;
+    }
+
+    // ---- delete (ADR 0024) ----
+
+    /// Delete of an `active` account removes the row, its on-disk SDK store dir
+    /// and staging backup, and retires the identity (a later login would mint a
+    /// fresh id, since `find_account_by_identity` now returns `None`).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_on_active_removes_row_and_store_dir() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-active-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap(); // active
+
+        // Stand in an on-disk store dir + staging backup so we can assert both go.
+        let dir = lc.config.data_dir.join(acct.account_id.to_string());
+        let backup = lc.config.data_dir.join(format!("{}.prev", acct.account_id));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&backup).unwrap();
+
+        lc.delete(acct.account_id).await.expect("delete succeeds");
+
+        assert!(
+            lc.store
+                .get_account(acct.account_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "row removed"
+        );
+        assert!(!dir.exists(), "store dir removed");
+        assert!(!backup.exists(), "staging backup removed");
+        assert!(
+            lc.store
+                .find_account_by_identity(&user, hs)
+                .await
+                .unwrap()
+                .is_none(),
+            "identity retired — a fresh login would mint a new id"
+        );
+    }
+
+    /// DELETE is refused while the identity is still named by `sync.account`: boot
+    /// provisioning would `upsert` it straight back as a fresh active row, so the
+    /// deletion wouldn't survive a restart (the resurrection regression). The row
+    /// and its store dir are left fully intact.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_of_configured_account_is_refused() {
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-configured-{}:localhost", Uuid::new_v4());
+        let lc = lifecycle_with_provision(&user, hs).await;
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        let dir = lc.config.data_dir.join(acct.account_id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = lc.delete(acct.account_id).await.unwrap_err();
+        assert!(matches!(err, LifecycleError::Provisioned(id) if id == acct.account_id));
+
+        // Nothing was torn down: the row is still present and active, dir intact.
+        let after = lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, AccountState::Active);
+        assert!(
+            dir.exists(),
+            "a configured account's store dir must be left intact"
+        );
+
+        delete_account(&lc.store, acct.account_id).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delete of a `deactivated` account also fully removes it (retained archive
+    /// and all). Logout keeps data; delete erases it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_on_deactivated_removes_row() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-deact-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        lc.store
+            .set_account_state(acct.account_id, AccountState::Deactivated)
+            .await
+            .unwrap();
+
+        lc.delete(acct.account_id).await.expect("delete succeeds");
+        assert!(lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Delete of a row already in `deleting` (a crash/failure left it mid-flight)
+    /// **resumes** the teardown to completion rather than erroring — the branch the
+    /// boot reconcile and a client retry both take.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_on_deleting_row_resumes_to_completion() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-resume-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        lc.store
+            .set_account_state(acct.account_id, AccountState::Deleting)
+            .await
+            .unwrap();
+        let dir = lc.config.data_dir.join(acct.account_id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        lc.delete(acct.account_id).await.expect("resume completes");
+        assert!(lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!dir.exists());
+    }
+
+    /// Delete twice: the first removes the row, the second finds nothing — the
+    /// shape a second concurrent delete sees once the first wins the identity lock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_is_idempotent_then_not_found() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-twice-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+
+        lc.delete(acct.account_id).await.expect("first delete");
+        let err = lc.delete(acct.account_id).await.unwrap_err();
+        assert!(matches!(err, LifecycleError::NotFound(id) if id == acct.account_id));
+    }
+
+    /// Delete on an unknown id is a 404, raised before any lock work.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_on_unknown_account_is_not_found() {
+        let lc = lifecycle().await;
+        let missing = Uuid::new_v4();
+        let err = lc.delete(missing).await.unwrap_err();
+        assert!(matches!(err, LifecycleError::NotFound(id) if id == missing));
+    }
+
+    /// Delete reaps the account's supervised task (awaiting its drain) before
+    /// removing anything, then completes — mirrors the logout drain test.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_reaps_supervised_task_then_completes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::engine::AccountTask;
+
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-drain-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+
+        let drained = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn({
+            let cancel = cancel.clone();
+            let drained = Arc::clone(&drained);
+            async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                drained.store(true, Ordering::SeqCst);
+            }
+        });
+        lc.tasks
+            .lock()
+            .unwrap()
+            .insert(acct.account_id, AccountTask { cancel, handle });
+
+        lc.delete(acct.account_id).await.expect("delete succeeds");
+
+        assert!(
+            drained.load(Ordering::SeqCst),
+            "delete returned before the supervised task finished draining"
+        );
+        assert!(!lc.tasks.lock().unwrap().contains_key(&acct.account_id));
+        assert!(lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Regression for the load-bearing ordering: a task that survives cancel **and**
+    /// abort fails the delete with `Draining` **before** the store dir is touched —
+    /// the row stays `deleting` and the on-disk store is left intact, so nothing is
+    /// removed out from under a still-live task. A retry once the task dies finishes
+    /// the job.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn delete_wedged_task_is_draining_and_preserves_store_dir() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::engine::AccountTask;
+
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@delete-wedged-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        let dir = lc.config.data_dir.join(acct.account_id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No await points: survives both cancel and abort until `unwedge` is set.
+        let unwedge = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn({
+            let unwedge = Arc::clone(&unwedge);
+            async move {
+                while !unwedge.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+        lc.tasks
+            .lock()
+            .unwrap()
+            .insert(acct.account_id, AccountTask { cancel, handle });
+
+        let err = lc.delete(acct.account_id).await.unwrap_err();
+        assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
+        // Row left `deleting`, task still registered, and — critically — the store
+        // dir is untouched (the teardown aborted before the removal step).
+        let after = lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, AccountState::Deleting);
+        assert!(lc.tasks.lock().unwrap().contains_key(&acct.account_id));
+        assert!(dir.exists(), "a live task's store dir must not be removed");
+
+        // Let it die and retry: the leftover is reaped and the delete completes.
+        unwedge.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        lc.delete(acct.account_id).await.expect("retry completes");
+        assert!(lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!dir.exists());
+    }
+
+    /// The lock-map prune guard (ADR 0024): pruning removes the identity's entry
+    /// only when no other verb still holds the lock `Arc`. A parked waiter (a live
+    /// extra clone) must keep the entry alive, or it would let a fresh `lock_for`
+    /// mint a second lock and break mutual exclusion.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn prune_lock_keeps_entry_while_a_waiter_holds_it() {
+        let lc = lifecycle().await;
+        let user = format!("@prune-{}:localhost", Uuid::new_v4());
+        let hs = "https://hs.example.org";
+        let key = format!("{user}\u{0}{hs}");
+
+        // `lock_for` inserts the entry and returns a clone: map(1) + ours(1).
+        let lock = lc.lock_for(&user, hs);
+
+        // A second live clone stands in for a parked waiter — strong_count is now 3,
+        // so the guard must refuse to prune.
+        let waiter = lock.clone();
+        lc.prune_lock(&user, hs, &lock);
+        assert!(
+            lc.locks.lock().unwrap().contains_key(&key),
+            "must not prune while a waiter holds the lock"
+        );
+
+        // Drop the waiter (back to map + us = 2): now pruning is safe and removes it.
+        drop(waiter);
+        lc.prune_lock(&user, hs, &lock);
+        assert!(
+            !lc.locks.lock().unwrap().contains_key(&key),
+            "uncontended prune removes the entry"
+        );
     }
 }

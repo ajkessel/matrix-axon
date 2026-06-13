@@ -21,6 +21,7 @@ mod gateway;
 mod lifecycle;
 mod manager;
 mod meta;
+mod reconcile;
 mod redecrypt;
 
 pub use engine::SyncEngine;

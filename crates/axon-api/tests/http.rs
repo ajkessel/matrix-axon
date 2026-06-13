@@ -21,7 +21,7 @@ use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use common::{LoginCall, LoginOutcome, LogoutOutcome, StubLifecycle, StubSender};
+use common::{DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, StubLifecycle, StubSender};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -684,6 +684,124 @@ async fn logout_error_maps_to_status() {
             Arc::new(StubLifecycle::logout_failing(outcome)),
         );
         let (status, err) = post_logout(&app, loopback, id).await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+/// `DELETE /v1/accounts/{account_id}` with an optional peer address. Returns
+/// `(status, parsed body)` — the body is `Null` for the 204 success path.
+async fn delete_account(
+    app: &axum::Router,
+    peer: Option<SocketAddr>,
+    account_id: Uuid,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("DELETE")
+        .uri(format!("/v1/accounts/{account_id}"));
+    if let Some(addr) = peer {
+        builder = builder.extension(ConnectInfo(addr));
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body")
+    };
+    (status, json)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delete_succeeds_with_204_and_routes_to_port() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+
+    let id = Uuid::new_v4();
+    let loopback = Some("127.0.0.1:54400".parse().unwrap());
+    let (status, body) = delete_account(&app, loopback, id).await;
+
+    // 204 No Content — the resource is gone, nothing to return.
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+    // The handler routed the id straight through to the port.
+    assert_eq!(stub.delete_calls(), vec![id]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delete_requires_loopback_but_get_on_same_path_stays_open() {
+    let store = store().await;
+    // Seed a real account so the open GET on the same path can read it back.
+    let user = format!("@del-http-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("seed");
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store.clone(), stub.clone());
+
+    // DELETE from a non-loopback peer is rejected before the handler runs.
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = delete_account(&app, off_box, account.account_id).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+    // Missing peer fails closed too.
+    let (status, _) = delete_account(&app, None, account.account_id).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The guard short-circuited: the lifecycle port was never invoked.
+    assert!(stub.delete_calls().is_empty());
+
+    // The sibling GET on the *same* path carries no loopback layer — a plain read
+    // (no peer extension) still succeeds, proving the guard is DELETE-only.
+    let (status, body) = get(&app, &format!("/v1/accounts/{}", account.account_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["account_id"], account.account_id.to_string());
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(store.pool())
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delete_error_maps_to_status() {
+    let store = store().await;
+    let loopback: Option<SocketAddr> = Some("127.0.0.1:14200".parse().unwrap());
+    let id = Uuid::new_v4();
+
+    let cases = [
+        (
+            DeleteOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            DeleteOutcome::Conflict("draining".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            DeleteOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = login_app(
+            store.clone(),
+            Arc::new(StubLifecycle::delete_failing(outcome)),
+        );
+        let (status, err) = delete_account(&app, loopback, id).await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }

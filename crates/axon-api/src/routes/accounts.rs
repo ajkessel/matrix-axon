@@ -132,6 +132,43 @@ pub async fn logout(
     Ok(ApiResponse::new(AccountDto::from(account)))
 }
 
+/// Permanently delete an account and every trace of it: stops syncing it,
+/// invalidates its device token upstream, removes its on-disk SDK store, and drops
+/// its row (cascading away its archived events, room state, and account data).
+/// Returns `204 No Content` — the resource is gone, so there is nothing to return.
+///
+/// Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account
+/// later is a fresh login with a new `account_id`. Idempotent and crash-safe — a
+/// delete of an account already mid-teardown resumes it, and an interrupted delete
+/// is finished by the next boot's reconcile. An unknown id is a `404`. A `409` means
+/// either the account's sync task has not finished shutting down (transient, retry)
+/// or the account is still named by `sync.account` — boot provisioning would
+/// recreate it, so remove it from config before deleting.
+///
+/// Destructive, so this route is loopback-only until the auth layer lands (see the
+/// per-method `route_layer` in [`router`](crate::router)) — the sibling `GET` on
+/// this path stays open.
+#[utoipa::path(
+    delete,
+    path = "/v1/accounts/{account_id}",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    responses(
+        (status = 204, description = "The account was deleted (or was already gone after a resumed teardown)"),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 409, description = "The sync task is still shutting down (retry), or the account is provisioned from config (remove it from sync.account first)", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn delete_account(
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    Path(account_id): Path<Uuid>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    lifecycle.delete(account_id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// Read a single account by id, in whatever lifecycle state it is — unlike the
 /// list, a direct by-id read is not filtered to `active` (so a client can poll
 /// an account it knows and watch it transition). An unknown id is a 404.

@@ -110,19 +110,40 @@ impl SyncEngine {
             tracing::info!(account_id = %account.account_id, user_id = %account.user_id, "provisioned account");
         }
 
+        // One tracker holds every task; the runtime login verb spawns onto the
+        // same tracker so a logged-in-at-runtime account shuts down with the rest.
+        // The task registry is shared the same way, so the lifecycle verbs can
+        // cancel a single account's task. Built here (ahead of the spawn loop) so
+        // the boot reconcile can drive the runtime delete verb over the same
+        // machinery.
+        let tracker = TaskTracker::new();
+        let tasks: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+
+        // Crash recovery (ADR 0024), before any account is brought online and
+        // before the HTTP listener binds (`axon-server` serves only after `start`
+        // returns), so neither sweep races API traffic or a supervised task
+        // creating a fresh store dir: finish any interrupted account deletion, then
+        // prune row-less store dirs.
+        let lifecycle = AccountLifecycle::new(
+            store.clone(),
+            config.clone(),
+            manager.clone(),
+            live_tx.clone(),
+            cancel.clone(),
+            tracker.clone(),
+            tasks.clone(),
+        );
+        crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
+        crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
+
         // `list_accounts` returns only `active` rows, so a `deactivated` or
-        // `deleting` account never gets a supervised task (ADR 0022).
+        // `deleting` account never gets a supervised task (ADR 0022). Listed after
+        // the reconcile so a just-completed deletion is already gone.
         let accounts = store.list_accounts().await?;
         if accounts.is_empty() {
             tracing::warn!("no active accounts; sync engine idle");
         }
 
-        // One tracker holds every task; the runtime login verb spawns onto the
-        // same tracker so a logged-in-at-runtime account shuts down with the rest.
-        // The task registry is shared the same way, so the lifecycle verbs can
-        // cancel a single account's task.
-        let tracker = TaskTracker::new();
-        let tasks: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
         for account in accounts {
             spawn_supervised(
                 &tracker,

@@ -6,7 +6,7 @@
 //! translation live here. `axon-api` and `axon-sync` never depend on each other.
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, LoginError, LogoutError};
+use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError};
 use axon_sync::{AccountLifecycle as SyncLifecycle, LifecycleError};
 use uuid::Uuid;
 
@@ -35,10 +35,11 @@ fn map_login_err(err: LifecycleError) -> LoginError {
             tracing::error!(error = %msg, "store error during account login");
             LoginError::Internal
         }
-        // Login resolves by identity and mints a row for a new one, so it never
-        // surfaces NotFound; treat it defensively as an internal error.
-        LifecycleError::NotFound(id) => {
-            tracing::error!(%id, "unexpected NotFound from account login");
+        // Login never surfaces these — `NotFound` (it mints a row for a new
+        // identity) or `Provisioned` (a delete-only guard) — so treat them
+        // defensively as an internal error.
+        LifecycleError::NotFound(id) | LifecycleError::Provisioned(id) => {
+            tracing::error!(%id, "unexpected lifecycle error from account login");
             LoginError::Internal
         }
     }
@@ -73,6 +74,38 @@ fn map_logout_err(err: LifecycleError) -> LogoutError {
     }
 }
 
+/// Map a sync-layer lifecycle error onto the API-layer delete error: an unknown id
+/// → not found, a not-yet-terminated sync task → conflict, a store/dir-removal
+/// failure → a logged internal error.
+fn map_delete_err(err: LifecycleError) -> DeleteError {
+    match err {
+        LifecycleError::NotFound(id) => DeleteError::NotFound(format!("account {id} not found")),
+        // The account's task survived cancel + abort, so its store dir can't be
+        // treated as quiescent and the teardown stopped before removing it. The row
+        // stays `deleting`; a retry (or the next boot's reconcile) finishes it.
+        LifecycleError::Draining(id) => DeleteError::Conflict(format!(
+            "the sync task for account {id} is still shutting down; retry shortly"
+        )),
+        // The account is still named by `sync.account`; deleting it would be undone
+        // by boot provisioning. Surface as a conflict telling the operator to remove
+        // it from config first.
+        LifecycleError::Provisioned(id) => DeleteError::Conflict(format!(
+            "account {id} is provisioned from config; remove it from sync.account before deleting"
+        )),
+        LifecycleError::Store(msg) => {
+            tracing::error!(error = %msg, "store error during account delete");
+            DeleteError::Internal
+        }
+        // Delete takes only an account id and resolves a `deleting` row by resuming
+        // (never `BeingDeleted`); a bad MXID, rejected credential, or upstream error
+        // can't arise. Treat them defensively as an internal error.
+        other => {
+            tracing::error!(error = %other, "unexpected error during account delete");
+            DeleteError::Internal
+        }
+    }
+}
+
 #[async_trait]
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
@@ -89,5 +122,9 @@ impl AccountLifecycle for LifecycleAdapter {
 
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError> {
         self.0.logout(account_id).await.map_err(map_logout_err)
+    }
+
+    async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError> {
+        self.0.delete(account_id).await.map_err(map_delete_err)
     }
 }

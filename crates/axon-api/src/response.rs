@@ -180,3 +180,15 @@ impl From<crate::lifecycle::LogoutError> for ApiError {
         }
     }
 }
+
+impl From<crate::lifecycle::DeleteError> for ApiError {
+    fn from(err: crate::lifecycle::DeleteError) -> Self {
+        use crate::lifecycle::DeleteError;
+        match err {
+            DeleteError::NotFound(msg) => ApiError::not_found(msg),
+            DeleteError::Conflict(msg) => ApiError::conflict(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            DeleteError::Internal => ApiError::internal(),
+        }
+    }
+}

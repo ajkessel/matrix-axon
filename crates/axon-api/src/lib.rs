@@ -22,7 +22,7 @@ mod sender;
 mod state;
 mod ws;
 
-pub use lifecycle::{AccountLifecycle, LoginError, LogoutError};
+pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
@@ -30,7 +30,7 @@ pub use state::AppState;
 
 use axum::{
     middleware::from_fn,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -58,9 +58,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/logout",
             post(routes::accounts::logout).route_layer(from_fn(loopback::require_loopback)),
         )
+        // Read one account (open) and delete one account (loopback-restricted like
+        // the other lifecycle verbs, until bearer auth lands). The loopback guard is
+        // layered onto the DELETE method only so the sibling GET stays open.
         .route(
             "/v1/accounts/{account_id}",
-            get(routes::accounts::get_account),
+            get(routes::accounts::get_account).merge(
+                delete(routes::accounts::delete_account)
+                    .route_layer(from_fn(loopback::require_loopback)),
+            ),
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(

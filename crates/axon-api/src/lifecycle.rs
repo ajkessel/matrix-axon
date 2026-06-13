@@ -51,8 +51,28 @@ pub enum LogoutError {
     Internal,
 }
 
-/// Adds, reactivates, or stops a Matrix account at runtime. Implemented outside
-/// this crate; held in [`AppState`](crate::AppState) as `Arc<dyn AccountLifecycle>`.
+/// What can go wrong deleting an account. Like [`LogoutError`], small and
+/// HTTP-shaped; the adapter collapses its backend error into one of these.
+#[derive(Debug)]
+pub enum DeleteError {
+    /// No account exists for the given id. → `404`. (Also what a second concurrent
+    /// delete sees once the first has removed the row.)
+    NotFound(String),
+    /// The teardown could not finish with its postcondition intact — the account's
+    /// supervised task has not yet terminated, so its store dir can't be removed.
+    /// Transient: a retry (or the next boot's reconcile) completes it. → `409`.
+    Conflict(String),
+    /// An internal failure (e.g. the store, or removing the on-disk store dir). The
+    /// detail is logged, not returned. → `500`.
+    ///
+    /// As with [`LogoutError`] there is deliberately no upstream/502 variant: the
+    /// device-token invalidation is best-effort and never fails the delete.
+    Internal,
+}
+
+/// Adds, reactivates, stops, or removes a Matrix account at runtime. Implemented
+/// outside this crate; held in [`AppState`](crate::AppState) as
+/// `Arc<dyn AccountLifecycle>`.
 #[async_trait]
 pub trait AccountLifecycle: Send + Sync {
     /// Log in (or reactivate) the account identified by `(homeserver_url,
@@ -75,4 +95,12 @@ pub trait AccountLifecycle: Send + Sync {
     /// all of its data so a later [`login`](Self::login) reactivates it. Idempotent
     /// — logging out an already-logged-out account succeeds.
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError>;
+
+    /// Permanently delete the account `account_id` and every trace of it — an
+    /// ordered, crash-recoverable teardown (the Postgres archive via cascade, the
+    /// on-disk SDK store). Unlike [`logout`](Self::logout) this is *not* reversible:
+    /// re-adding the same Matrix account later is a fresh [`login`](Self::login)
+    /// with a new id. Idempotent — a delete of an in-flight (`deleting`) row resumes
+    /// it; a delete of an already-gone row is a [`NotFound`](DeleteError::NotFound).
+    async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError>;
 }

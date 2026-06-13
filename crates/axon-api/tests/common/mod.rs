@@ -10,7 +10,7 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, LoginError, LogoutError, MessageSender, SendError};
+use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError, MessageSender, SendError};
 use uuid::Uuid;
 
 /// One recorded call to the stub, with the arguments the handler passed through.
@@ -151,34 +151,62 @@ impl LogoutOutcome {
     }
 }
 
-/// An in-memory [`AccountLifecycle`] for tests: records each `login`/`logout` call
-/// and returns a preset outcome, so the lifecycle routes can be exercised (loopback
-/// guard, request decoding, error → status mapping) without a real homeserver.
+/// The outcome the [`StubLifecycle`] returns for every `delete` call. `Clone` so
+/// one stub can answer repeated calls; mirrors [`DeleteError`]'s variants.
+#[derive(Clone)]
+pub enum DeleteOutcome {
+    Ok,
+    NotFound(String),
+    Conflict(String),
+    Internal,
+}
+
+impl DeleteOutcome {
+    fn to_result(&self) -> Result<(), DeleteError> {
+        match self {
+            DeleteOutcome::Ok => Ok(()),
+            DeleteOutcome::NotFound(m) => Err(DeleteError::NotFound(m.clone())),
+            DeleteOutcome::Conflict(m) => Err(DeleteError::Conflict(m.clone())),
+            DeleteOutcome::Internal => Err(DeleteError::Internal),
+        }
+    }
+}
+
+/// An in-memory [`AccountLifecycle`] for tests: records each `login`/`logout`/`delete`
+/// call and returns a preset outcome, so the lifecycle routes can be exercised
+/// (loopback guard, request decoding, error → status mapping) without a real
+/// homeserver.
 pub struct StubLifecycle {
     login_outcome: LoginOutcome,
     logout_outcome: LogoutOutcome,
+    delete_outcome: DeleteOutcome,
     login_calls: Mutex<Vec<LoginCall>>,
     logout_calls: Mutex<Vec<Uuid>>,
+    delete_calls: Mutex<Vec<Uuid>>,
 }
 
 impl StubLifecycle {
-    /// A stub that returns `Ok(account_id)` for every login and `Ok` for logout.
+    /// A stub that succeeds for every login, logout, and delete.
     pub fn ok(account_id: Uuid) -> Self {
         Self {
             login_outcome: LoginOutcome::Ok(account_id),
             logout_outcome: LogoutOutcome::Ok,
+            delete_outcome: DeleteOutcome::Ok,
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
         }
     }
 
-    /// A stub whose login returns the given failure (logout succeeds).
+    /// A stub whose login returns the given failure (logout/delete succeed).
     pub fn failing(outcome: LoginOutcome) -> Self {
         Self {
             login_outcome: outcome,
             logout_outcome: LogoutOutcome::Ok,
+            delete_outcome: DeleteOutcome::Ok,
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -187,8 +215,22 @@ impl StubLifecycle {
         Self {
             login_outcome: LoginOutcome::Ok(Uuid::nil()),
             logout_outcome: outcome,
+            delete_outcome: DeleteOutcome::Ok,
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose delete returns the given failure (login returns a nil id).
+    pub fn delete_failing(outcome: DeleteOutcome) -> Self {
+        Self {
+            login_outcome: LoginOutcome::Ok(Uuid::nil()),
+            logout_outcome: LogoutOutcome::Ok,
+            delete_outcome: outcome,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -200,6 +242,11 @@ impl StubLifecycle {
     /// The account ids passed to logout, in order.
     pub fn logout_calls(&self) -> Vec<Uuid> {
         self.logout_calls.lock().unwrap().clone()
+    }
+
+    /// The account ids passed to delete, in order.
+    pub fn delete_calls(&self) -> Vec<Uuid> {
+        self.delete_calls.lock().unwrap().clone()
     }
 }
 
@@ -222,6 +269,11 @@ impl AccountLifecycle for StubLifecycle {
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError> {
         self.logout_calls.lock().unwrap().push(account_id);
         self.logout_outcome.to_result()
+    }
+
+    async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError> {
+        self.delete_calls.lock().unwrap().push(account_id);
+        self.delete_outcome.to_result()
     }
 }
 
