@@ -544,17 +544,22 @@ impl EventDto {
         let msgtype = content.get("msgtype").and_then(|v| v.as_str());
         // m.sticker events don't have a msgtype but have their own event type
         let is_sticker = self.event_type == "m.sticker";
-        let filename = content
-            .get("filename")
-            .or_else(|| content.get("body"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("media");
+        let explicit_filename = content.get("filename").and_then(|v| v.as_str());
+        let body_text = content.get("body").and_then(|v| v.as_str());
+        // When `filename` is absent `body` is the filename. When both are present
+        // and differ, `body` is a user-authored caption shown as a second line.
+        let filename = explicit_filename.or(body_text).unwrap_or("media");
+        let caption = explicit_filename
+            .is_some()
+            .then(|| body_text.filter(|b| *b != filename))
+            .flatten();
+        let suffix = caption.map(|c| format!("\n{c}")).unwrap_or_default();
         match (msgtype, is_sticker) {
-            (Some("m.image"), _) => Some(format!("[image: {filename}]")),
-            (Some("m.file"), _) => Some(format!("[file: {filename}]")),
-            (Some("m.audio"), _) => Some(format!("[audio: {filename}]")),
-            (Some("m.video"), _) => Some(format!("[video: {filename}]")),
-            (_, true) => Some(format!("[sticker: {filename}]")),
+            (Some("m.image"), _) => Some(format!("[image: {filename}]{suffix}")),
+            (Some("m.file"), _) => Some(format!("[file: {filename}]{suffix}")),
+            (Some("m.audio"), _) => Some(format!("[audio: {filename}]{suffix}")),
+            (Some("m.video"), _) => Some(format!("[video: {filename}]{suffix}")),
+            (_, true) => Some(format!("[sticker: {filename}]{suffix}")),
             _ => None,
         }
     }

@@ -9,8 +9,8 @@ use ratatui_image::{Image, Resize};
 
 use crate::api::RoomDto;
 use crate::app::{
-    account_localpart, format_time, message_display_lines, AccountSelection, App, ImageState, Mode,
-    PopupKind, RoomKey, SearchKind,
+    account_localpart, format_time, message_display_lines, message_line_ranges, AccountSelection,
+    App, ImageState, Mode, PopupKind, RoomKey, SearchKind,
 };
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
@@ -338,15 +338,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // Reserve space at the bottom of the message pane for image preview when
     // an image is available. 30% of the height, at least 6 rows, at most 24.
     let (messages_area, image_preview_area) = if image_preview.is_some() {
-        let total = body[1].height;
+        let total = messages_area.height;
         let preview_h = (total / 3).clamp(6, 24);
         let panes = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(preview_h)])
-            .split(body[1]);
+            .split(messages_area);
         (panes[0], Some(panes[1]))
     } else {
-        (body[1], None)
+        (messages_area, None)
     };
 
 
@@ -408,6 +408,58 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .border_style(messages_border),
     );
     frame.render_widget(messages, messages_area);
+
+    // Inline thumbnails: for each visible image event that has a ready image,
+    // render a small thumbnail right-aligned within that event's row(s).
+    const THUMB_W: u16 = 12;
+    if messages_area.width > THUMB_W + 2 {
+        let ranges = message_line_ranges(
+            selected_events.as_slice(),
+            sender_labels.as_slice(),
+            message_width,
+            &reactions,
+            &app.colors,
+        );
+        // Collect thumbnail data (clone images) before the render loop so no
+        // borrow from image_cache overlaps with the picker borrow below.
+        let thumb_specs: Vec<(u16, u16, image::DynamicImage)> = selected_events
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, event)| {
+                let (_, mxc) = event.image_mxc()?;
+                let img = match app.image_cache.get(&mxc) {
+                    Some(ImageState::Ready(img)) => img.clone(),
+                    _ => return None,
+                };
+                let range = &ranges[idx];
+                if range.end <= message_scroll || range.start >= message_scroll + message_page_size
+                {
+                    return None;
+                }
+                let vis_row = range.start.saturating_sub(message_scroll) as u16;
+                let height = (range.end - range.start) as u16;
+                Some((vis_row, height, img))
+            })
+            .collect();
+        let inner_bottom = messages_area.y + messages_area.height.saturating_sub(1);
+        let thumb_x = messages_area.x + messages_area.width.saturating_sub(THUMB_W + 1);
+        for (vis_row, height, img) in thumb_specs {
+            let thumb_y = messages_area.y + 1 + vis_row;
+            if thumb_y >= inner_bottom {
+                continue;
+            }
+            let avail_h = inner_bottom - thumb_y;
+            let thumb_h = height.min(6).min(avail_h);
+            if thumb_h == 0 {
+                continue;
+            }
+            let rect = Rect::new(thumb_x, thumb_y, THUMB_W, thumb_h);
+            let size = Size::new(THUMB_W, thumb_h);
+            if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
+                frame.render_widget(Image::new(&proto), rect);
+            }
+        }
+    }
 
     if let Some(preview_area) = image_preview_area {
         match image_preview {
