@@ -14,7 +14,7 @@ Options:
 
 ```bash
 --base-url URL      Axon server URL, default http://127.0.0.1:8080
---account-id UUID  Optional Axon account filter for the room list
+--account-id UUID  Restrict account and room views to one Axon account
 ```
 
 ## What works today
@@ -31,7 +31,7 @@ Options:
 - Withdraws the current user's reactions by redacting their reaction events.
 - Logs Matrix accounts in through Axon's lifecycle API (Axon resolves the homeserver server-side), with masked password entry.
 - Logs active accounts out while retaining their archived data.
-- Three-pane focus system: Input, Room List, and Message List, with keyboard navigation and search in each list.
+- Multi-account panel and account filtering, with keyboard navigation and search across Accounts, Rooms, and Messages.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
 
@@ -50,8 +50,9 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | plain text | Send a message to the current room. |
 | `/login [user] [password] [homeserver]` | Log in a Matrix account. Usernames accept `@user:domain`, `user:domain`, or `user@domain`; typing the homeserver host (e.g. `@user:matrix.domain`) is rejected with a hint naming your canonical Matrix ID. The optional third argument overrides homeserver resolution — e.g. `/login @user:example.com pw matrix.example.com` (a bare host gains `https://`; pass an explicit scheme for loopback, e.g. `http://localhost:8008`). The inline password is a single token; for a password with spaces, omit it (and optionally give the homeserver after the Matrix ID, e.g. `/login @user:example.com hs.example.com`) to type it at the hidden prompt. Missing fields are prompted for and passwords are always masked. |
 | `/logout [user]` | Log out an active account while retaining its archive. Accepts `@user:domain`, `user:domain`, `user@domain`, or a unique localpart; Tab/Shift-Tab cycles matches. Prompts for `[y/N]` confirmation unless `display.confirm_logout = false`. |
-| `/switch <room>` | Switch rooms by list number, room id, canonical alias, display name, or shortened alias. |
-| `/rooms` | Refresh the room list. |
+| `/room <room>` (`/switch` alias) | Switch visible rooms by list number, room id, canonical alias, display name, or shortened alias. |
+| `/account <account>` | Filter rooms by Matrix ID, localpart, or the number shown in the account list. Account `0` (or `all`) shows all accounts. |
+| `/status` | Show Axon connectivity, the current account filter, and active accounts. |
 | `/event <event_id>` | Show a compact status-line summary of one event in the selected account. |
 | `/whoami` | Show your Matrix ID and display name for the selected room's account. |
 | `/whereami` | Show a room information popup for the selected room. Up/Down/PageUp/PageDown scroll the popup. |
@@ -61,7 +62,7 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/thread` | Start a thread from the selected or most recent displayed message; pending Axon API support. |
 | `/shortcuts` | Show active keyboard shortcuts from the config file. |
 | `/help`, `/?` | Show available slash commands. |
-| `/refresh` | Clear and redraw the terminal display. |
+| `/refresh` (`/rooms` alias) | Refresh the room list and redraw the terminal display. |
 | `/quit` | Exit. |
 | `/join <room>` | Known command for joining a room; pending Axon API support. |
 | `/leave`, `/part` | Known commands for leaving the current room; pending Axon API support. |
@@ -70,17 +71,17 @@ Room switching is forgiving. For a room with canonical alias
 `#test:example.com`, all of these can match:
 
 ```text
-/switch 1
-/switch test
-/switch #test
-/switch test:example.com
-/switch #test:example.com
+/room 1
+/room test
+/room #test
+/room test:example.com
+/room #test:example.com
 ```
 
-Use Tab to complete slash commands, `/switch` room names, and emoji names after
+Use Tab to complete slash commands, `/room` room names, and emoji names after
 `/react`; it also cycles active accounts for `/logout`. Use Shift-Tab to cycle
 backward through matching options. When several
-rooms match `/switch`, completion advances to their
+visible rooms match `/room`, completion advances to their
 longest common prefix and lists the remaining suffixes. Enter reports an
 ambiguity until the text identifies one room. While Tab completion is partial,
 Enter keeps the command open instead of submitting it. A unique Tab match is
@@ -92,9 +93,11 @@ Defaults:
 
 | Shortcut | Behavior |
 | --- | --- |
-| `Ctrl-Space` | Cycle focus: Input → Room List → Message List. |
+| `Ctrl-Space` | Cycle focus: Input → Accounts → Room List → Message List when multiple accounts are active. |
 | `Ctrl-N` | Next room (always active). |
 | `Ctrl-P` | Previous room (always active). |
+| `Alt-N` | Next account filter when multiple accounts are active. |
+| `Alt-P` | Previous account filter when multiple accounts are active. |
 | `Ctrl-J` | Next displayed message (always active). |
 | `Ctrl-K` | Previous displayed message (always active). |
 | `Ctrl-C` | Quit. |

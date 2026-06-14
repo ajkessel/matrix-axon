@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::api::AccountDto;
 use crate::app::emoji_matches;
-use crate::app::{cycle_index, App, Mode, PopupKind, SearchKind};
+use crate::app::{cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind};
 use crate::command;
 use crate::command::HELP_COMMANDS;
 
@@ -20,6 +20,14 @@ impl App {
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.switch_relative_room(-1).await;
+        } else if self.shortcuts.next_account.matches(key) && self.accounts_panel_visible() {
+            self.dismiss_input_help();
+            self.cycle_account(1);
+            self.load_selected_timeline().await;
+        } else if self.shortcuts.previous_account.matches(key) && self.accounts_panel_visible() {
+            self.dismiss_input_help();
+            self.cycle_account(-1);
+            self.load_selected_timeline().await;
         } else if self.shortcuts.message_down.matches(key) {
             // Ctrl+J always navigates messages regardless of focus
             self.dismiss_input_help();
@@ -43,6 +51,7 @@ impl App {
                 }
                 Mode::ConfirmLogout { account } => self.handle_confirm_logout_key(key, account),
                 Mode::RoomList => self.handle_room_list_key(key).await,
+                Mode::AccountList => self.handle_account_list_key(key).await,
                 Mode::MessageList => self.handle_message_list_key(key).await,
                 Mode::Search(kind, query) => self.handle_search_key(key, kind, query).await,
                 Mode::Editing { event_id } => self.handle_editing_key(key, event_id).await,
@@ -106,15 +115,22 @@ impl App {
             self.mode = match kind {
                 SearchKind::Rooms => Mode::RoomList,
                 SearchKind::Messages => Mode::MessageList,
+                SearchKind::Accounts => Mode::AccountList,
             };
         } else if self.shortcuts.submit.matches(key) {
             self.mode = match kind {
                 SearchKind::Rooms => Mode::RoomList,
                 SearchKind::Messages => Mode::MessageList,
+                SearchKind::Accounts => Mode::AccountList,
             };
             match kind {
                 SearchKind::Rooms => self.commit_room_search(query).await,
                 SearchKind::Messages => self.commit_message_search(query),
+                SearchKind::Accounts => {
+                    if self.commit_account_search(query) {
+                        self.load_selected_timeline().await;
+                    }
+                }
             }
         } else if self.shortcuts.backspace.matches(key) || key.code == KeyCode::Delete {
             query.pop();
@@ -133,9 +149,23 @@ impl App {
         } else if key.code == KeyCode::Down {
             self.switch_relative_room(1).await;
         } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
-            self.switch_relative_room(-5).await;
+            let page = self.rooms.page_size.max(1) as isize;
+            self.switch_relative_room(-page).await;
         } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
-            self.switch_relative_room(5).await;
+            let page = self.rooms.page_size.max(1) as isize;
+            self.switch_relative_room(page).await;
+        } else if key.code == KeyCode::Home {
+            let visible = self.visible_room_indices();
+            if let Some(&first) = visible.first() {
+                self.rooms.selected = Some(first);
+                self.load_selected_timeline().await;
+            }
+        } else if key.code == KeyCode::End {
+            let visible = self.visible_room_indices();
+            if let Some(&last) = visible.last() {
+                self.rooms.selected = Some(last);
+                self.load_selected_timeline().await;
+            }
         } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
             self.mode = Mode::Search(SearchKind::Rooms, String::new());
         } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
@@ -215,7 +245,7 @@ impl App {
             self.page_selected_message(1);
         } else if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
-            if let Some(completions) = self.input.partial_switch_completions.as_ref() {
+            if let Some(completions) = self.input.partial_room_completions.as_ref() {
                 self.status = format!(
                     "room completion is partial: {} - type more or press Tab",
                     completions.join(", ")
@@ -430,8 +460,10 @@ impl App {
         let input = std::mem::take(&mut self.input.buffer);
         self.input.cursor = 0;
         self.input.react_command_completion = None;
-        self.input.partial_switch_completions = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.account_command_completion = None;
         input
     }
 
@@ -456,8 +488,10 @@ impl App {
         self.input.buffer.clear();
         self.input.cursor = 0;
         self.input.react_command_completion = None;
-        self.input.partial_switch_completions = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.account_command_completion = None;
     }
 
     fn clear_input_and_selection(&mut self) {
@@ -484,6 +518,42 @@ impl App {
         }
     }
 
+    async fn handle_account_list_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Up {
+            self.accounts.selected = match self.accounts.selected {
+                AccountSelection::All => AccountSelection::All,
+                AccountSelection::Account(0) => AccountSelection::All,
+                AccountSelection::Account(i) => AccountSelection::Account(i - 1),
+            };
+            self.sync_room_selection_to_account_filter();
+            self.load_selected_timeline().await;
+        } else if key.code == KeyCode::Down {
+            self.accounts.selected = match self.accounts.selected {
+                AccountSelection::All if self.accounts.accounts.is_empty() => AccountSelection::All,
+                AccountSelection::All => AccountSelection::Account(0),
+                AccountSelection::Account(i) => {
+                    AccountSelection::Account((i + 1).min(self.accounts.accounts.len() - 1))
+                }
+            };
+            self.sync_room_selection_to_account_filter();
+            self.load_selected_timeline().await;
+        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+            self.mode = Mode::Search(SearchKind::Accounts, String::new());
+        } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+            if let Some(q) = self.last_search.clone() {
+                self.search_adjacent_account(&q, true);
+                self.load_selected_timeline().await;
+            }
+        } else if key.code == KeyCode::Char('N') && key.modifiers == KeyModifiers::SHIFT {
+            if let Some(q) = self.last_search.clone() {
+                self.search_adjacent_account(&q, false);
+                self.load_selected_timeline().await;
+            }
+        } else if self.shortcuts.submit.matches(key) || self.shortcuts.clear_input.matches(key) {
+            self.mode = Mode::Compose;
+        }
+    }
+
     fn cycle_focus(&mut self) {
         if matches!(
             self.mode,
@@ -497,18 +567,25 @@ impl App {
             self.abandon_transient_input_mode();
             return;
         }
-        self.mode = match self.mode {
-            Mode::Compose => Mode::RoomList,
-            Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::MessageList,
-            Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
-                Mode::Compose
+        self.mode = if self.accounts_panel_visible() {
+            match self.mode {
+                Mode::Compose => Mode::AccountList,
+                Mode::AccountList | Mode::Search(SearchKind::Accounts, _) => Mode::RoomList,
+                Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::MessageList,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::Compose
+                }
+                _ => Mode::Compose,
             }
-            Mode::LoginUsername
-            | Mode::LoginPassword { .. }
-            | Mode::ConfirmLogout { .. }
-            | Mode::Editing { .. }
-            | Mode::Reacting { .. }
-            | Mode::Unreacting { .. } => Mode::Compose,
+        } else {
+            match self.mode {
+                Mode::Compose => Mode::RoomList,
+                Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::MessageList,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::Compose
+                }
+                _ => Mode::Compose,
+            }
         };
     }
 }

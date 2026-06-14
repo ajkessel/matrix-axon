@@ -5,17 +5,22 @@ use crate::config::{DisplayOptions, SenderNameStyle};
 
 use super::{
     collect_reactions, message_index_at_line, message_line_ranges, selected_message_target_index,
-    App, LiveFrameAction, RoomKey, Status,
+    App, ConnectionState, LiveFrameAction, RoomKey, Status,
 };
 
 impl App {
     pub(crate) fn handle_live_frame(&mut self, frame: LiveFrame) -> LiveFrameAction {
         match frame {
             LiveFrame::Connected => {
+                self.connection_state = ConnectionState::Connected;
                 self.status = Status::Debug("live WebSocket connected".to_owned());
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
+                self.connection_state = ConnectionState::Reconnecting {
+                    reason: reason.clone(),
+                    delay,
+                };
                 self.status = Status::Info(format!(
                     "live WebSocket reconnecting in {}s: {reason}",
                     delay.as_secs()
@@ -23,10 +28,12 @@ impl App {
                 LiveFrameAction::None
             }
             LiveFrame::Disconnected(reason) => {
+                self.connection_state = ConnectionState::Disconnected(reason.clone());
                 self.status = Status::Debug(format!("live WebSocket disconnected: {reason}"));
                 LiveFrameAction::None
             }
             LiveFrame::ProtocolError(err) => {
+                self.connection_state = ConnectionState::ProtocolError(err.clone());
                 self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
                 LiveFrameAction::None
             }

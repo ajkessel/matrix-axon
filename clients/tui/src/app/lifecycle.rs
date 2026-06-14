@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::api::{AccountDto, AccountState};
 
-use super::{App, Mode, RoomKey, Status};
+use super::{AccountSelection, App, Mode, RoomKey, Status};
 
 enum LogoutResolution {
     Match(AccountDto),
@@ -39,7 +39,22 @@ pub(crate) enum LifecycleOutcome {
 impl App {
     pub(crate) async fn refresh_accounts(&mut self) {
         match self.client.list_accounts().await {
-            Ok(accounts) => self.accounts.accounts = accounts,
+            Ok(accounts) => {
+                self.set_accounts(accounts);
+                // Apply the CLI --account-id flag once, before user interaction
+                if self.accounts.selected == AccountSelection::All {
+                    if let Some(filter_id) = self.account_filter {
+                        if let Some(idx) = self
+                            .accounts
+                            .accounts
+                            .iter()
+                            .position(|a| a.account_id == filter_id)
+                        {
+                            self.accounts.selected = AccountSelection::Account(idx);
+                        }
+                    }
+                }
+            }
             Err(err) => self.status = Status::from(format!("account refresh failed: {err}")),
         }
     }
@@ -233,6 +248,16 @@ impl App {
             } => match result {
                 Ok(account) => {
                     let warning = self.refresh_after_lifecycle_change().await;
+                    if let Some(idx) = self
+                        .accounts
+                        .accounts
+                        .iter()
+                        .position(|a| a.account_id == account.account_id)
+                    {
+                        self.accounts.selected = AccountSelection::Account(idx);
+                        self.sync_room_selection_to_account_filter();
+                        self.load_selected_timeline().await;
+                    }
                     let already_active = prior_account_ids.contains(&account.account_id);
                     self.status = lifecycle_login_status(already_active, &account.user_id, warning);
                 }
@@ -306,7 +331,7 @@ impl App {
         let had_selection = self.selected_room().map(RoomKey::from);
         let mut warnings = Vec::new();
         match self.client.list_accounts().await {
-            Ok(accounts) => self.accounts.accounts = accounts,
+            Ok(accounts) => self.set_accounts(accounts),
             Err(err) => warnings.push(format!("account refresh failed: {err}")),
         }
         match self.client.list_rooms(self.account_filter).await {

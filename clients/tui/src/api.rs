@@ -30,6 +30,10 @@ impl AxonClient {
         }
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub async fn list_rooms(&self, account_id: Option<Uuid>) -> Result<Vec<RoomDto>, ApiError> {
         let mut request = self.http.get(format!("{}/v1/rooms", self.base_url));
         if let Some(account_id) = account_id {

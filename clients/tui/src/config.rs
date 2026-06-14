@@ -23,6 +23,8 @@ pub const DEFAULT_CONFIG: &str = r#"# axon-tui configuration.
 [shortcuts]
 next_room = "ctrl-n"
 previous_room = "ctrl-p"
+next_account = "alt-n"
+previous_account = "alt-p"
 quit = "ctrl-c"
 complete = "tab"
 submit = "enter"
@@ -121,6 +123,8 @@ impl TuiConfig {
 pub struct Shortcuts {
     pub next_room: KeyBinding,
     pub previous_room: KeyBinding,
+    pub next_account: KeyBinding,
+    pub previous_account: KeyBinding,
     pub quit: KeyBinding,
     pub complete: KeyBinding,
     pub submit: KeyBinding,
@@ -245,6 +249,8 @@ impl RawConfig {
             shortcuts: RawShortcuts {
                 next_room: "ctrl-n".to_owned(),
                 previous_room: "ctrl-p".to_owned(),
+                next_account: "alt-n".to_owned(),
+                previous_account: "alt-p".to_owned(),
                 quit: "ctrl-c".to_owned(),
                 complete: "tab".to_owned(),
                 submit: "enter".to_owned(),
@@ -304,6 +310,8 @@ impl RawConfig {
 [shortcuts]
 next_room = "{next_room}"
 previous_room = "{previous_room}"
+next_account = "{next_account}"
+previous_account = "{previous_account}"
 quit = "{quit}"
 complete = "{complete}"
 submit = "{submit}"
@@ -345,6 +353,8 @@ confirm_logout = {confirm_logout}
 "#,
             next_room = self.shortcuts.next_room,
             previous_room = self.shortcuts.previous_room,
+            next_account = self.shortcuts.next_account,
+            previous_account = self.shortcuts.previous_account,
             quit = self.shortcuts.quit,
             complete = self.shortcuts.complete,
             submit = self.shortcuts.submit,
@@ -394,6 +404,8 @@ struct PartialRawConfig {
 struct RawShortcuts {
     next_room: String,
     previous_room: String,
+    next_account: String,
+    previous_account: String,
     quit: String,
     complete: String,
     submit: String,
@@ -425,6 +437,8 @@ impl RawShortcuts {
         };
         assign_if_some(&mut self.next_room, partial.next_room);
         assign_if_some(&mut self.previous_room, partial.previous_room);
+        assign_if_some(&mut self.next_account, partial.next_account);
+        assign_if_some(&mut self.previous_account, partial.previous_account);
         assign_if_some(&mut self.quit, partial.quit);
         assign_if_some(&mut self.complete, partial.complete);
         assign_if_some(&mut self.submit, partial.submit);
@@ -453,6 +467,11 @@ impl RawShortcuts {
         Ok(Shortcuts {
             next_room: parse_key_binding("shortcuts.next_room", &self.next_room)?,
             previous_room: parse_key_binding("shortcuts.previous_room", &self.previous_room)?,
+            next_account: parse_key_binding("shortcuts.next_account", &self.next_account)?,
+            previous_account: parse_key_binding(
+                "shortcuts.previous_account",
+                &self.previous_account,
+            )?,
             quit: parse_key_binding("shortcuts.quit", &self.quit)?,
             complete: parse_key_binding("shortcuts.complete", &self.complete)?,
             submit: parse_key_binding("shortcuts.submit", &self.submit)?,
@@ -486,6 +505,8 @@ impl RawShortcuts {
 struct PartialRawShortcuts {
     next_room: Option<String>,
     previous_room: Option<String>,
+    next_account: Option<String>,
+    previous_account: Option<String>,
     quit: Option<String>,
     complete: Option<String>,
     submit: Option<String>,

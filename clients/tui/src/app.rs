@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::api::LiveFrame;
-use crate::api::{AccountDto, AxonClient, EventDto, RoomDto};
+use crate::api::{AccountDto, AccountState, AxonClient, EventDto, RoomDto};
 use crate::command::Command;
 #[cfg(test)]
 use crate::config::SenderNameStyle;
@@ -24,6 +24,7 @@ pub(crate) use render::{
     display_body_with_sender, format_time, message_display_lines, message_index_at_line,
     message_line_ranges,
 };
+pub(crate) use rooms::account_localpart;
 #[cfg(test)]
 use timeline::should_show_event;
 
@@ -43,6 +44,7 @@ pub(crate) enum Mode {
         account: AccountDto,
     },
     RoomList,
+    AccountList,
     MessageList,
     Search(SearchKind, String),
     Editing {
@@ -69,6 +71,31 @@ pub(crate) struct OwnReaction {
 pub(crate) enum SearchKind {
     Rooms,
     Messages,
+    Accounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountSelection {
+    All,
+    Account(usize),
+}
+
+impl AccountSelection {
+    pub(crate) fn display_number(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Account(index) => index + 1,
+        }
+    }
+
+    pub(crate) fn display_label(self, user_id: Option<&str>) -> String {
+        match self {
+            Self::All => format!("{} All Accounts", self.display_number()),
+            Self::Account(_) => {
+                format!("{} {}", self.display_number(), user_id.unwrap_or("?"))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +103,20 @@ pub(crate) enum PopupKind {
     Help,
     Shortcuts,
     RoomInfo,
+    Status,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) enum ConnectionState {
+    #[default]
+    Unknown,
+    Connected,
+    Reconnecting {
+        reason: String,
+        delay: std::time::Duration,
+    },
+    Disconnected(String),
+    ProtocolError(String),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +217,7 @@ pub(crate) struct App {
     pub(crate) messages: MessagePane,
     pub(crate) input: InputState,
     pub(crate) live: LiveState,
+    pub(crate) connection_state: ConnectionState,
     pub(crate) mode: Mode,
     pub(crate) popup_scroll: usize,
     pub(crate) help_selection: usize,
@@ -196,13 +238,34 @@ pub(crate) struct App {
 pub(crate) struct RoomsState {
     pub(crate) rooms: Vec<RoomDto>,
     pub(crate) selected: Option<usize>,
+    pub(crate) scroll: usize,
+    pub(crate) page_size: usize,
     pub(crate) display_names: HashMap<RoomKey, HashMap<String, String>>,
     pub(crate) unread: HashMap<RoomKey, usize>,
 }
 
-#[derive(Default)]
 pub(crate) struct AccountsState {
+    /// Only Active accounts. Used for panel display, navigation, and filtering.
     pub(crate) accounts: Vec<AccountDto>,
+    /// Account IDs known to be inactive (deactivated/deleting). Kept separately
+    /// so room-list filtering can drop their rooms even though they are not
+    /// displayed in the panel.
+    pub(crate) inactive_ids: std::collections::HashSet<Uuid>,
+    pub(crate) selected: AccountSelection,
+    pub(crate) scroll: usize,
+    pub(crate) page_size: usize,
+}
+
+impl Default for AccountsState {
+    fn default() -> Self {
+        Self {
+            accounts: Vec::new(),
+            inactive_ids: std::collections::HashSet::new(),
+            selected: AccountSelection::All,
+            scroll: 0,
+            page_size: 1,
+        }
+    }
 }
 
 pub(crate) struct MessagePane {
@@ -231,8 +294,10 @@ pub(crate) struct InputState {
     pub(crate) cursor: usize,
     pub(crate) react_tab: Option<usize>,
     pub(crate) react_command_completion: Option<(String, usize)>,
-    pub(crate) partial_switch_completions: Option<Vec<String>>,
+    pub(crate) partial_room_completions: Option<Vec<String>>,
+    pub(crate) room_command_completion: Option<(String, usize)>,
     pub(crate) logout_command_completion: Option<(String, usize)>,
+    pub(crate) account_command_completion: Option<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -259,6 +324,7 @@ impl App {
             messages: MessagePane::default(),
             input: InputState::default(),
             live: LiveState::default(),
+            connection_state: ConnectionState::Unknown,
             mode: Mode::Compose,
             popup_scroll: 0,
             help_selection: 0,
@@ -285,18 +351,75 @@ impl App {
         self.show_input_help = false;
     }
 
+    /// Replace the account list. Only Active accounts go into `accounts.accounts`
+    /// (for display and navigation); inactive IDs are recorded separately so
+    /// `is_known_inactive_account` can still filter their rooms off the room list.
+    pub(crate) fn set_accounts(&mut self, accounts: Vec<AccountDto>) {
+        let selected_account_id = self.active_account_filter();
+        self.accounts.inactive_ids = accounts
+            .iter()
+            .filter(|a| a.state != AccountState::Active)
+            .map(|a| a.account_id)
+            .collect();
+        let active: Vec<AccountDto> = accounts
+            .into_iter()
+            .filter(|a| {
+                a.state == AccountState::Active
+                    && self
+                        .account_filter
+                        .is_none_or(|account_id| a.account_id == account_id)
+            })
+            .collect();
+        self.accounts.accounts = active;
+        self.accounts.selected = selected_account_id
+            .and_then(|account_id| {
+                self.accounts
+                    .accounts
+                    .iter()
+                    .position(|account| account.account_id == account_id)
+            })
+            .map(AccountSelection::Account)
+            .unwrap_or(AccountSelection::All);
+    }
+
+    pub(crate) fn accounts_panel_visible(&self) -> bool {
+        self.accounts.accounts.len() >= 2
+    }
+
+    pub(crate) fn active_account_filter(&self) -> Option<Uuid> {
+        match self.accounts.selected {
+            AccountSelection::All => None,
+            AccountSelection::Account(idx) => self.accounts.accounts.get(idx).map(|a| a.account_id),
+        }
+    }
+
+    pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
+        let filter = self.active_account_filter();
+        self.rooms
+            .rooms
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| filter.is_none_or(|id| r.account_id == id))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub(crate) fn insert_char(&mut self, ch: char) {
         self.input.react_command_completion = None;
-        self.input.partial_switch_completions = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.account_command_completion = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
 
     pub(crate) fn backspace(&mut self) {
         self.input.react_command_completion = None;
-        self.input.partial_switch_completions = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.account_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -313,8 +436,10 @@ impl App {
 
     pub(crate) fn delete_forward(&mut self) {
         self.input.react_command_completion = None;
-        self.input.partial_switch_completions = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.account_command_completion = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -446,10 +571,13 @@ impl App {
                 self.start_login(username, password, homeserver).await;
             }
             Command::Logout(target) => self.start_logout(target),
-            Command::Switch(target) => self.switch_room(&target).await,
-            Command::Rooms => {
-                self.refresh_rooms().await;
+            Command::Room(target) => self.switch_room(&target).await,
+            Command::Account(target) => {
+                if self.switch_account(&target) {
+                    self.load_selected_timeline().await;
+                }
             }
+            Command::Status => self.open_popup(PopupKind::Status),
             Command::Event(event_id) => self.show_event(&event_id).await,
             Command::Whoami => self.show_whoami(),
             Command::Whereami => self.show_whereami(),
@@ -482,8 +610,8 @@ impl App {
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
             Command::Refresh => {
+                self.refresh_rooms().await;
                 self.redraw_requested = true;
-                self.status = Status::Info("display refresh requested".to_owned());
             }
             Command::Quit => self.should_quit = true,
             Command::Send(body) => self.send_message_to_room(&body).await,
@@ -813,11 +941,55 @@ mod tests {
     }
 
     fn account(user_id: &str, state: AccountState) -> AccountDto {
+        account_with_id(Uuid::from_u128(1), user_id, state)
+    }
+
+    fn account_with_id(account_id: Uuid, user_id: &str, state: AccountState) -> AccountDto {
         AccountDto {
-            account_id: Uuid::from_u128(1),
+            account_id,
             user_id: user_id.to_owned(),
             state,
         }
+    }
+
+    #[test]
+    fn account_refresh_preserves_selected_account_by_id() {
+        let first_id = Uuid::from_u128(1);
+        let selected_id = Uuid::from_u128(2);
+        let added_id = Uuid::from_u128(3);
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(first_id, "@first:example.com", AccountState::Active),
+            account_with_id(selected_id, "@selected:example.com", AccountState::Active),
+        ]);
+        app.accounts.selected = AccountSelection::Account(1);
+
+        app.set_accounts(vec![
+            account_with_id(selected_id, "@selected:example.com", AccountState::Active),
+            account_with_id(added_id, "@added:example.com", AccountState::Active),
+        ]);
+
+        assert_eq!(app.active_account_filter(), Some(selected_id));
+        assert_eq!(app.accounts.selected, AccountSelection::Account(0));
+    }
+
+    #[test]
+    fn cli_account_filter_restricts_account_navigation_state() {
+        let filter_id = Uuid::from_u128(1);
+        let other_id = Uuid::from_u128(2);
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            Some(filter_id),
+            TuiConfig::test_default(),
+        );
+
+        app.set_accounts(vec![
+            account_with_id(filter_id, "@filtered:example.com", AccountState::Active),
+            account_with_id(other_id, "@other:example.com", AccountState::Active),
+        ]);
+
+        assert_eq!(app.accounts.accounts.len(), 1);
+        assert_eq!(app.accounts.accounts[0].account_id, filter_id);
     }
 
     #[test]
@@ -847,7 +1019,7 @@ mod tests {
         stale_room.account_id = logged_out_id;
 
         let mut app = app_with_rooms(Vec::new());
-        app.accounts.accounts = vec![
+        app.set_accounts(vec![
             AccountDto {
                 account_id: active_id,
                 user_id: "@alice:example.com".to_owned(),
@@ -858,7 +1030,7 @@ mod tests {
                 user_id: "@bob:example.com".to_owned(),
                 state: AccountState::Deactivated,
             },
-        ];
+        ]);
 
         app.apply_room_refresh(vec![active_room, stale_room]);
 
@@ -882,6 +1054,29 @@ mod tests {
         app.apply_room_refresh(vec![unknown_room]);
 
         assert_eq!(app.rooms.rooms.len(), 1);
+    }
+
+    #[test]
+    fn filtered_room_refresh_does_not_select_a_hidden_room() {
+        let visible_account = Uuid::from_u128(1);
+        let other_account = Uuid::from_u128(2);
+        let mut other_room = room("!other:example.com", None, Some("Other"));
+        other_room.account_id = other_account;
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(
+                visible_account,
+                "@visible:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(other_account, "@other:example.com", AccountState::Active),
+        ]);
+        app.accounts.selected = AccountSelection::Account(0);
+
+        app.apply_room_refresh(vec![other_room]);
+
+        assert_eq!(app.rooms.selected, None);
+        assert!(app.selected_room().is_none());
     }
 
     #[test]
@@ -993,6 +1188,31 @@ mod tests {
         assert_eq!(app.resolve_room_target("2"), RoomTargetResolution::Match(1));
         assert_eq!(app.resolve_room_target("0"), RoomTargetResolution::Missing);
         assert_eq!(app.resolve_room_target("3"), RoomTargetResolution::Missing);
+    }
+
+    #[test]
+    fn room_resolution_ignores_rooms_hidden_by_account_filter() {
+        let visible_account = Uuid::from_u128(1);
+        let hidden_account = Uuid::from_u128(2);
+        let mut visible = room("!visible:example.com", None, Some("General"));
+        visible.account_id = visible_account;
+        let mut hidden = room("!hidden:example.com", None, Some("General"));
+        hidden.account_id = hidden_account;
+        let mut app = app_with_rooms(vec![visible, hidden]);
+        app.set_accounts(vec![
+            account_with_id(
+                visible_account,
+                "@visible:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(hidden_account, "@hidden:example.com", AccountState::Active),
+        ]);
+        app.accounts.selected = AccountSelection::Account(0);
+
+        assert_eq!(
+            app.resolve_room_target("General"),
+            RoomTargetResolution::Match(0)
+        );
     }
 
     #[test]
@@ -1256,7 +1476,7 @@ mod tests {
 
         app.handle_command(Command::Refresh).await;
 
-        assert_eq!(app.status.text(false), "display refresh requested");
+        // /refresh both refreshes rooms (status reflects that) and queues a redraw
         assert!(app.take_redraw_request());
         assert!(!app.take_redraw_request());
     }
@@ -1690,7 +1910,7 @@ mod tests {
             )],
         );
         app.messages.selection = Some("$message:example.com".to_owned());
-        app.input.buffer = "/switch room".to_owned();
+        app.input.buffer = "/room room".to_owned();
         app.input.cursor = app.input.buffer.len();
 
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
@@ -2138,26 +2358,133 @@ mod tests {
     }
 
     #[test]
-    fn switch_completion_fills_unique_room_alias_match() {
+    fn room_completion_fills_unique_room_alias_match() {
         let mut app = app_with_rooms(vec![
             room("!one:example.com", Some("#one:example.com"), Some("One")),
             room("!test:example.com", Some("#test:example.com"), Some("Test")),
         ]);
-        app.input.buffer = "/switch te".to_owned();
+        app.input.buffer = "/room te".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch #test:example.com");
+        assert_eq!(app.input.buffer, "/room #test:example.com");
     }
 
     #[test]
-    fn tab_completion_fills_unique_slash_command() {
+    fn room_completion_ignores_rooms_hidden_by_account_filter() {
+        let visible_account = Uuid::from_u128(1);
+        let hidden_account = Uuid::from_u128(2);
+        let mut visible = room("!visible:example.com", None, Some("General"));
+        visible.account_id = visible_account;
+        let mut hidden = room("!hidden:example.com", None, Some("General"));
+        hidden.account_id = hidden_account;
+        let mut app = app_with_rooms(vec![visible, hidden]);
+        app.set_accounts(vec![
+            account_with_id(
+                visible_account,
+                "@visible:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(hidden_account, "@hidden:example.com", AccountState::Active),
+        ]);
+        app.accounts.selected = AccountSelection::Account(0);
+        app.input.buffer = "/room Gen".to_owned();
+
+        app.complete_room_input(false);
+
+        assert_eq!(app.input.buffer, "/room General");
+        assert!(app.input.room_command_completion.is_none());
+    }
+
+    #[test]
+    fn tab_completion_keeps_parsed_command_aliases_discoverable() {
         let mut app = app_with_rooms(Vec::new());
-        app.input.buffer = "/sw".to_owned();
+        app.input.buffer = "/roo".to_owned();
 
         app.complete_input();
 
+        assert_eq!(app.input.buffer, "/roo");
+        assert!(app.status.text(false).contains("/room, /rooms"));
+
+        app.input.buffer = "/sw".to_owned();
+        app.complete_input();
+
         assert_eq!(app.input.buffer, "/switch ");
+    }
+
+    #[tokio::test]
+    async fn account_search_accepts_n_and_uppercase_n_as_query_text() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::Search(SearchKind::Accounts, "a".to_owned());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('n'))).await;
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT))
+            .await;
+
+        assert_eq!(
+            app.mode,
+            Mode::Search(SearchKind::Accounts, "anN".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn submitting_account_search_selects_first_match() {
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(
+                Uuid::from_u128(1),
+                "@alice:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(Uuid::from_u128(2), "@bob:example.com", AccountState::Active),
+        ]);
+        app.mode = Mode::Search(SearchKind::Accounts, "bob".to_owned());
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.mode, Mode::AccountList);
+        assert_eq!(app.accounts.selected, AccountSelection::Account(1));
+        assert_eq!(app.last_search.as_deref(), Some("bob"));
+    }
+
+    #[tokio::test]
+    async fn submitting_account_search_reports_no_match() {
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![account_with_id(
+            Uuid::from_u128(1),
+            "@alice:example.com",
+            AccountState::Active,
+        )]);
+        app.mode = Mode::Search(SearchKind::Accounts, "missing".to_owned());
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.accounts.selected, AccountSelection::All);
+        assert_eq!(app.status, "no account matches: missing");
+    }
+
+    #[test]
+    fn account_numbers_match_panel_labels() {
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(
+                Uuid::from_u128(1),
+                "@alice:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(Uuid::from_u128(2), "@bob:example.com", AccountState::Active),
+        ]);
+
+        assert!(app.switch_account("0"));
+        assert_eq!(app.accounts.selected, AccountSelection::All);
+        assert!(app.switch_account("2"));
+        assert_eq!(app.accounts.selected, AccountSelection::Account(1));
+        assert_eq!(AccountSelection::All.display_number(), 0);
+        assert_eq!(AccountSelection::Account(1).display_number(), 2);
+
+        app.accounts.selected = AccountSelection::All;
+        assert!(app.commit_account_search("2".to_owned()));
+        assert_eq!(app.accounts.selected, AccountSelection::Account(1));
     }
 
     #[test]
@@ -2373,13 +2700,13 @@ mod tests {
     }
 
     #[test]
-    fn tab_completion_fills_no_argument_slash_command_without_space() {
+    fn tab_completion_fills_argument_slash_command_with_space() {
         let mut app = app_with_rooms(Vec::new());
-        app.input.buffer = "/ro".to_owned();
+        app.input.buffer = "/acco".to_owned();
 
         app.complete_input();
 
-        assert_eq!(app.input.buffer, "/rooms");
+        assert_eq!(app.input.buffer, "/account ");
     }
 
     #[test]
@@ -2499,8 +2826,8 @@ mod tests {
         app.complete_input();
 
         assert_eq!(app.input.buffer, "/");
-        assert!(app.status.text(false).contains("/switch"));
-        assert!(app.status.text(false).contains("/rooms"));
+        assert!(app.status.text(false).contains("/room"));
+        assert!(app.status.text(false).contains("/status"));
         assert!(app.status.text(false).contains("/event"));
         assert!(app.status.text(false).contains("/whoami"));
         assert!(app.status.text(false).contains("/whereami"));
@@ -2697,21 +3024,21 @@ mod tests {
     }
 
     #[test]
-    fn switch_completion_adds_missing_hash_for_qualified_alias() {
+    fn room_completion_adds_missing_hash_for_qualified_alias() {
         let mut app = app_with_rooms(vec![room(
             "!test:example.com",
             Some("#test:example.com"),
             Some("Test"),
         )]);
-        app.input.buffer = "/switch test:ex".to_owned();
+        app.input.buffer = "/room test:ex".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch #test:example.com");
+        assert_eq!(app.input.buffer, "/room #test:example.com");
     }
 
     #[test]
-    fn switch_completion_reports_ambiguous_room_matches() {
+    fn room_completion_reports_ambiguous_room_matches() {
         let mut app = app_with_rooms(vec![
             room("!one:example.com", Some("#test:example.com"), Some("Test")),
             room(
@@ -2720,26 +3047,26 @@ mod tests {
                 Some("Testing"),
             ),
         ]);
-        app.input.buffer = "/switch test".to_owned();
+        app.input.buffer = "/room test".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch test");
+        assert_eq!(app.input.buffer, "/room test");
         assert!(app.status.text(false).contains("#test:example.com"));
         assert!(app.status.text(false).contains("#testing:example.com"));
     }
 
     #[test]
-    fn switch_completion_extends_to_common_prefix_and_shows_suffixes() {
+    fn room_completion_extends_to_common_prefix_and_shows_suffixes() {
         let mut app = app_with_rooms(vec![
             room("!one:example.com", None, Some("axontest")),
             room("!two:example.com", None, Some("axondev")),
         ]);
-        app.input.buffer = "/switch ax".to_owned();
+        app.input.buffer = "/room ax".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(app.input.buffer, "/room axon");
         assert!(app.status.text(false).contains("test"));
         assert!(app.status.text(false).contains("dev"));
     }
@@ -2750,19 +3077,19 @@ mod tests {
             room("!one:example.com", None, Some("axontest")),
             room("!two:example.com", None, Some("axondev")),
         ]);
-        app.input.buffer = "/switch ax".to_owned();
+        app.input.buffer = "/room ax".to_owned();
         app.input.cursor = app.input.buffer.len();
 
         app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
-        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(app.input.buffer, "/room axon");
         assert_eq!(
-            app.input.partial_switch_completions,
+            app.input.partial_room_completions,
             Some(vec!["test".to_owned(), "dev".to_owned()])
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
 
-        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(app.input.buffer, "/room axon");
         assert_eq!(app.rooms.selected, None);
         assert_eq!(
             app.status.text(false),
@@ -2770,11 +3097,11 @@ mod tests {
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('t'))).await;
-        assert!(app.input.partial_switch_completions.is_none());
+        assert!(app.input.partial_room_completions.is_none());
     }
 
     #[test]
-    fn switch_completion_uses_matching_names_when_rooms_have_aliases() {
+    fn room_completion_uses_matching_names_when_rooms_have_aliases() {
         let mut app = app_with_rooms(vec![
             room(
                 "!one:example.com",
@@ -2787,30 +3114,30 @@ mod tests {
                 Some("axondev"),
             ),
         ]);
-        app.input.buffer = "/switch ax".to_owned();
+        app.input.buffer = "/room ax".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch axon");
+        assert_eq!(app.input.buffer, "/room axon");
         assert!(app.status.text(false).contains("test"));
         assert!(app.status.text(false).contains("dev"));
     }
 
     #[test]
-    fn switch_completion_still_completes_unique_match_fully() {
+    fn room_completion_still_completes_unique_match_fully() {
         let mut app = app_with_rooms(vec![
             room("!one:example.com", None, Some("axontest")),
             room("!two:example.com", None, Some("axondev")),
         ]);
-        app.input.buffer = "/switch axont".to_owned();
+        app.input.buffer = "/room axont".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch axontest");
+        assert_eq!(app.input.buffer, "/room axontest");
     }
 
     #[test]
-    fn switch_completion_replaces_unique_name_match_with_canonical_alias() {
+    fn room_completion_replaces_unique_name_match_with_canonical_alias() {
         let mut app = app_with_rooms(vec![
             room(
                 "!one:example.com",
@@ -2823,11 +3150,78 @@ mod tests {
                 Some("axondev"),
             ),
         ]);
-        app.input.buffer = "/switch axont".to_owned();
+        app.input.buffer = "/room axont".to_owned();
 
-        app.complete_switch_input();
+        app.complete_room_input(false);
 
-        assert_eq!(app.input.buffer, "/switch #test:example.com");
+        assert_eq!(app.input.buffer, "/room #test:example.com");
+    }
+
+    #[test]
+    fn room_completion_cycles_duplicate_named_rooms_with_disambiguator() {
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("General")),
+            room("!two:example.com", None, Some("General")),
+        ]);
+        app.input.buffer = "/room General".to_owned();
+
+        app.complete_room_input(false);
+        assert_eq!(app.input.buffer, "/room !one:example.com");
+        assert!(app.status.text(false).contains("[1/2]"));
+        assert!(app.status.text(false).contains("General"));
+        assert!(app.status.text(false).contains("!one:example.com"));
+        assert!(app.status.text(false).contains("Tab/Shift-Tab to cycle"));
+
+        app.complete_room_input(false);
+        assert_eq!(app.input.buffer, "/room !two:example.com");
+        assert!(app.status.text(false).contains("[2/2]"));
+        assert!(app.status.text(false).contains("!two:example.com"));
+
+        app.complete_room_input(true);
+        assert_eq!(app.input.buffer, "/room !one:example.com");
+        assert!(app.status.text(false).contains("[1/2]"));
+    }
+
+    #[tokio::test]
+    async fn room_completion_enter_selects_after_prefix_expansion_then_cycling() {
+        // Regression: partial_room_completions set during prefix expansion must be
+        // cleared when cycling begins, otherwise Enter is incorrectly blocked.
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("General")),
+            room("!two:example.com", None, Some("General")),
+        ]);
+        app.input.buffer = "/room G".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        // First Tab: prefix-expands "G" → "General", sets partial_room_completions
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert_eq!(app.input.buffer, "/room General");
+        assert!(app.input.partial_room_completions.is_some());
+
+        // Second Tab: enters cycling mode — partial_room_completions must be cleared
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert!(app.input.buffer.starts_with("/room !"));
+        assert!(app.input.partial_room_completions.is_none());
+
+        // Enter must not be blocked
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+        assert!(app.rooms.selected.is_some());
+    }
+
+    #[test]
+    fn room_completion_typing_after_cycling_resets_to_normal_completion() {
+        let mut app = app_with_rooms(vec![
+            room("!one:example.com", None, Some("General")),
+            room("!two:example.com", None, Some("General")),
+        ]);
+        app.input.buffer = "/room General".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.complete_room_input(false);
+        assert!(app.input.room_command_completion.is_some());
+
+        app.insert_char('x');
+        assert!(app.input.room_command_completion.is_none());
     }
 
     #[test]
@@ -2870,14 +3264,14 @@ mod tests {
             ),
         ]);
 
-        app.handle_command(Command::Switch("axon".to_owned())).await;
+        app.handle_command(Command::Room("axon".to_owned())).await;
 
         assert_eq!(app.status.text(false), "room name is ambiguous: test, dev");
         assert_eq!(app.rooms.selected, None);
     }
 
     #[test]
-    fn switch_completion_only_runs_for_switch_command() {
+    fn room_completion_only_runs_for_switch_command() {
         let mut app = app_with_rooms(vec![room(
             "!test:example.com",
             Some("#test:example.com"),

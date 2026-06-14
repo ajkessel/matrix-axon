@@ -1,7 +1,9 @@
 use crate::api::RoomDto;
 use crate::command::{SlashCommand, SLASH_COMMANDS};
 
-use super::{cycle_index, emoji_matches, App, RoomTargetResolution, Status};
+use super::{
+    cycle_index, emoji_matches, rooms::account_localpart, App, RoomTargetResolution, Status,
+};
 
 impl App {
     pub(crate) fn complete_input(&mut self) {
@@ -19,10 +21,13 @@ impl App {
         if self.complete_logout_command_input(reverse) {
             return;
         }
+        if self.complete_account_command_input(reverse) {
+            return;
+        }
         if self.complete_command_input() {
             return;
         }
-        self.complete_switch_input();
+        self.complete_room_input(reverse);
     }
 
     pub(crate) fn complete_logout_command_input(&mut self, reverse: bool) -> bool {
@@ -64,6 +69,63 @@ impl App {
             user_id
         ));
         true
+    }
+
+    pub(crate) fn complete_account_command_input(&mut self, reverse: bool) -> bool {
+        let Some(target) = account_target_prefix(&self.input.buffer) else {
+            return false;
+        };
+        let query = self
+            .input
+            .account_command_completion
+            .as_ref()
+            .map(|(query, _)| query.clone())
+            .unwrap_or_else(|| target.to_owned());
+        let candidates = self.account_completion_candidates(&query);
+        if candidates.is_empty() {
+            self.input.account_command_completion = None;
+            self.status = Status::Info(if query.is_empty() {
+                "no accounts".to_owned()
+            } else {
+                format!("no account matches: {query}")
+            });
+            return true;
+        }
+        let selected = if let Some((_, current)) = self.input.account_command_completion.as_ref() {
+            cycle_index(*current, candidates.len(), reverse)
+        } else if reverse {
+            candidates.len() - 1
+        } else {
+            0
+        };
+        let user_id = &candidates[selected];
+        self.input.buffer = format!("/account {user_id}");
+        self.move_cursor_to_end();
+        self.input.account_command_completion = Some((query, selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to select",
+            selected + 1,
+            candidates.len(),
+            user_id
+        ));
+        true
+    }
+
+    fn account_completion_candidates(&self, target: &str) -> Vec<String> {
+        let target_lower = target.to_lowercase();
+        self.accounts
+            .accounts
+            .iter()
+            .filter(|a| {
+                if target.is_empty() {
+                    return true;
+                }
+                a.user_id.to_lowercase().contains(&target_lower)
+                    || account_localpart(&a.user_id)
+                        .is_some_and(|local| local.to_lowercase().contains(&target_lower))
+            })
+            .map(|a| a.user_id.clone())
+            .collect()
     }
 
     pub(crate) fn complete_react_command_input(&mut self, reverse: bool) -> bool {
@@ -131,25 +193,37 @@ impl App {
         true
     }
 
-    pub(crate) fn complete_switch_input(&mut self) {
-        let Some(target) = switch_target_prefix(&self.input.buffer) else {
+    pub(crate) fn complete_room_input(&mut self, reverse: bool) {
+        // If already cycling through same-name duplicates, continue cycling.
+        if let Some((query, current)) = self.input.room_command_completion.clone() {
+            let candidates = self.room_cycle_candidates(&query);
+            if candidates.is_empty() {
+                self.input.room_command_completion = None;
+                return;
+            }
+            let selected = cycle_index(current, candidates.len(), reverse);
+            self.apply_room_cycle_selection(&query, selected, &candidates);
+            return;
+        }
+
+        let Some(target) = room_target_prefix(&self.input.buffer) else {
             return;
         };
         let target = target.to_owned();
-        let candidates = self.switch_completion_candidates(&target);
+        let candidates = self.room_completion_candidates(&target);
         match candidates.as_slice() {
             [] => {
-                self.input.partial_switch_completions = None;
+                self.input.partial_room_completions = None;
                 self.status = Status::Info(format!("no room matches: {target}"));
             }
             [completion] => {
-                self.input.partial_switch_completions = None;
-                self.input.buffer = format!("/switch {completion}");
+                self.input.partial_room_completions = None;
+                self.input.buffer = format!("/room {completion}");
                 self.move_cursor_to_end();
                 self.status = Status::from(format!("completed room: {completion}"));
             }
             _ => {
-                let prefix_candidates = self.switch_prefix_candidates(&target);
+                let prefix_candidates = self.room_prefix_candidates(&target);
                 let common_prefix = longest_common_prefix(&prefix_candidates);
                 let completed = common_prefix
                     .as_deref()
@@ -161,9 +235,27 @@ impl App {
                     })
                     .unwrap_or(&target);
                 if completed != target {
-                    self.input.buffer = format!("/switch {completed}");
+                    self.input.buffer = format!("/room {completed}");
                     self.move_cursor_to_end();
                 }
+
+                // When all candidates collapse to the same display value and
+                // prefix expansion can't help further, cycle with disambiguators
+                // so the user can distinguish rooms that share a display name.
+                let all_same = candidates.windows(2).all(|w| w[0] == w[1]);
+                if all_same && completed == target {
+                    let cycle_candidates = self.room_cycle_candidates(&target);
+                    if cycle_candidates.len() > 1 {
+                        let selected = if reverse {
+                            cycle_candidates.len() - 1
+                        } else {
+                            0
+                        };
+                        self.apply_room_cycle_selection(&target, selected, &cycle_candidates);
+                        return;
+                    }
+                }
+
                 let shown_candidates = if completed != target {
                     &prefix_candidates
                 } else {
@@ -181,7 +273,7 @@ impl App {
                     .collect();
                 let shown = displayed.join(", ");
                 let more = candidates.len().saturating_sub(5);
-                self.input.partial_switch_completions = Some(displayed);
+                self.input.partial_room_completions = Some(displayed);
                 self.status = Status::Info(if more == 0 {
                     format!("room completions: {shown}")
                 } else {
@@ -191,29 +283,72 @@ impl App {
         }
     }
 
-    fn switch_completion_candidates(&self, target: &str) -> Vec<String> {
-        self.rooms
-            .rooms
-            .iter()
+    fn room_cycle_candidates(&self, target: &str) -> Vec<(String, String, String)> {
+        self.visible_room_indices()
+            .into_iter()
+            .filter_map(|index| self.rooms.rooms.get(index))
+            .filter(|room| room_matches_completion(room, target))
+            .map(|room| {
+                let display = room_completion_value(room);
+                // Prefer alias as disambiguator (more readable), but if the alias
+                // IS the display value fall back to the raw room ID.
+                let disambig = if room.canonical_alias.as_deref() == Some(display.as_str()) {
+                    room.room_id.clone()
+                } else {
+                    room.canonical_alias
+                        .as_deref()
+                        .unwrap_or(&room.room_id)
+                        .to_owned()
+                };
+                (room.room_id.clone(), display, disambig)
+            })
+            .collect()
+    }
+
+    fn apply_room_cycle_selection(
+        &mut self,
+        query: &str,
+        selected: usize,
+        candidates: &[(String, String, String)],
+    ) {
+        let (room_id, display, disambig) = &candidates[selected];
+        self.input.buffer = format!("/room {room_id}");
+        self.move_cursor_to_end();
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = Some((query.to_owned(), selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {}  ·  {}  —  Tab/Shift-Tab to cycle, Enter to select",
+            selected + 1,
+            candidates.len(),
+            display,
+            disambig,
+        ));
+    }
+
+    fn room_completion_candidates(&self, target: &str) -> Vec<String> {
+        self.visible_room_indices()
+            .into_iter()
+            .filter_map(|index| self.rooms.rooms.get(index))
             .filter(|room| room_matches_completion(room, target))
             .map(room_completion_value)
             .collect()
     }
 
-    fn switch_prefix_candidates(&self, target: &str) -> Vec<String> {
-        self.rooms
-            .rooms
-            .iter()
+    fn room_prefix_candidates(&self, target: &str) -> Vec<String> {
+        self.visible_room_indices()
+            .into_iter()
+            .filter_map(|index| self.rooms.rooms.get(index))
             .filter_map(|room| room_matching_prefix_value(room, target))
             .collect()
     }
 
     pub(super) fn resolve_room_target(&self, target: &str) -> RoomTargetResolution {
         let target = target.trim();
-        if let Ok(index) = target.parse::<usize>() {
-            return index
+        if let Ok(n) = target.parse::<usize>() {
+            let visible = self.visible_room_indices();
+            return n
                 .checked_sub(1)
-                .filter(|index| *index < self.rooms.rooms.len())
+                .and_then(|vis_pos| visible.get(vis_pos).copied())
                 .map(RoomTargetResolution::Match)
                 .unwrap_or(RoomTargetResolution::Missing);
         }
@@ -258,11 +393,9 @@ impl App {
     }
 
     fn matching_room_indices(&self, predicate: impl Fn(&RoomDto) -> bool) -> Vec<usize> {
-        self.rooms
-            .rooms
-            .iter()
-            .enumerate()
-            .filter_map(|(index, room)| predicate(room).then_some(index))
+        self.visible_room_indices()
+            .into_iter()
+            .filter(|index| self.rooms.rooms.get(*index).is_some_and(&predicate))
             .collect()
     }
 
@@ -330,6 +463,17 @@ fn logout_target_prefix(input: &str) -> Option<&str> {
         .then(|| rest.trim_start())
 }
 
+fn account_target_prefix(input: &str) -> Option<&str> {
+    let rest = input.strip_prefix("/account")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| rest.trim_start())
+}
+
 fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {
     let command_prefix = format!("/{prefix}");
     SLASH_COMMANDS
@@ -339,8 +483,10 @@ fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {
         .collect()
 }
 
-fn switch_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/switch")?;
+fn room_target_prefix(input: &str) -> Option<&str> {
+    let rest = input
+        .strip_prefix("/room")
+        .or_else(|| input.strip_prefix("/switch"))?;
     if rest.is_empty() {
         return Some("");
     }

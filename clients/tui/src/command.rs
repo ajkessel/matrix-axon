@@ -8,8 +8,9 @@ pub enum Command {
         homeserver: Option<String>,
     },
     Logout(Option<String>),
-    Switch(String),
-    Rooms,
+    Room(String),
+    Account(String),
+    Status,
     Event(String),
     Whoami,
     Whereami,
@@ -63,8 +64,10 @@ impl SlashCommand {
 pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/login", true),
     SlashCommand::supported("/logout", true),
+    SlashCommand::supported("/room", true),
     SlashCommand::supported("/switch", true),
-    SlashCommand::supported("/rooms", false),
+    SlashCommand::supported("/account", true),
+    SlashCommand::supported("/status", false),
     SlashCommand::supported("/event", true),
     SlashCommand::supported("/whoami", false),
     SlashCommand::supported("/whereami", false),
@@ -75,6 +78,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/help", false),
     SlashCommand::supported("/shortcuts", false),
     SlashCommand::supported("/refresh", false),
+    SlashCommand::supported("/rooms", false),
     SlashCommand::supported("/quit", false),
     SlashCommand::api_unsupported("/join", true),
     SlashCommand::api_unsupported("/leave", false),
@@ -98,14 +102,19 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "log out an active account while retaining its archive",
     },
     HelpCommand {
-        label: "/switch <room>",
-        insert_text: "/switch ",
+        label: "/room <room>, /switch <room>",
+        insert_text: "/room ",
         description: "switch room by name, alias, ID, or number",
     },
     HelpCommand {
-        label: "/rooms",
-        insert_text: "/rooms",
-        description: "refresh the room list",
+        label: "/account <account>",
+        insert_text: "/account ",
+        description: "filter by account (user ID, localpart, number, or \"all\")",
+    },
+    HelpCommand {
+        label: "/status",
+        insert_text: "/status",
+        description: "show server connectivity and account state",
     },
     HelpCommand {
         label: "/event <id>",
@@ -154,9 +163,9 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "show keyboard shortcuts",
     },
     HelpCommand {
-        label: "/refresh",
+        label: "/refresh, /rooms",
         insert_text: "/refresh",
-        description: "clear and redraw the display",
+        description: "refresh rooms and redraw the display",
     },
     HelpCommand {
         label: "/quit, /q",
@@ -212,11 +221,15 @@ pub fn parse(input: &str) -> Command {
             }
         }
         "logout" => Command::Logout((!arg.is_empty()).then(|| arg.to_owned())),
-        "switch" if !arg.is_empty() => Command::Switch(arg.to_owned()),
-        "switch" => {
-            Command::Invalid("/switch requires a room id, alias, name, or index".to_owned())
+        "room" | "switch" if !arg.is_empty() => Command::Room(arg.to_owned()),
+        "room" | "switch" => {
+            Command::Invalid("/room requires a room id, alias, name, or index".to_owned())
         }
-        "rooms" => Command::Rooms,
+        "account" if !arg.is_empty() => Command::Account(arg.to_owned()),
+        "account" => Command::Invalid(
+            "/account requires a user ID, localpart, number, or \"all\"".to_owned(),
+        ),
+        "status" => Command::Status,
         "event" if !arg.is_empty() => Command::Event(arg.to_owned()),
         "event" => Command::Invalid("/event requires an event id".to_owned()),
         "whoami" => Command::Whoami,
@@ -227,7 +240,7 @@ pub fn parse(input: &str) -> Command {
         "thread" => Command::Thread,
         "help" | "?" => Command::Help,
         "shortcuts" => Command::Shortcuts,
-        "refresh" => Command::Refresh,
+        "refresh" | "rooms" => Command::Refresh,
         "quit" | "q" => Command::Quit,
         other => {
             let command_name = format!("/{other}");
@@ -250,12 +263,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_switch() {
-        assert_eq!(parse("/switch 2"), Command::Switch("2".to_owned()));
+    fn parses_room() {
+        assert_eq!(parse("/room 2"), Command::Room("2".to_owned()));
         assert_eq!(
-            parse("/switch #room:localhost"),
-            Command::Switch("#room:localhost".to_owned())
+            parse("/room #room:localhost"),
+            Command::Room("#room:localhost".to_owned())
         );
+        assert_eq!(parse("/switch 2"), Command::Room("2".to_owned()));
     }
 
     #[test]
@@ -338,6 +352,7 @@ mod tests {
     #[test]
     fn parses_refresh() {
         assert_eq!(parse("/refresh"), Command::Refresh);
+        assert_eq!(parse("/rooms"), Command::Refresh);
     }
 
     #[test]
@@ -372,8 +387,8 @@ mod tests {
     #[test]
     fn reports_missing_arguments() {
         assert_eq!(
-            parse("/switch"),
-            Command::Invalid("/switch requires a room id, alias, name, or index".to_owned())
+            parse("/room"),
+            Command::Invalid("/room requires a room id, alias, name, or index".to_owned())
         );
         assert_eq!(
             parse("/event"),
