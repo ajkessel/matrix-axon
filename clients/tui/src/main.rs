@@ -102,9 +102,11 @@ async fn run_app(
 
     let mut tick = time::interval(Duration::from_millis(100));
     loop {
-        if app.take_redraw_request() {
-            terminal.clear()?;
-        }
+        // `take_redraw_request` signals that cached image content changed; for
+        // halfblocks rendering ratatui's diff-based draw handles the update
+        // without a full terminal clear (which queries cursor position and fails
+        // in some terminals, e.g. WSL2 pass-through).
+        let _ = app.take_redraw_request();
         terminal.draw(|frame| draw(frame, &mut app))?;
 
         tokio::select! {
