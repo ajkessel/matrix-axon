@@ -183,6 +183,7 @@ mod tests {
             CancellationToken::new(),
             TaskTracker::new(),
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
         )
     }
 

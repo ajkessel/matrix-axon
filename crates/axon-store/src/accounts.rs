@@ -84,8 +84,10 @@ pub struct Account {
     /// Lifecycle state (ADR 0022). The sync engine connects only [`AccountState::Active`] rows.
     pub state: AccountState,
     /// Whether axon's own device is currently cross-signed (orthogonal to
-    /// [`state`](Self::state)). Derived from the SDK's cross-signing state; the
-    /// derivation is wired up in a later subphase, so this is `false` until then.
+    /// [`state`](Self::state)). Derived from the SDK's cross-signing state and kept
+    /// fresh by the sync engine's verification watcher (ADR 0026), written via
+    /// [`Store::set_account_verified`]; `false` for a never-verified or
+    /// not-yet-synced device.
     pub verified: bool,
     /// Reserved sync-position cursor; the SyncService manages its own position
     /// in its SQLite store, so this currently stays `NULL`.
@@ -253,6 +255,26 @@ impl Store {
         sqlx_core::query::query("UPDATE accounts SET state = $2 WHERE account_id = $1")
             .bind(account_id)
             .bind(state.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Set whether axon's own device is currently cross-signed (ADR 0026),
+    /// orthogonal to lifecycle [`state`](Account::state). Unlike `state` this is a
+    /// *derived* value, not a verb-driven transition: it is re-derived from the
+    /// SDK's current cross-signing state (after `recover`/`verify` and whenever the
+    /// SDK's verification state changes) and written here, so the column tracks
+    /// reality rather than being written once. The `updated_at` trigger maintains
+    /// the timestamp.
+    pub async fn set_account_verified(
+        &self,
+        account_id: Uuid,
+        verified: bool,
+    ) -> Result<(), StoreError> {
+        sqlx_core::query::query("UPDATE accounts SET verified = $2 WHERE account_id = $1")
+            .bind(account_id)
+            .bind(verified)
             .execute(&self.pool)
             .await?;
         Ok(())

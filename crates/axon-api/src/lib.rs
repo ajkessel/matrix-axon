@@ -22,7 +22,7 @@ mod sender;
 mod state;
 mod ws;
 
-pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError};
+pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
@@ -57,6 +57,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/logout",
             post(routes::accounts::logout).route_layer(from_fn(loopback::require_loopback)),
+        )
+        // Recovery-key key acquisition. Secret-bearing (carries the 4S recovery
+        // key), so loopback-restricted until the bearer-token auth layer lands.
+        .route(
+            "/v1/accounts/{account_id}/recover",
+            post(routes::accounts::recover).route_layer(from_fn(loopback::require_loopback)),
         )
         // Read one account (open) and delete one account (loopback-restricted like
         // the other lifecycle verbs, until bearer auth lands). The loopback guard is

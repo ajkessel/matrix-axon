@@ -17,7 +17,7 @@ use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::{
     AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnySyncStateEvent, AnySyncTimelineEvent,
 };
-use matrix_sdk::Room;
+use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::client::matches_account;
 use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
-use crate::lifecycle::AccountLifecycle;
+use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::redecrypt;
 
@@ -83,6 +83,10 @@ pub struct SyncEngine {
     /// supervised task needs.
     store: Store,
     config: SyncConfig,
+    /// Per-identity lifecycle locks, owned here so every [`AccountLifecycle`] this
+    /// engine hands out and every supervised task's verification watcher share the
+    /// *same* lock per identity (ADR 0026).
+    locks: IdentityLocks,
 }
 
 impl SyncEngine {
@@ -118,6 +122,9 @@ impl SyncEngine {
         // machinery.
         let tracker = TaskTracker::new();
         let tasks: TaskRegistry = Arc::new(Mutex::new(HashMap::new()));
+        // Owned here (not inside `AccountLifecycle`) so the reconcile-time port, the
+        // API-time port, and the supervised watchers all share one lock per identity.
+        let locks: IdentityLocks = Arc::new(Mutex::new(HashMap::new()));
 
         // Crash recovery (ADR 0024), before any account is brought online and
         // before the HTTP listener binds (`axon-server` serves only after `start`
@@ -132,6 +139,7 @@ impl SyncEngine {
             cancel.clone(),
             tracker.clone(),
             tasks.clone(),
+            locks.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
@@ -154,6 +162,7 @@ impl SyncEngine {
                 cancel.clone(),
                 live_tx.clone(),
                 manager.clone(),
+                locks.clone(),
             );
         }
 
@@ -165,6 +174,7 @@ impl SyncEngine {
             manager,
             store,
             config,
+            locks,
         })
     }
 
@@ -196,6 +206,7 @@ impl SyncEngine {
             self.cancel.clone(),
             self.tracker.clone(),
             self.tasks.clone(),
+            self.locks.clone(),
         )
     }
 
@@ -233,6 +244,7 @@ pub(crate) fn spawn_supervised(
     cancel: CancellationToken,
     live_tx: broadcast::Sender<LiveEvent>,
     manager: ClientManager,
+    locks: IdentityLocks,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -243,6 +255,7 @@ pub(crate) fn spawn_supervised(
         task_cancel.clone(),
         live_tx,
         manager,
+        locks,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -264,6 +277,7 @@ async fn supervise_account(
     cancel: CancellationToken,
     live_tx: broadcast::Sender<LiveEvent>,
     manager: ClientManager,
+    locks: IdentityLocks,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -272,7 +286,11 @@ async fn supervise_account(
             return;
         }
 
-        match run_account(&store, &config, &account, &cancel, &live_tx, &manager).await {
+        match run_account(
+            &store, &config, &account, &cancel, &live_tx, &manager, &locks,
+        )
+        .await
+        {
             Ok(()) => {
                 // Clean stop (cancellation requested).
                 return;
@@ -618,6 +636,7 @@ async fn run_account(
     cancel: &CancellationToken,
     live_tx: &broadcast::Sender<LiveEvent>,
     manager: &ClientManager,
+    locks: &IdentityLocks,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -683,7 +702,25 @@ async fn run_account(
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
     // keys: keys already in the crypto store don't fire the arrival stream.
-    redecrypt::sweep_pending(&client, store, account.account_id).await;
+    redecrypt::sweep_pending_utds(&client, store, account.account_id).await;
+
+    // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
+    // the SDK's current cross-signing state. Same child-token + join-handle
+    // lifecycle as the re-decryption queue, so it ends with this run and is drained
+    // cleanly below rather than leaking across a supervised restart.
+    let verify_cancel = cancel.child_token();
+    // The watcher's `verified` write is serialized against the lifecycle verbs
+    // (recover/logout) by taking this identity's lock — the *same* lock those verbs
+    // hold — so a watcher derive can't clobber a concurrent recover's write (ADR
+    // 0026, the lost-update race).
+    let verify_lock = lock_for(locks, &account.user_id, &account.homeserver_url);
+    let verify_handle = tokio::spawn(watch_verification(
+        client.clone(),
+        store.clone(),
+        account.account_id,
+        verify_lock,
+        verify_cancel.clone(),
+    ));
 
     let mut state = sync_service.state();
     let result = loop {
@@ -711,7 +748,64 @@ async fn run_account(
             "re-decryption task did not shut down cleanly"
         );
     }
+    verify_cancel.cancel();
+    if let Err(err) = verify_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "verification watcher did not shut down cleanly"
+        );
+    }
     result
+}
+
+/// Keep the persisted `verified` flag tracking axon's own device verification
+/// state (ADR 0026). The SDK's `verification_state()` is a `subscribe_reset`
+/// subscriber, so the first poll yields the current value — persisting the
+/// initial state (`false` for a fresh unverified device, `true` once
+/// `recover`/`verify` has cross-signed it) — and each later change (cross-signing
+/// rotated, the device's trust reset) re-derives and re-persists. That is what
+/// makes the column track the SDK rather than being written once. Runs until
+/// `cancel` fires or the subscription closes; a persist failure is logged and
+/// skipped (best-effort, never fatal to the run).
+async fn watch_verification(
+    client: Client,
+    store: Store,
+    account_id: Uuid,
+    lock: IdentityLock,
+    cancel: CancellationToken,
+) {
+    let mut state = client.encryption().verification_state();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            next = state.next() => match next {
+                Some(_) => {
+                    // Derive AND persist under the per-identity lock — the same lock
+                    // `recover`/`logout` hold (ADR 0026). Without it the two derive+
+                    // persist steps could interleave with a concurrent `recover`: the
+                    // watcher reads pre-import state (`false`), recover imports keys
+                    // and writes `true`, then the watcher writes its stale `false` —
+                    // a lost update with no guaranteed later emission to self-heal it.
+                    // The shared helper holds the lock across the derive, so the
+                    // observation always reflects post-recover state.
+                    // Pass `cancel`: a lifecycle verb holds this lock while it drains
+                    // (awaits) this very task, so the lock wait MUST be cancellation-
+                    // aware or shutdown deadlocks and a detached watcher could later
+                    // clobber the verb's reset `verified` (ADR 0026).
+                    crate::lifecycle::lock_and_persist_verified(
+                        &lock,
+                        &client,
+                        &store,
+                        account_id,
+                        &cancel,
+                    )
+                    .await;
+                }
+                None => return,
+            },
+        }
+    }
 }
 
 /// Resolve the transient recovery key for `account` from the configured

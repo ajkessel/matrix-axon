@@ -207,9 +207,10 @@ pub struct AccountDto {
     /// read can return any state.
     pub state: AccountStateDto,
     /// Whether axon's own device is currently cross-signed (orthogonal to
-    /// `state`). `null` until the derivation lands (a later subphase) — a real
-    /// `false` would wrongly read as "known unverified", so we expose "unknown"
-    /// as absence rather than a misleading boolean.
+    /// `state`), derived from the SDK and kept fresh by the verification watcher
+    /// (ADR 0026): `false` for a fresh/unverified device, `true` once
+    /// `recover`/`verify` has cross-signed it. Kept nullable on the wire for
+    /// forward-compatibility, but currently always present.
     pub verified: Option<bool>,
     /// Row creation time, RFC 3339.
     pub created_at: String,
@@ -225,9 +226,9 @@ impl From<Account> for AccountDto {
             homeserver_url: a.homeserver_url,
             device_id: a.device_id,
             state: a.state.into(),
-            // The `verified` column is unwritten groundwork until derivation
-            // lands; surface "unknown" as `null` rather than the stored `false`.
-            verified: None,
+            // Surface the derived cross-signing state (ADR 0026). Kept `Option`
+            // for wire stability; populated from the persisted column.
+            verified: Some(a.verified),
             created_at: a.created_at.to_rfc3339(),
             updated_at: a.updated_at.to_rfc3339(),
         }
@@ -251,6 +252,17 @@ pub struct LoginRequest {
     pub username: String,
     /// Account password. Consumed once at login; never persisted.
     pub password: String,
+}
+
+/// Request body for recovery-key key acquisition
+/// (`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery
+/// key imports the account's megolm key backup + cross-signing keys, self-verifies
+/// axon's device, and unlocks stored UTDs. Like the login password it is a
+/// crown-jewel secret: used once to recover and **never persisted** or echoed back.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RecoverRequest {
+    /// The account's Secure-Storage (4S) recovery key.
+    pub recovery_key: String,
 }
 
 /// One page of a room timeline: the events plus the cursor to fetch the next

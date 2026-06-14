@@ -141,6 +141,49 @@ async fn deactivation_drops_from_listing_but_retains_row() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn set_account_verified_round_trips_orthogonal_to_state() {
+    let store = common::migrated_store().await;
+    let user = format!("@verified-{}:localhost", Uuid::new_v4());
+    let account = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("upsert");
+
+    // A fresh row defaults to unverified (ADR 0026: the derivation writes it).
+    assert!(!account.verified);
+
+    // Flipping `verified` is a derived-value write, independent of lifecycle
+    // `state` — the row stays `active`.
+    store
+        .set_account_verified(account.account_id, true)
+        .await
+        .expect("set verified");
+    let after = store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert!(after.verified);
+    assert_eq!(after.state, AccountState::Active);
+
+    // It is re-derivable both ways (not write-once): a later derivation can clear
+    // it again, e.g. when cross-signing is reset.
+    store
+        .set_account_verified(account.account_id, false)
+        .await
+        .expect("clear verified");
+    let cleared = store
+        .get_account(account.account_id)
+        .await
+        .expect("get")
+        .expect("row");
+    assert!(!cleared.verified);
+
+    common::cleanup_account(&common::raw_pool().await, account.account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn delete_removes_row_and_is_idempotent() {
     let store = common::migrated_store().await;
     let user = format!("@delete-{}:localhost", Uuid::new_v4());

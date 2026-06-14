@@ -192,3 +192,17 @@ impl From<crate::lifecycle::DeleteError> for ApiError {
         }
     }
 }
+
+impl From<crate::lifecycle::RecoverError> for ApiError {
+    fn from(err: crate::lifecycle::RecoverError) -> Self {
+        use crate::lifecycle::RecoverError;
+        match err {
+            RecoverError::NotFound(msg) => ApiError::not_found(msg),
+            RecoverError::Conflict(msg) => ApiError::conflict(msg),
+            // A wrong/rotated key (or no Secure Backup) is a readable client error.
+            RecoverError::BadRequest(msg) => ApiError::bad_request(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            RecoverError::Internal => ApiError::internal(),
+        }
+    }
+}

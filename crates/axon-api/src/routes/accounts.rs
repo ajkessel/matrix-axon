@@ -11,7 +11,7 @@ use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
-use crate::dto::{AccountDto, LoginRequest};
+use crate::dto::{AccountDto, LoginRequest, RecoverRequest};
 use crate::extract::{Json, Path};
 use crate::lifecycle::AccountLifecycle;
 use crate::response::{ApiError, ApiResponse};
@@ -125,6 +125,58 @@ pub async fn logout(
     lifecycle.logout(account_id).await?;
     // Read the row back so the response reflects the persisted (deactivated) state.
     // It was just transitioned, so a missing row here is a real inconsistency.
+    let account = store
+        .get_account(account_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    Ok(ApiResponse::new(AccountDto::from(account)))
+}
+
+/// Acquire E2EE keys for an **active** account from its Secure-Storage (4S)
+/// recovery key, then return the account with its `verified` flag re-derived. One
+/// SDK call imports the account's megolm key backup + cross-signing keys —
+/// self-verifying axon's device with no interactive partner — and any
+/// already-stored UTDs the keys unlock are back-filled. The recovery key is used
+/// once and never persisted.
+///
+/// A `200` means the **keys were imported** (the recovery succeeded); the returned
+/// `verified` reflects the freshly-derived cross-signing state, which is `true` in
+/// the normal case but is a *derived observation*, not a guaranteed postcondition
+/// (e.g. a partial Secure-Backup that imports the megolm key but not the
+/// cross-signing keys would import successfully yet stay unverified).
+///
+/// The account must be `active`: a logged-out (`deactivated`) account is a `409`
+/// (log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an
+/// account that never set up Secure Backup, is a `400` (a readable error, not a
+/// silent permanent UTD). An unknown id is a `404`.
+///
+/// Secret-bearing, so this route is loopback-only until the auth layer lands (see
+/// the per-method `route_layer` in [`router`](crate::router)).
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/recover",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    request_body = RecoverRequest,
+    responses(
+        (status = 200, description = "Keys imported; account returned with `verified` re-derived (normally true)", body = ApiResponse<AccountDto>),
+        (status = 400, description = "The recovery key was wrong/rotated, or the account has no Secure Backup", body = crate::response::ErrorResponse),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 409, description = "The account is not active (logged out — log in first) or is being deleted", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn recover(
+    State(store): State<Store>,
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    Path(account_id): Path<Uuid>,
+    Json(req): Json<RecoverRequest>,
+) -> Result<ApiResponse<AccountDto>, ApiError> {
+    lifecycle.recover(account_id, &req.recovery_key).await?;
+    // Read the row back so the response reflects the freshly-derived `verified`
+    // state. The account was just operated on, so a missing row is a real
+    // inconsistency.
     let account = store
         .get_account(account_id)
         .await?

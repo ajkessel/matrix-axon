@@ -10,7 +10,9 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError, MessageSender, SendError};
+use axon_api::{
+    AccountLifecycle, DeleteError, LoginError, LogoutError, MessageSender, RecoverError, SendError,
+};
 use uuid::Uuid;
 
 /// One recorded call to the stub, with the arguments the handler passed through.
@@ -172,17 +174,42 @@ impl DeleteOutcome {
     }
 }
 
-/// An in-memory [`AccountLifecycle`] for tests: records each `login`/`logout`/`delete`
-/// call and returns a preset outcome, so the lifecycle routes can be exercised
-/// (loopback guard, request decoding, error → status mapping) without a real
-/// homeserver.
+/// The outcome the [`StubLifecycle`] returns for every `recover` call. `Clone` so
+/// one stub can answer repeated calls; mirrors [`RecoverError`]'s variants.
+#[derive(Clone)]
+pub enum RecoverOutcome {
+    Ok,
+    NotFound(String),
+    Conflict(String),
+    BadRequest(String),
+    Internal,
+}
+
+impl RecoverOutcome {
+    fn to_result(&self) -> Result<(), RecoverError> {
+        match self {
+            RecoverOutcome::Ok => Ok(()),
+            RecoverOutcome::NotFound(m) => Err(RecoverError::NotFound(m.clone())),
+            RecoverOutcome::Conflict(m) => Err(RecoverError::Conflict(m.clone())),
+            RecoverOutcome::BadRequest(m) => Err(RecoverError::BadRequest(m.clone())),
+            RecoverOutcome::Internal => Err(RecoverError::Internal),
+        }
+    }
+}
+
+/// An in-memory [`AccountLifecycle`] for tests: records each
+/// `login`/`logout`/`delete`/`recover` call and returns a preset outcome, so the
+/// lifecycle routes can be exercised (loopback guard, request decoding, error →
+/// status mapping) without a real homeserver.
 pub struct StubLifecycle {
     login_outcome: LoginOutcome,
     logout_outcome: LogoutOutcome,
     delete_outcome: DeleteOutcome,
+    recover_outcome: RecoverOutcome,
     login_calls: Mutex<Vec<LoginCall>>,
     logout_calls: Mutex<Vec<Uuid>>,
     delete_calls: Mutex<Vec<Uuid>>,
+    recover_calls: Mutex<Vec<(Uuid, String)>>,
 }
 
 impl StubLifecycle {
@@ -195,6 +222,8 @@ impl StubLifecycle {
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
+            recover_outcome: RecoverOutcome::Ok,
+            recover_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -207,6 +236,8 @@ impl StubLifecycle {
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
+            recover_outcome: RecoverOutcome::Ok,
+            recover_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -219,6 +250,8 @@ impl StubLifecycle {
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
+            recover_outcome: RecoverOutcome::Ok,
+            recover_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -231,6 +264,22 @@ impl StubLifecycle {
             login_calls: Mutex::new(Vec::new()),
             logout_calls: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
+            recover_outcome: RecoverOutcome::Ok,
+            recover_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose recover returns the given failure (login returns a nil id).
+    pub fn recover_failing(outcome: RecoverOutcome) -> Self {
+        Self {
+            login_outcome: LoginOutcome::Ok(Uuid::nil()),
+            logout_outcome: LogoutOutcome::Ok,
+            delete_outcome: DeleteOutcome::Ok,
+            recover_outcome: outcome,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
+            recover_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -247,6 +296,11 @@ impl StubLifecycle {
     /// The account ids passed to delete, in order.
     pub fn delete_calls(&self) -> Vec<Uuid> {
         self.delete_calls.lock().unwrap().clone()
+    }
+
+    /// The `(account_id, recovery_key)` pairs passed to recover, in order.
+    pub fn recover_calls(&self) -> Vec<(Uuid, String)> {
+        self.recover_calls.lock().unwrap().clone()
     }
 }
 
@@ -274,6 +328,14 @@ impl AccountLifecycle for StubLifecycle {
     async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError> {
         self.delete_calls.lock().unwrap().push(account_id);
         self.delete_outcome.to_result()
+    }
+
+    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError> {
+        self.recover_calls
+            .lock()
+            .unwrap()
+            .push((account_id, recovery_key.to_owned()));
+        self.recover_outcome.to_result()
     }
 }
 

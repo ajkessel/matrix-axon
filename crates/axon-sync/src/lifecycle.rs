@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use axon_core::{LiveEvent, SyncConfig};
 use axon_store::{Account, AccountState, Store, StoreError};
+use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::OwnedUserId;
+use matrix_sdk::Client;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +29,7 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
-use crate::error::SyncError;
+use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
 
 /// How long logout waits for a cancelled supervised task to finish draining
@@ -54,6 +56,14 @@ const ABORT_TIMEOUT: Duration = Duration::from_millis(250);
 /// time never depends on a stalled homeserver (the row is already deactivated
 /// by the time this request is made).
 const UPSTREAM_LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cap on `recover`'s under-lock UTD back-fill sweep (ADR 0026). The sweep loads
+/// every pending UTD and pulls backup keys per room, so a large backlog or a
+/// stalled homeserver could otherwise let `recover` hold the per-identity lock —
+/// blocking a concurrent logout/delete — for an unbounded time. On timeout the
+/// keys and `verified` are already persisted (the success the caller awaits); the
+/// unswept rows are retried by the next supervised boot sweep.
+const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
 /// [`GatewayError`](crate::GatewayError): the composition-root adapter
@@ -96,6 +106,20 @@ pub enum LifecycleError {
     #[error("account {0} is provisioned from config; remove it from sync.account before deleting")]
     Provisioned(Uuid),
 
+    /// The account is not `active` (it is logged out / `deactivated`), so there
+    /// is no live authenticated client to run the operation against. The caller
+    /// must [`login`](AccountLifecycle::login) first to reactivate it. Raised by
+    /// verbs that need a live session, e.g. [`recover`](AccountLifecycle::recover).
+    /// → 409.
+    #[error("account is not active: {0}")]
+    NotActive(Uuid),
+
+    /// Importing keys from the supplied recovery key failed — a wrong or rotated
+    /// key, or an account whose Secure Backup was never set up. A readable client
+    /// error, not a silent permanent UTD and not an internal failure. → 400.
+    #[error("recovery failed: {0}")]
+    RecoveryFailed(String),
+
     /// The homeserver rejected the supplied credentials.
     #[error("authentication failed: {0}")]
     AuthFailed(String),
@@ -129,6 +153,127 @@ impl From<SyncError> for LifecycleError {
     }
 }
 
+/// Re-derive whether axon's own device is currently cross-signed — the value
+/// behind [`Account::verified`] (ADR 0026). Reads the SDK's current state
+/// directly (`get_own_device().is_cross_signed_by_owner()`), the same check the
+/// SDK uses internally, rather than the `verification_state()` subscriber: that
+/// subscriber only refreshes on a `/keys/query` round-trip, so it lags an
+/// immediate post-`recover` read. A missing own-device or a crypto-store error
+/// is treated as **not** verified — the safe default, since a stale `true` is
+/// worse than a transient `false`.
+pub(crate) async fn derive_verified(client: &Client) -> bool {
+    match client.encryption().get_own_device().await {
+        Ok(Some(device)) => device.is_cross_signed_by_owner(),
+        Ok(None) => false,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "failed to read own device for verification state; treating as unverified"
+            );
+            false
+        }
+    }
+}
+
+/// Re-derive and persist `verified` **under the per-identity lock** (ADR 0026).
+/// This is the shared critical section the verification watcher uses: holding the
+/// lock across the *derive* (not just the write) is what makes the observation
+/// reflect any concurrent `recover`/`logout` write, so two derivers can't lose an
+/// update (the watcher reading stale `false` and clobbering a recover's `true`).
+/// Best-effort: a persist failure is logged, never fatal to the caller.
+///
+/// **Cancellation-aware acquisition (load-bearing).** The lock wait races `cancel`,
+/// and a fired token wins (`biased`) and abandons the write. This is what keeps the
+/// watcher from wedging shutdown: a lifecycle verb (logout/delete) holds this *same*
+/// lock while it cancels and **awaits** the supervised task — which in turn awaits
+/// this watcher. Were the lock wait un-cancellable, the watcher would park here
+/// holding nothing while the verb waits on it holding the lock → deadlock until the
+/// drain timeout aborts the supervisor, after which this separately-spawned task
+/// could still acquire the freed lock and persist the dead device's value over the
+/// verb's reset `false`. Bailing on `cancel` closes both (ADR 0026).
+pub(crate) async fn lock_and_persist_verified(
+    lock: &IdentityLock,
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    cancel: &CancellationToken,
+) {
+    let _guard = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        guard = lock.lock() => guard,
+    };
+    let verified = derive_verified(client).await;
+    if let Err(err) = store.set_account_verified(account_id, verified).await {
+        tracing::warn!(
+            %account_id,
+            error = %err,
+            "failed to persist device verification state"
+        );
+    }
+}
+
+/// Classify an SDK [`RecoveryError`] into a [`LifecycleError`] (ADR 0026). Only
+/// the specific *key / backup-configuration* secret-storage variants are the
+/// client's to act on — an undecodable recovery key, a wrong key (decryption
+/// failure), an account with no secret storage, or a missing/inconsistent backup
+/// key — so they become a readable `400` (`RecoveryFailed`) with a **stable**
+/// message (the SDK's own text can leak secret-storage internals). Every other
+/// variant — a *nested* SDK/network, JSON, crypto-store, secret-import, or
+/// manual-verification failure, or any non-secret-storage `RecoveryError` — is
+/// internal/upstream and not the caller's fault, so it maps to `Upstream`
+/// (→ a logged, generic `500`) rather than being mis-blamed as a `400`.
+fn classify_recovery_error(err: RecoveryError) -> LifecycleError {
+    use matrix_sdk::encryption::secret_storage::SecretStorageError as Ss;
+
+    let recovery_failed = || {
+        LifecycleError::RecoveryFailed(
+            "the recovery key was rejected, or the account has no usable Secure Backup".to_owned(),
+        )
+    };
+    match err {
+        RecoveryError::SecretStorage(ss) => match ss {
+            // Client-actionable: the supplied key, or the account's backup config.
+            Ss::SecretStorageKey(_)                 // recovery key won't decode/verify
+            | Ss::MissingKeyInfo { .. }             // no secret storage configured
+            | Ss::Decryption(_)                     // wrong key (decryption/MAC failure)
+            | Ss::InconsistentBackupDecryptionKey
+            | Ss::MissingOrInvalidBackupDecryptionKey => recovery_failed(),
+            // Internal/upstream: nested SDK/network, JSON, crypto-store, import, or
+            // verification failure. Keep the detail server-side, return a 500.
+            other => LifecycleError::Upstream(other.to_string()),
+        },
+        // `Sdk` (upstream/SDK) and `BackupExistsOnServer` (can't arise on the
+        // recover path) are not key-actionable either.
+        other => LifecycleError::Upstream(other.to_string()),
+    }
+}
+
+/// The per-identity async mutex that serializes the lifecycle verbs (and the
+/// verification watcher's `verified` write) for one `(user_id, homeserver_url)`.
+pub(crate) type IdentityLock = Arc<AsyncMutex<()>>;
+
+/// `canonical-identity → lock`. Owned by [`SyncEngine`](crate::SyncEngine) and
+/// shared by every [`AccountLifecycle`] it hands out *and* by the supervised
+/// tasks' verification watchers, so a verb and a watcher for the same identity
+/// take the *same* lock (ADR 0026 — closes the `verified` lost-update race).
+pub(crate) type IdentityLocks = Arc<Mutex<HashMap<String, IdentityLock>>>;
+
+/// Fetch (or create) the per-identity lock for `(user_id, homeserver_url)`. The
+/// std mutex is held only to fetch/insert; callers `await` the returned async
+/// mutex, so verbs/watchers for *different* identities never block each other.
+///
+/// The map grows unbounded — one entry per identity ever seen, never removed.
+/// Pruning belongs to delete (which retires the identity for good), not logout: a
+/// logged-out identity can be logged back in, and removing its lock while a verb
+/// still holds it would let a concurrent login mint a fresh lock and run without
+/// mutual exclusion. The leak is one small entry per distinct identity.
+pub(crate) fn lock_for(locks: &IdentityLocks, user_id: &str, homeserver_url: &str) -> IdentityLock {
+    let key = format!("{user_id}\u{0}{homeserver_url}");
+    let mut map = locks.lock().expect("lifecycle lock map poisoned");
+    map.entry(key).or_default().clone()
+}
+
 /// Runtime account-lifecycle capability. Cheap to [`Clone`] — every field is a
 /// handle — so the adapter can hold one and call it per request. Shares the sync
 /// engine's task tracker, cancellation token, and live-event bus, so an account
@@ -144,10 +289,9 @@ pub struct AccountLifecycle {
     /// Per-account task cancellation handles, shared with the engine. Logout
     /// cancels (and removes) the entry for the account it stops.
     tasks: TaskRegistry,
-    /// `canonical-identity → lock`. The std mutex is held only to fetch/insert a
-    /// lock; the verb runs under the per-identity async mutex, so verbs for
-    /// different accounts never block each other.
-    locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    /// `canonical-identity → lock`, shared with the engine and the supervised
+    /// tasks' verification watchers (see [`IdentityLocks`]).
+    locks: IdentityLocks,
     /// HTTP client for homeserver discovery (see [`discovery`](crate::discovery)).
     /// Cheap to clone (an `Arc` internally), shared across logins.
     http: matrix_sdk::reqwest::Client,
@@ -155,6 +299,9 @@ pub struct AccountLifecycle {
 
 impl AccountLifecycle {
     /// Build the lifecycle port. Called by [`SyncEngine::lifecycle`](crate::SyncEngine::lifecycle).
+    // Each handle is a distinct shared resource the verbs need; bundling them into a
+    // struct would just move the list, not shorten it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Store,
         config: SyncConfig,
@@ -163,6 +310,7 @@ impl AccountLifecycle {
         cancel: CancellationToken,
         tracker: TaskTracker,
         tasks: TaskRegistry,
+        locks: IdentityLocks,
     ) -> Self {
         Self {
             store,
@@ -172,22 +320,15 @@ impl AccountLifecycle {
             cancel,
             tracker,
             tasks,
-            locks: Arc::new(Mutex::new(HashMap::new())),
+            locks,
             http: crate::discovery::http_client(),
         }
     }
 
     /// The per-identity lock for `(user_id, homeserver_url)`, created on first use.
-    fn lock_for(&self, user_id: &str, homeserver_url: &str) -> Arc<AsyncMutex<()>> {
-        let key = format!("{user_id}\u{0}{homeserver_url}");
-        // NOTE: this map grows unbounded — one entry per identity ever seen, never
-        // removed. Pruning belongs to delete (which retires the identity for good),
-        // not logout: a logged-out identity can be logged back in, and removing its
-        // lock while a verb still holds it would let a concurrent login mint a fresh
-        // lock and run without mutual exclusion. The leak is one small entry per
-        // distinct identity, bounded by the accounts a user ever adds.
-        let mut map = self.locks.lock().expect("lifecycle lock map poisoned");
-        map.entry(key).or_default().clone()
+    /// Shared with the verification watcher via the engine-owned [`IdentityLocks`].
+    fn lock_for(&self, user_id: &str, homeserver_url: &str) -> IdentityLock {
+        lock_for(&self.locks, user_id, homeserver_url)
     }
 
     /// Log a Matrix account in at runtime as a fresh device, returning its Axon
@@ -344,6 +485,7 @@ impl AccountLifecycle {
             self.cancel.clone(),
             self.live_tx.clone(),
             self.manager.clone(),
+            self.locks.clone(),
         );
         tracing::info!(%account_id, user_id = %username, "account logged in and supervised");
         Ok(account_id)
@@ -425,6 +567,19 @@ impl AccountLifecycle {
             AccountState::Deactivated => {}
         }
 
+        // Clear `verified` immediately after the state transition and BEFORE the
+        // fallible sever (ADR 0026). The device is logged out — its token is dead and
+        // a re-login mints a *fresh, unverified* device — so a stale `true` here
+        // would be returned by the next login's read-back or a by-id read of the
+        // `deactivated` row, which the spec forbids ("a stale `true` is worse than
+        // `false`"). This MUST precede `sever_session`: that call returns `Draining`
+        // when a wedged task survives cancel+abort, leaving the row `deactivated` —
+        // so a clear placed after it would be skipped exactly when the row stays
+        // client-visible. Safe under the identity lock we hold: the verification
+        // watcher takes the same lock for its own write, so it can't clobber this
+        // (and on the retry/already-`deactivated` path it re-clears harmlessly).
+        self.store.set_account_verified(account_id, false).await?;
+
         // Sever the live session: reap the supervised task (awaiting its drain)
         // and take + upstream-invalidate the cached client. Shared with `delete`.
         // A wedged task surfaces as `Draining` and leaves the row `deactivated` for
@@ -432,6 +587,123 @@ impl AccountLifecycle {
         self.sever_session(account_id).await?;
 
         tracing::info!(%account_id, user_id = %account.user_id, "account logged out");
+        Ok(())
+    }
+
+    /// Acquire E2EE keys for an account from its Secure-Storage (4S) **recovery
+    /// key** and self-verify axon's device — the bootstrap/fallback
+    /// key-acquisition path (ADR 0011), promoted from the boot-time config call
+    /// (`engine::recovery_key_for`) to an on-demand verb. A single SDK call
+    /// (`recovery().recover`) imports both the megolm key **backup** decryption
+    /// key and the cross-signing private keys into the account's crypto store,
+    /// which (1) lets axon cross-sign its own device with no interactive partner
+    /// and (2) unlocks already-stored UTDs — which we then back-fill through the
+    /// re-decryption queue's sweep. On success the account's `verified` flag is
+    /// re-derived from the SDK and persisted so a client reads the new state
+    /// immediately (ADR 0026). The recovery-key string is consumed here and
+    /// **never persisted**, consistent with the M3c boot path.
+    ///
+    /// Requires an **active** account (recover runs against its live,
+    /// authenticated client). Keyed by `account_id`:
+    /// - **`active` row** → recover.
+    /// - **`deactivated` row** → [`LifecycleError::NotActive`] (409): log in first.
+    /// - **`deleting` row** → [`LifecycleError::BeingDeleted`] (409).
+    /// - **no such row** → [`LifecycleError::NotFound`] (404).
+    ///
+    /// A wrong/rotated key, or an account with no Secure Backup, is a readable
+    /// [`LifecycleError::RecoveryFailed`] (400) — never a silent permanent UTD.
+    pub async fn recover(
+        &self,
+        account_id: Uuid,
+        recovery_key: &str,
+    ) -> Result<(), LifecycleError> {
+        // Resolve identity to take the per-identity lock (keyed by
+        // `(user_id, homeserver_url)`, the key space the other verbs use); a 404
+        // is cheap and needs no lock.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+
+        let lock = self.lock_for(&account.user_id, &account.homeserver_url);
+        let _guard = lock.lock().await;
+
+        // Re-read under the lock: the state may have moved between the unlocked
+        // resolve above and acquiring the lock. The lock serializes recover against
+        // login/logout/delete, so the state checked here can't change under us.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+        match account.state {
+            AccountState::Active => {}
+            AccountState::Deactivated => return Err(LifecycleError::NotActive(account_id)),
+            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
+        }
+
+        // The supervised task normally holds a cached client; the cold-connect
+        // gate (active-only) is satisfied by the check above. Map the gateway's
+        // errors onto the lifecycle ones — under the lock on an `active` row the
+        // not-active/unknown arms are unreachable, but stay defensive.
+        let client = self
+            .manager
+            .get_or_connect(account_id)
+            .await
+            .map_err(|e| match e {
+                GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
+                GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
+                other => LifecycleError::Upstream(other.to_string()),
+            })?;
+
+        // One SDK call imports the megolm backup + cross-signing keys. The failure
+        // is classified per variant (see `classify_recovery_error`), not blanket-
+        // 400'd: only the specific key/backup-config secret-storage variants are the
+        // caller's to fix (→ readable 400), everything else is internal/upstream
+        // (→ logged generic 500), and no SDK text leaks to the client.
+        client
+            .encryption()
+            .recovery()
+            .recover(recovery_key)
+            .await
+            .map_err(classify_recovery_error)?;
+
+        // The cross-signing keys just landed, so the device is now self-cross-
+        // signed: re-derive and persist `verified` straight away so the row the
+        // caller reads back reflects it. The sync watcher (ADR 0026) would also
+        // catch this on the next keys-query, but recover's caller reads the row
+        // immediately, and `verification_state()` lags that round-trip.
+        let verified = derive_verified(&client).await;
+        self.store
+            .set_account_verified(account_id, verified)
+            .await?;
+
+        // Back-fill any stored UTDs the imported keys now unlock — the same sweep
+        // the supervisor runs at boot (`engine::run_account`). Keys already in the
+        // crypto store don't fire the arrival stream, so an explicit sweep is the
+        // only thing that retries them now. Bounded by `RECOVER_SWEEP_TIMEOUT` so a
+        // large backlog or a stalled homeserver can't pin the per-identity lock and
+        // starve a concurrent logout/delete; an overrun leaves the remaining rows
+        // for the next supervised boot sweep (keys + `verified` are already saved).
+        let sweep = crate::redecrypt::sweep_pending_utds(&client, &self.store, account_id);
+        if tokio::time::timeout(RECOVER_SWEEP_TIMEOUT, sweep)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                %account_id,
+                timeout_secs = RECOVER_SWEEP_TIMEOUT.as_secs(),
+                "recover UTD back-fill sweep timed out; remaining UTDs retry on next sync restart"
+            );
+        }
+
+        tracing::info!(
+            %account_id,
+            user_id = %account.user_id,
+            verified,
+            "account recovered keys via recovery key"
+        );
         Ok(())
     }
 
@@ -681,6 +953,7 @@ mod tests {
             CancellationToken::new(),
             TaskTracker::new(),
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
         )
     }
 
@@ -714,6 +987,7 @@ mod tests {
             live_tx,
             CancellationToken::new(),
             TaskTracker::new(),
+            Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
         )
     }
@@ -814,6 +1088,223 @@ mod tests {
         assert_eq!(after.state, AccountState::Deactivated);
 
         delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// Logout clears `verified` (ADR 0026): a verified account that logs out must
+    /// not leave a stale `verified: true` behind, since the session's device is now
+    /// dead and a re-login mints a *fresh, unverified* device. Regression for the
+    /// "verified account → logout → re-login returns stale true" review finding.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn logout_resets_verified_flag() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@logout-verified-{}:localhost", Uuid::new_v4());
+        // Freshly upserted rows are `active`; mark this one verified as a prior
+        // recover would have.
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        lc.store
+            .set_account_verified(acct.account_id, true)
+            .await
+            .unwrap();
+
+        lc.logout(acct.account_id)
+            .await
+            .expect("logout on an active account succeeds");
+
+        let after = lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, AccountState::Deactivated);
+        assert!(
+            !after.verified,
+            "logout must reset verified to false so a re-login can't read a stale true"
+        );
+
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// The factored `lock_and_persist_verified` helper (the watcher's critical
+    /// section) takes the per-identity lock *before* its derive+persist, so it
+    /// cannot interleave with another holder of the same lock — the property that
+    /// closes the `recover` × watcher lost-update race (ADR 0026).
+    ///
+    /// Deterministic, no ordering sleeps: the test itself acquires the lock first
+    /// (program order, not timing), then spawns the helper. While the lock is held
+    /// the helper provably cannot complete — joining it with a timeout *must* time
+    /// out; if the helper skipped the lock it would finish immediately and the
+    /// assertion would fail. After the explicit release it completes and persists
+    /// its derived value. (The exact lost-update *value* needs a live homeserver to
+    /// drive `derive_verified`, like every other recover test; here the client is
+    /// offline, so the derive is a deterministic `false`.) Multi-thread runtime so
+    /// the held lock doesn't simply starve the single worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn lock_and_persist_verified_waits_for_the_identity_lock() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@verified-race-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        let id = acct.account_id;
+        // Seed a `true` so a missed-lock write (an immediate `false`) is observable.
+        lc.store.set_account_verified(id, true).await.unwrap();
+
+        // The helper resolves the *same* lock the verbs use (one shared map).
+        let lock = lock_for(&lc.locks, &user, hs);
+        let held = lock_for(&lc.locks, &user, hs);
+        assert!(Arc::ptr_eq(&lock, &held), "same identity must share a lock");
+
+        // An offline client: `derive_verified` reads no own-device and yields false.
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url("http://127.0.0.1:9")
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .build()
+            .await
+            .expect("offline client");
+
+        // Acquire the lock here FIRST (program order — no sleep needed to establish
+        // "first owns the lock before the second starts").
+        let guard = held.lock().await;
+
+        let store = lc.store.clone();
+        // A never-cancelled token: this test exercises the lock-wait path, not the
+        // cancellation bail-out (covered separately below).
+        let never = CancellationToken::new();
+        let mut helper = tokio::spawn(async move {
+            lock_and_persist_verified(&lock, &client, &store, id, &never).await;
+        });
+
+        // While we hold the lock the helper cannot finish: a join attempt must time
+        // out. (A no-lock helper would complete here, failing this assertion.)
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut helper)
+                .await
+                .is_err(),
+            "helper must block on the identity lock, not write while it is held"
+        );
+        // The held value is therefore untouched.
+        assert!(lc.store.get_account(id).await.unwrap().unwrap().verified);
+
+        // Release explicitly; now the helper acquires, derives (offline → false),
+        // and persists.
+        drop(guard);
+        helper.await.unwrap();
+        assert!(
+            !lc.store.get_account(id).await.unwrap().unwrap().verified,
+            "after release the helper's under-lock derive is persisted"
+        );
+
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// Regression for the shutdown deadlock / stale-write race (ADR 0026): the
+    /// watcher's `lock_and_persist_verified` must abandon its lock wait when its
+    /// token is cancelled. A lifecycle verb holds the identity lock while it awaits
+    /// the watcher's drain, so an un-cancellable wait here would wedge shutdown — and
+    /// a detached watcher could then persist the dead device's value over the verb's
+    /// reset `false`.
+    ///
+    /// We stand in for the verb: hold the lock (as logout does), park the helper on
+    /// it (as a mid-flight watcher would be), then fire the token. The helper must
+    /// complete *promptly while the lock is still held* (proving it didn't block on
+    /// the lock) and must **not** write — the seeded `true` survives, so no stale
+    /// value lands. Multi-thread so the held lock doesn't starve the worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn lock_and_persist_verified_bails_out_on_cancellation() {
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@verified-cancel-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap();
+        let id = acct.account_id;
+        // Seed a `true`: a bail-out must leave it untouched; a write would make it
+        // `false` (the offline client derives `false`), so `true` proves no write.
+        lc.store.set_account_verified(id, true).await.unwrap();
+
+        let lock = lock_for(&lc.locks, &user, hs);
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url("http://127.0.0.1:9")
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .build()
+            .await
+            .expect("offline client");
+
+        // Stand in for the lifecycle verb: hold the lock across the drain.
+        let guard = lock.lock().await;
+
+        let cancel = CancellationToken::new();
+        let store = lc.store.clone();
+        let cancel_for_helper = cancel.clone();
+        let helper_lock = lock.clone();
+        let mut helper = tokio::spawn(async move {
+            lock_and_persist_verified(&helper_lock, &client, &store, id, &cancel_for_helper).await;
+        });
+
+        // Parked on the lock: it cannot complete while we hold it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut helper)
+                .await
+                .is_err(),
+            "helper must be parked on the held identity lock"
+        );
+
+        // Cancel WITHOUT releasing the lock — the verb still holds it. A
+        // cancellation-aware wait must unpark and return immediately anyway.
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), &mut helper)
+            .await
+            .expect("cancelled helper must return without waiting for the lock")
+            .unwrap();
+
+        // No write happened: the seeded `true` is intact (a deadlock-prone write
+        // would have clobbered it with the offline `false`).
+        assert!(
+            lc.store.get_account(id).await.unwrap().unwrap().verified,
+            "a cancelled helper must not persist a (stale) value"
+        );
+
+        drop(guard);
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// The `RecoveryError` → `LifecycleError` classifier (ADR 0026) reserves the
+    /// client-facing `RecoveryFailed` (→ 400) for the specific key/backup-config
+    /// secret-storage variants, and routes every internal/upstream variant to
+    /// `Upstream` (→ a logged 500). No DB needed — pure mapping. Covers one
+    /// actionable and one internal `SecretStorageError` variant, plus a
+    /// non-secret-storage `RecoveryError`.
+    #[test]
+    fn classify_recovery_error_separates_actionable_from_internal() {
+        use matrix_sdk::encryption::secret_storage::SecretStorageError as Ss;
+
+        // Actionable: no secret storage configured on the account → 400.
+        let actionable =
+            classify_recovery_error(RecoveryError::SecretStorage(Ss::MissingKeyInfo {
+                key_id: None,
+            }));
+        match actionable {
+            LifecycleError::RecoveryFailed(msg) => {
+                assert!(!msg.is_empty());
+                // Stable message, not the SDK's own text.
+                assert!(!msg.contains("account data"), "must not leak SDK internals");
+            }
+            other => panic!("missing-key-info should be RecoveryFailed, got {other:?}"),
+        }
+
+        // Internal: a nested JSON error inside secret storage → 500 (Upstream).
+        let json_err = serde_json::from_str::<i32>("not-an-int").unwrap_err();
+        let internal = classify_recovery_error(RecoveryError::SecretStorage(Ss::Json(json_err)));
+        assert!(
+            matches!(internal, LifecycleError::Upstream(_)),
+            "a nested JSON failure is internal, not a client 400"
+        );
+
+        // A non-secret-storage variant is internal/upstream too.
+        let backup_exists = classify_recovery_error(RecoveryError::BackupExistsOnServer);
+        assert!(matches!(backup_exists, LifecycleError::Upstream(_)));
     }
 
     /// Logout on a `deleting` row is a conflict (→ 409): a delete is in flight.
@@ -1076,6 +1567,66 @@ mod tests {
             .expect("retry reaps the now-dead task");
         assert!(!lc.tasks.lock().unwrap().contains_key(&acct.account_id));
 
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// `verified` is cleared even when the logout's sever fails with `Draining`
+    /// (ADR 0026). The clear must precede the fallible sever: the row is already
+    /// flipped to `deactivated` by then, so a clear placed after `sever_session`
+    /// would be skipped on the `Draining` path, leaving a previously-verified
+    /// account client-visible as `verified: true` — the exact stale state this is
+    /// meant to eliminate. Regression for that ordering. (Multi-threaded runtime:
+    /// the wedged task blocks a worker by design.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn logout_clears_verified_even_when_draining() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::engine::AccountTask;
+
+        let lc = lifecycle().await;
+        let hs = "https://hs.example.org";
+        let user = format!("@logout-drain-verified-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, hs).await.unwrap(); // active by default
+        lc.store
+            .set_account_verified(acct.account_id, true)
+            .await
+            .unwrap();
+
+        // No await points, so neither cancel nor abort lands until `unwedge`: the
+        // sever wedges and logout returns `Draining`.
+        let unwedge = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn({
+            let unwedge = Arc::clone(&unwedge);
+            async move {
+                while !unwedge.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        });
+        lc.tasks
+            .lock()
+            .unwrap()
+            .insert(acct.account_id, AccountTask { cancel, handle });
+
+        let err = lc.logout(acct.account_id).await.unwrap_err();
+        assert!(matches!(err, LifecycleError::Draining(id) if id == acct.account_id));
+
+        let after = lc
+            .store
+            .get_account(acct.account_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, AccountState::Deactivated);
+        assert!(
+            !after.verified,
+            "verified must be cleared before the fallible sever, even on Draining"
+        );
+
+        // Let the wedged task die so the test runtime can shut down cleanly.
+        unwedge.store(true, Ordering::SeqCst);
         delete_account(&lc.store, acct.account_id).await;
     }
 

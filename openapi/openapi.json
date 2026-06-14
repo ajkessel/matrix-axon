@@ -298,6 +298,80 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/recover": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Acquire E2EE keys for an **active** account from its Secure-Storage (4S)\nrecovery key, then return the account with its `verified` flag re-derived. One\nSDK call imports the account's megolm key backup + cross-signing keys —\nself-verifying axon's device with no interactive partner — and any\nalready-stored UTDs the keys unlock are back-filled. The recovery key is used\nonce and never persisted.",
+        "description": "A `200` means the **keys were imported** (the recovery succeeded); the returned\n`verified` reflects the freshly-derived cross-signing state, which is `true` in\nthe normal case but is a *derived observation*, not a guaranteed postcondition\n(e.g. a partial Secure-Backup that imports the megolm key but not the\ncross-signing keys would import successfully yet stay unverified).\n\nThe account must be `active`: a logged-out (`deactivated`) account is a `409`\n(log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an\naccount that never set up Secure Backup, is a `400` (a readable error, not a\nsilent permanent UTD). An unknown id is a `404`.\n\nSecret-bearing, so this route is loopback-only until the auth layer lands (see\nthe per-method `route_layer` in [`router`](crate::router)).",
+        "operationId": "recover",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Keys imported; account returned with `verified` re-derived (normally true)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_AccountDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The recovery key was wrong/rotated, or the account has no Secure Backup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active (logged out — log in first) or is being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
       "put": {
         "tags": [
@@ -847,7 +921,7 @@
               "boolean",
               "null"
             ],
-            "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+            "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`), derived from the SDK and kept fresh by the verification watcher\n(ADR 0026): `false` for a fresh/unverified device, `true` once\n`recover`/`verify` has cross-signed it. Kept nullable on the wire for\nforward-compatibility, but currently always present."
           }
         }
       },
@@ -916,7 +990,7 @@
                   "boolean",
                   "null"
                 ],
-                "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+                "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`), derived from the SDK and kept fresh by the verification watcher\n(ADR 0026): `false` for a fresh/unverified device, `true` once\n`recover`/`verify` has cross-signed it. Kept nullable on the wire for\nforward-compatibility, but currently always present."
               }
             }
           }
@@ -1123,7 +1197,7 @@
                     "boolean",
                     "null"
                   ],
-                  "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`). `null` until the derivation lands (a later subphase) — a real\n`false` would wrongly read as \"known unverified\", so we expose \"unknown\"\nas absence rather than a misleading boolean."
+                  "description": "Whether axon's own device is currently cross-signed (orthogonal to\n`state`), derived from the SDK and kept fresh by the verification watcher\n(ADR 0026): `false` for a fresh/unverified device, `true` once\n`recover`/`verify` has cross-signed it. Kept nullable on the wire for\nforward-compatibility, but currently always present."
                 }
               }
             }
@@ -1366,6 +1440,19 @@
           "key": {
             "type": "string",
             "description": "The reaction key — typically an emoji."
+          }
+        }
+      },
+      "RecoverRequest": {
+        "type": "object",
+        "description": "Request body for recovery-key key acquisition\n(`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery\nkey imports the account's megolm key backup + cross-signing keys, self-verifies\naxon's device, and unlocks stored UTDs. Like the login password it is a\ncrown-jewel secret: used once to recover and **never persisted** or echoed back.",
+        "required": [
+          "recovery_key"
+        ],
+        "properties": {
+          "recovery_key": {
+            "type": "string",
+            "description": "The account's Secure-Storage (4S) recovery key."
           }
         }
       },

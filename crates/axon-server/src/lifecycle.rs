@@ -6,7 +6,7 @@
 //! translation live here. `axon-api` and `axon-sync` never depend on each other.
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError};
+use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 use axon_sync::{AccountLifecycle as SyncLifecycle, LifecycleError};
 use uuid::Uuid;
 
@@ -36,10 +36,17 @@ fn map_login_err(err: LifecycleError) -> LoginError {
             LoginError::Internal
         }
         // Login never surfaces these — `NotFound` (it mints a row for a new
-        // identity) or `Provisioned` (a delete-only guard) — so treat them
-        // defensively as an internal error.
-        LifecycleError::NotFound(id) | LifecycleError::Provisioned(id) => {
+        // identity), `Provisioned` (a delete-only guard), or `NotActive` /
+        // `RecoveryFailed` (recover-only) — so treat them defensively as an
+        // internal error.
+        LifecycleError::NotFound(id)
+        | LifecycleError::Provisioned(id)
+        | LifecycleError::NotActive(id) => {
             tracing::error!(%id, "unexpected lifecycle error from account login");
+            LoginError::Internal
+        }
+        LifecycleError::RecoveryFailed(msg) => {
+            tracing::error!(error = %msg, "unexpected recovery error from account login");
             LoginError::Internal
         }
     }
@@ -106,6 +113,54 @@ fn map_delete_err(err: LifecycleError) -> DeleteError {
     }
 }
 
+/// Map a sync-layer lifecycle error onto the API-layer recover error: an unknown
+/// id → not found, a not-active / mid-teardown account → conflict, a bad/rotated
+/// recovery key → bad request, a store failure → a logged internal error.
+fn map_recover_err(err: LifecycleError) -> RecoverError {
+    match err {
+        LifecycleError::NotFound(id) => RecoverError::NotFound(format!("account {id} not found")),
+        // Logged out: there is no live session to recover against. Reversible —
+        // the client should log in first, then recover.
+        LifecycleError::NotActive(id) => RecoverError::Conflict(format!(
+            "account {id} is not active; log in before recovering"
+        )),
+        LifecycleError::BeingDeleted(id) => {
+            RecoverError::Conflict(format!("account is being deleted: {id}"))
+        }
+        // A previous task for this identity hasn't terminated; its store dir/client
+        // can't be relied on. Transient — a logout retry reaps it.
+        LifecycleError::Draining(id) => RecoverError::Conflict(format!(
+            "the session for account {id} is still shutting down; retry shortly"
+        )),
+        // The only client-actionable recovery failure: a wrong/rotated key, or no
+        // Secure Backup on the account (a readable 400, never a silent permanent
+        // UTD). The sync layer already replaces the SDK's text with a stable message
+        // here, so nothing secret-storage-internal leaks.
+        LifecycleError::RecoveryFailed(msg) => RecoverError::BadRequest(msg),
+        // The live client couldn't be reached, or the SDK failed the import for a
+        // reason the caller can't fix by changing the key (a non-secret-storage
+        // `RecoveryError`). Not the caller's fault → a generic 500, detail logged
+        // server-side rather than returned. (A 502 would arguably fit a transient
+        // homeserver failure, but the SDK's opaque `Sdk` variant doesn't cleanly
+        // separate transient-upstream from internal, so we stay conservative.)
+        LifecycleError::Upstream(msg) => {
+            tracing::error!(error = %msg, "upstream/internal error during account recover");
+            RecoverError::Internal
+        }
+        LifecycleError::Store(msg) => {
+            tracing::error!(error = %msg, "store error during account recover");
+            RecoverError::Internal
+        }
+        // Recover takes only an account id + recovery key; a bad MXID, rejected
+        // credential, or the delete-only provisioned guard can't arise. Treat them
+        // defensively as an internal error.
+        other => {
+            tracing::error!(error = %other, "unexpected error during account recover");
+            RecoverError::Internal
+        }
+    }
+}
+
 #[async_trait]
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
@@ -126,5 +181,12 @@ impl AccountLifecycle for LifecycleAdapter {
 
     async fn delete(&self, account_id: Uuid) -> Result<(), DeleteError> {
         self.0.delete(account_id).await.map_err(map_delete_err)
+    }
+
+    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError> {
+        self.0
+            .recover(account_id, recovery_key)
+            .await
+            .map_err(map_recover_err)
     }
 }

@@ -21,7 +21,10 @@ use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use common::{DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, StubLifecycle, StubSender};
+use common::{
+    DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, RecoverOutcome, StubLifecycle,
+    StubSender,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -280,8 +283,10 @@ async fn accounts_read_api() {
 
     let active_row = find(active.account_id).expect("active listed");
     assert_eq!(active_row["state"], "active");
-    // `verified` is `null` (unknown) until derivation lands, not a bare `false`.
-    assert!(active_row["verified"].is_null());
+    // `verified` now surfaces the persisted column (ADR 0026): a freshly upserted
+    // account is unverified until a recover/verify derives otherwise, so it reads
+    // a concrete `false` rather than the old always-`null` stub.
+    assert_eq!(active_row["verified"], false);
     assert_eq!(active_row["user_id"], active_user);
     assert_eq!(active_row["homeserver_url"], hs);
     // The token is never exposed, under any key.
@@ -802,6 +807,154 @@ async fn delete_error_maps_to_status() {
             Arc::new(StubLifecycle::delete_failing(outcome)),
         );
         let (status, err) = delete_account(&app, loopback, id).await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+/// `POST /v1/accounts/{account_id}/recover` with an optional peer address and a
+/// JSON body. Returns `(status, body)`.
+async fn post_recover(
+    app: &axum::Router,
+    peer: Option<SocketAddr>,
+    account_id: Uuid,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/accounts/{account_id}/recover"))
+        .header("content-type", "application/json");
+    if let Some(addr) = peer {
+        builder = builder.extension(ConnectInfo(addr));
+    }
+    let req = builder.body(Body::from(body.to_string())).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body")
+    };
+    (status, json)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn recover_succeeds_and_envelopes_account_with_verified() {
+    let store = store().await;
+    let pool = store.pool().clone();
+
+    // Seed the account `active` (recover requires it) and mark it verified to
+    // mirror the post-recover row the handler reads back — the stubbed port
+    // doesn't touch the DB, so the real cross-signing + flag write are covered by
+    // the axon-sync lifecycle tests; here we assert the read-back is enveloped.
+    let hs = "https://hs.example.org";
+    let user = format!("@recover-{}:localhost", Uuid::new_v4());
+    let account = store.upsert_account(&user, hs).await.expect("seed");
+    store
+        .set_account_verified(account.account_id, true)
+        .await
+        .expect("verify");
+
+    let stub = Arc::new(StubLifecycle::ok(account.account_id));
+    let app = login_app(store.clone(), stub.clone());
+
+    let loopback = Some("127.0.0.1:54500".parse().unwrap());
+    let body = json!({ "recovery_key": "EsTc SomeRecoveryKey" });
+    let (status, resp) = post_recover(&app, loopback, account.account_id, body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["data"]["account_id"], account.account_id.to_string());
+    assert_eq!(resp["data"]["verified"], true);
+    // The handler forwarded the id + recovery key straight to the port.
+    assert_eq!(
+        stub.recover_calls(),
+        vec![(account.account_id, "EsTc SomeRecoveryKey".to_string())]
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account.account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn recover_requires_loopback_peer() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+    let body = json!({ "recovery_key": "k" });
+
+    // Non-loopback and missing-peer both fail closed before the handler runs.
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = post_recover(&app, off_box, Uuid::new_v4(), body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+
+    let (status, _) = post_recover(&app, None, Uuid::new_v4(), body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The guard short-circuited: the lifecycle port was never invoked.
+    assert!(stub.recover_calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn recover_malformed_body_is_enveloped_400_and_skips_port() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = login_app(store, stub.clone());
+
+    // A loopback peer so the request reaches body decoding (missing
+    // `recovery_key`), proving the 400 is decode-side, not the guard.
+    let loopback = Some("127.0.0.1:13500".parse().unwrap());
+    let (status, _) = post_recover(&app, loopback, Uuid::new_v4(), json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(stub.recover_calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn recover_error_maps_to_status() {
+    let store = store().await;
+    let loopback: Option<SocketAddr> = Some("127.0.0.1:14300".parse().unwrap());
+    let id = Uuid::new_v4();
+    let body = json!({ "recovery_key": "k" });
+
+    let cases = [
+        (
+            RecoverOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            RecoverOutcome::Conflict("not active".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            RecoverOutcome::BadRequest("bad key".into()),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            RecoverOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = login_app(
+            store.clone(),
+            Arc::new(StubLifecycle::recover_failing(outcome)),
+        );
+        let (status, err) = post_recover(&app, loopback, id, body.clone()).await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }

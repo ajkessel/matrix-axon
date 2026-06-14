@@ -70,6 +70,24 @@ pub enum DeleteError {
     Internal,
 }
 
+/// What can go wrong acquiring keys from a recovery key. Like the others, small
+/// and HTTP-shaped; the adapter collapses its backend error into one of these.
+#[derive(Debug)]
+pub enum RecoverError {
+    /// No account exists for the given id. → `404`.
+    NotFound(String),
+    /// The account can't be recovered right now: it is logged out
+    /// (`deactivated` — log in first) or mid-teardown (`deleting`). → `409`.
+    Conflict(String),
+    /// The recovery key was wrong/rotated, or the account never set up Secure
+    /// Backup, so key import failed. A client error, not an internal one — and
+    /// never a silent permanent UTD. → `400`.
+    BadRequest(String),
+    /// An internal failure (e.g. the store, or the live client could not be
+    /// reached). The detail is logged, not returned. → `500`.
+    Internal,
+}
+
 /// Adds, reactivates, stops, or removes a Matrix account at runtime. Implemented
 /// outside this crate; held in [`AppState`](crate::AppState) as
 /// `Arc<dyn AccountLifecycle>`.
@@ -95,6 +113,15 @@ pub trait AccountLifecycle: Send + Sync {
     /// all of its data so a later [`login`](Self::login) reactivates it. Idempotent
     /// — logging out an already-logged-out account succeeds.
     async fn logout(&self, account_id: Uuid) -> Result<(), LogoutError>;
+
+    /// Acquire E2EE keys for the **active** account `account_id` from its
+    /// Secure-Storage (4S) `recovery_key`: import the megolm key backup +
+    /// cross-signing keys (self-verifying axon's device) and back-fill any stored
+    /// UTDs the keys now unlock. The `recovery_key` is consumed once and never
+    /// persisted. A logged-out (`deactivated`) or mid-teardown (`deleting`) account
+    /// is a [`Conflict`](RecoverError::Conflict); a wrong/rotated key (or no Secure
+    /// Backup) is a [`BadRequest`](RecoverError::BadRequest).
+    async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError>;
 
     /// Permanently delete the account `account_id` and every trace of it — an
     /// ordered, crash-recoverable teardown (the Postgres archive via cascade, the

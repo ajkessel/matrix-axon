@@ -12,7 +12,7 @@
 //! - [`run`] subscribes to the SDK's `room_keys_received_stream`: every batch of
 //!   arriving keys names a `(room_id, session_id)`, and we drain exactly the
 //!   pending rows waiting on that session.
-//! - [`sweep_pending`] runs once at startup, retrying the whole backlog — keys
+//! - [`sweep_pending_utds`] runs once at startup, retrying the whole backlog — keys
 //!   may already sit in the crypto store from a prior run or a just-completed
 //!   `recover()`, with no fresh arrival event to react to.
 //!
@@ -117,7 +117,7 @@ pub(crate) async fn run(client: Client, store: Store, account_id: Uuid, cancel: 
 /// One startup pass over every pending UTD for the account. Keys already in the
 /// crypto store (from a prior run or a just-finished `recover()`) won't fire the
 /// arrival stream, so we retry the full backlog once at boot.
-pub(crate) async fn sweep_pending(client: &Client, store: &Store, account_id: Uuid) {
+pub(crate) async fn sweep_pending_utds(client: &Client, store: &Store, account_id: Uuid) {
     let rows = match store.pending_utds_for_account(account_id).await {
         Ok(rows) => rows,
         Err(err) => {
