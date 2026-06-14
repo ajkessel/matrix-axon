@@ -574,7 +574,11 @@ impl EventDto {
         if !is_image {
             return None;
         }
-        let url = content.get("url").and_then(|v| v.as_str())?;
+        // Plain media has `content.url`; encrypted media has `content.file.url`.
+        let url = content
+            .get("url")
+            .and_then(|v| v.as_str())
+            .or_else(|| content.get("file")?.get("url")?.as_str())?;
         if !url.starts_with("mxc://") {
             return None;
         }
