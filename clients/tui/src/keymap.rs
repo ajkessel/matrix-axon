@@ -456,12 +456,6 @@ impl App {
             self.send_edit(&event_id, &input).await;
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_input_and_selection();
-        } else if self.shortcuts.edit_previous.matches(key) {
-            self.dismiss_input_help();
-            self.edit_previous();
-        } else if self.shortcuts.edit_next.matches(key) {
-            self.dismiss_input_help();
-            self.edit_next();
         } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
             self.clear_input_buffer();
         } else if let KeyCode::Char(ch) = key.code {

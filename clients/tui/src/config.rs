@@ -38,8 +38,6 @@ cursor_start = "ctrl-a"
 cursor_end = "ctrl-e"
 cursor_left = "left"
 cursor_right = "right"
-edit_previous = "up"
-edit_next = "down"
 message_down = "ctrl-j"
 message_up = "ctrl-k"
 message_page_up = "pageup"
@@ -246,8 +244,6 @@ pub struct Shortcuts {
     pub cursor_end: KeyBinding,
     pub cursor_left: KeyBinding,
     pub cursor_right: KeyBinding,
-    pub edit_previous: KeyBinding,
-    pub edit_next: KeyBinding,
     pub message_down: KeyBinding,
     pub message_up: KeyBinding,
     pub message_page_up: KeyBinding,
@@ -397,8 +393,6 @@ impl RawConfig {
                 cursor_end: "ctrl-e".to_owned(),
                 cursor_left: "left".to_owned(),
                 cursor_right: "right".to_owned(),
-                edit_previous: "up".to_owned(),
-                edit_next: "down".to_owned(),
                 message_down: "ctrl-j".to_owned(),
                 message_up: "ctrl-k".to_owned(),
                 message_page_up: "pageup".to_owned(),
@@ -573,8 +567,6 @@ cursor_start = "{cursor_start}"
 cursor_end = "{cursor_end}"
 cursor_left = "{cursor_left}"
 cursor_right = "{cursor_right}"
-edit_previous = "{edit_previous}"
-edit_next = "{edit_next}"
 message_down = "{message_down}"
 message_up = "{message_up}"
 message_page_up = "{message_page_up}"
@@ -689,8 +681,6 @@ search_wrap = {search_wrap}
             cursor_end = self.shortcuts.cursor_end,
             cursor_left = self.shortcuts.cursor_left,
             cursor_right = self.shortcuts.cursor_right,
-            edit_previous = self.shortcuts.edit_previous,
-            edit_next = self.shortcuts.edit_next,
             message_down = self.shortcuts.message_down,
             message_up = self.shortcuts.message_up,
             message_page_up = self.shortcuts.message_page_up,
@@ -936,8 +926,6 @@ struct RawShortcuts {
     cursor_end: String,
     cursor_left: String,
     cursor_right: String,
-    edit_previous: String,
-    edit_next: String,
     message_down: String,
     message_up: String,
     message_page_up: String,
@@ -1048,8 +1036,6 @@ impl RawShortcuts {
             cursor_end: parse_key_binding("shortcuts.cursor_end", &self.cursor_end)?,
             cursor_left: parse_key_binding("shortcuts.cursor_left", &self.cursor_left)?,
             cursor_right: parse_key_binding("shortcuts.cursor_right", &self.cursor_right)?,
-            edit_previous: parse_key_binding("shortcuts.edit_previous", &self.edit_previous)?,
-            edit_next: parse_key_binding("shortcuts.edit_next", &self.edit_next)?,
             message_down: parse_key_binding("shortcuts.message_down", &self.message_down)?,
             message_up: parse_key_binding("shortcuts.message_up", &self.message_up)?,
             message_page_up: parse_key_binding("shortcuts.message_page_up", &self.message_page_up)?,
@@ -1098,10 +1084,6 @@ struct PartialRawShortcuts {
     cursor_end: Option<String>,
     cursor_left: Option<String>,
     cursor_right: Option<String>,
-    #[serde(alias = "history_previous")]
-    edit_previous: Option<String>,
-    #[serde(alias = "history_next")]
-    edit_next: Option<String>,
     message_down: Option<String>,
     message_up: Option<String>,
     message_page_up: Option<String>,
@@ -1585,7 +1567,6 @@ bearer_token = "secret-token"
             .matches(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
         let repaired = fs::read_to_string(&path).expect("read repaired config");
         assert!(repaired.contains("cursor_start = \"ctrl-a\""));
-        assert!(repaired.contains("edit_next = \"down\""));
         assert!(repaired.contains("message_down = \"ctrl-j\""));
         assert!(repaired.contains("message_page_up = \"pageup\""));
         assert!(repaired.contains("thread = \"t\""));

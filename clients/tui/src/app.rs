@@ -390,7 +390,7 @@ impl App {
             lifecycle_busy: false,
             image_cache: HashMap::new(),
             image_tx: None,
-            picker: Picker::halfblocks(),
+            picker: Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
             redraw_requested: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
