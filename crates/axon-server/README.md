@@ -14,7 +14,8 @@ Entry point for the `axon` binary. Reads config, initializes all subsystems (`ax
 ## Notes
 
 - Boot sequence: load `Config` → init `tracing` (honors `RUST_LOG`, else
-  `log.level`) → `Store::connect` (runs migrations) → build `axon_api::router`
+  the full `tracing_subscriber::EnvFilter` directive in `log.level`) →
+  `Store::connect` (runs migrations) → build `axon_api::router`
   → bind + `axum::serve` with graceful shutdown on Ctrl-C / SIGTERM.
 
 ## Status

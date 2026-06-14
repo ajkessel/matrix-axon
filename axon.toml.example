@@ -19,8 +19,9 @@ url = "postgres://axon:axon@127.0.0.1:5432/axon"
 max_connections = 5
 
 [log]
-# tracing filter directive. Overridden by RUST_LOG when set.
-level = "info"
+# Full tracing EnvFilter directive. The global level remains `info`, while the
+# noisy missing-backup-key warning is suppressed. Overridden by RUST_LOG.
+level = "info,matrix_sdk_crypto::backups=error"
 
 [sync]
 # Directory for the matrix-rust-sdk state + crypto stores (one subdir per
