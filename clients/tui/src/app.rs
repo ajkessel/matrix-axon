@@ -30,8 +30,8 @@ mod timeline;
 
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
-    display_body_with_sender, format_time, message_display_lines, message_index_at_line,
-    message_line_ranges, IMAGE_THUMB_ROWS,
+    display_body_with_sender, format_time, image_body_row_count, message_display_lines,
+    message_index_at_line, message_line_ranges, ImageCardRows, IMAGE_CARD_ROWS, IMAGE_THUMB_ROWS,
 };
 pub(crate) use rooms::account_localpart;
 #[cfg(test)]
@@ -2058,6 +2058,7 @@ mod tests {
             80,
             &HashMap::new(),
             &own_senders,
+            &ImageCardRows::new(),
         );
 
         assert_eq!(lines[0].spans[2].style.fg, Some(colors.own_message_sender));
@@ -2222,6 +2223,7 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
+            &ImageCardRows::new(),
         );
 
         assert!(lines[0].spans.iter().any(|span| {
@@ -2264,6 +2266,7 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
+            &ImageCardRows::new(),
         );
 
         let text = lines[0]
@@ -2694,7 +2697,7 @@ mod tests {
             ],
         );
 
-        // Up from no selection: jump to the last message and enter MessageList mode
+        // Up from no selection: select the last message; switches to MessageList, input untouched
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
         assert_eq!(app.input.buffer, "");
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));

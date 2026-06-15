@@ -631,6 +631,31 @@ impl EventDto {
         Some((self.account_id, url.to_owned()))
     }
 
+    /// Returns the filename for an image/sticker event (the `filename` field if
+    /// present, otherwise `body`). Returns `None` for non-image events.
+    pub fn image_filename(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+        self.image_mxc()?;
+        let explicit_filename = content.get("filename").and_then(|v| v.as_str());
+        let body_text = content.get("body").and_then(|v| v.as_str());
+        Some(explicit_filename.or(body_text).unwrap_or("media").to_owned())
+    }
+
+    /// Returns the user-authored caption for an image/sticker event — present
+    /// only when `filename` and `body` are both set and differ. Returns `None`
+    /// for non-image events or images without a caption.
+    pub fn image_caption(&self) -> Option<String> {
+        let content = self.content.as_ref()?;
+        self.image_mxc()?;
+        let explicit_filename = content.get("filename").and_then(|v| v.as_str())?;
+        let body_text = content.get("body").and_then(|v| v.as_str())?;
+        if body_text != explicit_filename {
+            Some(body_text.to_owned())
+        } else {
+            None
+        }
+    }
+
     pub fn formatted_body(&self) -> Option<&str> {
         let content = self.content.as_ref()?;
         (content.get("format")?.as_str()? == "org.matrix.custom.html")

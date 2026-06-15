@@ -11,6 +11,12 @@ use crate::config::ColorScheme;
 use crate::html::formatted_message_body_lines;
 use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
 
+/// Map from `(account_id, mxc_url)` to the total display rows allocated for
+/// that image card (1 sender row + N thumbnail rows). Entries are only present
+/// when the image is already in the cache and its natural size is smaller than
+/// `IMAGE_CARD_ROWS`; absent entries default to `IMAGE_CARD_ROWS`.
+pub(crate) type ImageCardRows = HashMap<(Uuid, String), usize>;
+
 /// Rows reserved in the message list for image/sticker events so the inline
 /// thumbnail has enough vertical space to be legible.
 pub(crate) const IMAGE_THUMB_ROWS: usize = 6;
@@ -41,6 +47,7 @@ pub(crate) fn message_line_ranges(
     width: usize,
     reactions: &HashMap<String, Vec<(String, usize)>>,
     colors: &ColorScheme,
+    image_card_rows: &ImageCardRows,
 ) -> Vec<Range<usize>> {
     let empty = vec![];
     let mut start = 0;
@@ -52,8 +59,14 @@ pub(crate) fn message_line_ranges(
                 .get(&event.event_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&empty);
-            let count =
-                message_display_line_count(event, sender_label, width, event_reactions, colors);
+            let count = message_display_line_count(
+                event,
+                sender_label,
+                width,
+                event_reactions,
+                colors,
+                image_card_rows,
+            );
             let range = start..start + count;
             start += count;
             range
@@ -74,9 +87,12 @@ fn message_display_line_count(
     width: usize,
     event_reactions: &[(String, usize)],
     colors: &ColorScheme,
+    image_card_rows: &ImageCardRows,
 ) -> usize {
-    let body_lines = if event.image_mxc().is_some() {
-        IMAGE_CARD_ROWS
+    let body_lines = if let Some((account_id, mxc_url)) = event.image_mxc() {
+        *image_card_rows
+            .get(&(account_id, mxc_url))
+            .unwrap_or(&IMAGE_CARD_ROWS)
     } else {
         message_body_lines(
             event,
@@ -99,6 +115,7 @@ pub(crate) fn message_display_lines(
     width: usize,
     reactions: &HashMap<String, Vec<(String, usize)>>,
     own_senders: &HashMap<Uuid, String>,
+    image_card_rows: &ImageCardRows,
 ) -> Vec<Line<'static>> {
     let reaction_style = Style::default().fg(colors.input_hint);
     events
@@ -128,8 +145,11 @@ pub(crate) fn message_display_lines(
             // Keep the media label on the first row and reserve dedicated rows
             // below it. The thumbnail never overlays sender, timestamp, or
             // caption text.
-            if event.image_mxc().is_some() {
-                body_lines.resize_with(IMAGE_CARD_ROWS, Vec::new);
+            if let Some((account_id, mxc_url)) = event.image_mxc() {
+                let card_rows = *image_card_rows
+                    .get(&(account_id, mxc_url))
+                    .unwrap_or(&IMAGE_CARD_ROWS);
+                body_lines.resize_with(card_rows, Vec::new);
             }
             let event_reactions = reactions.get(&event.event_id).cloned().unwrap_or_default();
             let reaction_line = if event_reactions.is_empty() {
@@ -215,6 +235,26 @@ fn message_body_lines(
         first_width,
         continuation_width,
     ))
+}
+
+/// Number of rendered body lines for an image event (label + any caption
+/// lines). This is the row offset from the sender line to where the inline
+/// thumbnail starts.
+pub(crate) fn image_body_row_count(
+    event: &EventDto,
+    sender_label: &str,
+    width: usize,
+    colors: &ColorScheme,
+) -> usize {
+    message_body_lines(
+        event,
+        sender_label,
+        first_body_width(sender_label, event.origin_ts, width),
+        continuation_body_width(width),
+        colors,
+    )
+    .len()
+    .max(1)
 }
 
 fn continuation_body_width(width: usize) -> usize {
