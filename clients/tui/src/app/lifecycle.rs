@@ -1058,6 +1058,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
 
         app.handle_lifecycle_outcome(LifecycleOutcome::Recover {

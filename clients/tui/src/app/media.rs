@@ -10,9 +10,10 @@ use uuid::Uuid;
 
 use crate::api::AxonClient;
 
-/// The result of one background image download: the MXC URL that was fetched
-/// (used as the cache key) and either the raw bytes or an error string.
-pub(crate) type ImageFetchResult = (String, Result<Vec<u8>, String>);
+/// The result of one background image download: the MXC URL (cache key),
+/// whether the source event used encrypted media (`content.file`), and either
+/// the raw bytes or an error string.
+pub(crate) type ImageFetchResult = (String, bool, Result<Vec<u8>, String>);
 
 /// State of a single cached image.
 pub(crate) enum ImageState {
@@ -25,12 +26,14 @@ pub(crate) enum ImageState {
 }
 
 /// Spawn a tokio task that downloads `mxc_url` and sends the result on `tx`.
-/// The task runs on the existing `tokio::Runtime`; the channel is typically the
-/// one owned by the main event loop so results are polled alongside key events.
+/// `is_encrypted` indicates the URL came from `content.file` (encrypted event);
+/// it is forwarded unchanged so the result handler can give a better error when
+/// the server returns raw ciphertext instead of a decoded image.
 pub(crate) fn spawn_image_fetch(
     client: AxonClient,
     account_id: Uuid,
     mxc_url: String,
+    is_encrypted: bool,
     tx: mpsc::UnboundedSender<ImageFetchResult>,
 ) {
     tokio::spawn(async move {
@@ -38,6 +41,6 @@ pub(crate) fn spawn_image_fetch(
             .get_media(account_id, &mxc_url)
             .await
             .map_err(|e| e.to_string());
-        let _ = tx.send((mxc_url, result));
+        let _ = tx.send((mxc_url, is_encrypted, result));
     });
 }

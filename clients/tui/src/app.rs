@@ -1,4 +1,6 @@
+use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
+use ratatui_image::protocol::Protocol;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -26,7 +28,7 @@ mod timeline;
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
     display_body_with_sender, format_time, message_display_lines, message_index_at_line,
-    message_line_ranges,
+    message_line_ranges, IMAGE_THUMB_ROWS,
 };
 pub(crate) use rooms::account_localpart;
 #[cfg(test)]
@@ -277,6 +279,11 @@ pub(crate) struct App {
     /// the terminal supports them (future work). Used by the render layer to
     /// encode decoded images into the right wire format each frame.
     pub(crate) picker: Picker,
+    /// Cache of encoded image protocols keyed by (mxc_url, display_size).
+    /// Avoids re-encoding (expensive resize + encode) on every frame.
+    /// Entries are lazily populated and naturally invalidated on resize
+    /// because the Size component of the key changes.
+    pub(crate) proto_cache: HashMap<(String, Size), Protocol>,
 }
 
 #[derive(Default)]
@@ -359,7 +366,12 @@ pub(crate) struct LiveState {
 }
 
 impl App {
-    pub(crate) fn new(client: AxonClient, account_filter: Option<Uuid>, config: TuiConfig) -> Self {
+    pub(crate) fn new(
+        client: AxonClient,
+        account_filter: Option<Uuid>,
+        config: TuiConfig,
+        picker: Picker,
+    ) -> Self {
         let config_status = if config.created_default {
             format!("created default config at {}", config.path.display())
         } else {
@@ -390,7 +402,8 @@ impl App {
             lifecycle_busy: false,
             image_cache: HashMap::new(),
             image_tx: None,
-            picker: Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
+            picker,
+            proto_cache: HashMap::new(),
             redraw_requested: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
@@ -412,7 +425,12 @@ impl App {
 
     /// Request a background download of `mxc_url` if it is not already cached
     /// or in flight. Does nothing if the image channel has not been wired up.
-    pub(crate) fn request_image(&mut self, account_id: uuid::Uuid, mxc_url: String) {
+    pub(crate) fn request_image(
+        &mut self,
+        account_id: uuid::Uuid,
+        mxc_url: String,
+        is_encrypted: bool,
+    ) {
         if self.image_cache.contains_key(&mxc_url) {
             return;
         }
@@ -421,17 +439,27 @@ impl App {
         };
         self.image_cache
             .insert(mxc_url.clone(), ImageState::Fetching);
-        media::spawn_image_fetch(self.client.clone(), account_id, mxc_url, tx);
+        media::spawn_image_fetch(self.client.clone(), account_id, mxc_url, is_encrypted, tx);
     }
 
     /// Handle the result of a completed image download: decode the bytes and
     /// store the image (or failure) in the cache, then request a redraw.
     pub(crate) fn handle_image_result(&mut self, result: ImageFetchResult) {
-        let (mxc_url, outcome) = result;
+        let (mxc_url, is_encrypted, outcome) = result;
         let state = match outcome {
             Ok(bytes) => match image::load_from_memory(&bytes) {
-                Ok(img) => ImageState::Ready(img),
-                Err(e) => ImageState::Failed(e.to_string()),
+                Ok(img) => ImageState::Ready(apply_exif_orientation(img, &bytes)),
+                Err(e) => {
+                    let fmt = sniff_format(&bytes);
+                    let msg = if is_encrypted && fmt.starts_with("unknown") {
+                        // High-entropy bytes from an encrypted event = the server
+                        // served raw ciphertext (key not available for this message).
+                        format!("encrypted media — server could not decrypt ({mxc_url})")
+                    } else {
+                        format!("{e} ({fmt}) — {mxc_url}")
+                    };
+                    ImageState::Failed(msg)
+                }
             },
             Err(e) => ImageState::Failed(e),
         };
@@ -1236,6 +1264,87 @@ pub(crate) fn match_status(match_num: usize, total: usize) -> Status {
     Status::from(format!("match {} of {}", match_num, total))
 }
 
+/// Apply the EXIF orientation tag to `img` so it displays upright, matching
+/// what other Matrix clients show. `load_from_memory` decodes raw pixels but
+/// ignores EXIF, so without this correction rotated JPEGs appear sideways.
+/// Returns `img` unchanged if EXIF is absent, unreadable, or already upright.
+fn apply_exif_orientation(img: image::DynamicImage, bytes: &[u8]) -> image::DynamicImage {
+    use std::io::Cursor;
+    let orientation = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()
+        .and_then(|exif| {
+            exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|f| f.value.get_uint(0))
+        })
+        .unwrap_or(1);
+
+    // EXIF orientation values 1–8; 1 = already upright.
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// Identify an image format from raw magic bytes without relying on the
+/// compiled-in feature set of the `image` crate. Returns a short description
+/// including a hex dump of the first bytes for truly unrecognised content.
+fn sniff_format(bytes: &[u8]) -> String {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return "JPEG".into();
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return "PNG".into();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "GIF".into();
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return "WebP".into();
+    }
+    if bytes.starts_with(b"BM") {
+        return "BMP".into();
+    }
+    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+        return "TIFF".into();
+    }
+    // ISO Base Media File Format container: AVIF, HEIC, HEIF, MP4, …
+    if bytes.get(4..8) == Some(b"ftyp") {
+        return match bytes.get(8..12) {
+            Some(b"avif") | Some(b"avis") => "AVIF".into(),
+            Some(b"heic") | Some(b"heis") | Some(b"heim") | Some(b"heix") => "HEIC".into(),
+            Some(b"mif1") | Some(b"msf1") => "HEIF".into(),
+            _ => "ISO BMFF (AVIF/HEIC/MP4/…)".into(),
+        };
+    }
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<SVG") {
+        return "SVG (not supported)".into();
+    }
+    if bytes.starts_with(b"\x00\x00\x01\x00") {
+        return "ICO".into();
+    }
+    // Not a recognised image format — could be a JSON/HTML error body served
+    // with a 2xx status. Show the first bytes so the cause is obvious.
+    let prefix: String = bytes
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let printable: String = bytes
+        .iter()
+        .take(16)
+        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+        .collect();
+    format!("unknown — first bytes: {prefix}  ({printable})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1315,6 +1424,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
         app.rooms.rooms = rooms;
         app.show_input_help = false;
@@ -1364,6 +1474,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             Some(filter_id),
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.set_accounts(vec![
@@ -3607,6 +3718,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         assert!(app.show_input_help);
@@ -3619,6 +3731,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('/'))).await;
@@ -3633,6 +3746,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))

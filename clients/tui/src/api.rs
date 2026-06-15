@@ -564,6 +564,25 @@ impl EventDto {
         }
     }
 
+    /// Returns `true` when this image/sticker event uses encrypted media
+    /// (`content.file.url`) rather than a plain `content.url`. The Axon media
+    /// proxy attempts server-side decryption, but may not have the key for
+    /// older messages — in that case it returns raw ciphertext.
+    pub fn image_is_encrypted(&self) -> bool {
+        let Some(content) = self.content.as_ref() else {
+            return false;
+        };
+        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
+        let is_image = matches!(msgtype, Some("m.image")) || self.event_type == "m.sticker";
+        is_image
+            && content.get("url").and_then(|v| v.as_str()).is_none()
+            && content
+                .get("file")
+                .and_then(|f| f.get("url"))
+                .and_then(|v| v.as_str())
+                .is_some()
+    }
+
     /// Extract the `mxc://` URI and account from an image or sticker event.
     /// Returns `(account_id, mxc_url)` when the event carries a downloadable
     /// image, `None` otherwise.
@@ -575,6 +594,8 @@ impl EventDto {
             return None;
         }
         // Plain media has `content.url`; encrypted media has `content.file.url`.
+        // The Axon media proxy handles decryption server-side, so both paths
+        // yield decodable image bytes.
         let url = content
             .get("url")
             .and_then(|v| v.as_str())

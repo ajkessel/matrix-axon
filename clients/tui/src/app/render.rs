@@ -11,6 +11,10 @@ use crate::config::ColorScheme;
 use crate::html::formatted_message_body_lines;
 use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
 
+/// Rows reserved in the message list for image/sticker events so the inline
+/// thumbnail has enough vertical space to be legible.
+pub(crate) const IMAGE_THUMB_ROWS: usize = 6;
+
 pub(crate) fn format_time(origin_ts: i64) -> String {
     let Ok(millis) = u64::try_from(origin_ts) else {
         return "--:--:--".to_owned();
@@ -70,15 +74,19 @@ fn message_display_line_count(
     event_reactions: &[(String, usize)],
     colors: &ColorScheme,
 ) -> usize {
-    let body_lines = message_body_lines(
-        event,
-        sender_label,
-        first_body_width(sender_label, event.origin_ts, width),
-        continuation_body_width(width),
-        colors,
-    )
-    .len()
-    .max(1);
+    let body_lines = if event.image_mxc().is_some() {
+        IMAGE_THUMB_ROWS
+    } else {
+        message_body_lines(
+            event,
+            sender_label,
+            first_body_width(sender_label, event.origin_ts, width),
+            continuation_body_width(width),
+            colors,
+        )
+        .len()
+        .max(1)
+    };
     body_lines + usize::from(!event_reactions.is_empty())
 }
 
@@ -109,13 +117,18 @@ pub(crate) fn message_display_lines(
             } else {
                 colors.message_sender
             };
-            let body_lines = message_body_lines(
+            let mut body_lines = message_body_lines(
                 event,
                 sender_label,
                 first_body_width(sender_label, event.origin_ts, width),
                 continuation_body_width(width),
                 colors,
             );
+            // Reserve IMAGE_THUMB_ROWS lines for image/sticker events so the
+            // inline thumbnail overlay has vertical space to render into.
+            if event.image_mxc().is_some() {
+                body_lines.resize_with(IMAGE_THUMB_ROWS, Vec::new);
+            }
             let event_reactions = reactions.get(&event.event_id).cloned().unwrap_or_default();
             let reaction_line = if event_reactions.is_empty() {
                 None

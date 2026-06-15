@@ -106,7 +106,7 @@ impl App {
                 // page so images are ready by the time the user scrolls to them.
                 for event in &page.events {
                     if let Some((account_id, mxc_url)) = event.image_mxc() {
-                        self.request_image(account_id, mxc_url);
+                        self.request_image(account_id, mxc_url, event.image_is_encrypted());
                     }
                 }
                 self.messages

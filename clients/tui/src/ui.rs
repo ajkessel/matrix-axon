@@ -10,7 +10,7 @@ use ratatui_image::{Image, Resize};
 use crate::api::RoomDto;
 use crate::app::{
     account_localpart, format_time, message_display_lines, message_line_ranges, AccountSelection,
-    App, ImageState, Mode, PopupKind, RoomKey, SearchKind,
+    App, ImageState, Mode, PopupKind, RoomKey, SearchKind, IMAGE_THUMB_ROWS,
 };
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
@@ -319,32 +319,46 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // Check whether the selected event has a cached image result. Clone the
     // owned values now so no borrow is held across the later &mut calls.
     // `Ok` = decoded image ready to render; `Err` = download/decode failed.
-    let image_preview: Option<Result<image::DynamicImage, String>> = {
-        let mxc = app.messages.selection.as_deref().and_then(|id| {
+    // Also retain the mxc URL for the protocol cache key.
+    let (image_preview_mxc, image_preview): (Option<String>, Option<Result<image::DynamicImage, String>>) = {
+        let mxc: Option<String> = app.messages.selection.as_deref().and_then(|id| {
             app.selected_events()
                 .into_iter()
                 .find(|e| e.event_id == id)
                 .and_then(|e| e.image_mxc())
                 .map(|(_, url)| url)
         });
-        mxc.as_deref()
+        let preview = mxc.as_deref()
             .and_then(|url| match app.image_cache.get(url) {
                 Some(ImageState::Ready(img)) => Some(Ok(img.clone())),
                 Some(ImageState::Failed(msg)) => Some(Err(msg.clone())),
                 _ => None,
-            })
+            });
+        (mxc, preview)
     };
 
-    // Reserve space at the bottom of the message pane for image preview when
-    // an image is available. 30% of the height, at least 6 rows, at most 24.
+    // Reserve space for the image preview pane.
+    // Wide screens (>= 120 cols): preview on the right, full height — doesn't
+    // shrink the vertical message area so no scroll adjustment is needed.
+    // Narrow screens: preview below, taking ~30% of height — the message area
+    // shrinks, so `ensure_selected_message_visible` corrects the scroll after
+    // `set_message_viewport` establishes the new (smaller) page size.
     let (messages_area, image_preview_area) = if image_preview.is_some() {
-        let total = messages_area.height;
-        let preview_h = (total / 3).clamp(6, 24);
-        let panes = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(preview_h)])
-            .split(messages_area);
-        (panes[0], Some(panes[1]))
+        if messages_area.width >= 120 {
+            let preview_w = (messages_area.width / 3).clamp(30, 60);
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(preview_w)])
+                .split(messages_area);
+            (panes[0], Some(panes[1]))
+        } else {
+            let preview_h = (messages_area.height / 3).clamp(6, 24);
+            let panes = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(preview_h)])
+                .split(messages_area);
+            (panes[0], Some(panes[1]))
+        }
     } else {
         (messages_area, None)
     };
@@ -353,6 +367,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
     let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
     app.set_message_viewport(message_page_size, message_width);
+    // If the preview pane shrank the message area (narrow-screen vertical split),
+    // re-anchor the scroll so the selected message stays visible.
+    if image_preview_area.is_some() {
+        app.ensure_selected_message_visible();
+    }
     let selected_events = app.selected_events();
     let sender_labels = selected_events
         .iter()
@@ -410,9 +429,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(messages, messages_area);
 
     // Inline thumbnails: for each visible image event that has a ready image,
-    // render a small thumbnail right-aligned within that event's row(s).
-    const THUMB_W: u16 = 12;
-    if messages_area.width > THUMB_W + 2 {
+    // render a thumbnail in the body content area (where "[image: ...]" appears),
+    // covering the IMAGE_THUMB_ROWS lines that were reserved for it.
+    //
+    // Geometry and proto-cache lookup are resolved in one pass so that the
+    // DynamicImage clone (expensive for large images) is skipped entirely when
+    // the encoded Protocol is already in proto_cache for the current display size.
+    {
         let ranges = message_line_ranges(
             selected_events.as_slice(),
             sender_labels.as_slice(),
@@ -420,43 +443,62 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             &reactions,
             &app.colors,
         );
-        // Collect thumbnail data (clone images) before the render loop so no
-        // borrow from image_cache overlaps with the picker borrow below.
-        let thumb_specs: Vec<(u16, u16, image::DynamicImage)> = selected_events
+        let inner_bottom = messages_area.y + messages_area.height.saturating_sub(1);
+        // Tuple: (rect, size, mxc_url, Option<DynamicImage>)
+        // img is None when the Protocol is already cached for (mxc, size).
+        let thumb_specs: Vec<(Rect, Size, String, Option<image::DynamicImage>)> = selected_events
             .iter()
             .enumerate()
             .filter_map(|(idx, event)| {
                 let (_, mxc) = event.image_mxc()?;
-                let img = match app.image_cache.get(&mxc) {
-                    Some(ImageState::Ready(img)) => img.clone(),
-                    _ => return None,
-                };
                 let range = &ranges[idx];
                 if range.end <= message_scroll || range.start >= message_scroll + message_page_size
                 {
                     return None;
                 }
+                // prefix = marker(2) + time(8) + space(1) + sender(N) + ": "(2)
+                let prefix_w = (13 + sender_labels[idx].chars().count()) as u16;
+                let body_w = (message_width as u16).saturating_sub(prefix_w);
+                if body_w < 4 {
+                    return None;
+                }
                 let vis_row = range.start.saturating_sub(message_scroll) as u16;
                 let height = (range.end - range.start) as u16;
-                Some((vis_row, height, img))
+                let thumb_y = messages_area.y + 1 + vis_row;
+                if thumb_y >= inner_bottom {
+                    return None;
+                }
+                let avail_h = inner_bottom - thumb_y;
+                let thumb_h = height.min(IMAGE_THUMB_ROWS as u16).min(avail_h);
+                if thumb_h == 0 {
+                    return None;
+                }
+                let size = Size::new(body_w, thumb_h);
+                let thumb_x = messages_area.x + 1 + prefix_w;
+                let rect = Rect::new(thumb_x, thumb_y, body_w, thumb_h);
+                // Only clone the raw image if not already encoded for this size.
+                let img = if app.proto_cache.contains_key(&(mxc.clone(), size)) {
+                    None
+                } else {
+                    match app.image_cache.get(&mxc) {
+                        Some(ImageState::Ready(img)) => Some(img.clone()),
+                        _ => return None,
+                    }
+                };
+                Some((rect, size, mxc, img))
             })
             .collect();
-        let inner_bottom = messages_area.y + messages_area.height.saturating_sub(1);
-        let thumb_x = messages_area.x + messages_area.width.saturating_sub(THUMB_W + 1);
-        for (vis_row, height, img) in thumb_specs {
-            let thumb_y = messages_area.y + 1 + vis_row;
-            if thumb_y >= inner_bottom {
-                continue;
+        // selected_events borrow ends here (last use above); proto_cache is now
+        // safe to borrow mutably.
+        for (rect, size, mxc, img) in thumb_specs {
+            let cache_key = (mxc, size);
+            if let Some(img) = img {
+                if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
+                    app.proto_cache.insert(cache_key.clone(), proto);
+                }
             }
-            let avail_h = inner_bottom - thumb_y;
-            let thumb_h = height.min(6).min(avail_h);
-            if thumb_h == 0 {
-                continue;
-            }
-            let rect = Rect::new(thumb_x, thumb_y, THUMB_W, thumb_h);
-            let size = Size::new(THUMB_W, thumb_h);
-            if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
-                frame.render_widget(Image::new(&proto), rect);
+            if let Some(proto) = app.proto_cache.get(&cache_key) {
+                frame.render_widget(Image::new(proto), rect);
             }
         }
     }
@@ -465,8 +507,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         match image_preview {
             Some(Ok(img)) => {
                 let size = Size::new(preview_area.width, preview_area.height);
-                if let Ok(protocol) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
-                    frame.render_widget(Image::new(&protocol), preview_area);
+                if let Some(mxc) = &image_preview_mxc {
+                    let cache_key = (mxc.clone(), size);
+                    if !app.proto_cache.contains_key(&cache_key) {
+                        if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
+                            app.proto_cache.insert(cache_key.clone(), proto);
+                        }
+                    }
+                    if let Some(proto) = app.proto_cache.get(&cache_key) {
+                        frame.render_widget(Image::new(proto), preview_area);
+                    }
                 }
             }
             Some(Err(msg)) => {
@@ -1270,6 +1320,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         let response =
             "This command response is long enough to wrap beyond the one-line entry box.";
@@ -1292,6 +1343,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         app.show_input_help = false;
         app.status = Status::Info("done".to_owned());
@@ -1312,6 +1364,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         app.show_input_help = false;
         app.input.buffer = "/recover alice".to_owned();
@@ -1384,6 +1437,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         let room = RoomDto {
             account_id: Uuid::nil(),

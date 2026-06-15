@@ -24,6 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 use tokio::time;
 use ui::draw;
@@ -69,8 +70,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Query the terminal for image protocol support before entering raw mode /
+    // alternate screen — from_query_stdio() temporarily enables raw mode itself
+    // and must not be called while it is already active.
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let mut terminal = TerminalGuard::enter()?;
-    let result = run_app(&mut terminal.terminal, client, args.account_id, config).await;
+    let result = run_app(&mut terminal.terminal, client, args.account_id, config, picker).await;
     terminal.leave()?;
     result
 }
@@ -80,6 +85,7 @@ async fn run_app(
     client: AxonClient,
     account_filter: Option<Uuid>,
     config: TuiConfig,
+    picker: Picker,
 ) -> anyhow::Result<()> {
     let (live_tx, mut live_rx) = mpsc::unbounded_channel();
     tokio::spawn(websocket_task(client.clone(), live_tx));
@@ -93,7 +99,7 @@ async fn run_app(
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
     let (image_tx, mut image_rx) = mpsc::unbounded_channel();
-    let mut app = App::new(client, account_filter, config);
+    let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_image_sender(image_tx);
     app.refresh_accounts().await;
