@@ -284,6 +284,9 @@ impl App {
         } else if self.shortcuts.unreact_message.matches(key) {
             self.dismiss_input_help();
             self.start_unreact_from_selected_message().await;
+        } else if self.shortcuts.media_preview.matches(key) {
+            self.dismiss_input_help();
+            self.open_selected_media_preview();
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_search_status();
             self.mode = Mode::Compose;

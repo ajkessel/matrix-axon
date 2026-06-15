@@ -25,6 +25,7 @@ const MESSAGE_MUTATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Recovery imports the megolm key backup and cross-signing keys, which can
 /// legitimately exceed 60 s on a real account.
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -224,8 +225,8 @@ impl AxonClient {
 
     /// Download media identified by an `mxc://` URI, routed through the Axon
     /// server's authenticated media proxy. The server name and media ID are
-    /// extracted from the URI and placed in the path; returns the raw bytes on
-    /// success.
+    /// extracted from the URI and placed in the path. Responses larger than
+    /// 20 MiB are refused so one event cannot exhaust the TUI's memory.
     pub async fn get_media(&self, account_id: Uuid, mxc_url: &str) -> Result<Vec<u8>, ApiError> {
         let rest = mxc_url
             .strip_prefix("mxc://")
@@ -233,6 +234,9 @@ impl AxonClient {
         let (server, media_id) = rest
             .split_once('/')
             .ok_or_else(|| ApiError::Url("malformed mxc:// URI".to_owned()))?;
+        if server.is_empty() || media_id.is_empty() {
+            return Err(ApiError::Url("malformed mxc:// URI".to_owned()));
+        }
         let request = self.http.get(format!(
             "{}/v1/media/{}/{}/{}",
             self.base_url,
@@ -243,7 +247,28 @@ impl AxonClient {
         let response = request.send().await?;
         let status = response.status();
         if status.is_success() {
-            Ok(response.bytes().await?.to_vec())
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_MEDIA_BYTES as u64)
+            {
+                return Err(ApiError::Url(format!(
+                    "media exceeds {} MiB limit",
+                    MAX_MEDIA_BYTES / 1024 / 1024
+                )));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if bytes.len().saturating_add(chunk.len()) > MAX_MEDIA_BYTES {
+                    return Err(ApiError::Url(format!(
+                        "media exceeds {} MiB limit",
+                        MAX_MEDIA_BYTES / 1024 / 1024
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
         } else {
             let text = response.text().await?;
             Err(ApiError::Status {
@@ -914,6 +939,20 @@ mod tests {
             path_segment("$event:local/host").to_string(),
             "%24event%3Alocal%2Fhost"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_mxc_server_or_media_id() {
+        let client = AxonClient::new("http://127.0.0.1:8080".to_owned());
+
+        assert!(matches!(
+            client.get_media(Uuid::nil(), "mxc:///media").await,
+            Err(ApiError::Url(_))
+        ));
+        assert!(matches!(
+            client.get_media(Uuid::nil(), "mxc://server/").await,
+            Err(ApiError::Url(_))
+        ));
     }
 
     #[test]

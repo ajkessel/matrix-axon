@@ -75,7 +75,14 @@ async fn main() -> anyhow::Result<()> {
     // and must not be called while it is already active.
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let mut terminal = TerminalGuard::enter()?;
-    let result = run_app(&mut terminal.terminal, client, args.account_id, config, picker).await;
+    let result = run_app(
+        &mut terminal.terminal,
+        client,
+        args.account_id,
+        config,
+        picker,
+    )
+    .await;
     terminal.leave()?;
     result
 }
@@ -98,10 +105,10 @@ async fn run_app(
     });
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
-    let (image_tx, mut image_rx) = mpsc::unbounded_channel();
+    let (media_tx, mut media_rx) = mpsc::channel(app::MEDIA_WORKERS * 2);
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
-    app.set_image_sender(image_tx);
+    app.set_media_sender(media_tx);
     app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
@@ -161,8 +168,8 @@ async fn run_app(
             Some(outcome) = lifecycle_rx.recv() => {
                 app.handle_lifecycle_outcome(outcome).await;
             }
-            Some(result) = image_rx.recv() => {
-                app.handle_image_result(result);
+            Some(result) = media_rx.recv() => {
+                app.handle_media_result(result);
             }
         }
     }

@@ -1,8 +1,8 @@
 use ratatui::layout::Size;
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::Protocol;
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -19,7 +19,10 @@ mod completion;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
-pub(crate) use media::{ImageFetchResult, ImageState};
+pub(crate) use media::{
+    ImageState, MediaKey, MediaResult, ProtocolKey, ProtocolState, IMAGE_CACHE_LIMIT,
+    MEDIA_WORKERS, PROTOCOL_CACHE_LIMIT,
+};
 mod reactions;
 mod render;
 mod rooms;
@@ -126,6 +129,7 @@ pub(crate) enum PopupKind {
     RoomInfo,
     Status,
     CommandResponse,
+    MediaPreview,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -267,23 +271,20 @@ pub(crate) struct App {
     pub(crate) edit_config_requested: bool,
     /// When true, the room list shows only rooms with unread messages.
     pub(crate) unread_filter: bool,
-    /// In-flight and decoded image cache, keyed by `mxc://` URL. Populated by
-    /// background tasks triggered whenever an image event becomes visible.
-    pub(crate) image_cache: HashMap<String, ImageState>,
-    /// Sender end of the channel the main loop listens on for completed image
-    /// downloads. `None` until `set_image_sender` is called (unit tests may
+    /// In-flight and decoded images, account-scoped and bounded by LRU order.
+    pub(crate) image_cache: HashMap<MediaKey, ImageState>,
+    image_cache_order: VecDeque<MediaKey>,
+    /// Sender end of the channel the main loop listens on for completed media
+    /// work. `None` until `set_media_sender` is called (unit tests may
     /// omit it).
-    pub(crate) image_tx: Option<mpsc::UnboundedSender<ImageFetchResult>>,
-    /// Terminal image protocol picker. Initialized to halfblocks (safe
-    /// universal fallback); upgraded to Kitty/Sixel/iTerm2 at startup when
-    /// the terminal supports them (future work). Used by the render layer to
-    /// encode decoded images into the right wire format each frame.
+    pub(crate) media_tx: Option<mpsc::Sender<MediaResult>>,
+    media_workers: Arc<Semaphore>,
+    /// Terminal image protocol picker, detected before raw mode with halfblocks
+    /// as the universal fallback.
     pub(crate) picker: Picker,
-    /// Cache of encoded image protocols keyed by (mxc_url, display_size).
-    /// Avoids re-encoding (expensive resize + encode) on every frame.
-    /// Entries are lazily populated and naturally invalidated on resize
-    /// because the Size component of the key changes.
-    pub(crate) proto_cache: HashMap<(String, Size), Protocol>,
+    /// Bounded cache of protocols encoded for a specific image and cell size.
+    pub(crate) proto_cache: HashMap<ProtocolKey, ProtocolState>,
+    proto_cache_order: VecDeque<ProtocolKey>,
 }
 
 #[derive(Default)]
@@ -401,9 +402,12 @@ impl App {
             lifecycle_tx: None,
             lifecycle_busy: false,
             image_cache: HashMap::new(),
-            image_tx: None,
+            image_cache_order: VecDeque::new(),
+            media_tx: None,
+            media_workers: Arc::new(Semaphore::new(MEDIA_WORKERS)),
             picker,
             proto_cache: HashMap::new(),
+            proto_cache_order: VecDeque::new(),
             redraw_requested: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
@@ -419,52 +423,109 @@ impl App {
     }
 
     /// Wire up the channel the main loop drains for completed image downloads.
-    pub(crate) fn set_image_sender(&mut self, tx: mpsc::UnboundedSender<ImageFetchResult>) {
-        self.image_tx = Some(tx);
+    pub(crate) fn set_media_sender(&mut self, tx: mpsc::Sender<MediaResult>) {
+        self.media_tx = Some(tx);
     }
 
     /// Request a background download of `mxc_url` if it is not already cached
     /// or in flight. Does nothing if the image channel has not been wired up.
-    pub(crate) fn request_image(
-        &mut self,
-        account_id: uuid::Uuid,
-        mxc_url: String,
-        is_encrypted: bool,
-    ) {
-        if self.image_cache.contains_key(&mxc_url) {
+    pub(crate) fn request_image(&mut self, account_id: Uuid, mxc_url: String, is_encrypted: bool) {
+        let key = MediaKey::new(account_id, mxc_url);
+        if self.image_cache.contains_key(&key) {
+            touch_lru(&mut self.image_cache_order, &key);
             return;
         }
-        let Some(tx) = self.image_tx.clone() else {
+        let Some(tx) = self.media_tx.clone() else {
             return;
         };
-        self.image_cache
-            .insert(mxc_url.clone(), ImageState::Fetching);
-        media::spawn_image_fetch(self.client.clone(), account_id, mxc_url, is_encrypted, tx);
+        if !evict_lru_where(
+            &mut self.image_cache,
+            &mut self.image_cache_order,
+            IMAGE_CACHE_LIMIT,
+            |state| !matches!(state, ImageState::Fetching),
+        ) {
+            return;
+        }
+        self.image_cache.insert(key.clone(), ImageState::Fetching);
+        touch_lru(&mut self.image_cache_order, &key);
+        media::spawn_image_fetch(
+            self.client.clone(),
+            key,
+            is_encrypted,
+            self.media_workers.clone(),
+            tx,
+        );
     }
 
-    /// Handle the result of a completed image download: decode the bytes and
-    /// store the image (or failure) in the cache, then request a redraw.
-    pub(crate) fn handle_image_result(&mut self, result: ImageFetchResult) {
-        let (mxc_url, is_encrypted, outcome) = result;
-        let state = match outcome {
-            Ok(bytes) => match image::load_from_memory(&bytes) {
-                Ok(img) => ImageState::Ready(apply_exif_orientation(img, &bytes)),
-                Err(e) => {
-                    let fmt = sniff_format(&bytes);
-                    let msg = if is_encrypted && fmt.starts_with("unknown") {
-                        // High-entropy bytes from an encrypted event = the server
-                        // served raw ciphertext (key not available for this message).
-                        format!("encrypted media — server could not decrypt ({mxc_url})")
-                    } else {
-                        format!("{e} ({fmt}) — {mxc_url}")
-                    };
-                    ImageState::Failed(msg)
-                }
-            },
-            Err(e) => ImageState::Failed(e),
+    pub(crate) fn request_protocol(&mut self, key: MediaKey, size: Size) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let protocol_key = ProtocolKey {
+            media: key.clone(),
+            size,
         };
-        self.image_cache.insert(mxc_url, state);
-        self.redraw_requested = true;
+        if self.proto_cache.contains_key(&protocol_key) {
+            touch_lru(&mut self.proto_cache_order, &protocol_key);
+            return;
+        }
+        let Some(ImageState::Ready(image)) = self.image_cache.get(&key) else {
+            return;
+        };
+        let Some(tx) = self.media_tx.clone() else {
+            return;
+        };
+        let image = Arc::clone(image);
+        if !evict_lru_where(
+            &mut self.proto_cache,
+            &mut self.proto_cache_order,
+            PROTOCOL_CACHE_LIMIT,
+            |state| !matches!(state, ProtocolState::Encoding),
+        ) {
+            return;
+        }
+        self.proto_cache
+            .insert(protocol_key.clone(), ProtocolState::Encoding);
+        touch_lru(&mut self.proto_cache_order, &protocol_key);
+        media::spawn_protocol_encode(
+            self.picker.clone(),
+            image,
+            protocol_key,
+            self.media_workers.clone(),
+            tx,
+        );
+    }
+
+    pub(crate) fn handle_media_result(&mut self, result: MediaResult) {
+        let updated = match result {
+            MediaResult::Image { key, outcome } => {
+                if !matches!(self.image_cache.get(&key), Some(ImageState::Fetching)) {
+                    return;
+                }
+                let state = match outcome {
+                    Ok(image) => ImageState::Ready(image),
+                    Err(error) => ImageState::Failed(error),
+                };
+                self.image_cache.insert(key.clone(), state);
+                touch_lru(&mut self.image_cache_order, &key);
+                true
+            }
+            MediaResult::Protocol { key, outcome } => {
+                if !matches!(self.proto_cache.get(&key), Some(ProtocolState::Encoding)) {
+                    return;
+                }
+                let state = match outcome {
+                    Ok(protocol) => ProtocolState::Ready(protocol),
+                    Err(error) => ProtocolState::Failed(error),
+                };
+                self.proto_cache.insert(key.clone(), state);
+                touch_lru(&mut self.proto_cache_order, &key);
+                true
+            }
+        };
+        if updated {
+            self.redraw_requested = true;
+        }
     }
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
@@ -940,6 +1001,20 @@ impl App {
         self.mode = Mode::Popup(kind);
     }
 
+    pub(crate) fn open_selected_media_preview(&mut self) {
+        let Some(event) = self.selected_message_event() else {
+            self.status = Status::Info("select an image message first".to_owned());
+            return;
+        };
+        let Some((account_id, mxc_url)) = event.image_mxc() else {
+            self.status = Status::Info("selected message has no image".to_owned());
+            return;
+        };
+        let encrypted = event.image_is_encrypted();
+        self.request_image(account_id, mxc_url, encrypted);
+        self.open_popup(PopupKind::MediaPreview);
+    }
+
     fn show_whereami(&mut self) {
         if self.selected_room().is_none() {
             self.status = Status::Info("select a room before using /whereami".to_owned());
@@ -1264,11 +1339,46 @@ pub(crate) fn match_status(match_num: usize, total: usize) -> Status {
     Status::from(format!("match {} of {}", match_num, total))
 }
 
+fn touch_lru<K: Clone + Eq>(order: &mut VecDeque<K>, key: &K) {
+    if let Some(index) = order.iter().position(|candidate| candidate == key) {
+        order.remove(index);
+    }
+    order.push_back(key.clone());
+}
+
+fn evict_lru_where<K, V>(
+    cache: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    limit: usize,
+    can_evict: impl Fn(&V) -> bool,
+) -> bool
+where
+    K: Clone + Eq + std::hash::Hash,
+{
+    if cache.len() < limit {
+        return true;
+    }
+    let Some(index) = order
+        .iter()
+        .position(|key| cache.get(key).is_some_and(&can_evict))
+    else {
+        return false;
+    };
+    let Some(oldest) = order.remove(index) else {
+        return false;
+    };
+    cache.remove(&oldest);
+    true
+}
+
 /// Apply the EXIF orientation tag to `img` so it displays upright, matching
 /// what other Matrix clients show. `load_from_memory` decodes raw pixels but
 /// ignores EXIF, so without this correction rotated JPEGs appear sideways.
 /// Returns `img` unchanged if EXIF is absent, unreadable, or already upright.
-fn apply_exif_orientation(img: image::DynamicImage, bytes: &[u8]) -> image::DynamicImage {
+pub(super) fn apply_exif_orientation(
+    img: image::DynamicImage,
+    bytes: &[u8],
+) -> image::DynamicImage {
     use std::io::Cursor;
     let orientation = exif::Reader::new()
         .read_from_container(&mut Cursor::new(bytes))
@@ -1295,7 +1405,7 @@ fn apply_exif_orientation(img: image::DynamicImage, bytes: &[u8]) -> image::Dyna
 /// Identify an image format from raw magic bytes without relying on the
 /// compiled-in feature set of the `image` crate. Returns a short description
 /// including a hex dump of the first bytes for truly unrecognised content.
-fn sniff_format(bytes: &[u8]) -> String {
+pub(super) fn sniff_format(bytes: &[u8]) -> String {
     if bytes.starts_with(b"\xFF\xD8\xFF") {
         return "JPEG".into();
     }
@@ -1340,7 +1450,13 @@ fn sniff_format(bytes: &[u8]) -> String {
     let printable: String = bytes
         .iter()
         .take(16)
-        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
         .collect();
     format!("unknown — first bytes: {prefix}  ({printable})")
 }
@@ -1443,6 +1559,35 @@ mod tests {
             state,
             verified: Some(false),
         }
+    }
+
+    #[test]
+    fn media_cache_keys_are_account_scoped() {
+        let url = "mxc://example.com/media".to_owned();
+
+        assert_ne!(
+            MediaKey::new(Uuid::from_u128(1), url.clone()),
+            MediaKey::new(Uuid::from_u128(2), url)
+        );
+    }
+
+    #[test]
+    fn bounded_cache_never_evicts_in_flight_work() {
+        let mut cache = HashMap::from([("ready".to_owned(), false), ("fetching".to_owned(), true)]);
+        let mut order = VecDeque::from(["ready".to_owned(), "fetching".to_owned()]);
+
+        assert!(evict_lru_where(&mut cache, &mut order, 2, |in_flight| {
+            !*in_flight
+        }));
+        assert!(!cache.contains_key("ready"));
+        assert!(cache.contains_key("fetching"));
+
+        cache.insert("encoding".to_owned(), true);
+        order.push_back("encoding".to_owned());
+        assert!(!evict_lru_where(&mut cache, &mut order, 2, |in_flight| {
+            !*in_flight
+        }));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
@@ -2582,6 +2727,32 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
         assert_eq!(app.input.buffer, "");
         assert!(matches!(app.mode, Mode::MessageList));
+    }
+
+    #[tokio::test]
+    async fn media_preview_hotkey_opens_popup_for_selected_image() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.selection = Some("$image:example.com".to_owned());
+        app.mode = Mode::MessageList;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$image:example.com",
+                "m.room.message",
+                Some("photo.jpg"),
+                serde_json::json!({
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://example.com/photo"
+                }),
+            )],
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v'))).await;
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::MediaPreview));
     }
 
     #[tokio::test]

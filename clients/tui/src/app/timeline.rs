@@ -93,10 +93,6 @@ impl App {
             {
                 return LiveFrameAction::None;
             }
-            // Kick off a background download for incoming image events.
-            if let Some((account_id, mxc_url)) = event.image_mxc() {
-                self.request_image(account_id, mxc_url, event.image_is_encrypted());
-            }
             self.messages
                 .events
                 .entry(key.clone())
@@ -195,7 +191,7 @@ impl App {
         self.messages.selection.as_deref()
     }
 
-    pub(super) fn selected_message_event(&self) -> Option<&EventDto> {
+    pub(crate) fn selected_message_event(&self) -> Option<&EventDto> {
         let selected_message = self.messages.selection.as_deref()?;
         self.selected_events()
             .into_iter()
@@ -336,20 +332,6 @@ impl App {
             scroll = range.start;
         }
         self.messages.scroll = scroll.min(max_scroll);
-    }
-
-    /// Scroll the message list so the currently selected message is visible.
-    /// Call this after `set_message_viewport` when the visible area may have shrunk
-    /// (e.g., the image preview pane appearing below the message list).
-    pub(crate) fn ensure_selected_message_visible(&mut self) {
-        let Some(selection) = self.messages.selection.clone() else {
-            return;
-        };
-        let events = self.selected_events();
-        let Some(index) = events.iter().position(|e| e.event_id == selection) else {
-            return;
-        };
-        self.ensure_message_index_visible(index);
     }
 
     pub(crate) async fn commit_room_search(&mut self, query: String) {

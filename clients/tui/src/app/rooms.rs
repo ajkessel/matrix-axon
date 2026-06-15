@@ -102,13 +102,6 @@ impl App {
                 apply_edits(&mut page.events);
                 let has_more = page.next_cursor.is_some();
                 self.rebuild_display_names(&room, &page.events);
-                // Kick off background downloads for any image events in this
-                // page so images are ready by the time the user scrolls to them.
-                for event in &page.events {
-                    if let Some((account_id, mxc_url)) = event.image_mxc() {
-                        self.request_image(account_id, mxc_url, event.image_is_encrypted());
-                    }
-                }
                 self.messages
                     .events
                     .insert(RoomKey::from(&room), page.events);

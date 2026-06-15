@@ -40,6 +40,7 @@ loopback default.
 - Multi-account panel and account filtering, with keyboard navigation and search across Accounts, Rooms, and Messages.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
+- Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
 
 ## Not Yet Implemented
 
@@ -122,6 +123,7 @@ When focus is on the **Room List** or **Message List**, the focused pane border 
 | `/` | Start a search; type a query and press `Enter`. |
 | `n` | Next search match (no wrap). |
 | `N` | Previous search match (no wrap). |
+| `v` | In Message List, open a larger preview of the selected image message. |
 | `Enter` or `Esc` | Return focus to Input. |
 
 When focus is on the **Input** pane:
@@ -179,6 +181,7 @@ cursor_left = "left"
 cursor_right = "right"
 edit_previous = "up"
 edit_next = "down"
+media_preview = "v"
 message_down = "ctrl-j"
 message_up = "ctrl-k"
 message_page_up = "pageup"
@@ -287,6 +290,23 @@ next launch.
 Whenever axon-tui rewrites the config, it preserves supported settings and
 comments. Unsupported options are retained as commented-out lines with an
 explanatory comment immediately above them instead of being deleted.
+
+## Media
+
+Image messages and stickers reserve a fixed six-row thumbnail card below their
+caption. The TUI renders a thumbnail only when that complete card is visible,
+so terminal graphics cannot overlap adjacent message text while scrolling.
+With Message List focused, select an image and press `v` (configurable as
+`shortcuts.media_preview`) to open a larger popup preview.
+
+Media is requested from Axon's account-scoped `/v1/media` proxy only when it is
+visible or explicitly previewed. Downloads, image decoding, EXIF orientation,
+resizing, and terminal-protocol encoding run as bounded background work so room
+navigation and input remain responsive. Decoded images are dimension-checked
+and downscaled before caching. The client keeps at most 16 decoded images and
+32 encoded terminal images, runs at most four media workers, and
+rejects media responses larger than 20 MiB. Kitty, Sixel, and iTerm2 are used
+when detected; half-block rendering is the portable fallback.
 
 ## Formatted Messages
 

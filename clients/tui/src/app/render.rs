@@ -14,6 +14,7 @@ use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
 /// Rows reserved in the message list for image/sticker events so the inline
 /// thumbnail has enough vertical space to be legible.
 pub(crate) const IMAGE_THUMB_ROWS: usize = 6;
+pub(crate) const IMAGE_CARD_ROWS: usize = IMAGE_THUMB_ROWS + 1;
 
 pub(crate) fn format_time(origin_ts: i64) -> String {
     let Ok(millis) = u64::try_from(origin_ts) else {
@@ -75,7 +76,7 @@ fn message_display_line_count(
     colors: &ColorScheme,
 ) -> usize {
     let body_lines = if event.image_mxc().is_some() {
-        IMAGE_THUMB_ROWS
+        IMAGE_CARD_ROWS
     } else {
         message_body_lines(
             event,
@@ -124,10 +125,11 @@ pub(crate) fn message_display_lines(
                 continuation_body_width(width),
                 colors,
             );
-            // Reserve IMAGE_THUMB_ROWS lines for image/sticker events so the
-            // inline thumbnail overlay has vertical space to render into.
+            // Keep the media label on the first row and reserve dedicated rows
+            // below it. The thumbnail never overlays sender, timestamp, or
+            // caption text.
             if event.image_mxc().is_some() {
-                body_lines.resize_with(IMAGE_THUMB_ROWS, Vec::new);
+                body_lines.resize_with(IMAGE_CARD_ROWS, Vec::new);
             }
             let event_reactions = reactions.get(&event.event_id).cloned().unwrap_or_default();
             let reaction_line = if event_reactions.is_empty() {

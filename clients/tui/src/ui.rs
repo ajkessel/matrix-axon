@@ -1,16 +1,18 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
-use ratatui_image::{Image, Resize};
+use ratatui_image::Image;
 
 use crate::api::RoomDto;
 use crate::app::{
     account_localpart, format_time, message_display_lines, message_line_ranges, AccountSelection,
-    App, ImageState, Mode, PopupKind, RoomKey, SearchKind, IMAGE_THUMB_ROWS,
+    App, ImageState, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
+    IMAGE_THUMB_ROWS,
 };
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
@@ -315,63 +317,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(rooms, rooms_area);
     }
 
-
-    // Check whether the selected event has a cached image result. Clone the
-    // owned values now so no borrow is held across the later &mut calls.
-    // `Ok` = decoded image ready to render; `Err` = download/decode failed.
-    // Also retain the mxc URL for the protocol cache key.
-    let (image_preview_mxc, image_preview): (Option<String>, Option<Result<image::DynamicImage, String>>) = {
-        let mxc: Option<String> = app.messages.selection.as_deref().and_then(|id| {
-            app.selected_events()
-                .into_iter()
-                .find(|e| e.event_id == id)
-                .and_then(|e| e.image_mxc())
-                .map(|(_, url)| url)
-        });
-        let preview = mxc.as_deref()
-            .and_then(|url| match app.image_cache.get(url) {
-                Some(ImageState::Ready(img)) => Some(Ok(img.clone())),
-                Some(ImageState::Failed(msg)) => Some(Err(msg.clone())),
-                _ => None,
-            });
-        (mxc, preview)
-    };
-
-    // Reserve space for the image preview pane.
-    // Wide screens (>= 120 cols): preview on the right, full height — doesn't
-    // shrink the vertical message area so no scroll adjustment is needed.
-    // Narrow screens: preview below, taking ~30% of height — the message area
-    // shrinks, so `ensure_selected_message_visible` corrects the scroll after
-    // `set_message_viewport` establishes the new (smaller) page size.
-    let (messages_area, image_preview_area) = if image_preview.is_some() {
-        if messages_area.width >= 120 {
-            let preview_w = (messages_area.width / 3).clamp(30, 60);
-            let panes = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(40), Constraint::Length(preview_w)])
-                .split(messages_area);
-            (panes[0], Some(panes[1]))
-        } else {
-            let preview_h = (messages_area.height / 3).clamp(6, 24);
-            let panes = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(preview_h)])
-                .split(messages_area);
-            (panes[0], Some(panes[1]))
-        }
-    } else {
-        (messages_area, None)
-    };
-
-
     let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
     let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
     app.set_message_viewport(message_page_size, message_width);
-    // If the preview pane shrank the message area (narrow-screen vertical split),
-    // re-anchor the scroll so the selected message stays visible.
-    if image_preview_area.is_some() {
-        app.ensure_selected_message_visible();
-    }
     let selected_events = app.selected_events();
     let sender_labels = selected_events
         .iter()
@@ -428,14 +376,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     );
     frame.render_widget(messages, messages_area);
 
-    // Inline thumbnails: for each visible image event that has a ready image,
-    // render a thumbnail in the body content area (where "[image: ...]" appears),
-    // covering the IMAGE_THUMB_ROWS lines that were reserved for it.
-    //
-    // Geometry and proto-cache lookup are resolved in one pass so that the
-    // DynamicImage clone (expensive for large images) is skipped entirely when
-    // the encoded Protocol is already in proto_cache for the current display size.
-    {
+    // Media cards keep their caption on the normal message row and reserve six
+    // rows immediately below it for the thumbnail. A graphic is rendered only
+    // when that complete reserved region is visible; partial scrolling therefore
+    // cannot paint outside the message's rows or cover adjacent text.
+    let (media_requests, thumb_specs) = {
         let ranges = message_line_ranges(
             selected_events.as_slice(),
             sender_labels.as_slice(),
@@ -443,88 +388,40 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             &reactions,
             &app.colors,
         );
-        let inner_bottom = messages_area.y + messages_area.height.saturating_sub(1);
-        // Tuple: (rect, size, mxc_url, Option<DynamicImage>)
-        // img is None when the Protocol is already cached for (mxc, size).
-        let thumb_specs: Vec<(Rect, Size, String, Option<image::DynamicImage>)> = selected_events
+        let visible_end = message_scroll.saturating_add(message_page_size);
+        let mut requests = Vec::new();
+        let specs: Vec<(Rect, Size, MediaKey)> = selected_events
             .iter()
             .enumerate()
             .filter_map(|(idx, event)| {
-                let (_, mxc) = event.image_mxc()?;
+                let (account_id, mxc_url) = event.image_mxc()?;
                 let range = &ranges[idx];
-                if range.end <= message_scroll || range.start >= message_scroll + message_page_size
-                {
+                if range.end <= message_scroll || range.start >= visible_end {
                     return None;
                 }
-                // prefix = marker(2) + time(8) + space(1) + sender(N) + ": "(2)
-                let prefix_w = (13 + sender_labels[idx].chars().count()) as u16;
-                let body_w = (message_width as u16).saturating_sub(prefix_w);
-                if body_w < 4 {
-                    return None;
-                }
-                let vis_row = range.start.saturating_sub(message_scroll) as u16;
-                let height = (range.end - range.start) as u16;
-                let thumb_y = messages_area.y + 1 + vis_row;
-                if thumb_y >= inner_bottom {
-                    return None;
-                }
-                let avail_h = inner_bottom - thumb_y;
-                let thumb_h = height.min(IMAGE_THUMB_ROWS as u16).min(avail_h);
-                if thumb_h == 0 {
-                    return None;
-                }
-                let size = Size::new(body_w, thumb_h);
-                let thumb_x = messages_area.x + 1 + prefix_w;
-                let rect = Rect::new(thumb_x, thumb_y, body_w, thumb_h);
-                // Only clone the raw image if not already encoded for this size.
-                let img = if app.proto_cache.contains_key(&(mxc.clone(), size)) {
-                    None
-                } else {
-                    match app.image_cache.get(&mxc) {
-                        Some(ImageState::Ready(img)) => Some(img.clone()),
-                        _ => return None,
-                    }
-                };
-                Some((rect, size, mxc, img))
+                let media = MediaKey::new(account_id, mxc_url);
+                requests.push((media.clone(), event.image_is_encrypted()));
+
+                let (rect, size) = image_thumbnail_spec(
+                    messages_area,
+                    message_width,
+                    range,
+                    message_scroll,
+                    message_page_size,
+                )?;
+                Some((rect, size, media))
             })
             .collect();
-        // selected_events borrow ends here (last use above); proto_cache is now
-        // safe to borrow mutably.
-        for (rect, size, mxc, img) in thumb_specs {
-            let cache_key = (mxc, size);
-            if let Some(img) = img {
-                if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
-                    app.proto_cache.insert(cache_key.clone(), proto);
-                }
-            }
-            if let Some(proto) = app.proto_cache.get(&cache_key) {
-                frame.render_widget(Image::new(proto), rect);
-            }
-        }
+        (requests, specs)
+    };
+    for (key, encrypted) in media_requests {
+        app.request_image(key.account_id, key.mxc_url, encrypted);
     }
-
-    if let Some(preview_area) = image_preview_area {
-        match image_preview {
-            Some(Ok(img)) => {
-                let size = Size::new(preview_area.width, preview_area.height);
-                if let Some(mxc) = &image_preview_mxc {
-                    let cache_key = (mxc.clone(), size);
-                    if !app.proto_cache.contains_key(&cache_key) {
-                        if let Ok(proto) = app.picker.new_protocol(img, size, Resize::Fit(None)) {
-                            app.proto_cache.insert(cache_key.clone(), proto);
-                        }
-                    }
-                    if let Some(proto) = app.proto_cache.get(&cache_key) {
-                        frame.render_widget(Image::new(proto), preview_area);
-                    }
-                }
-            }
-            Some(Err(msg)) => {
-                let err = Paragraph::new(format!("Image: {msg}"))
-                    .block(Block::default().borders(Borders::TOP));
-                frame.render_widget(err, preview_area);
-            }
-            None => {}
+    for (rect, size, media) in thumb_specs {
+        app.request_protocol(media.clone(), size);
+        let protocol_key = ProtocolKey { media, size };
+        if let Some(ProtocolState::Ready(protocol)) = app.proto_cache.get(&protocol_key) {
+            frame.render_widget(Image::new(protocol), rect);
         }
     }
 
@@ -707,12 +604,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     if let Mode::Popup(kind) = app.mode {
         let command_response = app.pending_command_response.as_deref().unwrap_or_default();
-        let area = if kind == PopupKind::CommandResponse {
-            command_response_popup_area(command_response, frame.area())
-        } else {
-            centered_rect(72, 80, frame.area())
+        let area = match kind {
+            PopupKind::CommandResponse => {
+                command_response_popup_area(command_response, frame.area())
+            }
+            PopupKind::MediaPreview => centered_rect(88, 88, frame.area()),
+            _ => centered_rect(72, 80, frame.area()),
         };
         frame.render_widget(Clear, area);
+        if kind == PopupKind::MediaPreview {
+            render_media_preview(frame, app, area);
+            return;
+        }
         let page_size = usize::from(area.height.saturating_sub(2)).max(1);
         let (popup_title, lines) = match kind {
             PopupKind::Help => {
@@ -755,6 +658,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     .map(Line::from)
                     .collect(),
             ),
+            PopupKind::MediaPreview => unreachable!("media preview handled above"),
         };
         let max_scroll = lines.len().saturating_sub(page_size);
         app.popup_scroll = app.popup_scroll.min(max_scroll);
@@ -773,6 +677,87 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(popup, area);
+    }
+}
+
+fn image_thumbnail_spec(
+    messages_area: Rect,
+    message_width: usize,
+    message_range: &Range<usize>,
+    scroll: usize,
+    page_size: usize,
+) -> Option<(Rect, Size)> {
+    let visible_end = scroll.saturating_add(page_size);
+    let thumb_start = message_range.start.saturating_add(1);
+    let thumb_end = thumb_start.saturating_add(IMAGE_THUMB_ROWS);
+    if thumb_start < scroll || thumb_end > visible_end {
+        return None;
+    }
+    let body_w = (message_width as u16).saturating_sub(2);
+    if body_w < 4 {
+        return None;
+    }
+    let size = Size::new(body_w, IMAGE_THUMB_ROWS as u16);
+    let rect = Rect::new(
+        messages_area.x.saturating_add(3),
+        messages_area
+            .y
+            .saturating_add(1)
+            .saturating_add((thumb_start - scroll) as u16),
+        body_w,
+        IMAGE_THUMB_ROWS as u16,
+    );
+    Some((rect, size))
+}
+
+fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let selected = app.selected_message_event().and_then(|event| {
+        event.image_mxc().map(|(account_id, mxc_url)| {
+            (
+                MediaKey::new(account_id, mxc_url),
+                event.image_is_encrypted(),
+            )
+        })
+    });
+    let block = Block::default()
+        .title("Image Preview  (Esc to close)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.colors.selected_room));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some((media, encrypted)) = selected else {
+        frame.render_widget(Paragraph::new("Selected message has no image."), inner);
+        return;
+    };
+    app.request_image(media.account_id, media.mxc_url.clone(), encrypted);
+    let size = Size::new(inner.width, inner.height);
+    app.request_protocol(media.clone(), size);
+    let protocol_key = ProtocolKey {
+        media: media.clone(),
+        size,
+    };
+    match app.image_cache.get(&media) {
+        Some(ImageState::Failed(error)) => {
+            frame.render_widget(
+                Paragraph::new(format!("Image unavailable: {error}")).wrap(Wrap { trim: false }),
+                inner,
+            );
+        }
+        Some(ImageState::Ready(_)) => match app.proto_cache.get(&protocol_key) {
+            Some(ProtocolState::Ready(protocol)) => {
+                frame.render_widget(Image::new(protocol), inner);
+            }
+            Some(ProtocolState::Failed(error)) => {
+                frame.render_widget(
+                    Paragraph::new(format!("Unable to render image: {error}"))
+                        .wrap(Wrap { trim: false }),
+                    inner,
+                );
+            }
+            _ => frame.render_widget(Paragraph::new("Preparing image..."), inner),
+        },
+        _ => frame.render_widget(Paragraph::new("Loading image..."), inner),
     }
 }
 
@@ -1152,6 +1137,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             shortcuts.unreact_message.label(),
             "withdraw one of your reactions",
         ),
+        kv(
+            shortcuts.media_preview.label(),
+            "open selected image preview",
+        ),
         kv(shortcuts.reply.label(), "reply (pending API support)"),
         kv(shortcuts.thread.label(), "thread (pending API support)"),
         "".to_owned(),
@@ -1301,6 +1290,33 @@ mod tests {
         assert!(text.contains("edit message"));
         assert!(text.contains("react to message"));
         assert!(text.contains("withdraw one of your reactions"));
+        assert!(text.contains("open selected image preview"));
+        assert!(text.contains("Up / Down   select previous / next message"));
+    }
+
+    #[test]
+    fn thumbnail_geometry_requires_the_full_reserved_region() {
+        let area = Rect::new(10, 5, 50, 12);
+        let range = 2..9;
+
+        let (rect, size) =
+            image_thumbnail_spec(area, 48, &range, 0, 10).expect("fully visible thumbnail");
+
+        assert_eq!(rect, Rect::new(13, 9, 46, 6));
+        assert_eq!(size, Size::new(46, 6));
+        assert!(image_thumbnail_spec(area, 48, &range, 4, 10).is_none());
+        assert!(image_thumbnail_spec(area, 48, &range, 0, 8).is_none());
+    }
+
+    #[test]
+    fn thumbnail_geometry_is_independent_of_sender_label_width() {
+        let area = Rect::new(0, 0, 30, 10);
+        let range = 0..7;
+
+        let (rect, _) = image_thumbnail_spec(area, 28, &range, 0, 8).expect("visible thumbnail");
+
+        assert_eq!(rect.x, 3);
+        assert_eq!(rect.width, 26);
     }
 
     #[test]
