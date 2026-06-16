@@ -836,6 +836,293 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/verify": {
+      "get": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "List the account's currently-tracked verification flows (live, plus\nrecently-terminal ones still within their grace window).",
+        "operationId": "list_flows",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's tracked flows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_FlowDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Start a SAS verification against one of the account's trusted devices,\nreturning the new flow's `flow_id`. The exchange then proceeds\nasynchronously: watch `verification.*` frames over `/v1/ws`, or poll\n`GET …/verify/{flow_id}`.",
+        "description": "Trust-bearing, so loopback-only until the auth layer lands (see the\n`route_layer` in [`router`](crate::router)).",
+        "operationId": "start_verification",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The started flow's transaction id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_StartVerifyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The named device is not a known device of this account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active (logged out or being deleted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error sending the verification request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/verify/{flow_id}": {
+      "get": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Read one verification flow's replayable state — the endpoint a reconnecting\nclient reads to resume (current stage, target device, and the SAS\nemoji/decimals once they're available).",
+        "operationId": "get_flow",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Verification transaction id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow's current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_FlowDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account, or no such (live or recently-terminal) flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/verify/{flow_id}/cancel": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal\nflow succeeds. Trust-bearing, so loopback-only until the auth layer lands.",
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Verification transaction id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cancelled (or already terminal)"
+          },
+          "404": {
+            "description": "No such account or flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error sending the cancellation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/verify/{flow_id}/confirm": {
+      "post": {
+        "tags": [
+          "verification"
+        ],
+        "summary": "Confirm that the SAS matches, sending this side's MAC. Returns `204` once the\nconfirm is sent; completion (`verification.done`) arrives asynchronously.\nIdempotent. Trust-bearing, so loopback-only until the auth layer lands.",
+        "operationId": "confirm",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "path",
+            "description": "Verification transaction id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Confirm sent (or already confirmed)"
+          },
+          "404": {
+            "description": "No such account or flow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow has not reached the SAS stage, or is already terminal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error sending the MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/rooms": {
       "get": {
         "tags": [
@@ -1085,6 +1372,67 @@
           }
         }
       },
+      "ApiResponse_FlowDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
+            "required": [
+              "flow_id",
+              "device_id",
+              "stage"
+            ],
+            "properties": {
+              "cancel_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The cancel reason, for a cancelled flow."
+              },
+              "decimals": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "description": "SAS decimal triple, the alternative to the emoji."
+              },
+              "device_id": {
+                "type": "string",
+                "description": "The other device in the flow."
+              },
+              "emoji": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/EmojiDto"
+                },
+                "description": "SAS emoji to compare, once keys are exchanged."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The verification transaction id."
+              },
+              "stage": {
+                "$ref": "#/components/schemas/FlowStageDto",
+                "description": "The flow's current stage."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_SendResultDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -1102,6 +1450,28 @@
               "event_id": {
                 "type": "string",
                 "description": "The created Matrix event id."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_StartVerifyResponse": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response body for starting a SAS verification: the new flow's transaction id,\nwhich keys every subsequent read (`GET …/verify/{flow_id}`), op\n(`…/confirm`, `…/cancel`), and `verification.*` WS frame.",
+            "required": [
+              "flow_id"
+            ],
+            "properties": {
+              "flow_id": {
+                "type": "string",
+                "description": "The verification transaction id."
               }
             }
           }
@@ -1204,6 +1574,70 @@
           }
         }
       },
+      "ApiResponse_Vec_FlowDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
+              "required": [
+                "flow_id",
+                "device_id",
+                "stage"
+              ],
+              "properties": {
+                "cancel_reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The cancel reason, for a cancelled flow."
+                },
+                "decimals": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  },
+                  "description": "SAS decimal triple, the alternative to the emoji."
+                },
+                "device_id": {
+                  "type": "string",
+                  "description": "The other device in the flow."
+                },
+                "emoji": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "$ref": "#/components/schemas/EmojiDto"
+                  },
+                  "description": "SAS emoji to compare, once keys are exchanged."
+                },
+                "flow_id": {
+                  "type": "string",
+                  "description": "The verification transaction id."
+                },
+                "stage": {
+                  "$ref": "#/components/schemas/FlowStageDto",
+                  "description": "The flow's current stage."
+                }
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_Vec_RoomDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -1291,6 +1725,24 @@
           "body": {
             "type": "string",
             "description": "The new message text."
+          }
+        }
+      },
+      "EmojiDto": {
+        "type": "object",
+        "description": "One SAS emoji: the symbol and its short English description.",
+        "required": [
+          "symbol",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The emoji's short English name."
+          },
+          "symbol": {
+            "type": "string",
+            "description": "The emoji character(s)."
           }
         }
       },
@@ -1404,6 +1856,70 @@
             "description": "Matrix event type, e.g. `m.room.message`."
           }
         }
+      },
+      "FlowDto": {
+        "type": "object",
+        "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
+        "required": [
+          "flow_id",
+          "device_id",
+          "stage"
+        ],
+        "properties": {
+          "cancel_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cancel reason, for a cancelled flow."
+          },
+          "decimals": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "SAS decimal triple, the alternative to the emoji."
+          },
+          "device_id": {
+            "type": "string",
+            "description": "The other device in the flow."
+          },
+          "emoji": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/EmojiDto"
+            },
+            "description": "SAS emoji to compare, once keys are exchanged."
+          },
+          "flow_id": {
+            "type": "string",
+            "description": "The verification transaction id."
+          },
+          "stage": {
+            "$ref": "#/components/schemas/FlowStageDto",
+            "description": "The flow's current stage."
+          }
+        }
+      },
+      "FlowStageDto": {
+        "type": "string",
+        "description": "The stage of a SAS verification flow on the wire.",
+        "enum": [
+          "requested",
+          "ready",
+          "keys_exchanged",
+          "confirmed",
+          "done",
+          "cancelled"
+        ]
       },
       "LoginRequest": {
         "type": "object",
@@ -1547,6 +2063,32 @@
           }
         }
       },
+      "StartVerifyRequest": {
+        "type": "object",
+        "description": "Request body for starting a SAS verification\n(`POST /v1/accounts/{account_id}/verify`). Names the target device — one of\nthe user's other trusted devices — rather than leaving the choice implicit.",
+        "required": [
+          "device_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The device ID of the trusted device to verify against."
+          }
+        }
+      },
+      "StartVerifyResponse": {
+        "type": "object",
+        "description": "Response body for starting a SAS verification: the new flow's transaction id,\nwhich keys every subsequent read (`GET …/verify/{flow_id}`), op\n(`…/confirm`, `…/cancel`), and `verification.*` WS frame.",
+        "required": [
+          "flow_id"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "description": "The verification transaction id."
+          }
+        }
+      },
       "TimelinePage": {
         "type": "object",
         "description": "One page of a room timeline: the events plus the cursor to fetch the next\n(older) page. `next_cursor` is `null` when the last page has been reached.",
@@ -1588,6 +2130,10 @@
     {
       "name": "messages",
       "description": "Sending, editing, redacting, and reacting"
+    },
+    {
+      "name": "verification",
+      "description": "Interactive SAS device verification"
     }
   ]
 }

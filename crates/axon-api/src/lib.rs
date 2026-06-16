@@ -20,6 +20,7 @@ mod response;
 mod routes;
 mod sender;
 mod state;
+mod verification;
 mod ws;
 
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
@@ -27,6 +28,7 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
 pub use state::AppState;
+pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
 use axum::{
     middleware::from_fn,
@@ -73,6 +75,30 @@ pub fn router(state: AppState) -> Router {
                 delete(routes::accounts::delete_account)
                     .route_layer(from_fn(loopback::require_loopback)),
             ),
+        )
+        // Interactive SAS verification. The mutating verbs (start/confirm/cancel)
+        // are trust-bearing, so loopback-restricted until bearer auth lands; the
+        // GET reads stay open (a reconnecting client polls them to resume a flow).
+        // The loopback guard is layered onto the POST methods only so the sibling
+        // GETs stay open (same merge idiom as DELETE on /accounts/{account_id}).
+        .route(
+            "/v1/accounts/{account_id}/verify",
+            get(routes::verify::list_flows).merge(
+                post(routes::verify::start_verification)
+                    .route_layer(from_fn(loopback::require_loopback)),
+            ),
+        )
+        .route(
+            "/v1/accounts/{account_id}/verify/{flow_id}",
+            get(routes::verify::get_flow),
+        )
+        .route(
+            "/v1/accounts/{account_id}/verify/{flow_id}/confirm",
+            post(routes::verify::confirm).route_layer(from_fn(loopback::require_loopback)),
+        )
+        .route(
+            "/v1/accounts/{account_id}/verify/{flow_id}/cancel",
+            post(routes::verify::cancel).route_layer(from_fn(loopback::require_loopback)),
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(

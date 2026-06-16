@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{LiveEvent, SyncConfig};
+use axon_core::{LiveFrame, SyncConfig};
 use axon_store::{Account, AccountState, Store, StoreError};
 use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::OwnedUserId;
@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
+use crate::verification::FlowRegistry;
 
 /// How long logout waits for a cancelled supervised task to finish draining
 /// (sync-service stop + re-decryption join) before escalating to an abort
@@ -283,7 +284,7 @@ pub struct AccountLifecycle {
     store: Store,
     config: SyncConfig,
     manager: ClientManager,
-    live_tx: broadcast::Sender<LiveEvent>,
+    live_tx: broadcast::Sender<LiveFrame>,
     cancel: CancellationToken,
     tracker: TaskTracker,
     /// Per-account task cancellation handles, shared with the engine. Logout
@@ -292,6 +293,10 @@ pub struct AccountLifecycle {
     /// `canonical-identity → lock`, shared with the engine and the supervised
     /// tasks' verification watchers (see [`IdentityLocks`]).
     locks: IdentityLocks,
+    /// Verification-flow registry, shared with the engine so an account logged in
+    /// here gets a supervised task whose incoming-request listener registers onto
+    /// the same map the verification port reads.
+    verifications: FlowRegistry,
     /// HTTP client for homeserver discovery (see [`discovery`](crate::discovery)).
     /// Cheap to clone (an `Arc` internally), shared across logins.
     http: matrix_sdk::reqwest::Client,
@@ -306,11 +311,12 @@ impl AccountLifecycle {
         store: Store,
         config: SyncConfig,
         manager: ClientManager,
-        live_tx: broadcast::Sender<LiveEvent>,
+        live_tx: broadcast::Sender<LiveFrame>,
         cancel: CancellationToken,
         tracker: TaskTracker,
         tasks: TaskRegistry,
         locks: IdentityLocks,
+        verifications: FlowRegistry,
     ) -> Self {
         Self {
             store,
@@ -321,6 +327,7 @@ impl AccountLifecycle {
             tracker,
             tasks,
             locks,
+            verifications,
             http: crate::discovery::http_client(),
         }
     }
@@ -486,6 +493,7 @@ impl AccountLifecycle {
             self.live_tx.clone(),
             self.manager.clone(),
             self.locks.clone(),
+            self.verifications.clone(),
         );
         tracing::info!(%account_id, user_id = %username, "account logged in and supervised");
         Ok(account_id)
@@ -954,6 +962,7 @@ mod tests {
             TaskTracker::new(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
+            crate::verification::new_registry(),
         )
     }
 
@@ -989,6 +998,7 @@ mod tests {
             TaskTracker::new(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
+            crate::verification::new_registry(),
         )
     }
 

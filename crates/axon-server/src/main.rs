@@ -6,6 +6,7 @@
 
 mod gateway;
 mod lifecycle;
+mod verification;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
+use crate::verification::VerificationAdapter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,16 +45,19 @@ async fn main() -> anyhow::Result<()> {
 
     // The API shares the sync engine's live-event bus so `/v1/ws` can fan out
     // events as they're persisted, its message gateway (adapted onto the API's
-    // MessageSender port) so the mutation routes can send via the SDK, and its
+    // MessageSender port) so the mutation routes can send via the SDK, its
     // lifecycle engine (adapted onto the AccountLifecycle port) so the login route
-    // can add/reactivate accounts at runtime.
+    // can add/reactivate accounts at runtime, and its verification engine (adapted
+    // onto the VerificationService port) so the verify routes can drive SAS flows.
     let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
+    let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let app = axon_api::router(axon_api::AppState::new(
         store,
         sync_engine.live_events(),
         sender,
         lifecycle,
+        verify,
     ));
 
     let addr = config.socket_addr();

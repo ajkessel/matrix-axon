@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{LiveEvent, SyncConfig};
+use axon_core::{LiveEvent, LiveFrame, SyncConfig};
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -30,6 +30,10 @@ use crate::gateway::SdkGateway;
 use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::redecrypt;
+use crate::verification::{
+    cancel_account_flows, new_registry, on_incoming_request, reap_expired_flows, FlowRegistry,
+    VerificationEngine, VerificationListenerCtx,
+};
 
 /// Backoff bounds for restarting a failed per-account task.
 const BACKOFF_START: Duration = Duration::from_secs(1);
@@ -73,7 +77,7 @@ pub struct SyncEngine {
     /// Producer end of the live-event bus. The sync tasks publish through clones
     /// of this; [`SyncEngine::live_events`] hands a clone to the API layer so
     /// each WebSocket connection can `subscribe()`.
-    live_tx: broadcast::Sender<LiveEvent>,
+    live_tx: broadcast::Sender<LiveFrame>,
     /// Per-account client lifecycle. Shared by the supervised sync tasks (which
     /// drive connects + retry) and the message gateway handed to the API layer
     /// (see [`SyncEngine::gateway`]).
@@ -87,6 +91,10 @@ pub struct SyncEngine {
     /// engine hands out and every supervised task's verification watcher share the
     /// *same* lock per identity (ADR 0026).
     locks: IdentityLocks,
+    /// In-memory registry of interactive SAS verification flows, shared between the
+    /// [`VerificationEngine`] (the runtime port) and each account's supervised task
+    /// (which listens for peer-initiated requests). Ephemeral — never persisted.
+    verifications: FlowRegistry,
 }
 
 impl SyncEngine {
@@ -125,6 +133,9 @@ impl SyncEngine {
         // Owned here (not inside `AccountLifecycle`) so the reconcile-time port, the
         // API-time port, and the supervised watchers all share one lock per identity.
         let locks: IdentityLocks = Arc::new(Mutex::new(HashMap::new()));
+        // Shared by the verification port and every account's incoming-request
+        // listener. Ephemeral — lives only as long as the engine.
+        let verifications = new_registry();
 
         // Crash recovery (ADR 0024), before any account is brought online and
         // before the HTTP listener binds (`axon-server` serves only after `start`
@@ -140,6 +151,7 @@ impl SyncEngine {
             tracker.clone(),
             tasks.clone(),
             locks.clone(),
+            verifications.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
@@ -163,8 +175,18 @@ impl SyncEngine {
                 live_tx.clone(),
                 manager.clone(),
                 locks.clone(),
+                verifications.clone(),
             );
         }
+
+        // Background reaper for terminal verification flows, so their grace TTL is
+        // honoured even on an account with no further verify API traffic to drive
+        // the lazy sweep. Runs on the same tracker under a child of the engine
+        // token, so `shutdown` cancels and joins it with everything else.
+        tracker.spawn(reap_expired_flows(
+            verifications.clone(),
+            cancel.child_token(),
+        ));
 
         Ok(SyncEngine {
             tracker,
@@ -175,6 +197,7 @@ impl SyncEngine {
             store,
             config,
             locks,
+            verifications,
         })
     }
 
@@ -188,7 +211,7 @@ impl SyncEngine {
     /// A producer handle for the live-event bus. The API layer holds this in its
     /// router state and calls [`broadcast::Sender::subscribe`] once per
     /// `/v1/ws` connection. Cloning is cheap and does not affect delivery.
-    pub fn live_events(&self) -> broadcast::Sender<LiveEvent> {
+    pub fn live_events(&self) -> broadcast::Sender<LiveFrame> {
         self.live_tx.clone()
     }
 
@@ -206,6 +229,25 @@ impl SyncEngine {
             self.cancel.clone(),
             self.tracker.clone(),
             self.tasks.clone(),
+            self.locks.clone(),
+            self.verifications.clone(),
+        )
+    }
+
+    /// The runtime device-verification port, for the API layer's verify routes.
+    /// `axon-server` wraps this in an adapter implementing its `VerificationService`
+    /// port. Shares this engine's flow registry, task tracker, and cancel token, so
+    /// verification driver tasks are supervised and shut down with the engine, and
+    /// the flows it tracks are the same ones each account's incoming-request
+    /// listener registers.
+    pub fn verification(&self) -> VerificationEngine {
+        VerificationEngine::new(
+            self.store.clone(),
+            self.manager.clone(),
+            self.verifications.clone(),
+            self.live_tx.clone(),
+            self.tracker.clone(),
+            self.cancel.clone(),
             self.locks.clone(),
         )
     }
@@ -242,9 +284,10 @@ pub(crate) fn spawn_supervised(
     config: SyncConfig,
     account: Account,
     cancel: CancellationToken,
-    live_tx: broadcast::Sender<LiveEvent>,
+    live_tx: broadcast::Sender<LiveFrame>,
     manager: ClientManager,
     locks: IdentityLocks,
+    verifications: FlowRegistry,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -256,6 +299,8 @@ pub(crate) fn spawn_supervised(
         live_tx,
         manager,
         locks,
+        tracker.clone(),
+        verifications,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -270,14 +315,17 @@ pub(crate) fn spawn_supervised(
 
 /// Supervise a single account: run it, and on failure restart with exponential
 /// backoff until the cancellation token fires.
+#[allow(clippy::too_many_arguments)]
 async fn supervise_account(
     store: Store,
     config: SyncConfig,
     account: Account,
     cancel: CancellationToken,
-    live_tx: broadcast::Sender<LiveEvent>,
+    live_tx: broadcast::Sender<LiveFrame>,
     manager: ClientManager,
     locks: IdentityLocks,
+    tracker: TaskTracker,
+    verifications: FlowRegistry,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -287,7 +335,15 @@ async fn supervise_account(
         }
 
         match run_account(
-            &store, &config, &account, &cancel, &live_tx, &manager, &locks,
+            &store,
+            &config,
+            &account,
+            &cancel,
+            &live_tx,
+            &manager,
+            &locks,
+            &tracker,
+            &verifications,
         )
         .await
         {
@@ -324,7 +380,7 @@ struct PersistContext {
     account_id: Uuid,
     /// Producer end of the live-event bus; [`persist_timeline_event`] publishes
     /// each freshly persisted event to it for `/v1/ws` fan-out.
-    live_tx: broadcast::Sender<LiveEvent>,
+    live_tx: broadcast::Sender<LiveFrame>,
 }
 
 /// Event handler: persist every synced timeline event to Postgres.
@@ -448,7 +504,7 @@ async fn persist_timeline_event(
     // receivers — harmless to ignore (a receiver may have dropped between the
     // count check and the send), and never fatal to sync.
     if ctx.live_tx.receiver_count() > 0 {
-        let _ = ctx.live_tx.send(LiveEvent {
+        let _ = ctx.live_tx.send(LiveFrame::Timeline(LiveEvent {
             account_id: ctx.account_id,
             event_id: event_id.clone(),
             room_id: room_id.clone(),
@@ -459,7 +515,7 @@ async fn persist_timeline_event(
             content: new_ev.content.clone(),
             body: decrypted_body_text.clone(),
             relates_to: new_ev.relates_to.clone(),
-        });
+        }));
     }
 
     // Sibling rows are best-effort: a failure here must not take down sync.
@@ -629,14 +685,17 @@ async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: 
 /// Run one account's sync to completion: authenticate, start the sync service,
 /// and monitor its state until cancellation (returns `Ok`) or an error/terminal
 /// state (returns `Err`, triggering a supervised restart).
+#[allow(clippy::too_many_arguments)]
 async fn run_account(
     store: &Store,
     config: &SyncConfig,
     account: &Account,
     cancel: &CancellationToken,
-    live_tx: &broadcast::Sender<LiveEvent>,
+    live_tx: &broadcast::Sender<LiveFrame>,
     manager: &ClientManager,
     locks: &IdentityLocks,
+    tracker: &TaskTracker,
+    verifications: &FlowRegistry,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -677,6 +736,20 @@ async fn run_account(
     client.add_event_handler(persist_room_state_event);
     client.add_event_handler(persist_room_account_data);
     client.add_event_handler(persist_global_account_data);
+
+    // Interactive SAS verification (M7a PR6): surface peer-initiated requests with
+    // no HTTP kickoff. The handler registers the flow and spawns a driver under a
+    // child of this account's cancel token, onto the engine tracker, so it shuts
+    // down with the account. Outgoing flows (started via the API) are driven by the
+    // VerificationEngine directly; both share `verifications`.
+    client.add_event_handler_context(VerificationListenerCtx {
+        account_id: account.account_id,
+        registry: verifications.clone(),
+        live_tx: live_tx.clone(),
+        tracker: tracker.clone(),
+        cancel: cancel.clone(),
+    });
+    client.add_event_handler(on_incoming_request);
 
     // `SyncService::builder` consumes the client; keep a clone for the
     // re-decryption queue and the startup sweep (the client is Arc-backed, so
@@ -756,6 +829,16 @@ async fn run_account(
             "verification watcher did not shut down cleanly"
         );
     }
+
+    // Cancel any in-flight SAS verification drivers for this account: they hold the
+    // SDK client this run is tearing down (or rebuilding), so they must not survive
+    // it. Each cancelled driver best-effort cancels upstream and drops its registry
+    // entry — binding a flow's lifetime to the *run*, not just the account or the
+    // process. (Incoming drivers run under this account's token; API-started ones
+    // under the engine token, so neither is reliably reached by token cascade on a
+    // single-account stop — this sweep covers both.)
+    cancel_account_flows(verifications, account.account_id);
+
     result
 }
 

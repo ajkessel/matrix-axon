@@ -11,4 +11,4 @@ pub mod live;
 
 pub use config::{AccountProvision, Config, Credential, SyncConfig};
 pub use error::{ConfigError, Error, Result};
-pub use live::LiveEvent;
+pub use live::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};

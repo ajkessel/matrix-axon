@@ -1,10 +1,13 @@
 //! The `/v1/ws` live-event WebSocket.
 //!
 //! A client opens one socket and receives every event the sync engine persists,
-//! across all of this Axon's accounts, as it arrives. Each frame is a JSON
-//! envelope `{ "type", "account_id", "payload" }` ([`WsEnvelope`]) — the same
-//! `type`/`account_id`/`payload` shape used elsewhere on the wire, with the
-//! payload for a timeline event being the read API's [`EventDto`].
+//! across all of this Axon's accounts, as it arrives, plus the frames of any
+//! interactive device-verification flow. Each frame is a JSON envelope
+//! `{ "type", "account_id", "payload" }` ([`WsEnvelope`]) — the same
+//! `type`/`account_id`/`payload` shape used elsewhere on the wire. The `type`
+//! tag discriminates the kind: `timeline.event` carries the read API's
+//! [`EventDto`]; `verification.{requested,sas,done,cancelled}` carry a
+//! [`VerificationFramePayload`] (SAS emoji/decimals, target device, outcome).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -13,7 +16,7 @@
 //! the sync engine. There is no auth yet — bearer-token validation on the
 //! upgrade arrives with the rest of the API's auth (see ADR 0020).
 
-use axon_core::LiveEvent;
+use axon_core::{LiveFrame, VerificationFrame, VerificationFrameKind};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
@@ -23,8 +26,8 @@ use uuid::Uuid;
 
 use crate::dto::EventDto;
 
-/// The `type` tag for a live timeline event frame. Namespaced so later frame
-/// kinds (e.g. interactive-verification events) extend the protocol without
+/// The `type` tag for a live timeline event frame. Namespaced so other frame
+/// kinds (e.g. the `verification.*` frames below) extend the protocol without
 /// colliding.
 const TIMELINE_EVENT: &str = "timeline.event";
 
@@ -38,9 +41,62 @@ struct WsEnvelope<T> {
     payload: T,
 }
 
-/// `GET /v1/ws` — upgrade the connection and stream live events to the client.
+/// The wire payload for a `verification.*` frame: the live state of one SAS
+/// verification flow. Fields that don't apply to a given stage are omitted
+/// (e.g. `emoji`/`decimals` only on a `verification.sas` frame, `reason` only on
+/// `verification.cancelled`).
+#[derive(Debug, Serialize)]
+struct VerificationFramePayload {
+    flow_id: String,
+    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emoji: Option<Vec<EmojiPair>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decimals: Option<[u16; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// One SAS emoji: the symbol and its short English description.
+#[derive(Debug, Serialize)]
+struct EmojiPair {
+    symbol: String,
+    description: String,
+}
+
+/// The `type` tag for a verification frame of the given kind.
+fn verification_type(kind: VerificationFrameKind) -> &'static str {
+    match kind {
+        VerificationFrameKind::Requested => "verification.requested",
+        VerificationFrameKind::Sas => "verification.sas",
+        VerificationFrameKind::Done => "verification.done",
+        VerificationFrameKind::Cancelled => "verification.cancelled",
+    }
+}
+
+impl From<VerificationFrame> for VerificationFramePayload {
+    fn from(frame: VerificationFrame) -> Self {
+        Self {
+            flow_id: frame.flow_id,
+            device_id: frame.target_device_id,
+            emoji: frame.emoji.map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(symbol, description)| EmojiPair {
+                        symbol,
+                        description,
+                    })
+                    .collect()
+            }),
+            decimals: frame.decimals.map(|(a, b, c)| [a, b, c]),
+            reason: frame.outcome,
+        }
+    }
+}
+
+/// `GET /v1/ws` — upgrade the connection and stream live frames to the client.
 pub async fn ws_handler(
-    State(live): State<broadcast::Sender<LiveEvent>>,
+    State(live): State<broadcast::Sender<LiveFrame>>,
     ws: WebSocketUpgrade,
 ) -> Response {
     // Subscribe before the upgrade completes so no event that arrives during the
@@ -49,24 +105,36 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| pump(socket, rx))
 }
 
-/// Forward live events to one connected client until either side hangs up.
-async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<LiveEvent>) {
+/// Serialize a [`LiveFrame`] to its `/v1/ws` envelope JSON. Each frame kind has
+/// its own `type` tag and payload type, so the branches serialize separately.
+fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
+    match frame {
+        LiveFrame::Timeline(event) => serde_json::to_string(&WsEnvelope {
+            kind: TIMELINE_EVENT,
+            account_id: event.account_id,
+            payload: EventDto::from(event),
+        }),
+        LiveFrame::Verification(frame) => serde_json::to_string(&WsEnvelope {
+            kind: verification_type(frame.kind),
+            account_id: frame.account_id,
+            payload: VerificationFramePayload::from(frame),
+        }),
+    }
+}
+
+/// Forward live frames to one connected client until either side hangs up.
+async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<LiveFrame>) {
     loop {
         tokio::select! {
-            // A live event to push out.
+            // A live frame to push out.
             received = rx.recv() => match received {
-                Ok(event) => {
-                    let frame = WsEnvelope {
-                        kind: TIMELINE_EVENT,
-                        account_id: event.account_id,
-                        payload: EventDto::from(event),
-                    };
-                    let text = match serde_json::to_string(&frame) {
+                Ok(frame) => {
+                    let text = match encode_frame(frame) {
                         Ok(text) => text,
                         Err(err) => {
                             // Serializing a JSON value can't realistically fail;
                             // log and skip rather than dropping the connection.
-                            tracing::error!(error = %err, "failed to serialize live event frame");
+                            tracing::error!(error = %err, "failed to serialize live frame");
                             continue;
                         }
                     };
@@ -96,5 +164,100 @@ async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<LiveEvent>) {
                 Some(Ok(_)) => {}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axon_core::{LiveEvent, VerificationFrame, VerificationFrameKind};
+    use serde_json::Value;
+
+    fn decode(frame: LiveFrame) -> Value {
+        serde_json::from_str(&encode_frame(frame).expect("encode")).expect("json")
+    }
+
+    #[test]
+    fn timeline_frame_keeps_its_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::Timeline(LiveEvent {
+            account_id,
+            event_id: "$e:localhost".to_owned(),
+            room_id: "!r:localhost".to_owned(),
+            sender: "@a:localhost".to_owned(),
+            state_key: None,
+            origin_ts: 42,
+            event_type: "m.room.message".to_owned(),
+            content: None,
+            body: Some("hi".to_owned()),
+            relates_to: None,
+        }));
+        assert_eq!(v["type"], "timeline.event");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["event_id"], "$e:localhost");
+    }
+
+    #[test]
+    fn sas_frame_carries_emoji_and_decimals() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::Verification(VerificationFrame {
+            account_id,
+            flow_id: "$flow".to_owned(),
+            kind: VerificationFrameKind::Sas,
+            target_device_id: "DEV".to_owned(),
+            emoji: Some(vec![("🐶".to_owned(), "Dog".to_owned())]),
+            decimals: Some((1, 2, 3)),
+            outcome: None,
+        }));
+        assert_eq!(v["type"], "verification.sas");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["flow_id"], "$flow");
+        assert_eq!(v["payload"]["device_id"], "DEV");
+        assert_eq!(v["payload"]["emoji"][0]["symbol"], "🐶");
+        assert_eq!(v["payload"]["emoji"][0]["description"], "Dog");
+        assert_eq!(v["payload"]["decimals"], serde_json::json!([1, 2, 3]));
+        // Fields that don't apply to this stage are omitted, not null.
+        assert!(v["payload"].get("reason").is_none());
+    }
+
+    #[test]
+    fn requested_and_terminal_frames_tag_correctly() {
+        let account_id = Uuid::new_v4();
+        let requested = decode(LiveFrame::Verification(VerificationFrame {
+            account_id,
+            flow_id: "$f".to_owned(),
+            kind: VerificationFrameKind::Requested,
+            target_device_id: "DEV".to_owned(),
+            emoji: None,
+            decimals: None,
+            outcome: None,
+        }));
+        assert_eq!(requested["type"], "verification.requested");
+        // No SAS yet → emoji/decimals omitted.
+        assert!(requested["payload"].get("emoji").is_none());
+        assert!(requested["payload"].get("decimals").is_none());
+
+        let cancelled = decode(LiveFrame::Verification(VerificationFrame {
+            account_id,
+            flow_id: "$f".to_owned(),
+            kind: VerificationFrameKind::Cancelled,
+            target_device_id: "DEV".to_owned(),
+            emoji: None,
+            decimals: None,
+            outcome: Some("user cancelled".to_owned()),
+        }));
+        assert_eq!(cancelled["type"], "verification.cancelled");
+        assert_eq!(cancelled["payload"]["reason"], "user cancelled");
+
+        let done = decode(LiveFrame::Verification(VerificationFrame {
+            account_id,
+            flow_id: "$f".to_owned(),
+            kind: VerificationFrameKind::Done,
+            target_device_id: "DEV".to_owned(),
+            emoji: None,
+            decimals: None,
+            outcome: None,
+        }));
+        assert_eq!(done["type"], "verification.done");
     }
 }

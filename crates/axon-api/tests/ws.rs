@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_api::AppState;
-use axon_core::LiveEvent;
+use axon_core::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
-use common::{StubLifecycle, StubSender};
+use common::{StubLifecycle, StubSender, StubVerification};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -39,12 +39,13 @@ async fn ws_streams_live_events() {
     // We keep the sender so the test can publish; the router subscribes per
     // connection. Dropping the initial receiver means the connected handler is
     // the *only* subscriber, so `send` succeeding proves the socket is wired.
-    let (live, _) = broadcast::channel::<LiveEvent>(16);
+    let (live, _) = broadcast::channel::<LiveFrame>(16);
     let app = axon_api::router(AppState::new(
         store,
         live.clone(),
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
     ));
 
     // Serve on an ephemeral port in the background.
@@ -70,7 +71,7 @@ async fn ws_streams_live_events() {
     let account_id = Uuid::new_v4();
     let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
     let receivers = live
-        .send(LiveEvent {
+        .send(LiveFrame::Timeline(LiveEvent {
             account_id,
             event_id: event_id.clone(),
             room_id: "!room:localhost".to_owned(),
@@ -81,7 +82,7 @@ async fn ws_streams_live_events() {
             content: Some(json!({ "membership": "join", "displayname": "Alice" })),
             body: None,
             relates_to: None,
-        })
+        }))
         .expect("a connected subscriber");
     assert_eq!(receivers, 1, "exactly the connected socket subscribed");
 
@@ -106,6 +107,38 @@ async fn ws_streams_live_events() {
     assert_eq!(envelope["payload"]["type"], "m.room.member");
     assert_eq!(envelope["payload"]["body"], Value::Null);
     assert_eq!(envelope["payload"]["redacted"], false);
+
+    // A verification frame rides the same socket, tagged distinctly.
+    let flow_id = "$flow:localhost";
+    let receivers = live
+        .send(LiveFrame::Verification(VerificationFrame {
+            account_id,
+            flow_id: flow_id.to_owned(),
+            kind: VerificationFrameKind::Sas,
+            target_device_id: "TRUSTEDDEV".to_owned(),
+            emoji: Some(vec![("🐶".to_owned(), "Dog".to_owned())]),
+            decimals: Some((1, 2, 3)),
+            outcome: None,
+        }))
+        .expect("a connected subscriber");
+    assert_eq!(receivers, 1);
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a frame within the timeout")
+        .expect("stream still open")
+        .expect("a websocket message");
+    let text = match frame {
+        Message::Text(text) => text,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
+    assert_eq!(envelope["type"], "verification.sas");
+    assert_eq!(envelope["account_id"], account_id.to_string());
+    assert_eq!(envelope["payload"]["flow_id"], flow_id);
+    assert_eq!(envelope["payload"]["device_id"], "TRUSTEDDEV");
+    assert_eq!(envelope["payload"]["emoji"][0]["symbol"], "🐶");
+    assert_eq!(envelope["payload"]["decimals"], json!([1, 2, 3]));
 
     ws.close(None).await.ok();
     server.abort();

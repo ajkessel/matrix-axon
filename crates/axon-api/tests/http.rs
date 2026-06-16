@@ -23,7 +23,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use common::{
     DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, RecoverOutcome, StubLifecycle,
-    StubSender,
+    StubSender, StubVerification, VerifyCall, VerifyOutcome,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -147,6 +147,7 @@ async fn read_api_end_to_end() {
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
     ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
@@ -271,6 +272,7 @@ async fn accounts_read_api() {
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
     ));
 
     // GET /v1/accounts — the client-visible set: `active` and `deactivated` are
@@ -352,6 +354,21 @@ fn login_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Router
         live,
         Arc::new(StubSender::ok("$unused:localhost")),
         lifecycle,
+        Arc::new(StubVerification::ok("$unused-flow")),
+    ))
+}
+
+/// Build a router whose verify routes are backed by `verify`. The other ports are
+/// unused by the verification path (the handlers delegate straight to the port and
+/// never touch the store).
+fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        verify,
     ))
 }
 
@@ -955,6 +972,259 @@ async fn recover_error_maps_to_status() {
             Arc::new(StubLifecycle::recover_failing(outcome)),
         );
         let (status, err) = post_recover(&app, loopback, id, body.clone()).await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+// ---- Interactive SAS verification (M7a PR6) ----
+
+/// `POST` to a verify route with an optional peer address (the
+/// `ConnectInfo<SocketAddr>` the loopback guard reads) and an optional JSON body
+/// (start carries one; confirm/cancel don't). Returns `(status, parsed body)`.
+async fn post_verify(
+    app: &axum::Router,
+    peer: Option<SocketAddr>,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method("POST").uri(uri);
+    if body.is_some() {
+        builder = builder.header("content-type", "application/json");
+    }
+    if let Some(addr) = peer {
+        builder = builder.extension(ConnectInfo(addr));
+    }
+    let payload = body.map(|b| b.to_string()).unwrap_or_default();
+    let req = builder.body(Body::from(payload)).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("json body")
+    };
+    (status, json)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_start_succeeds_and_returns_flow_id() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-abc"));
+    let app = verify_app(store, verify.clone());
+
+    let account_id = Uuid::new_v4();
+    let loopback = Some("127.0.0.1:55000".parse().unwrap());
+    let (status, body) = post_verify(
+        &app,
+        loopback,
+        &format!("/v1/accounts/{account_id}/verify"),
+        Some(json!({ "device_id": "TRUSTEDDEV" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["flow_id"], "$flow-abc");
+    // The handler forwarded the id + device straight to the port.
+    assert_eq!(
+        verify.calls(),
+        vec![VerifyCall::Start {
+            account_id,
+            device_id: "TRUSTEDDEV".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_start_requires_loopback_peer() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-abc"));
+    let app = verify_app(store, verify.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account_id}/verify");
+    let body = json!({ "device_id": "D" });
+
+    // Non-loopback and missing-peer both fail closed before the handler runs.
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = post_verify(&app, off_box, &uri, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+
+    let (status, _) = post_verify(&app, None, &uri, Some(body.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The guard short-circuited: the verification port was never invoked.
+    assert!(verify.calls().is_empty());
+
+    // A loopback peer passes through to the port.
+    let loopback = Some("127.0.0.1:55001".parse().unwrap());
+    let (status, _) = post_verify(&app, loopback, &uri, Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verify.calls().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_get_returns_flow_state_dto_and_stays_open() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-xyz"));
+    let app = verify_app(store, verify.clone());
+    let account_id = Uuid::new_v4();
+
+    // The GET read carries no loopback layer — a plain request (no peer) is admitted.
+    let (status, body) = get(&app, &format!("/v1/accounts/{account_id}/verify/$flow-xyz")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let flow = &body["data"];
+    assert_eq!(flow["flow_id"], "$flow-xyz");
+    assert_eq!(flow["device_id"], "TRUSTEDDEV");
+    assert_eq!(flow["stage"], "keys_exchanged");
+    assert_eq!(flow["emoji"][0]["symbol"], "🐶");
+    assert_eq!(flow["emoji"][0]["description"], "Dog");
+    assert_eq!(flow["decimals"][0], 1234);
+    assert_eq!(flow["decimals"][2], 9012);
+    assert!(flow["cancel_reason"].is_null());
+
+    assert_eq!(
+        verify.calls(),
+        vec![VerifyCall::Get {
+            account_id,
+            flow_id: "$flow-xyz".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_list_returns_flows_and_stays_open() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-1"));
+    let app = verify_app(store, verify.clone());
+    let account_id = Uuid::new_v4();
+
+    let (status, body) = get(&app, &format!("/v1/accounts/{account_id}/verify")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let flows = body["data"].as_array().expect("data array");
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0]["flow_id"], "$flow-1");
+    assert_eq!(verify.calls(), vec![VerifyCall::List { account_id }]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_confirm_and_cancel_return_204_and_route() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-2"));
+    let app = verify_app(store, verify.clone());
+    let account_id = Uuid::new_v4();
+    let loopback = Some("127.0.0.1:55002".parse().unwrap());
+
+    let (status, _) = post_verify(
+        &app,
+        loopback,
+        &format!("/v1/accounts/{account_id}/verify/$flow-2/confirm"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = post_verify(
+        &app,
+        loopback,
+        &format!("/v1/accounts/{account_id}/verify/$flow-2/cancel"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        verify.calls(),
+        vec![
+            VerifyCall::Confirm {
+                account_id,
+                flow_id: "$flow-2".to_owned(),
+            },
+            VerifyCall::Cancel {
+                account_id,
+                flow_id: "$flow-2".to_owned(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_confirm_requires_loopback_peer() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-3"));
+    let app = verify_app(store, verify.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account_id}/verify/$flow-3/confirm");
+
+    let off_box = Some("203.0.113.7:443".parse().unwrap());
+    let (status, err) = post_verify(&app, off_box, &uri, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err["error"]["code"], "forbidden");
+
+    assert!(verify.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_error_maps_to_status() {
+    let store = store().await;
+    let loopback: Option<SocketAddr> = Some("127.0.0.1:55003".parse().unwrap());
+    let account_id = Uuid::new_v4();
+    let body = json!({ "device_id": "D" });
+
+    let cases = [
+        (
+            VerifyOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            VerifyOutcome::NotActive("logged out".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            VerifyOutcome::Conflict("wrong stage".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            VerifyOutcome::BadRequest("unknown device".into()),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            VerifyOutcome::Upstream("hs down".into()),
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+        ),
+        (
+            VerifyOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = verify_app(store.clone(), Arc::new(StubVerification::failing(outcome)));
+        let (status, err) = post_verify(
+            &app,
+            loopback,
+            &format!("/v1/accounts/{account_id}/verify"),
+            Some(body.clone()),
+        )
+        .await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }

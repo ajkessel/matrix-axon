@@ -206,3 +206,19 @@ impl From<crate::lifecycle::RecoverError> for ApiError {
         }
     }
 }
+
+impl From<crate::verification::VerifyError> for ApiError {
+    fn from(err: crate::verification::VerifyError) -> Self {
+        use crate::verification::VerifyError;
+        match err {
+            VerifyError::NotFound(msg) => ApiError::not_found(msg),
+            // Both a logged-out account and a wrong-stage/terminal flow are conflicts
+            // with the resource's current state.
+            VerifyError::NotActive(msg) | VerifyError::Conflict(msg) => ApiError::conflict(msg),
+            VerifyError::BadRequest(msg) => ApiError::bad_request(msg),
+            VerifyError::Upstream(msg) => ApiError::bad_gateway(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            VerifyError::Internal => ApiError::internal(),
+        }
+    }
+}

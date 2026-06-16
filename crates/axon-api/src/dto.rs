@@ -265,6 +265,105 @@ pub struct RecoverRequest {
     pub recovery_key: String,
 }
 
+/// Request body for starting a SAS verification
+/// (`POST /v1/accounts/{account_id}/verify`). Names the target device — one of
+/// the user's other trusted devices — rather than leaving the choice implicit.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct StartVerifyRequest {
+    /// The device ID of the trusted device to verify against.
+    pub device_id: String,
+}
+
+/// Response body for starting a SAS verification: the new flow's transaction id,
+/// which keys every subsequent read (`GET …/verify/{flow_id}`), op
+/// (`…/confirm`, `…/cancel`), and `verification.*` WS frame.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StartVerifyResponse {
+    /// The verification transaction id.
+    pub flow_id: String,
+}
+
+/// The stage of a SAS verification flow on the wire.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowStageDto {
+    /// A verification was requested; awaiting the peer.
+    Requested,
+    /// The peer is ready; SAS not yet computed.
+    Ready,
+    /// Keys exchanged — the SAS is ready to compare.
+    KeysExchanged,
+    /// This side has confirmed; awaiting the peer's MAC.
+    Confirmed,
+    /// Completed successfully; the device is now cross-signed.
+    Done,
+    /// Cancelled (timeout, mismatch, or either side cancelling).
+    Cancelled,
+}
+
+impl From<crate::verification::FlowStage> for FlowStageDto {
+    fn from(stage: crate::verification::FlowStage) -> Self {
+        use crate::verification::FlowStage;
+        match stage {
+            FlowStage::Requested => FlowStageDto::Requested,
+            FlowStage::Ready => FlowStageDto::Ready,
+            FlowStage::KeysExchanged => FlowStageDto::KeysExchanged,
+            FlowStage::Confirmed => FlowStageDto::Confirmed,
+            FlowStage::Done => FlowStageDto::Done,
+            FlowStage::Cancelled => FlowStageDto::Cancelled,
+        }
+    }
+}
+
+/// One SAS emoji: the symbol and its short English description.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EmojiDto {
+    /// The emoji character(s).
+    pub symbol: String,
+    /// The emoji's short English name.
+    pub description: String,
+}
+
+/// A verification flow's replayable state (`GET …/verify` /
+/// `GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are
+/// exchanged; `cancel_reason` is `null` unless the flow was cancelled.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FlowDto {
+    /// The verification transaction id.
+    pub flow_id: String,
+    /// The other device in the flow.
+    pub device_id: String,
+    /// The flow's current stage.
+    pub stage: FlowStageDto,
+    /// SAS emoji to compare, once keys are exchanged.
+    pub emoji: Option<Vec<EmojiDto>>,
+    /// SAS decimal triple, the alternative to the emoji.
+    pub decimals: Option<[u16; 3]>,
+    /// The cancel reason, for a cancelled flow.
+    pub cancel_reason: Option<String>,
+}
+
+impl From<crate::verification::FlowSummary> for FlowDto {
+    fn from(f: crate::verification::FlowSummary) -> Self {
+        FlowDto {
+            flow_id: f.flow_id,
+            device_id: f.target_device_id,
+            stage: f.stage.into(),
+            emoji: f.emoji.map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(symbol, description)| EmojiDto {
+                        symbol,
+                        description,
+                    })
+                    .collect()
+            }),
+            decimals: f.decimals.map(|(a, b, c)| [a, b, c]),
+            cancel_reason: f.cancel_reason,
+        }
+    }
+}
+
 /// One page of a room timeline: the events plus the cursor to fetch the next
 /// (older) page. `next_cursor` is `null` when the last page has been reached.
 #[derive(Debug, Serialize, ToSchema)]

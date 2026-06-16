@@ -30,6 +30,11 @@ use utoipa::OpenApi;
         crate::routes::messages::edit_message,
         crate::routes::messages::redact_event,
         crate::routes::messages::react,
+        crate::routes::verify::start_verification,
+        crate::routes::verify::list_flows,
+        crate::routes::verify::get_flow,
+        crate::routes::verify::confirm,
+        crate::routes::verify::cancel,
     ),
     components(schemas(
         crate::dto::AccountDto,
@@ -43,6 +48,11 @@ use utoipa::OpenApi;
         crate::dto::EditRequest,
         crate::dto::ReactRequest,
         crate::dto::SendResultDto,
+        crate::dto::StartVerifyRequest,
+        crate::dto::StartVerifyResponse,
+        crate::dto::FlowDto,
+        crate::dto::FlowStageDto,
+        crate::dto::EmojiDto,
         crate::response::ErrorBody,
         crate::response::ErrorResponse,
     )),
@@ -51,6 +61,7 @@ use utoipa::OpenApi;
         (name = "rooms", description = "Rooms and their timelines"),
         (name = "events", description = "Individual events"),
         (name = "messages", description = "Sending, editing, redacting, and reacting"),
+        (name = "verification", description = "Interactive SAS device verification"),
     ),
 )]
 pub struct ApiDoc;

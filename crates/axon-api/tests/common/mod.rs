@@ -11,7 +11,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, DeleteError, LoginError, LogoutError, MessageSender, RecoverError, SendError,
+    AccountLifecycle, DeleteError, FlowStage, FlowSummary, LoginError, LogoutError, MessageSender,
+    RecoverError, SendError, VerificationService, VerifyError,
 };
 use uuid::Uuid;
 
@@ -301,6 +302,149 @@ impl StubLifecycle {
     /// The `(account_id, recovery_key)` pairs passed to recover, in order.
     pub fn recover_calls(&self) -> Vec<(Uuid, String)> {
         self.recover_calls.lock().unwrap().clone()
+    }
+}
+
+/// One recorded call to the [`StubVerification`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyCall {
+    Start { account_id: Uuid, device_id: String },
+    List { account_id: Uuid },
+    Get { account_id: Uuid, flow_id: String },
+    Confirm { account_id: Uuid, flow_id: String },
+    Cancel { account_id: Uuid, flow_id: String },
+}
+
+/// The error the [`StubVerification`] returns for every call (or `Ok`). `Clone`
+/// so one stub can answer repeated calls; mirrors [`VerifyError`]'s variants.
+#[derive(Clone)]
+pub enum VerifyOutcome {
+    Ok,
+    NotFound(String),
+    NotActive(String),
+    Conflict(String),
+    BadRequest(String),
+    Upstream(String),
+    Internal,
+}
+
+impl VerifyOutcome {
+    /// The error to return, or `None` when the outcome is `Ok` (the method then
+    /// returns its natural success value).
+    fn as_error(&self) -> Option<VerifyError> {
+        match self {
+            VerifyOutcome::Ok => None,
+            VerifyOutcome::NotFound(m) => Some(VerifyError::NotFound(m.clone())),
+            VerifyOutcome::NotActive(m) => Some(VerifyError::NotActive(m.clone())),
+            VerifyOutcome::Conflict(m) => Some(VerifyError::Conflict(m.clone())),
+            VerifyOutcome::BadRequest(m) => Some(VerifyError::BadRequest(m.clone())),
+            VerifyOutcome::Upstream(m) => Some(VerifyError::Upstream(m.clone())),
+            VerifyOutcome::Internal => Some(VerifyError::Internal),
+        }
+    }
+}
+
+/// An in-memory [`VerificationService`] for tests: records each call and returns
+/// a preset outcome, so the verify routes can be exercised (loopback guard, path
+/// /body decoding, error → status mapping, DTO shape) without a real client.
+pub struct StubVerification {
+    outcome: VerifyOutcome,
+    flow_id: String,
+    summary: FlowSummary,
+    calls: Mutex<Vec<VerifyCall>>,
+}
+
+impl StubVerification {
+    /// A stub that succeeds for every op: `start` returns `flow_id`, and
+    /// `get`/`list` return a representative SAS-stage flow (emoji + decimals
+    /// populated) so a test can assert the [`FlowDto`](axon_api) wire mapping.
+    pub fn ok(flow_id: &str) -> Self {
+        Self {
+            outcome: VerifyOutcome::Ok,
+            flow_id: flow_id.to_owned(),
+            summary: FlowSummary {
+                flow_id: flow_id.to_owned(),
+                target_device_id: "TRUSTEDDEV".to_owned(),
+                stage: FlowStage::KeysExchanged,
+                emoji: Some(vec![
+                    ("🐶".to_owned(), "Dog".to_owned()),
+                    ("🐱".to_owned(), "Cat".to_owned()),
+                ]),
+                decimals: Some((1234, 5678, 9012)),
+                cancel_reason: None,
+            },
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every op.
+    pub fn failing(outcome: VerifyOutcome) -> Self {
+        let mut s = Self::ok("$unused-flow");
+        s.outcome = outcome;
+        s
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<VerifyCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl VerificationService for StubVerification {
+    async fn start(&self, account_id: Uuid, device_id: &str) -> Result<String, VerifyError> {
+        self.calls.lock().unwrap().push(VerifyCall::Start {
+            account_id,
+            device_id: device_id.to_owned(),
+        });
+        match self.outcome.as_error() {
+            Some(err) => Err(err),
+            None => Ok(self.flow_id.clone()),
+        }
+    }
+
+    async fn list(&self, account_id: Uuid) -> Result<Vec<FlowSummary>, VerifyError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(VerifyCall::List { account_id });
+        match self.outcome.as_error() {
+            Some(err) => Err(err),
+            None => Ok(vec![self.summary.clone()]),
+        }
+    }
+
+    async fn get(&self, account_id: Uuid, flow_id: &str) -> Result<FlowSummary, VerifyError> {
+        self.calls.lock().unwrap().push(VerifyCall::Get {
+            account_id,
+            flow_id: flow_id.to_owned(),
+        });
+        match self.outcome.as_error() {
+            Some(err) => Err(err),
+            None => Ok(self.summary.clone()),
+        }
+    }
+
+    async fn confirm(&self, account_id: Uuid, flow_id: &str) -> Result<(), VerifyError> {
+        self.calls.lock().unwrap().push(VerifyCall::Confirm {
+            account_id,
+            flow_id: flow_id.to_owned(),
+        });
+        match self.outcome.as_error() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    async fn cancel(&self, account_id: Uuid, flow_id: &str) -> Result<(), VerifyError> {
+        self.calls.lock().unwrap().push(VerifyCall::Cancel {
+            account_id,
+            flow_id: flow_id.to_owned(),
+        });
+        match self.outcome.as_error() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
