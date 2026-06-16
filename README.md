@@ -31,8 +31,10 @@ Once prerequisites are installed, the quickest path is:
 ```bash
 ./run.sh          # macOS / Linux / WSL  — starts axon-server (default)
 ./run.sh tui      # starts axon-tui instead
+./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
 .\run.ps1         # Windows (PowerShell) — starts axon-server (default)
 .\run.ps1 tui     # starts axon-tui instead
+.\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
 ```
 
 The run script handles the rest automatically: validates that required
@@ -123,8 +125,10 @@ The server loads `.env` automatically on startup. The defaults in `.env.example`
 # Quick path — starts Docker, runs the target, tears down Docker on exit:
 ./run.sh          # macOS / Linux / WSL  — axon-server (default)
 ./run.sh tui      # axon-tui
+./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
 .\run.ps1         # Windows (PowerShell) — axon-server (default)
 .\run.ps1 tui     # axon-tui
+.\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
 
 # Or run directly if Postgres is already up:
 cargo run -p axon-server

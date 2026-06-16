@@ -20,30 +20,49 @@ function New-RandomHex([int]$byteCount) {
     return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
 }
 
-if (-not (Test-Cmd 'docker')) {
-    Write-Host "Error: 'docker' is not installed or not in PATH."
-    Write-Host ""
-    Write-Host "Install Docker Desktop:"
-    Write-Host "  winget install Docker.DockerDesktop"
-    Write-Host "  Or visit: https://docs.docker.com/desktop/windows/install/"
-    exit 1
+# --- Determine target early ---
+
+$target = if ($args.Count -gt 0) { $args[0] } else { 'server' }
+$package = switch ($target) {
+    'server' { 'axon-server' }
+    'tui'    { 'axon-tui' }
+    'clean'  { 'clean' }
+    default  {
+        Write-Host "Error: unknown target '$target'. Valid targets: server (default), tui, clean."
+        exit 1
+    }
 }
 
-if (-not (Test-Cmd 'cargo')) {
-    Write-Host "Error: 'cargo' is not installed or not in PATH."
-    Write-Host ""
-    Write-Host "Install Rust (includes cargo):"
-    Write-Host "  winget install Rustlang.Rustup"
-    Write-Host "  Or visit: https://www.rust-lang.org/tools/install"
-    exit 1
+# --- Prerequisites ---
+
+if ($package -ne 'clean') {
+    if (-not (Test-Cmd 'cargo')) {
+        Write-Host "Error: 'cargo' is not installed or not in PATH."
+        Write-Host ""
+        Write-Host "Install Rust (includes cargo):"
+        Write-Host "  winget install Rustlang.Rustup"
+        Write-Host "  Or visit: https://www.rust-lang.org/tools/install"
+        exit 1
+    }
 }
 
-$null = docker info 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Error: Docker is installed but Docker Desktop is not running."
-    Write-Host ""
-    Write-Host "Start Docker Desktop from the Start menu or system tray and try again."
-    exit 1
+if ($package -eq 'axon-server' -or $package -eq 'clean') {
+    if (-not (Test-Cmd 'docker')) {
+        Write-Host "Error: 'docker' is not installed or not in PATH."
+        Write-Host ""
+        Write-Host "Install Docker Desktop:"
+        Write-Host "  winget install Docker.DockerDesktop"
+        Write-Host "  Or visit: https://docs.docker.com/desktop/windows/install/"
+        exit 1
+    }
+
+    $null = docker info 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: Docker is installed but Docker Desktop is not running."
+        Write-Host ""
+        Write-Host "Start Docker Desktop from the Start menu or system tray and try again."
+        exit 1
+    }
 }
 
 # --- Load .env if present ---
@@ -75,7 +94,8 @@ $configFile = if ($env:AXON_CONFIG) {
     Join-Path $PSScriptRoot 'axon.toml'
 }
 
-if (-not (Test-Path $envFile) -and (Test-Path $envExample) -and
+if ($package -eq 'axon-server' -and
+    -not (Test-Path $envFile) -and (Test-Path $envExample) -and
     -not $env:DATABASE_URL -and -not $env:AXON_DATABASE__URL -and
     -not (Test-Path $configFile)) {
     $answer = Read-Host "No database configuration found. Create .env from .env.example now? [y/N]"
@@ -109,67 +129,71 @@ if (-not (Test-Path $envFile) -and (Test-Path $envExample) -and
 
 # --- Run ---
 
-$target = if ($args.Count -gt 0) { $args[0] } else { 'server' }
-$package = switch ($target) {
-    'server' { 'axon-server' }
-    'tui'    { 'axon-tui' }
-    default  {
-        Write-Host "Error: unknown target '$target'. Valid targets: server (default), tui."
+if ($package -eq 'clean') {
+    Write-Host "Warning: this will permanently destroy all Postgres data."
+    $answer = Read-Host "Continue? [y/N]"
+    if ($answer -match '^[yY]') {
+        Invoke-Compose down -v
+        exit $LASTEXITCODE
+    } else {
+        Write-Host "Aborted."
         exit 1
     }
 }
 
 $exitCode = 1
 try {
-    Invoke-Compose up -d --wait postgres
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: Docker Compose could not start the Postgres service."
-        Write-Host "Review the Docker output above; no database reset was attempted."
-        exit 1
-    }
-
-    $postgresUser = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } else { 'axon' }
-    $postgresPassword = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else { 'axon' }
-    $postgresDb = if ($env:POSTGRES_DB) { $env:POSTGRES_DB } else { 'axon' }
-
-    $postgresOutput = Invoke-Compose exec -e "PGPASSWORD=$postgresPassword" postgres `
-        psql -h localhost -U $postgresUser -d $postgresDb -c "SELECT 1" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $postgresError = $postgresOutput | Out-String
-        if ($postgresError -notmatch
-            'password authentication failed|role ".+" does not exist|database ".+" does not exist') {
-            Write-Host "Error: could not run the Postgres credential check:"
-            Write-Host $postgresError.Trim()
-            Write-Host "No database reset was attempted."
+    if ($package -eq 'axon-server') {
+        Invoke-Compose up -d --wait postgres
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error: Docker Compose could not start the Postgres service."
+            Write-Host "Review the Docker output above; no database reset was attempted."
             exit 1
         }
 
-        Write-Host "Error: could not connect to the Compose Postgres service with its configured credentials."
-        Write-Host "The database volume was likely initialized with a different password."
-        Write-Host ""
-        $reset = Read-Host "Reset the database now? This destroys all existing data. [y/N]"
-        if ($reset -match '^[yY]') {
-            Invoke-Compose down -v
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error: Docker Compose could not remove the existing database volume."
+        $postgresUser = if ($env:POSTGRES_USER) { $env:POSTGRES_USER } else { 'axon' }
+        $postgresPassword = if ($env:POSTGRES_PASSWORD) { $env:POSTGRES_PASSWORD } else { 'axon' }
+        $postgresDb = if ($env:POSTGRES_DB) { $env:POSTGRES_DB } else { 'axon' }
+
+        $postgresOutput = Invoke-Compose exec -e "PGPASSWORD=$postgresPassword" postgres `
+            psql -h localhost -U $postgresUser -d $postgresDb -c "SELECT 1" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $postgresError = $postgresOutput | Out-String
+            if ($postgresError -notmatch
+                'password authentication failed|role ".+" does not exist|database ".+" does not exist') {
+                Write-Host "Error: could not run the Postgres credential check:"
+                Write-Host $postgresError.Trim()
+                Write-Host "No database reset was attempted."
                 exit 1
             }
-            Invoke-Compose up -d --wait postgres
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error: Docker Compose could not restart Postgres after the reset."
+
+            Write-Host "Error: could not connect to the Compose Postgres service with its configured credentials."
+            Write-Host "The database volume was likely initialized with a different password."
+            Write-Host ""
+            $reset = Read-Host "Reset the database now? This destroys all existing data. [y/N]"
+            if ($reset -match '^[yY]') {
+                Invoke-Compose down -v
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error: Docker Compose could not remove the existing database volume."
+                    exit 1
+                }
+                Invoke-Compose up -d --wait postgres
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error: Docker Compose could not restart Postgres after the reset."
+                    exit 1
+                }
+                $postgresOutput = Invoke-Compose exec -e "PGPASSWORD=$postgresPassword" postgres `
+                    psql -h localhost -U $postgresUser -d $postgresDb -c "SELECT 1" 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "Error: Postgres still rejects the configured credentials after the reset."
+                    Write-Host (($postgresOutput | Out-String).Trim())
+                    exit 1
+                }
+            } else {
+                Write-Host "Aborting. Update the Compose Postgres credentials to match the existing"
+                Write-Host "database, or run 'docker compose down -v' from the project directory to reset."
                 exit 1
             }
-            $postgresOutput = Invoke-Compose exec -e "PGPASSWORD=$postgresPassword" postgres `
-                psql -h localhost -U $postgresUser -d $postgresDb -c "SELECT 1" 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "Error: Postgres still rejects the configured credentials after the reset."
-                Write-Host (($postgresOutput | Out-String).Trim())
-                exit 1
-            }
-        } else {
-            Write-Host "Aborting. Update the Compose Postgres credentials to match the existing"
-            Write-Host "database, or run 'docker compose down -v' from the project directory to reset."
-            exit 1
         }
     }
 
@@ -185,7 +209,9 @@ try {
     & cargo run --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') -p $package
     $exitCode = $LASTEXITCODE
 } finally {
-    $null = Invoke-Compose down
+    if ($package -eq 'axon-server') {
+        $null = Invoke-Compose down
+    }
     foreach ($entry in $loadedVars.GetEnumerator()) {
         [System.Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
     }
