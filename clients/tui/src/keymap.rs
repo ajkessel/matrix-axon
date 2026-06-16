@@ -89,7 +89,11 @@ impl App {
 
     fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
         if self.shortcuts.clear_input.matches(key) {
-            self.mode = Mode::Compose;
+            self.mode = if kind == PopupKind::MediaPreview {
+                Mode::MessageList
+            } else {
+                Mode::Compose
+            };
             self.popup_scroll = 0;
             self.help_selection = 0;
             if kind == PopupKind::CommandResponse {
@@ -248,10 +252,10 @@ impl App {
             self.page_selected_message(1);
         } else if key.code == KeyCode::Home {
             self.dismiss_input_help();
-            self.select_first_message();
+            self.jump_to_first_message();
         } else if key.code == KeyCode::End {
             self.dismiss_input_help();
-            self.select_last_message();
+            self.jump_to_last_message();
         } else if self.shortcuts.find.matches(key) {
             self.mode = Mode::Search(SearchKind::Messages, String::new());
         } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
@@ -304,17 +308,27 @@ impl App {
         } else if self.shortcuts.edit_previous.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(-1);
-            self.mode = Mode::MessageList;
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.edit_next.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(1);
-            self.mode = Mode::MessageList;
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(-1);
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.message_page_down.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(1);
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
             if let Some(completions) = self.input.partial_room_completions.as_ref() {
@@ -670,14 +684,22 @@ impl App {
             };
             self.sync_room_selection_to_account_filter();
             self.load_selected_timeline().await;
+        } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
+            let page = self.accounts.page_size.max(1) as isize;
+            self.cycle_account(-page);
+            self.load_selected_timeline().await;
+        } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
+            let page = self.accounts.page_size.max(1) as isize;
+            self.cycle_account(page);
+            self.load_selected_timeline().await;
         } else if key.code == KeyCode::Home {
             self.accounts.selected = AccountSelection::All;
             self.sync_room_selection_to_account_filter();
             self.load_selected_timeline().await;
         } else if key.code == KeyCode::End {
-            if !self.accounts.accounts.is_empty() {
-                self.accounts.selected =
-                    AccountSelection::Account(self.accounts.accounts.len() - 1);
+            let n = self.accounts.accounts.len();
+            if n > 0 {
+                self.accounts.selected = AccountSelection::Account(n - 1);
                 self.sync_room_selection_to_account_filter();
                 self.load_selected_timeline().await;
             }

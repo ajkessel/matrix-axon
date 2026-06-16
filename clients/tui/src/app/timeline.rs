@@ -5,7 +5,8 @@ use crate::config::{DisplayOptions, SenderNameStyle};
 
 use super::{
     collect_reactions, match_status, message_index_at_line, message_line_ranges, next_match_index,
-    selected_message_target_index, App, ConnectionState, LiveFrameAction, RoomKey, Status,
+    selected_message_target_index, App, ConnectionState, ImageCardRows, LiveFrameAction, RoomKey,
+    Status,
 };
 
 impl App {
@@ -250,6 +251,35 @@ impl App {
         self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
     }
 
+    pub(crate) fn jump_to_first_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let event_id = events[0].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(0);
+        self.status = Status::from(format!("selected message 1 of {}", count));
+    }
+
+    pub(crate) fn jump_to_last_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let last = count - 1;
+        let event_id = events[last].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(last);
+        self.status = Status::from(format!("selected message {} of {}", count, count));
+    }
+
     pub(crate) fn page_selected_message(&mut self, direction: isize) {
         let page = self.messages.page_size.max(1);
         let Some((event_id, next, event_count)) = ({
@@ -265,6 +295,7 @@ impl App {
                     self.messages.width,
                     &reactions,
                     &self.colors,
+                    &ImageCardRows::new(),
                 );
                 let total_lines = ranges
                     .last()
@@ -320,6 +351,7 @@ impl App {
             self.messages.width,
             &reactions,
             &self.colors,
+            &ImageCardRows::new(),
         );
         let Some(range) = ranges.get(index) else {
             return;
@@ -487,6 +519,7 @@ impl App {
             self.messages.width,
             &reactions,
             &self.colors,
+            &ImageCardRows::new(),
         )
         .last()
         .map(|range| range.end)

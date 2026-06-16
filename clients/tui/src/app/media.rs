@@ -19,8 +19,8 @@ use crate::api::AxonClient;
 pub(crate) const IMAGE_CACHE_LIMIT: usize = 16;
 pub(crate) const PROTOCOL_CACHE_LIMIT: usize = 32;
 pub(crate) const MEDIA_WORKERS: usize = 4;
-const MAX_DECODED_PIXELS: u64 = 12_000_000;
-const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DECODED_PIXELS: u64 = 40_000_000;
+const MAX_DECODE_ALLOC_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_CACHED_IMAGE_DIMENSION: u32 = 1600;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -152,7 +152,14 @@ fn decode_image_with_limits(bytes: &[u8]) -> Result<image::DynamicImage, String>
     reader.limits(limits);
     let image = reader.decode().map_err(|err| err.to_string())?;
     let image = super::apply_exif_orientation(image, bytes);
-    Ok(image.thumbnail(MAX_CACHED_IMAGE_DIMENSION, MAX_CACHED_IMAGE_DIMENSION))
+    // thumbnail() upscales small images; only downscale when the image exceeds the cap.
+    Ok(
+        if image.width() > MAX_CACHED_IMAGE_DIMENSION || image.height() > MAX_CACHED_IMAGE_DIMENSION {
+            image.thumbnail(MAX_CACHED_IMAGE_DIMENSION, MAX_CACHED_IMAGE_DIMENSION)
+        } else {
+            image
+        },
+    )
 }
 
 fn validate_image_dimensions(width: u32, height: u32) -> Result<(), String> {
@@ -171,8 +178,8 @@ mod tests {
 
     #[test]
     fn rejects_images_with_excessive_decoded_dimensions() {
-        assert!(validate_image_dimensions(4000, 3000).is_ok());
-        assert!(validate_image_dimensions(5000, 3000).is_err());
+        assert!(validate_image_dimensions(6000, 6000).is_ok()); // 36 MP — under new limit
+        assert!(validate_image_dimensions(7000, 6000).is_err()); // 42 MP — over limit
         assert!(validate_image_dimensions(0, 100).is_err());
     }
 }
