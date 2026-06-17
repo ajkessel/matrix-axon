@@ -9,9 +9,9 @@
 //!
 //! Concurrency: lifecycle verbs for one account must not interleave (a login
 //! racing a future logout could strand a half-built session), so each verb runs
-//! under a per-identity async lock keyed by the canonical
-//! `(user_id, homeserver_url)` — the natural key login starts from, before any
-//! `account_id` exists.
+//! under a per-identity async lock keyed by Matrix `user_id` — the identity
+//! login starts from, before any `account_id` exists. Homeserver URLs are
+//! connection endpoints and may have multiple valid spellings.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -251,7 +251,7 @@ fn classify_recovery_error(err: RecoveryError) -> LifecycleError {
 }
 
 /// The per-identity async mutex that serializes the lifecycle verbs (and the
-/// verification watcher's `verified` write) for one `(user_id, homeserver_url)`.
+/// verification watcher's `verified` write) for one Matrix user id.
 pub(crate) type IdentityLock = Arc<AsyncMutex<()>>;
 
 /// `canonical-identity → lock`. Owned by [`SyncEngine`](crate::SyncEngine) and
@@ -260,17 +260,25 @@ pub(crate) type IdentityLock = Arc<AsyncMutex<()>>;
 /// take the *same* lock (ADR 0026 — closes the `verified` lost-update race).
 pub(crate) type IdentityLocks = Arc<Mutex<HashMap<String, IdentityLock>>>;
 
-/// Fetch (or create) the per-identity lock for `(user_id, homeserver_url)`. The
-/// std mutex is held only to fetch/insert; callers `await` the returned async
-/// mutex, so verbs/watchers for *different* identities never block each other.
+/// Fetch (or create) the per-identity lock for a Matrix user id. Homeserver base
+/// URLs are connection endpoints, not distinct Matrix identities; config and
+/// discovery may legitimately produce different URLs for the same user.
+///
+/// The std mutex is held only to fetch/insert; callers `await` the returned
+/// async mutex, so verbs/watchers for *different* identities never block each
+/// other.
 ///
 /// The map grows unbounded — one entry per identity ever seen, never removed.
 /// Pruning belongs to delete (which retires the identity for good), not logout: a
 /// logged-out identity can be logged back in, and removing its lock while a verb
 /// still holds it would let a concurrent login mint a fresh lock and run without
 /// mutual exclusion. The leak is one small entry per distinct identity.
-pub(crate) fn lock_for(locks: &IdentityLocks, user_id: &str, homeserver_url: &str) -> IdentityLock {
-    let key = format!("{user_id}\u{0}{homeserver_url}");
+pub(crate) fn lock_for(
+    locks: &IdentityLocks,
+    user_id: &str,
+    _homeserver_url: &str,
+) -> IdentityLock {
+    let key = user_id.to_owned();
     let mut map = locks.lock().expect("lifecycle lock map poisoned");
     map.entry(key).or_default().clone()
 }
@@ -332,14 +340,14 @@ impl AccountLifecycle {
         }
     }
 
-    /// The per-identity lock for `(user_id, homeserver_url)`, created on first use.
+    /// The per-identity lock for a Matrix user id, created on first use.
     /// Shared with the verification watcher via the engine-owned [`IdentityLocks`].
     fn lock_for(&self, user_id: &str, homeserver_url: &str) -> IdentityLock {
         lock_for(&self.locks, user_id, homeserver_url)
     }
 
     /// Log a Matrix account in at runtime as a fresh device, returning its Axon
-    /// `account_id`. Idempotent by canonical `(user_id, homeserver_url)`:
+    /// `account_id`. Idempotent by Matrix user id:
     ///
     /// - **New identity** → mint a row.
     /// - **`deactivated` row** → reuse its `account_id` (and its retained Postgres
@@ -377,33 +385,15 @@ impl AccountLifecycle {
         let user_id = OwnedUserId::try_from(username)
             .map_err(|e| LifecycleError::InvalidUserId(format!("{username}: {e}")))?;
 
-        // Resolve the canonical homeserver before taking the identity lock — the
-        // lock is keyed by `(user_id, homeserver_url)`, and discovery is a pure
-        // read of external state.
-        let homeserver_url = match homeserver_url {
-            // Normalize + scheme-check the caller's URL (trailing slash trimmed
-            // so it keys identically to a discovered one; plain-HTTP public hosts
-            // refused so the password can't leave in cleartext). Not probed —
-            // it's caller-asserted; a bad URL surfaces at the SDK login below.
-            Some(url) => crate::discovery::accept_explicit_homeserver(user_id.server_name(), url)
-                .map_err(|e| LifecycleError::Upstream(e.to_string()))?,
-            None => crate::discovery::resolve_homeserver(&self.http, user_id.server_name())
-                .await
-                .map_err(|e| LifecycleError::Upstream(e.to_string()))?,
-        };
-        let homeserver_url = homeserver_url.as_str();
-
-        let lock = self.lock_for(username, homeserver_url);
+        // Serialize before discovery so concurrent requests using different
+        // endpoint spellings cannot both observe a missing Matrix identity.
+        let lock = self.lock_for(username, "");
         let _guard = lock.lock().await;
 
-        // Resolve the target row: no-op on an already-active one, reactivate a
-        // deactivated one, reject one mid-deletion, or prepare to mint a new
-        // one. Keep the new-row write until after the domain check below.
-        let account = match self
-            .store
-            .find_account_by_identity(username, homeserver_url)
-            .await?
-        {
+        // Resolve by Matrix id, not homeserver URL. A configured endpoint and a
+        // discovered client endpoint can differ while naming the same account;
+        // treating the URL as identity used to mint duplicate active rows.
+        let account = match self.store.find_account_by_user_id(username).await? {
             Some(existing) => match existing.state {
                 // Already logged in and supervised: idempotent no-op. Return the
                 // existing account untouched rather than re-logging-in (which would
@@ -434,6 +424,25 @@ impl AccountLifecycle {
             },
             None => None,
         };
+
+        // A retained account keeps using its stored endpoint. Only a genuinely
+        // new Matrix identity needs caller normalization or server-side discovery.
+        let homeserver_url = match account.as_ref() {
+            Some(existing) => existing.homeserver_url.clone(),
+            None => match homeserver_url {
+                // Normalize + scheme-check the caller's URL (trailing slash
+                // trimmed; plain-HTTP public hosts refused so the password can't
+                // leave in cleartext). Not probed — a bad URL surfaces at login.
+                Some(url) => {
+                    crate::discovery::accept_explicit_homeserver(user_id.server_name(), url)
+                        .map_err(|e| LifecycleError::Upstream(e.to_string()))?
+                }
+                None => crate::discovery::resolve_homeserver(&self.http, user_id.server_name())
+                    .await
+                    .map_err(|e| LifecycleError::Upstream(e.to_string()))?,
+            },
+        };
+        let homeserver_url = homeserver_url.as_str();
 
         // Refuse an MXID whose domain is actually the homeserver's hostname —
         // no such user can exist there, so fail with the spelling they meant
@@ -860,8 +869,8 @@ impl AccountLifecycle {
     /// without mutual exclusion against that waiter. Performed under the std map
     /// mutex so no new waiter can clone the `Arc` between the count check and the
     /// removal.
-    fn prune_lock(&self, user_id: &str, homeserver_url: &str, lock: &Arc<AsyncMutex<()>>) {
-        let key = format!("{user_id}\u{0}{homeserver_url}");
+    fn prune_lock(&self, user_id: &str, _homeserver_url: &str, lock: &Arc<AsyncMutex<()>>) {
+        let key = user_id.to_owned();
         let mut map = self.locks.lock().expect("lifecycle lock map poisoned");
         // Live strong refs: the map entry (1) + our own `lock` handle (1) + one per
         // parked waiter. `== 2` ⇒ only map + us, so removing the entry can't strand
@@ -1035,6 +1044,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after.state, AccountState::Active);
+
+        delete_account(&lc.store, acct.account_id).await;
+    }
+
+    /// Config and discovery can use different homeserver base URLs for the same
+    /// MXID. Login must still return the active configured row rather than minting
+    /// a second account.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn login_on_active_user_with_different_homeserver_is_idempotent_noop() {
+        let lc = lifecycle().await;
+        let configured_hs = "https://matrix.example.org";
+        let discovered_hs = "https://client.example.org";
+        let user = format!("@url-alias-{}:localhost", Uuid::new_v4());
+        let acct = lc.store.upsert_account(&user, configured_hs).await.unwrap();
+
+        let id = lc
+            .login(Some(discovered_hs), &user, "not-the-password")
+            .await
+            .expect("active Matrix id is a no-op across URL aliases");
+        assert_eq!(id, acct.account_id);
+
+        let visible = lc.store.list_client_visible_accounts().await.unwrap();
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|account| account.user_id == user)
+                .count(),
+            1
+        );
 
         delete_account(&lc.store, acct.account_id).await;
     }
@@ -1644,7 +1683,7 @@ mod tests {
 
     /// Delete of an `active` account removes the row, its on-disk SDK store dir
     /// and staging backup, and retires the identity (a later login would mint a
-    /// fresh id, since `find_account_by_identity` now returns `None`).
+    /// fresh id, since `find_account_by_user_id` now returns `None`).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn delete_on_active_removes_row_and_store_dir() {
@@ -1673,7 +1712,7 @@ mod tests {
         assert!(!backup.exists(), "staging backup removed");
         assert!(
             lc.store
-                .find_account_by_identity(&user, hs)
+                .find_account_by_user_id(&user)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1907,7 +1946,7 @@ mod tests {
         let lc = lifecycle().await;
         let user = format!("@prune-{}:localhost", Uuid::new_v4());
         let hs = "https://hs.example.org";
-        let key = format!("{user}\u{0}{hs}");
+        let key = user.clone();
 
         // `lock_for` inserts the entry and returns a clone: map(1) + ours(1).
         let lock = lc.lock_for(&user, hs);

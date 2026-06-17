@@ -79,6 +79,28 @@ impl AxonClient {
         self.send(request).await
     }
 
+    pub async fn recover(
+        &self,
+        account_id: Uuid,
+        recovery_key: &str,
+    ) -> Result<AccountDto, ApiError> {
+        let request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{account_id}/recover",
+                self.base_url
+            ))
+            .json(&serde_json::json!({ "recovery_key": recovery_key }));
+        self.send(request).await
+    }
+
+    pub async fn delete_account(&self, account_id: Uuid) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .delete(format!("{}/v1/accounts/{account_id}", self.base_url));
+        self.send_no_body(request).await
+    }
+
     pub async fn room_timeline(
         &self,
         account_id: Uuid,
@@ -206,6 +228,20 @@ impl AxonClient {
         }
     }
 
+    async fn send_no_body(&self, request: reqwest::RequestBuilder) -> Result<(), ApiError> {
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            let text = response.text().await?;
+            let message = serde_json::from_str::<ErrorResponse>(&text)
+                .map(|body| format!("{}: {}", body.error.code, body.error.message))
+                .unwrap_or_else(|_| text);
+            Err(ApiError::Status { status, message })
+        }
+    }
+
     pub fn ws_url(&self) -> Result<String, ApiError> {
         let url =
             reqwest::Url::parse(&self.base_url).map_err(|err| ApiError::Url(err.to_string()))?;
@@ -326,6 +362,8 @@ pub struct AccountDto {
     pub account_id: Uuid,
     pub user_id: String,
     pub state: AccountState,
+    #[serde(default)]
+    pub verified: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

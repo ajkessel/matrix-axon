@@ -40,7 +40,14 @@ pub(crate) enum Mode {
         /// one there. `None` means Axon resolves the homeserver.
         homeserver: Option<String>,
     },
+    RecoveryKey {
+        account: AccountDto,
+        origin: RecoveryOrigin,
+    },
     ConfirmLogout {
+        account: AccountDto,
+    },
+    ConfirmDelete {
         account: AccountDto,
     },
     RoomList,
@@ -59,6 +66,12 @@ pub(crate) enum Mode {
         selected: usize,
     },
     Popup(PopupKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryOrigin {
+    PostLogin,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +117,7 @@ pub(crate) enum PopupKind {
     Shortcuts,
     RoomInfo,
     Status,
+    CommandResponse,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -224,6 +238,9 @@ pub(crate) struct App {
     pub(crate) last_search: Option<String>,
     pub(crate) show_input_help: bool,
     pub(crate) status: Status,
+    /// A completed slash-command response waiting for the renderer to decide
+    /// whether it fits in the fixed-height entry box.
+    pub(crate) pending_command_response: Option<String>,
     pub(crate) should_quit: bool,
     /// Sender for results of in-flight login/logout work spawned off the event
     /// loop. `None` until the main loop wires up the channel (and in unit tests).
@@ -247,6 +264,10 @@ pub(crate) struct RoomsState {
 pub(crate) struct AccountsState {
     /// Only Active accounts. Used for panel display, navigation, and filtering.
     pub(crate) accounts: Vec<AccountDto>,
+    /// Every account returned by `GET /v1/accounts` (active + deactivated).
+    /// Retained for lifecycle/status views without exposing logged-out accounts
+    /// through active-only navigation.
+    pub(crate) client_visible: Vec<AccountDto>,
     /// Account IDs known to be inactive (deactivated/deleting). Kept separately
     /// so room-list filtering can drop their rooms even though they are not
     /// displayed in the panel.
@@ -260,6 +281,7 @@ impl Default for AccountsState {
     fn default() -> Self {
         Self {
             accounts: Vec::new(),
+            client_visible: Vec::new(),
             inactive_ids: std::collections::HashSet::new(),
             selected: AccountSelection::All,
             scroll: 0,
@@ -297,6 +319,8 @@ pub(crate) struct InputState {
     pub(crate) partial_room_completions: Option<Vec<String>>,
     pub(crate) room_command_completion: Option<(String, usize)>,
     pub(crate) logout_command_completion: Option<(String, usize)>,
+    pub(crate) recover_command_completion: Option<(String, usize)>,
+    pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
 }
 
@@ -331,6 +355,7 @@ impl App {
             last_search: None,
             show_input_help: true,
             status: Status::Info(config_status),
+            pending_command_response: None,
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
@@ -345,6 +370,25 @@ impl App {
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
         std::mem::take(&mut self.redraw_requested)
+    }
+
+    /// Returns true when the user is mid-command in a transient input mode
+    /// or has an account lifecycle request in flight, where unsolicited status
+    /// updates would overwrite an active prompt/progress message or disrupt
+    /// in-progress text entry.
+    pub(crate) fn is_mid_command(&self) -> bool {
+        self.lifecycle_busy
+            || matches!(
+                self.mode,
+                Mode::LoginUsername
+                    | Mode::LoginPassword { .. }
+                    | Mode::RecoveryKey { .. }
+                    | Mode::ConfirmLogout { .. }
+                    | Mode::ConfirmDelete { .. }
+                    | Mode::Editing { .. }
+                    | Mode::Reacting { .. }
+                    | Mode::Unreacting { .. }
+            )
     }
 
     pub(crate) fn dismiss_input_help(&mut self) {
@@ -362,14 +406,16 @@ impl App {
             .map(|a| a.account_id)
             .collect();
         let active: Vec<AccountDto> = accounts
-            .into_iter()
+            .iter()
             .filter(|a| {
                 a.state == AccountState::Active
                     && self
                         .account_filter
                         .is_none_or(|account_id| a.account_id == account_id)
             })
+            .cloned()
             .collect();
+        self.accounts.client_visible = accounts;
         self.accounts.accounts = active;
         self.accounts.selected = selected_account_id
             .and_then(|account_id| {
@@ -409,6 +455,8 @@ impl App {
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
@@ -419,6 +467,8 @@ impl App {
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         if self.input.cursor == 0 {
             return;
@@ -439,6 +489,8 @@ impl App {
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
@@ -562,6 +614,26 @@ impl App {
     }
 
     pub(crate) async fn handle_command(&mut self, command: Command) {
+        let tracks_response =
+            !matches!(&command, Command::Send(_) | Command::Empty | Command::Quit);
+        self.pending_command_response = None;
+        self.handle_command_inner(command).await;
+        if tracks_response {
+            self.queue_completed_command_response();
+        }
+    }
+
+    pub(crate) fn queue_completed_command_response(&mut self) {
+        if self.mode != Mode::Compose || self.is_mid_command() {
+            return;
+        }
+        let response = self.status.text(self.display.debug);
+        if !response.is_empty() {
+            self.pending_command_response = Some(response);
+        }
+    }
+
+    async fn handle_command_inner(&mut self, command: Command) {
         match command {
             Command::Login {
                 username,
@@ -571,6 +643,8 @@ impl App {
                 self.start_login(username, password, homeserver).await;
             }
             Command::Logout(target) => self.start_logout(target),
+            Command::Recover(target) => self.start_recover(target),
+            Command::Delete(target) => self.start_delete(target),
             Command::Room(target) => self.switch_room(&target).await,
             Command::Account(target) => {
                 if self.switch_account(&target) {
@@ -859,7 +933,7 @@ mod tests {
     use super::*;
     use crate::api::{AccountDto, AccountState};
     use crate::command::HELP_COMMANDS;
-    use crate::ui::{entry_status_text, popup_shortcuts_lines};
+    use crate::ui::{entry_status_text, popup_shortcuts_lines, popup_status_lines};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn room(room_id: &str, alias: Option<&str>, name: Option<&str>) -> RoomDto {
@@ -949,6 +1023,7 @@ mod tests {
             account_id,
             user_id: user_id.to_owned(),
             state,
+            verified: Some(false),
         }
     }
 
@@ -1024,11 +1099,13 @@ mod tests {
                 account_id: active_id,
                 user_id: "@alice:example.com".to_owned(),
                 state: AccountState::Active,
+                verified: Some(false),
             },
             AccountDto {
                 account_id: logged_out_id,
                 user_id: "@bob:example.com".to_owned(),
                 state: AccountState::Deactivated,
+                verified: Some(false),
             },
         ]);
 
@@ -1042,6 +1119,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["!active:example.com"]
         );
+    }
+
+    #[test]
+    fn status_lists_active_and_deactivated_accounts() {
+        let active_id = Uuid::from_u128(1);
+        let logged_out_id = Uuid::from_u128(2);
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(active_id, "@alice:example.com", AccountState::Active),
+            account_with_id(logged_out_id, "@bob:example.com", AccountState::Deactivated),
+        ]);
+
+        assert_eq!(
+            app.accounts
+                .accounts
+                .iter()
+                .map(|account| account.account_id)
+                .collect::<Vec<_>>(),
+            vec![active_id],
+            "active navigation remains active-only"
+        );
+
+        let status = popup_status_lines(&app).join("\n");
+        assert!(status.contains("@alice:example.com  (logged in, 0 rooms)"));
+        assert!(status.contains("@bob:example.com  (logged out, 0 rooms)"));
+    }
+
+    #[test]
+    fn status_disambiguates_duplicate_matrix_ids_with_account_ids() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(first_id, "@alice:example.com", AccountState::Active),
+            account_with_id(second_id, "@alice:example.com", AccountState::Deactivated),
+        ]);
+
+        let status = popup_status_lines(&app).join("\n");
+        assert!(status.contains(&format!("@alice:example.com  [{first_id}]  (logged in")));
+        assert!(status.contains(&format!("@alice:example.com  [{second_id}]  (logged out")));
     }
 
     #[test]
@@ -1499,6 +1616,18 @@ mod tests {
         assert_eq!(app.status.text(false), "unknown command: /frobnicate");
     }
 
+    #[tokio::test]
+    async fn slash_command_response_waits_for_layout_fit_check() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.handle_command(Command::Whoami).await;
+
+        assert_eq!(
+            app.pending_command_response.as_deref(),
+            Some("select a room before using /whoami")
+        );
+    }
+
     #[test]
     fn formatted_body_renders_supported_html_styles() {
         let colors = TuiConfig::test_default().colors;
@@ -1893,6 +2022,43 @@ mod tests {
             entry_status_text(&app),
             "live WebSocket reconnecting in 4s: connection reset"
         );
+    }
+
+    #[test]
+    fn in_flight_lifecycle_status_ignores_live_socket_updates() {
+        let mut app = app_with_rooms(Vec::new());
+        app.lifecycle_busy = true;
+        app.status = Status::Info("logging in @alice:example.com…".to_owned());
+
+        let action = app.handle_live_frame(LiveFrame::Reconnecting {
+            reason: "connection reset".to_owned(),
+            delay: std::time::Duration::from_secs(4),
+        });
+
+        assert_eq!(action, LiveFrameAction::None);
+        assert_eq!(app.status.text(false), "logging in @alice:example.com…");
+    }
+
+    #[test]
+    fn lifecycle_prompt_status_survives_background_room_refresh() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::LoginUsername;
+        app.status = Status::Info("Matrix ID: @user:example.com".to_owned());
+
+        app.apply_room_refresh(Vec::new());
+
+        assert_eq!(app.status.text(false), "Matrix ID: @user:example.com");
+    }
+
+    #[test]
+    fn in_flight_lifecycle_status_survives_background_room_refresh() {
+        let mut app = app_with_rooms(Vec::new());
+        app.lifecycle_busy = true;
+        app.status = Status::Info("deleting @alice:example.com…".to_owned());
+
+        app.apply_room_refresh(Vec::new());
+
+        assert_eq!(app.status.text(false), "deleting @alice:example.com…");
     }
 
     #[tokio::test]
@@ -2542,6 +2708,52 @@ mod tests {
     }
 
     #[test]
+    fn logout_completion_selects_duplicate_user_ids_by_account_id() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account_with_id(first_id, "@alice:example.com", AccountState::Active),
+            account_with_id(second_id, "@alice:example.com", AccountState::Active),
+        ];
+        app.input.buffer = "/logout alice".to_owned();
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/logout {first_id}"));
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/logout {second_id}"));
+        assert!(matches!(
+            app.resolve_logout_target(Some(&second_id.to_string())),
+            super::lifecycle::LogoutResolution::Match(AccountDto { account_id, .. })
+                if account_id == second_id
+        ));
+    }
+
+    #[test]
+    fn delete_completion_selects_duplicate_user_ids_by_account_id() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account_with_id(first_id, "@alice:example.com", AccountState::Active),
+            account_with_id(second_id, "@alice:example.com", AccountState::Deactivated),
+        ];
+        app.input.buffer = "/delete alice".to_owned();
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/delete {first_id}"));
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/delete {second_id}"));
+        assert!(matches!(
+            app.resolve_delete_target(Some(&second_id.to_string())),
+            super::lifecycle::DeleteResolution::Match(AccountDto { account_id, .. })
+                if account_id == second_id
+        ));
+    }
+
+    #[test]
     fn logout_prompts_for_confirmation_when_enabled() {
         let mut app = app_with_rooms(Vec::new());
         app.display.confirm_logout = true;
@@ -2578,7 +2790,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('n'))).await;
 
         assert_eq!(app.mode, Mode::Compose);
-        assert_eq!(app.status.text(false), "logout canceled");
+        assert_eq!(app.status.text(false), "");
     }
 
     #[tokio::test]
@@ -2591,6 +2803,36 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('x'))).await;
 
         assert!(matches!(app.mode, Mode::ConfirmLogout { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_confirmation_non_yes_enter_clears_buffer() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::ConfirmDelete {
+            account: account("@alice:example.com", AccountState::Active),
+        };
+        app.input.buffer = "no".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_confirmation_escape_clears_buffer() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::ConfirmDelete {
+            account: account("@alice:example.com", AccountState::Active),
+        };
+        app.input.buffer = "YES".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.input.buffer.is_empty());
     }
 
     #[tokio::test]
@@ -2630,7 +2872,104 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Compose);
         assert!(app.input.buffer.is_empty());
-        assert_eq!(app.status.text(false), "login canceled");
+        assert_eq!(app.status.text(false), "");
+    }
+
+    #[tokio::test]
+    async fn empty_recovery_key_skips_post_login_recovery() {
+        let mut app = app_with_rooms(Vec::new());
+        let account = account("@alice:example.com", AccountState::Active);
+        app.mode = Mode::RecoveryKey {
+            account,
+            origin: RecoveryOrigin::PostLogin,
+        };
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(
+            app.status.text(false),
+            "recovery skipped for @alice:example.com"
+        );
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_standalone_recovery_and_clears_secret() {
+        let mut app = app_with_rooms(Vec::new());
+        let account = account("@alice:example.com", AccountState::Active);
+        app.mode = Mode::RecoveryKey {
+            account,
+            origin: RecoveryOrigin::Command,
+        };
+        app.input.buffer = "secret recovery key".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(
+            app.status.text(false),
+            "recovery cancelled for @alice:example.com"
+        );
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn account_navigation_clears_recovery_key_input() {
+        let mut app = app_with_rooms(Vec::new());
+        app.set_accounts(vec![
+            account_with_id(
+                Uuid::from_u128(1),
+                "@alice:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(Uuid::from_u128(2), "@bob:example.com", AccountState::Active),
+        ]);
+        app.mode = Mode::RecoveryKey {
+            account: account("@alice:example.com", AccountState::Active),
+            origin: RecoveryOrigin::Command,
+        };
+        app.input.buffer = "secret recovery key".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+            .await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.input.buffer.is_empty());
+    }
+
+    #[test]
+    fn recover_resolution_uses_active_accounts_and_uuid_for_duplicates() {
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account_with_id(first_id, "@alice:example.com", AccountState::Active),
+            account_with_id(second_id, "@alice:example.com", AccountState::Active),
+            account_with_id(
+                Uuid::from_u128(3),
+                "@bob:example.com",
+                AccountState::Deactivated,
+            ),
+        ];
+
+        assert!(matches!(
+            app.resolve_recover_target(Some(&second_id.to_string())),
+            super::lifecycle::RecoverResolution::Match(AccountDto { account_id, .. })
+                if account_id == second_id
+        ));
+        assert!(matches!(
+            app.resolve_recover_target(Some("bob")),
+            super::lifecycle::RecoverResolution::Missing
+        ));
+
+        app.input.buffer = "/recover alice".to_owned();
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/recover {first_id}"));
+        app.complete_input();
+        assert_eq!(app.input.buffer, format!("/recover {second_id}"));
     }
 
     #[tokio::test]
@@ -2887,7 +3226,8 @@ mod tests {
     #[tokio::test]
     async fn popup_keys_scroll_and_close_popup() {
         let mut app = app_with_rooms(Vec::new());
-        app.mode = Mode::Popup(PopupKind::RoomInfo);
+        app.mode = Mode::Popup(PopupKind::CommandResponse);
+        app.pending_command_response = Some("full command response".to_owned());
 
         app.handle_key(KeyEvent::from(KeyCode::Down)).await;
         assert_eq!(app.popup_scroll, 1);
@@ -2901,6 +3241,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
         assert_eq!(app.popup_scroll, 0);
         assert_eq!(app.mode, Mode::Compose);
+        assert!(app.pending_command_response.is_none());
     }
 
     #[tokio::test]
@@ -2912,12 +3253,9 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
 
         assert_eq!(app.mode, Mode::Compose);
-        assert_eq!(app.input.buffer, "/login ");
-        assert_eq!(app.input.cursor, "/login ".len());
-        assert_eq!(
-            app.status.text(false),
-            "selected command: /login [user] [password] [homeserver]"
-        );
+        assert_eq!(app.input.buffer, "//");
+        assert_eq!(app.input.cursor, "//".len());
+        assert_eq!(app.status.text(false), "selected command: //<text>");
     }
 
     #[tokio::test]

@@ -1,11 +1,24 @@
 use ruma::OwnedUserId;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::api::{AccountDto, AccountState};
 
-use super::{AccountSelection, App, Mode, RoomKey, Status};
+use super::{AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status};
 
-enum LogoutResolution {
+pub(super) enum LogoutResolution {
+    Match(AccountDto),
+    Ambiguous(Vec<String>),
+    Missing,
+}
+
+pub(super) enum DeleteResolution {
+    Match(AccountDto),
+    Ambiguous(Vec<String>),
+    Missing,
+}
+
+pub(super) enum RecoverResolution {
     Match(AccountDto),
     Ambiguous(Vec<String>),
     Missing,
@@ -33,6 +46,25 @@ pub(crate) enum LifecycleOutcome {
         /// The Matrix ID being logged out, for failure messaging.
         user_id: String,
         result: Result<AccountDto, String>,
+    },
+    RecoverReady {
+        target: Option<String>,
+        result: Result<Vec<AccountDto>, String>,
+    },
+    Recover {
+        user_id: String,
+        result: Result<AccountDto, String>,
+    },
+    /// Account list fetched off-loop as the first phase of delete; the main
+    /// loop resolves the target and dispatches to confirm/perform from here.
+    DeleteReady {
+        target: Option<String>,
+        result: Result<Vec<AccountDto>, String>,
+    },
+    Delete {
+        /// The Matrix ID being deleted, for failure messaging.
+        user_id: String,
+        result: Result<(), String>,
     },
 }
 
@@ -150,6 +182,23 @@ impl App {
         self.perform_login(username, password, homeserver);
     }
 
+    pub(crate) fn submit_recovery_key(&mut self, account: AccountDto, origin: RecoveryOrigin) {
+        let recovery_key = self.take_input_for_submit();
+        if recovery_key.trim().is_empty() {
+            self.mode = Mode::Compose;
+            self.status = Status::from(match origin {
+                RecoveryOrigin::PostLogin => {
+                    format!("recovery skipped for {}", account.user_id)
+                }
+                RecoveryOrigin::Command => {
+                    format!("recovery cancelled for {}", account.user_id)
+                }
+            });
+            return;
+        }
+        self.perform_recover(account, recovery_key);
+    }
+
     /// Kick off a login without blocking the event loop: the login round-trip
     /// runs in a spawned task (which owns and then drops the password), and its
     /// outcome arrives via [`LifecycleOutcome`]. `homeserver` is an optional base
@@ -196,6 +245,57 @@ impl App {
         });
     }
 
+    pub(super) fn start_recover(&mut self, target: Option<String>) {
+        if self.reject_if_lifecycle_busy() {
+            return;
+        }
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.status = Status::from(match &target {
+            Some(t) if !t.is_empty() => format!("preparing recovery for {t}…"),
+            _ => "preparing recovery…".to_owned(),
+        });
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client.list_accounts().await.map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::RecoverReady { target, result });
+        });
+    }
+
+    fn request_recovery(&mut self, account: AccountDto, origin: RecoveryOrigin) {
+        self.clear_lifecycle_input();
+        self.status = Status::from(format!(
+            "Recovery key for {}: input is hidden; Enter submits, empty Enter or Esc skips",
+            account.user_id
+        ));
+        self.mode = Mode::RecoveryKey { account, origin };
+    }
+
+    fn perform_recover(&mut self, account: AccountDto, recovery_key: String) {
+        let user_id = account.user_id.clone();
+        let recovery_key = Zeroizing::new(recovery_key);
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            self.clear_lifecycle_input();
+            self.mode = Mode::Compose;
+            return;
+        };
+        self.clear_lifecycle_input();
+        self.mode = Mode::Compose;
+        self.status = Status::from(format!("recovering encryption keys for {user_id}…"));
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        let account_id = account.account_id;
+        tokio::spawn(async move {
+            let result = client
+                .recover(account_id, &recovery_key)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::Recover { user_id, result });
+        });
+    }
+
     /// Either prompt for confirmation or log out immediately, per the
     /// `confirm_logout` display option.
     pub(crate) fn request_logout(&mut self, account: AccountDto) {
@@ -210,7 +310,7 @@ impl App {
 
     pub(crate) fn cancel_logout_confirmation(&mut self) {
         self.mode = Mode::Compose;
-        self.status = Status::from("logout canceled".to_owned());
+        self.status = Status::Info(String::new());
     }
 
     /// Kick off a logout without blocking the event loop; the result arrives via
@@ -235,11 +335,68 @@ impl App {
         });
     }
 
+    pub(super) fn start_delete(&mut self, target: Option<String>) {
+        if self.reject_if_lifecycle_busy() {
+            return;
+        }
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.status = Status::from(match &target {
+            Some(t) if !t.is_empty() => format!("preparing to delete {t}…"),
+            _ => "preparing to delete…".to_owned(),
+        });
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client.list_accounts().await.map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::DeleteReady { target, result });
+        });
+    }
+
+    pub(crate) fn request_delete(&mut self, account: AccountDto) {
+        self.clear_lifecycle_input();
+        self.status = Status::from(format!(
+            "Permanently delete {}? Type YES to confirm, or Esc to cancel",
+            account.user_id
+        ));
+        self.mode = Mode::ConfirmDelete { account };
+    }
+
+    pub(crate) fn cancel_delete_confirmation(&mut self) {
+        self.clear_lifecycle_input();
+        self.mode = Mode::Compose;
+        self.status = Status::Info("deletion cancelled".to_owned());
+    }
+
+    pub(crate) fn perform_delete(&mut self, account: AccountDto) {
+        let user_id = account.user_id.clone();
+        self.clear_lifecycle_input();
+        self.mode = Mode::Compose;
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.status = Status::from(format!("deleting {user_id}…"));
+        self.lifecycle_busy = true;
+        let client = self.client.clone();
+        let account_id = account.account_id;
+        tokio::spawn(async move {
+            let result = client
+                .delete_account(account_id)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::Delete { user_id, result });
+        });
+    }
+
     /// Apply the result of a spawned login/logout once it lands on the event
     /// loop: refresh views and report a final status. Runs only fast, local
     /// Axon calls, so blocking here is acceptable.
     pub(crate) async fn handle_lifecycle_outcome(&mut self, outcome: LifecycleOutcome) {
         self.lifecycle_busy = false;
+        if !matches!(self.mode, Mode::Popup(_)) {
+            self.pending_command_response = None;
+        }
         match outcome {
             LifecycleOutcome::Login {
                 username,
@@ -259,7 +416,12 @@ impl App {
                         self.load_selected_timeline().await;
                     }
                     let already_active = prior_account_ids.contains(&account.account_id);
-                    self.status = lifecycle_login_status(already_active, &account.user_id, warning);
+                    if should_offer_post_login_recovery(already_active, account.verified) {
+                        self.request_recovery(account, RecoveryOrigin::PostLogin);
+                    } else {
+                        self.status =
+                            lifecycle_login_status(already_active, &account.user_id, warning);
+                    }
                 }
                 Err(error) => {
                     self.status = Status::from(format!("login failed for {username}: {error}"));
@@ -307,7 +469,101 @@ impl App {
                     self.status = Status::from(format!("logout failed for {user_id}: {error}"));
                 }
             },
+            LifecycleOutcome::RecoverReady { target, result } => {
+                self.lifecycle_busy = false;
+                match result {
+                    Ok(accounts) => {
+                        self.set_accounts(accounts);
+                        match self.resolve_recover_target(target.as_deref()) {
+                            RecoverResolution::Match(account) => {
+                                self.request_recovery(account, RecoveryOrigin::Command);
+                            }
+                            RecoverResolution::Ambiguous(options) => {
+                                self.restore_recover_input(target.as_deref());
+                                self.status = Status::from(format!(
+                                    "recovery target is ambiguous: {} - press Tab to choose",
+                                    options.join(", ")
+                                ));
+                            }
+                            RecoverResolution::Missing => {
+                                self.restore_recover_input(target.as_deref());
+                                self.status = if target.as_deref().is_some_and(|v| !v.is_empty()) {
+                                    Status::from(format!(
+                                        "no active account matches: {}",
+                                        target.unwrap_or_default()
+                                    ))
+                                } else {
+                                    Status::from("no active accounts".to_owned())
+                                };
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.restore_recover_input(target.as_deref());
+                        self.status = Status::from(format!("recovery failed: {err}"));
+                    }
+                }
+            }
+            LifecycleOutcome::Recover { user_id, result } => match result {
+                Ok(account) => {
+                    let warning = self.refresh_after_lifecycle_change().await;
+                    self.status =
+                        recovery_success_status(&account.user_id, account.verified, warning);
+                }
+                Err(error) => {
+                    self.status = Status::from(format!("recovery failed for {user_id}: {error}"));
+                }
+            },
+            LifecycleOutcome::DeleteReady { target, result } => {
+                self.lifecycle_busy = false;
+                match result {
+                    Ok(accounts) => {
+                        self.accounts.client_visible = accounts.clone();
+                        self.accounts.inactive_ids = accounts
+                            .iter()
+                            .filter(|a| a.state != AccountState::Active)
+                            .map(|a| a.account_id)
+                            .collect();
+                        self.accounts.accounts = accounts;
+                        match self.resolve_delete_target(target.as_deref()) {
+                            DeleteResolution::Match(account) => self.request_delete(account),
+                            DeleteResolution::Ambiguous(options) => {
+                                self.restore_delete_input(target.as_deref());
+                                self.status = Status::from(format!(
+                                    "delete target is ambiguous: {} - press Tab to choose",
+                                    options.join(", ")
+                                ));
+                            }
+                            DeleteResolution::Missing => {
+                                self.restore_delete_input(target.as_deref());
+                                self.status = if target.as_deref().is_some_and(|v| !v.is_empty()) {
+                                    Status::from(format!(
+                                        "no account matches: {}",
+                                        target.unwrap_or_default()
+                                    ))
+                                } else {
+                                    Status::from("no accounts".to_owned())
+                                };
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.restore_delete_input(target.as_deref());
+                        self.status = Status::from(format!("delete failed: {err}"));
+                    }
+                }
+            }
+            LifecycleOutcome::Delete { user_id, result } => match result {
+                Ok(()) => {
+                    let warning = self.refresh_after_lifecycle_change().await;
+                    self.status = lifecycle_success_status("deleted", &user_id, warning);
+                }
+                Err(error) => {
+                    self.status = Status::from(format!("delete failed for {user_id}: {error}"));
+                }
+            },
         }
+        self.queue_completed_command_response();
     }
 
     fn reject_if_lifecycle_busy(&mut self) -> bool {
@@ -349,7 +605,7 @@ impl App {
         (!warnings.is_empty()).then(|| warnings.join("; "))
     }
 
-    fn resolve_logout_target(&self, target: Option<&str>) -> LogoutResolution {
+    pub(super) fn resolve_logout_target(&self, target: Option<&str>) -> LogoutResolution {
         let active: Vec<_> = self
             .accounts
             .accounts
@@ -360,6 +616,11 @@ impl App {
         let target = target.unwrap_or_default().trim();
         let matches = if target.is_empty() {
             active
+        } else if let Ok(account_id) = Uuid::parse_str(target) {
+            active
+                .into_iter()
+                .filter(|account| account.account_id == account_id)
+                .collect()
         } else if let Some(canonical) = canonical_logout_target(target) {
             active
                 .into_iter()
@@ -382,6 +643,34 @@ impl App {
         }
     }
 
+    pub(super) fn resolve_recover_target(&self, target: Option<&str>) -> RecoverResolution {
+        let active: Vec<_> = self
+            .accounts
+            .accounts
+            .iter()
+            .filter(|account| account.state == AccountState::Active)
+            .cloned()
+            .collect();
+        let target = target.unwrap_or_default().trim();
+        let matches = resolve_account_matches(active, target);
+        match matches.as_slice() {
+            [account] => RecoverResolution::Match(account.clone()),
+            [_, _, ..] => RecoverResolution::Ambiguous(
+                matches.into_iter().map(|account| account.user_id).collect(),
+            ),
+            [] => RecoverResolution::Missing,
+        }
+    }
+
+    fn restore_recover_input(&mut self, target: Option<&str>) {
+        self.mode = Mode::Compose;
+        self.input.buffer = match target.filter(|value| !value.is_empty()) {
+            Some(target) => format!("/recover {target}"),
+            None => "/recover".to_owned(),
+        };
+        self.move_cursor_to_end();
+    }
+
     fn restore_logout_input(&mut self, target: Option<&str>) {
         self.mode = Mode::Compose;
         self.input.buffer = match target.filter(|value| !value.is_empty()) {
@@ -391,9 +680,93 @@ impl App {
         self.move_cursor_to_end();
     }
 
+    pub(super) fn resolve_delete_target(&self, target: Option<&str>) -> DeleteResolution {
+        let deletable: Vec<_> = self
+            .accounts
+            .accounts
+            .iter()
+            .filter(|account| account.state != AccountState::Deleting)
+            .cloned()
+            .collect();
+        let target = target.unwrap_or_default().trim();
+        let matches = if target.is_empty() {
+            deletable
+        } else if let Ok(account_id) = Uuid::parse_str(target) {
+            deletable
+                .into_iter()
+                .filter(|account| account.account_id == account_id)
+                .collect()
+        } else if let Some(canonical) = canonical_logout_target(target) {
+            deletable
+                .into_iter()
+                .filter(|account| account.user_id == canonical)
+                .collect()
+        } else {
+            let localpart = target.trim_start_matches('@');
+            deletable
+                .into_iter()
+                .filter(|account| matrix_user_localpart(&account.user_id) == Some(localpart))
+                .collect()
+        };
+
+        match matches.as_slice() {
+            [account] => DeleteResolution::Match(account.clone()),
+            [_, _, ..] => DeleteResolution::Ambiguous(
+                matches.into_iter().map(|account| account.user_id).collect(),
+            ),
+            [] => DeleteResolution::Missing,
+        }
+    }
+
+    fn restore_delete_input(&mut self, target: Option<&str>) {
+        self.mode = Mode::Compose;
+        self.input.buffer = match target.filter(|value| !value.is_empty()) {
+            Some(target) => format!("/delete {target}"),
+            None => "/delete".to_owned(),
+        };
+        self.move_cursor_to_end();
+    }
+
+    pub(crate) fn delete_candidates(&self, target: &str) -> Vec<String> {
+        let target = target.trim();
+        let matches: Vec<_> = self
+            .accounts
+            .accounts
+            .iter()
+            .filter(|account| account.state != AccountState::Deleting)
+            .filter(|account| {
+                if target.is_empty() {
+                    true
+                } else if let Some(canonical) = canonical_logout_target(target) {
+                    account.user_id.starts_with(&canonical)
+                } else {
+                    matrix_user_localpart(&account.user_id).is_some_and(|localpart| {
+                        localpart.starts_with(target.trim_start_matches('@'))
+                    })
+                }
+            })
+            .collect();
+        matches
+            .iter()
+            .map(|account| {
+                if matches
+                    .iter()
+                    .filter(|candidate| candidate.user_id == account.user_id)
+                    .count()
+                    > 1
+                {
+                    account.account_id.to_string()
+                } else {
+                    account.user_id.clone()
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn active_logout_candidates(&self, target: &str) -> Vec<String> {
         let target = target.trim();
-        self.accounts
+        let matches: Vec<_> = self
+            .accounts
             .accounts
             .iter()
             .filter(|account| account.state == AccountState::Active)
@@ -408,20 +781,111 @@ impl App {
                     })
                 }
             })
-            .map(|account| account.user_id.clone())
+            .collect();
+        matches
+            .iter()
+            .map(|account| {
+                if matches
+                    .iter()
+                    .filter(|candidate| candidate.user_id == account.user_id)
+                    .count()
+                    > 1
+                {
+                    account.account_id.to_string()
+                } else {
+                    account.user_id.clone()
+                }
+            })
             .collect()
+    }
+
+    pub(crate) fn active_recover_candidates(&self, target: &str) -> Vec<String> {
+        self.active_account_candidates(target)
+    }
+
+    fn active_account_candidates(&self, target: &str) -> Vec<String> {
+        let target = target.trim();
+        let matches: Vec<_> = self
+            .accounts
+            .accounts
+            .iter()
+            .filter(|account| account.state == AccountState::Active)
+            .filter(|account| {
+                if target.is_empty() {
+                    true
+                } else if let Some(canonical) = canonical_logout_target(target) {
+                    account.user_id.starts_with(&canonical)
+                } else {
+                    matrix_user_localpart(&account.user_id).is_some_and(|localpart| {
+                        localpart.starts_with(target.trim_start_matches('@'))
+                    })
+                }
+            })
+            .collect();
+        account_completion_values(&matches)
     }
 
     pub(crate) fn cancel_lifecycle_input(&mut self) {
         self.clear_lifecycle_input();
         self.mode = Mode::Compose;
-        self.status = "login canceled".into();
+        self.status = Status::Info(String::new());
+    }
+
+    pub(crate) fn cancel_recovery_input(&mut self, account: AccountDto, origin: RecoveryOrigin) {
+        self.clear_lifecycle_input();
+        self.mode = Mode::Compose;
+        self.status = Status::from(match origin {
+            RecoveryOrigin::PostLogin => format!("recovery skipped for {}", account.user_id),
+            RecoveryOrigin::Command => format!("recovery cancelled for {}", account.user_id),
+        });
     }
 
     fn clear_lifecycle_input(&mut self) {
         self.clear_input_buffer();
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
     }
+}
+
+fn resolve_account_matches(accounts: Vec<AccountDto>, target: &str) -> Vec<AccountDto> {
+    if target.is_empty() {
+        accounts
+    } else if let Ok(account_id) = Uuid::parse_str(target) {
+        accounts
+            .into_iter()
+            .filter(|account| account.account_id == account_id)
+            .collect()
+    } else if let Some(canonical) = canonical_logout_target(target) {
+        accounts
+            .into_iter()
+            .filter(|account| account.user_id == canonical)
+            .collect()
+    } else {
+        let localpart = target.trim_start_matches('@');
+        accounts
+            .into_iter()
+            .filter(|account| matrix_user_localpart(&account.user_id) == Some(localpart))
+            .collect()
+    }
+}
+
+fn account_completion_values(accounts: &[&AccountDto]) -> Vec<String> {
+    accounts
+        .iter()
+        .map(|account| {
+            if accounts
+                .iter()
+                .filter(|candidate| candidate.user_id == account.user_id)
+                .count()
+                > 1
+            {
+                account.account_id.to_string()
+            } else {
+                account.user_id.clone()
+            }
+        })
+        .collect()
 }
 
 /// Username-step prompt. Mentions the optional homeserver so users who must use
@@ -501,9 +965,32 @@ fn lifecycle_login_status(already_active: bool, user_id: &str, warning: Option<S
     })
 }
 
+fn recovery_success_status(
+    user_id: &str,
+    verified: Option<bool>,
+    warning: Option<String>,
+) -> Status {
+    let verification = match verified {
+        Some(true) => "device verified",
+        Some(false) => "device remains unverified",
+        None => "device verification unavailable",
+    };
+    lifecycle_success_status(
+        "recovered encryption keys",
+        &format!("{user_id} ({verification})"),
+        warning,
+    )
+}
+
+fn should_offer_post_login_recovery(already_active: bool, verified: Option<bool>) -> bool {
+    !already_active && verified != Some(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::AxonClient;
+    use crate::config::TuiConfig;
 
     #[test]
     fn normalizes_supported_matrix_username_forms() {
@@ -527,6 +1014,26 @@ mod tests {
         assert!(normalize_matrix_user_id("@alice").is_err());
     }
 
+    #[tokio::test]
+    async fn recovery_failure_is_queued_for_overflow_handling() {
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            None,
+            TuiConfig::test_default(),
+        );
+
+        app.handle_lifecycle_outcome(LifecycleOutcome::Recover {
+            user_id: "@alice:example.com".to_owned(),
+            result: Err("the recovery key was rejected by Axon".to_owned()),
+        })
+        .await;
+
+        assert_eq!(
+            app.pending_command_response.as_deref(),
+            Some("recovery failed for @alice:example.com: the recovery key was rejected by Axon")
+        );
+    }
+
     #[test]
     fn login_status_distinguishes_no_op_from_fresh_login() {
         assert_eq!(
@@ -545,6 +1052,26 @@ mod tests {
             )
             .text(false),
             "already logged in: @alice:example.com (no changes); room refresh failed"
+        );
+    }
+
+    #[test]
+    fn post_login_recovery_is_offered_only_after_changed_unverified_login() {
+        assert!(should_offer_post_login_recovery(false, Some(false)));
+        assert!(should_offer_post_login_recovery(false, None));
+        assert!(!should_offer_post_login_recovery(false, Some(true)));
+        assert!(!should_offer_post_login_recovery(true, Some(false)));
+    }
+
+    #[test]
+    fn recovery_success_reports_derived_verification_state() {
+        assert_eq!(
+            recovery_success_status("@alice:example.com", Some(true), None).text(false),
+            "recovered encryption keys: @alice:example.com (device verified)"
+        );
+        assert_eq!(
+            recovery_success_status("@alice:example.com", Some(false), None).text(false),
+            "recovered encryption keys: @alice:example.com (device remains unverified)"
         );
     }
 

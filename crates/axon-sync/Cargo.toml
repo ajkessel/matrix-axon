@@ -21,7 +21,7 @@ matrix-sdk = { workspace = true, features = [
 ] }
 matrix-sdk-ui = { workspace = true }
 
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 # `rt` gives TaskTracker (dynamic supervised-task spawning at runtime login).
 tokio-util = { workspace = true, features = ["rt"] }
 # StreamExt::next for the room-key arrival stream.

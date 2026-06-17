@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::api::AccountDto;
 use crate::app::emoji_matches;
-use crate::app::{cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind};
+use crate::app::{cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind, Status};
 use crate::command;
 use crate::command::HELP_COMMANDS;
 
@@ -22,10 +22,12 @@ impl App {
             self.switch_relative_room(-1).await;
         } else if self.shortcuts.next_account.matches(key) && self.accounts_panel_visible() {
             self.dismiss_input_help();
+            self.abandon_transient_input_mode();
             self.cycle_account(1);
             self.load_selected_timeline().await;
         } else if self.shortcuts.previous_account.matches(key) && self.accounts_panel_visible() {
             self.dismiss_input_help();
+            self.abandon_transient_input_mode();
             self.cycle_account(-1);
             self.load_selected_timeline().await;
         } else if self.shortcuts.message_down.matches(key) {
@@ -49,7 +51,11 @@ impl App {
                     self.handle_login_password_key(key, username, homeserver)
                         .await
                 }
+                Mode::RecoveryKey { account, origin } => {
+                    self.handle_recovery_key(key, account, origin)
+                }
                 Mode::ConfirmLogout { account } => self.handle_confirm_logout_key(key, account),
+                Mode::ConfirmDelete { account } => self.handle_confirm_delete_key(key, account),
                 Mode::RoomList => self.handle_room_list_key(key).await,
                 Mode::AccountList => self.handle_account_list_key(key).await,
                 Mode::MessageList => self.handle_message_list_key(key).await,
@@ -75,6 +81,9 @@ impl App {
             self.mode = Mode::Compose;
             self.popup_scroll = 0;
             self.help_selection = 0;
+            if kind == PopupKind::CommandResponse {
+                self.pending_command_response = None;
+            }
         } else if kind == PopupKind::Help {
             self.handle_help_popup_key(key);
         } else if key.code == KeyCode::Up {
@@ -313,6 +322,28 @@ impl App {
         }
     }
 
+    fn handle_recovery_key(
+        &mut self,
+        key: KeyEvent,
+        account: AccountDto,
+        origin: crate::app::RecoveryOrigin,
+    ) {
+        if self.handle_input_navigation_key(key) {
+            return;
+        }
+        if self.shortcuts.submit.matches(key) {
+            self.submit_recovery_key(account, origin);
+        } else if self.shortcuts.clear_input.matches(key) {
+            self.cancel_recovery_input(account, origin);
+        } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            self.clear_input_buffer();
+        } else if let KeyCode::Char(ch) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                self.insert_char(ch);
+            }
+        }
+    }
+
     fn handle_confirm_logout_key(&mut self, key: KeyEvent, account: AccountDto) {
         // Safe default: only an explicit "y" confirms; "n", Esc, or the
         // clear-input shortcut cancel; every other key is ignored so a stray
@@ -323,6 +354,34 @@ impl App {
             || self.shortcuts.clear_input.matches(key)
         {
             self.cancel_logout_confirmation();
+        }
+    }
+
+    fn handle_confirm_delete_key(&mut self, key: KeyEvent, account: AccountDto) {
+        if self.handle_input_navigation_key(key) {
+            return;
+        }
+        // "YES" confirms; "yes" (wrong case) clears the buffer and stays in
+        // this mode with a hint so the user can retry; anything else cancels.
+        if self.shortcuts.submit.matches(key) {
+            let input = self.input.buffer.trim().to_owned();
+            if input == "YES" {
+                self.perform_delete(account);
+            } else if input.eq_ignore_ascii_case("yes") {
+                self.clear_input_buffer();
+                self.status = Status::Info("type YES in all caps to confirm".to_owned());
+                self.mode = Mode::ConfirmDelete { account };
+            } else {
+                self.cancel_delete_confirmation();
+            }
+        } else if self.shortcuts.clear_input.matches(key) {
+            self.cancel_delete_confirmation();
+        } else if key.code == KeyCode::Backspace {
+            self.backspace();
+        } else if let KeyCode::Char(ch) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                self.insert_char(ch);
+            }
         }
     }
 
@@ -463,6 +522,8 @@ impl App {
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         input
     }
@@ -491,6 +552,8 @@ impl App {
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
         self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
     }
 
@@ -507,7 +570,9 @@ impl App {
             self.mode,
             Mode::LoginUsername
                 | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
                 | Mode::ConfirmLogout { .. }
+                | Mode::ConfirmDelete { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -559,7 +624,9 @@ impl App {
             self.mode,
             Mode::LoginUsername
                 | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
                 | Mode::ConfirmLogout { .. }
+                | Mode::ConfirmDelete { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }

@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
 uuid = { workspace = true, features = ["serde"] }
+zeroize = "1"
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 emojis = "0.8"

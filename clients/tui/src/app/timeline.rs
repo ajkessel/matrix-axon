@@ -13,7 +13,9 @@ impl App {
         match frame {
             LiveFrame::Connected => {
                 self.connection_state = ConnectionState::Connected;
-                self.status = Status::Debug("live WebSocket connected".to_owned());
+                if !self.is_mid_command() {
+                    self.status = Status::Debug("live WebSocket connected".to_owned());
+                }
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
@@ -21,20 +23,26 @@ impl App {
                     reason: reason.clone(),
                     delay,
                 };
-                self.status = Status::Info(format!(
-                    "live WebSocket reconnecting in {}s: {reason}",
-                    delay.as_secs()
-                ));
+                if !self.is_mid_command() {
+                    self.status = Status::Info(format!(
+                        "live WebSocket reconnecting in {}s: {reason}",
+                        delay.as_secs()
+                    ));
+                }
                 LiveFrameAction::None
             }
             LiveFrame::Disconnected(reason) => {
                 self.connection_state = ConnectionState::Disconnected(reason.clone());
-                self.status = Status::Debug(format!("live WebSocket disconnected: {reason}"));
+                if !self.is_mid_command() {
+                    self.status = Status::Debug(format!("live WebSocket disconnected: {reason}"));
+                }
                 LiveFrameAction::None
             }
             LiveFrame::ProtocolError(err) => {
                 self.connection_state = ConnectionState::ProtocolError(err.clone());
-                self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
+                if !self.is_mid_command() {
+                    self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
+                }
                 LiveFrameAction::None
             }
             LiveFrame::Timeline(event) => self.append_live_event(*event),

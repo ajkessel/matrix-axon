@@ -209,15 +209,41 @@ async fn create_store_dir(path: &Path) -> Result<(), SyncError> {
 }
 
 /// `remove_dir_all` that treats an absent directory as success.
+///
+/// Retries on EMFILE (os error 24) with exponential back-off: the Matrix SDK
+/// spawns internal tasks that hold `Arc<Client>` (and thus open SQLite fds)
+/// even after the main sync task has been reaped.  Those tasks typically release
+/// their last Arc clone within a few hundred milliseconds, so retrying allows
+/// `remove_dir_all` to succeed once the fds are freed.
 async fn remove_dir_if_present(path: &Path) -> Result<(), SyncError> {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(SyncError::Sdk(format!(
-            "removing dir {}: {e}",
-            path.display()
-        ))),
+    const EMFILE: i32 = 24;
+    let mut delay_ms = 100u64;
+    for attempt in 0..6 {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.raw_os_error() == Some(EMFILE) && attempt < 5 => {
+                tracing::debug!(
+                    path = %path.display(),
+                    attempt,
+                    delay_ms,
+                    "remove_dir_all hit EMFILE; retrying after delay"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                delay_ms *= 2;
+            }
+            Err(e) => {
+                return Err(SyncError::Sdk(format!(
+                    "removing dir {}: {e}",
+                    path.display()
+                )))
+            }
+        }
     }
+    Err(SyncError::Sdk(format!(
+        "removing dir {}: EMFILE after 6 attempts",
+        path.display()
+    )))
 }
 
 /// Remove an account's on-disk SDK store: both the live store dir

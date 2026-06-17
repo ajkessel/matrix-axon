@@ -1,0 +1,4 @@
+[alias]
+tui = 'run -p axon-tui'
+server = 'run -p axon-server'
+tui-smoke = 'run -p axon-tui-smoke'

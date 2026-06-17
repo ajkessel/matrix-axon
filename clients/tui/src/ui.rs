@@ -311,7 +311,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     );
     frame.render_widget(messages, messages_area);
 
-    let (command_line, command_title, cursor_col) = match &app.mode {
+    let (command_line, command_title, mut cursor_col) = match &app.mode {
         Mode::Search(_, q) => {
             let hint = "  n: next match  N: prev match".to_owned();
             let q = q.clone();
@@ -330,8 +330,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ]);
             (line, "Search", Some(col))
         }
-        Mode::LoginPassword { .. } => {
-            let masked = "•".repeat(app.input.buffer.chars().count());
+        Mode::LoginPassword { .. } | Mode::RecoveryKey { .. } => {
+            let masked = mask_secret_input(&app.input.buffer);
             let col = 2u16 + app.input.buffer[..app.input.cursor].chars().count() as u16;
             let line = Line::from(vec![
                 Span::raw("> "),
@@ -344,7 +344,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         .add_modifier(Modifier::ITALIC),
                 ),
             ]);
-            (line, "Password", Some(col))
+            let title = if matches!(app.mode, Mode::LoginPassword { .. }) {
+                "Password"
+            } else {
+                "Recovery key"
+            };
+            (line, title, Some(col))
         }
         Mode::ConfirmLogout { account } => {
             let line = Line::from(vec![
@@ -397,6 +402,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Mode::Compose
             | Mode::LoginUsername
             | Mode::LoginPassword { .. }
+            | Mode::RecoveryKey { .. }
             | Mode::ConfirmLogout { .. }
             | Mode::Editing { .. }
             | Mode::Reacting { .. }
@@ -417,6 +423,22 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .border_style(input_border),
         )
         .wrap(Wrap { trim: false });
+    if app.mode == Mode::Compose {
+        if let Some(response) = app.pending_command_response.as_deref() {
+            let inner_width = outer[1].width.saturating_sub(2);
+            let prefix_width = command_response_prefix_width(app);
+            let response_overflows =
+                command_response_line_count(response, inner_width, prefix_width)
+                    > usize::from(app.display.input_lines);
+            if response_overflows {
+                app.mode = Mode::Popup(PopupKind::CommandResponse);
+                app.popup_scroll = 0;
+                cursor_col = None;
+            } else {
+                app.pending_command_response = None;
+            }
+        }
+    }
     frame.render_widget(input, outer[1]);
     if let Some(col) = cursor_col {
         // col = prefix_len + chars_before_cursor; compute visual row/col for wrapping
@@ -434,7 +456,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if let Mode::Popup(kind) = app.mode {
-        let area = centered_rect(72, 80, frame.area());
+        let command_response = app.pending_command_response.as_deref().unwrap_or_default();
+        let area = if kind == PopupKind::CommandResponse {
+            command_response_popup_area(command_response, frame.area())
+        } else {
+            centered_rect(72, 80, frame.area())
+        };
         frame.render_widget(Clear, area);
         let page_size = usize::from(area.height.saturating_sub(2)).max(1);
         let (popup_title, lines) = match kind {
@@ -467,6 +494,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             PopupKind::Status => (
                 "Status  (Esc to close)",
                 popup_status_lines(app)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect(),
+            ),
+            PopupKind::CommandResponse => (
+                "Command Response  (Esc to close)",
+                wrap_command_response(command_response, area.width.saturating_sub(2))
                     .into_iter()
                     .map(Line::from)
                     .collect(),
@@ -517,6 +551,23 @@ fn mask_login_command(input: &str) -> String {
     )
 }
 
+fn mask_secret_input(input: &str) -> String {
+    "•".repeat(input.chars().count())
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::mask_secret_input;
+
+    #[test]
+    fn secret_prompt_masks_every_character() {
+        assert_eq!(
+            mask_secret_input("secret recovery key"),
+            "•••••••••••••••••••"
+        );
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -534,6 +585,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn centered_size(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
@@ -702,19 +764,16 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         "Accounts:".to_owned(),
     ];
 
-    if app.accounts.accounts.is_empty() {
-        lines.push("  (none logged in)".to_owned());
+    if app.accounts.client_visible.is_empty() {
+        lines.push("  (none)".to_owned());
     } else {
-        for (idx, account) in app.accounts.accounts.iter().enumerate() {
+        for account in &app.accounts.client_visible {
             let state_label = match account.state {
-                crate::api::AccountState::Active => "active",
-                crate::api::AccountState::Deactivated => "deactivated",
+                crate::api::AccountState::Active => "logged in",
+                crate::api::AccountState::Deactivated => "logged out",
                 crate::api::AccountState::Deleting => "deleting",
             };
-            let selected = matches!(
-                app.accounts.selected,
-                AccountSelection::Account(i) if i == idx
-            );
+            let selected = app.active_account_filter() == Some(account.account_id);
             let marker = if selected { ">" } else { " " };
             let rooms_for_account = app
                 .rooms
@@ -722,10 +781,20 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
                 .iter()
                 .filter(|r| r.account_id == account.account_id)
                 .count();
+            let duplicate = app
+                .accounts
+                .client_visible
+                .iter()
+                .filter(|candidate| candidate.user_id == account.user_id)
+                .count()
+                > 1;
+            let identity = if duplicate {
+                format!("{}  [{}]", account.user_id, account.account_id)
+            } else {
+                account.user_id.clone()
+            };
             lines.push(format!(
-                "  {marker} {} {}  ({state_label}, {rooms_for_account} rooms)",
-                AccountSelection::Account(idx).display_number(),
-                account.user_id,
+                "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
         }
     }
@@ -821,11 +890,107 @@ pub(crate) fn entry_status_text(app: &App) -> String {
     app.status.text(app.display.debug)
 }
 
+fn command_response_prefix_width(app: &App) -> usize {
+    let input = if app.show_input_help && app.input.buffer.is_empty() {
+        "Type /help or /? for help".to_owned()
+    } else {
+        mask_login_command(&app.input.buffer)
+    };
+    4 + Line::from(input).width()
+}
+
+fn command_response_line_count(response: &str, width: u16, prefix_width: usize) -> usize {
+    let width = usize::from(width);
+    if width == 0 {
+        return usize::MAX;
+    }
+
+    let mut total = 0;
+    for (line_index, line) in response.split('\n').enumerate() {
+        let mut lines = 1;
+        let mut used = if line_index == 0 {
+            prefix_width.min(width)
+        } else {
+            0
+        };
+        for word in line.split_whitespace() {
+            let word_width = Line::from(word).width();
+            let separator = usize::from(used > 0);
+            if used + separator + word_width <= width {
+                used += separator + word_width;
+                continue;
+            }
+
+            if used > 0 {
+                lines += 1;
+            }
+            lines += word_width.saturating_sub(1) / width;
+            used = word_width % width;
+            if used == 0 && word_width > 0 {
+                used = width;
+            }
+        }
+        total += lines;
+    }
+    total.max(1)
+}
+
+fn wrap_command_response(response: &str, width: u16) -> Vec<String> {
+    let width = usize::from(width).max(1);
+    let mut wrapped = Vec::new();
+    for line in response.split('\n') {
+        let mut current = String::new();
+        let mut current_width = 0;
+        for ch in line.chars() {
+            let ch_width = Line::from(ch.to_string()).width();
+            if current_width > 0 && current_width + ch_width > width {
+                wrapped.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        wrapped.push(current);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
+fn command_response_popup_area(response: &str, terminal: Rect) -> Rect {
+    const TITLE_WIDTH: u16 = 34;
+    const MAX_WIDTH: u16 = 80;
+
+    let available_width = terminal.width.saturating_sub(2).max(1);
+    let content_width = response
+        .split('\n')
+        .map(|line| Line::from(line).width())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(2);
+    let width = u16::try_from(content_width)
+        .unwrap_or(u16::MAX)
+        .clamp(TITLE_WIDTH, MAX_WIDTH)
+        .min(available_width);
+    let wrapped_height = wrap_command_response(response, width.saturating_sub(2)).len();
+    let desired_height = u16::try_from(wrapped_height)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let max_height = terminal.height.saturating_mul(4) / 5;
+    let height = desired_height.min(max_height.max(3)).min(terminal.height);
+
+    centered_size(width, height, terminal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{EventDto, RoomDto};
+    use crate::app::Status;
     use crate::config::TuiConfig;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     use uuid::Uuid;
 
     #[test]
@@ -850,6 +1015,103 @@ mod tests {
     #[test]
     fn account_localpart_tag_omits_matrix_sigil() {
         assert_eq!(account_localpart("@alice:example.com"), Some("alice"));
+    }
+
+    #[test]
+    fn overflowing_command_response_opens_popup() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            None,
+            TuiConfig::test_default(),
+        );
+        let response =
+            "This command response is long enough to wrap beyond the one-line entry box.";
+        app.show_input_help = false;
+        app.status = Status::Info(response.to_owned());
+        app.pending_command_response = Some(response.to_owned());
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
+        assert_eq!(app.pending_command_response.as_deref(), Some(response));
+    }
+
+    #[test]
+    fn fitting_command_response_stays_in_entry_box() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            None,
+            TuiConfig::test_default(),
+        );
+        app.show_input_help = false;
+        app.status = Status::Info("done".to_owned());
+        app.pending_command_response = Some("done".to_owned());
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert!(app.pending_command_response.is_none());
+    }
+
+    #[test]
+    fn restored_command_input_reduces_available_response_width() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            None,
+            TuiConfig::test_default(),
+        );
+        app.show_input_help = false;
+        app.input.buffer = "/recover alice".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.status = Status::Info("recovery failed".to_owned());
+        app.pending_command_response = Some("recovery failed".to_owned());
+        let mut terminal = Terminal::new(TestBackend::new(30, 20)).expect("terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
+    }
+
+    #[test]
+    fn command_response_wrap_count_honors_words_and_newlines() {
+        assert_eq!(command_response_line_count("done", 20, 4), 1);
+        assert_eq!(command_response_line_count("12345 12345 12345", 10, 4), 3);
+        assert_eq!(command_response_line_count("first\nsecond", 20, 4), 2);
+    }
+
+    #[test]
+    fn command_response_popup_wraps_long_lines_for_scrolling() {
+        let lines = wrap_command_response(&"x".repeat(25), 10);
+
+        assert_eq!(lines, vec!["x".repeat(10), "x".repeat(10), "x".repeat(5)]);
+    }
+
+    #[test]
+    fn command_response_popup_height_fits_short_content() {
+        let area = command_response_popup_area("recovery failed", Rect::new(0, 0, 120, 40));
+
+        assert_eq!(area.height, 3);
+        assert_eq!(area.width, 34);
+        assert_eq!(area.x, 43);
+        assert_eq!(area.y, 18);
+    }
+
+    #[test]
+    fn command_response_popup_is_clamped_for_small_terminals() {
+        let area = command_response_popup_area(&"x".repeat(200), Rect::new(0, 0, 30, 10));
+
+        assert_eq!(area.width, 28);
+        assert_eq!(area.height, 8);
+        assert_eq!(area.x, 1);
+        assert_eq!(area.y, 1);
     }
 
     #[test]

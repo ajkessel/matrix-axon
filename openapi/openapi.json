@@ -37,8 +37,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by `(homeserver_url, username)`: a new identity is\nminted, a logged-out (`deactivated`) account is reactivated, and an\nalready-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.",
-        "description": "`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword, and one canonical URL keys the identity no matter who logs it in.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing, so this route is loopback-only until the auth layer lands (see\nthe `route_layer` in [`router`](crate::router)).",
+        "summary": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by Matrix `username`: a new identity is minted, a\nlogged-out (`deactivated`) account is reactivated using its stored endpoint,\nand an already-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.",
+        "description": "`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword. The URL is a connection endpoint; the Matrix ID keys identity.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing, so this route is loopback-only until the auth layer lands (see\nthe `route_layer` in [`router`](crate::router)).",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -1923,7 +1923,7 @@
       },
       "LoginRequest": {
         "type": "object",
-        "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by `(homeserver_url, username)`. The\npassword is used once to authenticate and is never stored or echoed back.",
+        "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by its Matrix `username`. The\npassword is used once to authenticate and is never stored or echoed back.",
         "required": [
           "username",
           "password"

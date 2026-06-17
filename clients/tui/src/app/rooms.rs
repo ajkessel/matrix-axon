@@ -12,7 +12,9 @@ impl App {
         match self.client.list_rooms(self.account_filter).await {
             Ok(rooms) => self.apply_room_refresh(rooms),
             Err(err) => {
-                self.status = Status::from(format!("room refresh failed: {err}"));
+                if !self.is_mid_command() {
+                    self.status = Status::from(format!("room refresh failed: {err}"));
+                }
             }
         }
     }
@@ -49,7 +51,9 @@ impl App {
         self.seed_own_senders_from_rooms();
         if self.rooms.rooms.is_empty() {
             self.rooms.selected = None;
-            self.status = Status::from("no rooms returned by Axon".to_owned());
+            if !self.is_mid_command() {
+                self.status = Status::from("no rooms returned by Axon".to_owned());
+            }
         } else if self
             .rooms
             .selected
@@ -57,8 +61,10 @@ impl App {
         {
             let visible = self.visible_room_indices();
             self.rooms.selected = visible.first().copied();
-            self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
-        } else {
+            if !self.is_mid_command() {
+                self.status = Status::from(format!("loaded {} rooms", self.rooms.rooms.len()));
+            }
+        } else if !self.is_mid_command() {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
     }
@@ -100,14 +106,18 @@ impl App {
                     .events
                     .insert(RoomKey::from(&room), page.events);
                 self.rooms.unread.remove(&RoomKey::from(&room));
-                self.status = Status::Info(if has_more {
-                    format!("showing {} (older history available later)", room.title())
-                } else {
-                    format!("showing {}", room.title())
-                });
+                if !self.is_mid_command() {
+                    self.status = Status::Info(if has_more {
+                        format!("showing {} (older history available later)", room.title())
+                    } else {
+                        format!("showing {}", room.title())
+                    });
+                }
             }
             Err(err) => {
-                self.status = Status::from(format!("timeline load failed: {err}"));
+                if !self.is_mid_command() {
+                    self.status = Status::from(format!("timeline load failed: {err}"));
+                }
             }
         }
     }

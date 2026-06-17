@@ -43,16 +43,19 @@ Options:
 
 ## Commands
 
-Type `/help` or `/?` in the entry line to show a popup with available commands. Type `/shortcuts` to see all keyboard shortcuts. Popups are dismissed with `Esc`.
+Type `/help` or `/?` in the entry line to show a popup with available commands. Type `/shortcuts` to see all keyboard shortcuts. To send a message beginning with `/` instead of running a command, type an extra leading slash; for example, `//help` sends `/help`. Slash-command responses that do not fit in the entry box open in a scrollable popup instead. Popups are dismissed with `Esc`.
 
 | Command | Behavior |
 | --- | --- |
 | plain text | Send a message to the current room. |
-| `/login [user] [password] [homeserver]` | Log in a Matrix account. Usernames accept `@user:domain`, `user:domain`, or `user@domain`; typing the homeserver host (e.g. `@user:matrix.domain`) is rejected with a hint naming your canonical Matrix ID. The optional third argument overrides homeserver resolution — e.g. `/login @user:example.com pw matrix.example.com` (a bare host gains `https://`; pass an explicit scheme for loopback, e.g. `http://localhost:8008`). The inline password is a single token; for a password with spaces, omit it (and optionally give the homeserver after the Matrix ID, e.g. `/login @user:example.com hs.example.com`) to type it at the hidden prompt. Missing fields are prompted for and passwords are always masked. |
-| `/logout [user]` | Log out an active account while retaining its archive. Accepts `@user:domain`, `user:domain`, `user@domain`, or a unique localpart; Tab/Shift-Tab cycles matches. Prompts for `[y/N]` confirmation unless `display.confirm_logout = false`. |
+| `//<text>` | Send a message beginning with a literal `/`; for example, `//help` sends `/help`. |
+| `/login [user] [password] [homeserver]` | Log in a Matrix account. Usernames accept `@user:domain`, `user:domain`, or `user@domain`; typing the homeserver host (e.g. `@user:matrix.domain`) is rejected with a hint naming your canonical Matrix ID. The optional third argument overrides homeserver resolution — e.g. `/login @user:example.com pw matrix.example.com` (a bare host gains `https://`; pass an explicit scheme for loopback, e.g. `http://localhost:8008`). The inline password is a single token; for a password with spaces, omit it (and optionally give the homeserver after the Matrix ID, e.g. `/login @user:example.com hs.example.com`) to type it at the hidden prompt. Missing fields are prompted for and passwords are always masked. After a new or reactivated unverified login, the TUI offers a masked recovery-key prompt; submit an empty value or press `Esc` to skip it. |
+| `/logout [user]` | Log out an active account while retaining its archive. Accepts `@user:domain`, `user:domain`, `user@domain`, or a unique localpart; Tab/Shift-Tab cycles matches. If legacy duplicate rows share one Matrix ID, completion selects them by account UUID. Prompts for `[y/N]` confirmation unless `display.confirm_logout = false`. |
+| `/recover [user]` | Import Secure Backup and cross-signing keys for an active account, then retry decryption of stored messages. The optional target uses the same Matrix-ID, localpart, UUID, and Tab/Shift-Tab selection rules as `/logout`; when only one active account matches it is selected automatically. The recovery key is accepted only at the masked prompt, never inline. Submit an empty value or press `Esc` to cancel. |
+| `/delete [user]` | Permanently delete an account and its local Axon data. Accepts `@user:domain`, `user:domain`, `user@domain`, or a unique localpart; Tab/Shift-Tab cycles matches. If legacy duplicate rows share one Matrix ID, completion selects them by account UUID. Deletion requires typing `YES` in all caps at the confirmation prompt. |
 | `/room <room>` (`/switch` alias) | Switch visible rooms by list number, room id, canonical alias, display name, or shortened alias. |
 | `/account <account>` | Filter rooms by Matrix ID, localpart, or the number shown in the account list. Account `0` (or `all`) shows all accounts. |
-| `/status` | Show Axon connectivity, the current account filter, and active accounts. |
+| `/status` | Show Axon connectivity, the current account filter, and all accounts as `logged in` or `logged out`. |
 | `/event <event_id>` | Show a compact status-line summary of one event in the selected account. |
 | `/whoami` | Show your Matrix ID and display name for the selected room's account. |
 | `/whereami` | Show a room information popup for the selected room. Up/Down/PageUp/PageDown scroll the popup. |
@@ -79,8 +82,9 @@ Room switching is forgiving. For a room with canonical alias
 ```
 
 Use Tab to complete slash commands, `/room` room names, and emoji names after
-`/react`; it also cycles active accounts for `/logout`. Use Shift-Tab to cycle
-backward through matching options. When several
+`/react`; it also cycles active accounts for `/logout`, `/recover`, and `/account`, plus all
+client-visible accounts for `/delete`. Use Shift-Tab to cycle backward through
+matching options. When several
 visible rooms match `/room`, completion advances to their
 longest common prefix and lists the remaining suffixes. Enter reports an
 ambiguity until the text identifies one room. While Tab completion is partial,

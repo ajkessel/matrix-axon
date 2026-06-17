@@ -221,24 +221,26 @@ impl Store {
         Ok(ids)
     }
 
-    /// Look up an account by its Matrix identity `(user_id, homeserver_url)` —
-    /// the natural key the login verb starts from, before any `account_id`
-    /// exists. Returns the row in **any** lifecycle state (so a caller can
-    /// distinguish "new identity" from a `deactivated` row to reactivate or an
-    /// `active` one to reject); `None` means no such account. Read-only — unlike
+    /// Look up an account by its Matrix user id before runtime login considers
+    /// minting a new row. A Matrix id names one identity even when config and
+    /// server-side discovery reach its homeserver through different base URLs.
+    ///
+    /// Returns the oldest active row first, then the oldest retained row in any
+    /// other lifecycle state. The ordering keeps stores affected by the historical
+    /// duplicate-account bug operable. Read-only — unlike
     /// [`upsert_account`](Self::upsert_account) it never inserts.
-    pub async fn find_account_by_identity(
+    pub async fn find_account_by_user_id(
         &self,
         user_id: &str,
-        homeserver_url: &str,
     ) -> Result<Option<Account>, StoreError> {
         let sql = format!(
             "SELECT {ACCOUNT_COLUMNS} FROM accounts \
-             WHERE user_id = $1 AND homeserver_url = $2"
+             WHERE user_id = $1 \
+             ORDER BY (state = 'active') DESC, created_at ASC \
+             LIMIT 1"
         );
         let account = sqlx_core::query_as::query_as::<Postgres, Account>(&sql)
             .bind(user_id)
-            .bind(homeserver_url)
             .fetch_optional(&self.pool)
             .await?;
         Ok(account)

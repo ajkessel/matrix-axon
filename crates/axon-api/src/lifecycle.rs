@@ -93,8 +93,9 @@ pub enum RecoverError {
 /// `Arc<dyn AccountLifecycle>`.
 #[async_trait]
 pub trait AccountLifecycle: Send + Sync {
-    /// Log in (or reactivate) the account identified by `(homeserver_url,
-    /// username)`, where `username` is a full Matrix user ID. When
+    /// Log in (or reactivate) the account identified by `username`, a full Matrix
+    /// user ID. A retained account continues using its stored homeserver endpoint.
+    /// When no account exists and
     /// `homeserver_url` is `None`, the implementation discovers the canonical
     /// homeserver from the user ID's server name (`.well-known/matrix/client`,
     /// falling back to the server name itself); a username whose domain is the

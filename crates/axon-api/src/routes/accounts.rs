@@ -42,9 +42,9 @@ pub async fn list_accounts(
 }
 
 /// Add or reactivate a Matrix account at runtime, then return the resulting
-/// active account. Idempotent by `(homeserver_url, username)`: a new identity is
-/// minted, a logged-out (`deactivated`) account is reactivated, and an
-/// already-`active` account is returned **unchanged** (a no-op — the desired end
+/// active account. Idempotent by Matrix `username`: a new identity is minted, a
+/// logged-out (`deactivated`) account is reactivated using its stored endpoint,
+/// and an already-`active` account is returned **unchanged** (a no-op — the desired end
 /// state already holds, so the password isn't consulted and nothing is touched).
 /// An account mid-deletion (`deleting`) is a `409`. `username` must be a full
 /// Matrix user ID (a malformed one is a `400`); bad credentials are a `401`. The
@@ -53,7 +53,7 @@ pub async fn list_accounts(
 /// `homeserver_url` is optional: when omitted, the server discovers the
 /// canonical homeserver from the user ID's server name (`.well-known/matrix/client`,
 /// falling back to the server name itself) — so clients need only username +
-/// password, and one canonical URL keys the identity no matter who logs it in.
+/// password. The URL is a connection endpoint; the Matrix ID keys identity.
 /// A failed discovery is a `502`. The `username` domain is then checked against
 /// the homeserver's own declared server name (best-effort): a user ID written
 /// with the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose

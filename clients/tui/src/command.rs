@@ -8,6 +8,8 @@ pub enum Command {
         homeserver: Option<String>,
     },
     Logout(Option<String>),
+    Recover(Option<String>),
+    Delete(Option<String>),
     Room(String),
     Account(String),
     Status,
@@ -64,6 +66,8 @@ impl SlashCommand {
 pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/login", true),
     SlashCommand::supported("/logout", true),
+    SlashCommand::supported("/recover", true),
+    SlashCommand::supported("/delete", true),
     SlashCommand::supported("/room", true),
     SlashCommand::supported("/switch", true),
     SlashCommand::supported("/account", true),
@@ -92,6 +96,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "send a message to the current room",
     },
     HelpCommand {
+        label: "//<text>",
+        insert_text: "//",
+        description: "send a message beginning with a literal /",
+    },
+    HelpCommand {
         label: "/login [user] [password] [homeserver]",
         insert_text: "/login ",
         description: "log in a Matrix account; prompts for missing credentials",
@@ -100,6 +109,16 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/logout [user]",
         insert_text: "/logout ",
         description: "log out an active account while retaining its archive",
+    },
+    HelpCommand {
+        label: "/recover [user]",
+        insert_text: "/recover ",
+        description: "import encryption keys for an active account from a hidden prompt",
+    },
+    HelpCommand {
+        label: "/delete [user]",
+        insert_text: "/delete ",
+        description: "permanently delete an account and all its data (requires typing YES)",
     },
     HelpCommand {
         label: "/room <room>, /switch <room>",
@@ -189,6 +208,9 @@ pub fn parse(input: &str) -> Command {
     if input.is_empty() {
         return Command::Empty;
     }
+    if let Some(message) = input.strip_prefix("//") {
+        return Command::Send(format!("/{message}"));
+    }
     if !input.starts_with('/') {
         return Command::Send(input.to_owned());
     }
@@ -221,6 +243,20 @@ pub fn parse(input: &str) -> Command {
             }
         }
         "logout" => Command::Logout((!arg.is_empty()).then(|| arg.to_owned())),
+        "recover" => {
+            let mut tokens = arg.split_whitespace();
+            let target = tokens.next().map(str::to_owned);
+            if tokens.next().is_some() {
+                Command::Invalid(
+                    "/recover takes at most one account target; the recovery key is entered at \
+                     the hidden prompt"
+                        .to_owned(),
+                )
+            } else {
+                Command::Recover(target)
+            }
+        }
+        "delete" => Command::Delete((!arg.is_empty()).then(|| arg.to_owned())),
         "room" | "switch" if !arg.is_empty() => Command::Room(arg.to_owned()),
         "room" | "switch" => {
             Command::Invalid("/room requires a room id, alias, name, or index".to_owned())
@@ -333,6 +369,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_delete_forms() {
+        assert_eq!(parse("/delete"), Command::Delete(None));
+        assert_eq!(
+            parse("/delete @me:example.com"),
+            Command::Delete(Some("@me:example.com".to_owned()))
+        );
+        assert_eq!(parse("/delete me"), Command::Delete(Some("me".to_owned())));
+    }
+
+    #[test]
+    fn parses_recover_forms_and_rejects_inline_keys() {
+        assert_eq!(parse("/recover"), Command::Recover(None));
+        assert_eq!(
+            parse("/recover @me:example.com"),
+            Command::Recover(Some("@me:example.com".to_owned()))
+        );
+        assert!(matches!(
+            parse("/recover @me:example.com inline-key"),
+            Command::Invalid(message) if message.contains("hidden prompt")
+        ));
+    }
+
+    #[test]
     fn parses_quit_aliases() {
         assert_eq!(parse("/quit"), Command::Quit);
         assert_eq!(parse("/q"), Command::Quit);
@@ -382,6 +441,14 @@ mod tests {
             parse("  hello world  "),
             Command::Send("hello world".to_owned())
         );
+    }
+
+    #[test]
+    fn parses_double_slash_as_literal_leading_slash() {
+        assert_eq!(parse("//help"), Command::Send("/help".to_owned()));
+        assert_eq!(parse("///help"), Command::Send("//help".to_owned()));
+        assert_eq!(parse("//"), Command::Send("/".to_owned()));
+        assert_eq!(parse("  //help  "), Command::Send("/help".to_owned()));
     }
 
     #[test]

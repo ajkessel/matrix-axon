@@ -236,7 +236,7 @@ impl From<Account> for AccountDto {
 }
 
 /// Request body for runtime login (`POST /v1/accounts/login`). Adds or
-/// reactivates a Matrix account keyed by `(homeserver_url, username)`. The
+/// reactivates a Matrix account keyed by its Matrix `username`. The
 /// password is used once to authenticate and is never stored or echoed back.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {

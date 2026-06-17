@@ -19,10 +19,16 @@ domain). It is a DNS-like indirection, not a homeserver call.
 itself, client-side. Review flagged the tension: the architecture says clients
 talk only to axon, and client-side discovery means (a) every client reimplements
 the same resolution, (b) client egress includes arbitrary user-named hosts, and
-(c) — decisive — the account natural key is `(user_id, homeserver_url)`
-everywhere (identity lookup, per-identity verb locks, upsert), so two clients
-that resolve the same user differently (one via well-known, one via the
-fallback) would mint **duplicate accounts** for one identity.
+(c) — decisive at the time — the account natural key was
+`(user_id, homeserver_url)` everywhere (identity lookup, per-identity verb
+locks, upsert), so two clients that resolved the same user differently (one via
+well-known, one via the fallback) would mint **duplicate accounts** for one
+identity.
+
+Amendment (2026-06-14): runtime lifecycle lookup and locking now use `user_id`
+as the identity and treat the URL as its connection endpoint. This closes the
+remaining config-vs-discovery alias case while retaining the existing database
+constraint for compatibility with stores that already contain duplicate rows.
 
 ## Decision
 
