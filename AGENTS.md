@@ -65,6 +65,11 @@ matrix-axon/
 
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
+## Instructions after making changes
+
+* Make sure to run `cargo fmt --all` after finishing making changes
+* Make sure to fix any clippy issues `cargo clippy --all-targets --all-features -- -D warnings` after making changes
+
 ## Current state
 
 **Milestone 7a in flight** (PRs 1–5 landed of ~6; PR 6 — interactive SAS verification — in review) — M6 (mutations) is complete and the post-M6 sequence was rethought (see `docs/mvp/implementation.md` "Milestone resequencing" + ADR 0022). **M7** is account lifecycle & auth, in three phases: **7a** the Matrix-account lifecycle (login/verify/recover/logout/delete) — which also folds in the interactive SAS verification deferred from M5 (the old "5c") as its *last* PR; **7b** the client↔axon bearer-token gate (was M8); **7c** sender-device trust. The interactive-verification work landed in PR 6 (in `axon-sync`, not `axon-crypto` — that crate stays a stub).
