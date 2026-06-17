@@ -335,8 +335,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .zip(sender_labels.iter())
         .filter_map(|(event, sender_label)| {
             let (account_id, mxc_url) = event.image_mxc()?;
-            let body_rows =
-                image_body_row_count(event, sender_label, message_width, &app.colors);
+            let body_rows = image_body_row_count(event, sender_label, message_width, &app.colors);
             let key = MediaKey::new(account_id, mxc_url.clone());
             let thumb_h = if let Some(ImageState::Ready(img)) = app.image_cache.get(&key) {
                 let nat = Resize::natural_size(img, font_size);
@@ -764,7 +763,11 @@ fn image_thumbnail_spec(
 /// Compute the cell dimensions at which an image should be encoded for the
 /// media-preview popup on a screen of the given size.  Returns `None` when the
 /// image has zero natural dimensions (shouldn't happen for a valid decode).
-fn preview_target_size(img: &image::DynamicImage, font_size: FontSize, screen: Rect) -> Option<Size> {
+fn preview_target_size(
+    img: &image::DynamicImage,
+    font_size: FontSize,
+    screen: Rect,
+) -> Option<Size> {
     let max_area = centered_rect(88, 88, screen);
     // Subtract the 1-cell border on each side (same as Block::inner).
     let max_w = max_area.width.saturating_sub(2);
@@ -831,10 +834,13 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
     };
 
     // Reserve lines below the image for the caption text.
-    let caption_h = caption.as_deref().map(|c| {
-        let w = (target_size.width as usize).max(1);
-        wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
-    }).unwrap_or(0);
+    let caption_h = caption
+        .as_deref()
+        .map(|c| {
+            let w = (target_size.width as usize).max(1);
+            wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
+        })
+        .unwrap_or(0);
 
     // Compute the popup area from target_size now — before we know whether the
     // protocol is ready — so the border never jumps when encoding finishes.
@@ -857,7 +863,12 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
     frame.render_widget(block, area);
 
     // Split inner into image area (top) and caption area (bottom).
-    let image_area = Rect::new(inner.x, inner.y, inner.width, target_size.height.min(inner.height));
+    let image_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        target_size.height.min(inner.height),
+    );
     let caption_area = (caption_h > 0 && inner.height > target_size.height).then(|| {
         Rect::new(
             inner.x,

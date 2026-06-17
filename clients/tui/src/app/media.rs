@@ -154,7 +154,8 @@ fn decode_image_with_limits(bytes: &[u8]) -> Result<image::DynamicImage, String>
     let image = super::apply_exif_orientation(image, bytes);
     // thumbnail() upscales small images; only downscale when the image exceeds the cap.
     Ok(
-        if image.width() > MAX_CACHED_IMAGE_DIMENSION || image.height() > MAX_CACHED_IMAGE_DIMENSION {
+        if image.width() > MAX_CACHED_IMAGE_DIMENSION || image.height() > MAX_CACHED_IMAGE_DIMENSION
+        {
             image.thumbnail(MAX_CACHED_IMAGE_DIMENSION, MAX_CACHED_IMAGE_DIMENSION)
         } else {
             image

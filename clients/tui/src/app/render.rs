@@ -107,6 +107,7 @@ fn message_display_line_count(
     body_lines + usize::from(!event_reactions.is_empty())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn message_display_lines(
     events: &[&EventDto],
     sender_labels: &[String],

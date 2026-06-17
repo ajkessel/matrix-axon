@@ -638,7 +638,12 @@ impl EventDto {
         self.image_mxc()?;
         let explicit_filename = content.get("filename").and_then(|v| v.as_str());
         let body_text = content.get("body").and_then(|v| v.as_str());
-        Some(explicit_filename.or(body_text).unwrap_or("media").to_owned())
+        Some(
+            explicit_filename
+                .or(body_text)
+                .unwrap_or("media")
+                .to_owned(),
+        )
     }
 
     /// Returns the user-authored caption for an image/sticker event — present
