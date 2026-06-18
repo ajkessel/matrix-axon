@@ -97,11 +97,12 @@ Defaults:
 
 | Shortcut | Behavior |
 | --- | --- |
-| `Ctrl-Space` | Cycle focus: Input → Accounts → Room List → Message List when multiple accounts are active. |
+| `Ctrl-Tab` | Cycle focus: Input → Accounts → Room List → Message List when multiple accounts are active. |
 | `Ctrl-N` | Next room (always active). |
 | `Ctrl-P` | Previous room (always active). |
 | `Alt-N` | Next account filter when multiple accounts are active. |
 | `Alt-P` | Previous account filter when multiple accounts are active. |
+| `Alt-U` | Toggle unread filter: show only rooms with unread messages. The Rooms pane heading changes to `Rooms (Unread)` while active. |
 | `Ctrl-J` | Next displayed message (always active). |
 | `Ctrl-K` | Previous displayed message (always active). |
 | `Ctrl-C` | Quit. |
@@ -182,7 +183,7 @@ edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
 unreact_message = "shift-u"
-focus_next = "ctrl-space"
+focus_next = "ctrl-tab"
 
 [colors]
 border = "gray"
@@ -192,6 +193,16 @@ message_sender = "green"
 own_message_sender = "light-cyan"
 input_hint = "dark-gray"
 status = "cyan"
+background = "default"
+# accounts_foreground = "default"
+# rooms_foreground = "default"
+# messages_foreground = "default"
+# input_foreground = "default"
+# accounts_background = "default"
+# rooms_background = "default"
+# messages_background = "default"
+# input_background = "default"
+# popup_background = "default"
 
 [display]
 debug = false
@@ -201,13 +212,14 @@ input_lines = 1
 confirm_logout = true
 ```
 
-Supported key forms include `ctrl-n`, `ctrl-j`, `ctrl-k`, `ctrl-space`, `tab`,
+Supported key forms include `ctrl-n`, `ctrl-j`, `ctrl-k`, `ctrl-tab`, `tab`,
 `enter`, `esc`, `backspace`, `home`, `end`, `up`, `down`, `left`, `right`,
 `pageup`, `pagedown`, `space`, `r`, `t`, `shift-r`, `shift-u`.
 
 Supported color names are `black`, `red`, `green`, `yellow`, `blue`, `magenta`,
 `cyan`, `gray`, `dark-gray`, `light-red`, `light-green`, `light-yellow`,
-`light-blue`, `light-magenta`, `light-cyan`, and `white`.
+`light-blue`, `light-magenta`, `light-cyan`, `white`, and `default` (terminal
+default color).
 
 Set `display.show_state_events = true` to show all state events in room
 timelines. When it is `false`, membership events such as joins, leaves, bans,
@@ -230,6 +242,40 @@ status text. The default is `false`, which hides those event codes.
 Set `colors.own_message_sender` to control the color used for the sender label
 on messages you sent. Defaults to `"light-cyan"` to distinguish them from other
 senders (controlled by `colors.message_sender`).
+
+Set `colors.background` to apply a uniform background color to all panes.
+Defaults to `"default"`, which leaves the terminal's own background unchanged.
+
+For finer control, each pane has an independent foreground and background color
+setting: `accounts_foreground`, `rooms_foreground`, `messages_foreground`, and
+`input_foreground` control the base text color of uncolored content in each
+pane; `accounts_background`, `rooms_background`, `messages_background`, and
+`input_background` override the pane background. Per-pane background settings
+fall back to `colors.background` when not specified; per-pane foreground
+settings fall back to the terminal default. Named foreground colors (such as
+`border` and `message_sender`) always take precedence over the pane foreground.
+
+Set `colors.popup_background` to control the background color of all popups
+(`/help`, `/shortcuts`, `/whereami`, `/status`). Defaults to
+`colors.background` when not specified.
+
+The default config file includes four ready-to-use commented-out themes
+(Dracula, Nord, Solarized Dark, and Paper Light) that can be activated by
+uncommenting the relevant lines and commenting out the Default theme block.
+
+Set `display.search_wrap = false` to make search stop at the end/beginning of
+the list instead of wrapping around. The default is `true`.
+
+Pane widths (set interactively with `Alt-Left`/`Alt-Right` in the accounts or
+rooms panel, or `Alt-Up`/`Alt-Down` for input height) are session-only by
+default. Run `/saveconfig` to persist the current `input_lines`,
+`accounts_panel_width`, and `rooms_panel_width_adj` to the config file. The
+saved values appear in `[display]` and are restored on the next launch.
+
+Run `/editconfig` to open the config file directly in your `$EDITOR`. If
+`$EDITOR` is not set, `nano` is used on macOS/Linux and `notepad` on Windows.
+The TUI suspends while the editor is open and reloads the config automatically
+when the editor exits.
 
 ## Formatted Messages
 

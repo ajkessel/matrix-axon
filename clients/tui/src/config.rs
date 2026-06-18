@@ -11,14 +11,14 @@ use thiserror::Error;
 pub const DEFAULT_CONFIG: &str = r#"# axon-tui configuration.
 #
 # Key names are case-insensitive. Supported forms include:
-#   ctrl-n, ctrl-p, ctrl-c, ctrl-j, ctrl-k, ctrl-space, tab, enter, esc,
+#   ctrl-n, ctrl-p, ctrl-c, ctrl-j, ctrl-k, f6, ctrl-f6, tab, enter, esc,
 #   backspace, ctrl-a, ctrl-e, home, end, up, down, left, right,
 #   pageup, pagedown, space, r, t, shift-r
 #
 # Color names are case-insensitive. Supported names:
 #   black, red, green, yellow, blue, magenta, cyan, gray,
 #   dark-gray, light-red, light-green, light-yellow, light-blue,
-#   light-magenta, light-cyan, white
+#   light-magenta, light-cyan, white, default
 
 [shortcuts]
 next_room = "ctrl-n"
@@ -46,9 +46,27 @@ edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
 unreact_message = "shift-u"
-focus_next = "ctrl-space"
+focus_next = "f6"
+focus_prev = "ctrl-f6"
+find = "ctrl-f"
+toggle_accounts_panel = "alt-a"
+toggle_rooms_panel = "alt-r"
+toggle_unread_filter = "alt-u"
+refresh = "ctrl-l"
 
+# Select one theme by leaving its lines uncommented; comment out all others.
+# Named foreground colors: border, selected_room, unread_count, message_sender,
+#   own_message_sender, input_hint, status
+# Per-pane base foreground (uncolored text) and background:
+#   accounts_foreground, rooms_foreground, messages_foreground, input_foreground
+#   accounts_background, rooms_background, messages_background, input_background
+# Popup background: popup_background
+# Global background: background
+# All colors accept: black, red, green, yellow, blue, magenta, cyan, gray,
+#   dark-gray, light-red, light-green, light-yellow, light-blue, light-magenta,
+#   light-cyan, white, default
 [colors]
+# ── Default ───────────────────────────────────────────────────────────────────
 border = "gray"
 selected_room = "cyan"
 unread_count = "yellow"
@@ -56,6 +74,61 @@ message_sender = "green"
 own_message_sender = "light-cyan"
 input_hint = "dark-gray"
 status = "cyan"
+background = "default"
+
+# ── Dracula ───────────────────────────────────────────────────────────────────
+# border = "light-magenta"
+# selected_room = "light-magenta"
+# unread_count = "light-yellow"
+# message_sender = "light-cyan"
+# own_message_sender = "magenta"
+# input_hint = "dark-gray"
+# status = "light-magenta"
+# background = "black"
+# popup_background = "dark-gray"
+
+# ── Nord ──────────────────────────────────────────────────────────────────────
+# border = "light-blue"
+# selected_room = "light-blue"
+# unread_count = "light-yellow"
+# message_sender = "light-cyan"
+# own_message_sender = "cyan"
+# input_hint = "gray"
+# status = "light-blue"
+# background = "dark-gray"
+# accounts_foreground = "white"
+# rooms_foreground = "white"
+# accounts_background = "black"
+# rooms_background = "black"
+# popup_background = "dark-gray"
+
+# ── Solarized Dark ────────────────────────────────────────────────────────────
+# border = "yellow"
+# selected_room = "light-green"
+# unread_count = "light-red"
+# message_sender = "light-cyan"
+# own_message_sender = "cyan"
+# input_hint = "dark-gray"
+# status = "light-green"
+# background = "black"
+# popup_background = "dark-gray"
+
+# ── Paper (Light) ─────────────────────────────────────────────────────────────
+# border = "gray"
+# selected_room = "blue"
+# unread_count = "red"
+# message_sender = "blue"
+# own_message_sender = "dark-gray"
+# input_hint = "gray"
+# status = "blue"
+# background = "white"
+# accounts_foreground = "black"
+# rooms_foreground = "black"
+# messages_foreground = "black"
+# input_foreground = "black"
+# accounts_background = "gray"
+# rooms_background = "gray"
+# popup_background = "gray"
 
 [display]
 debug = false
@@ -63,7 +136,10 @@ show_state_events = false
 sender_name = "display_name"
 input_lines = 1
 confirm_logout = true
+search_wrap = true
 "#;
+
+pub const DEFAULT_ACCOUNTS_PANEL_WIDTH: u16 = 25;
 
 #[derive(Debug, Clone)]
 pub struct TuiConfig {
@@ -83,10 +159,9 @@ impl TuiConfig {
     pub fn load_or_create_at(path: PathBuf) -> Result<Self, ConfigError> {
         let created_default = ensure_default_config(&path)?;
         let text = fs::read_to_string(&path)?;
-        let raw = RawConfig::load_with_defaults(&text)?;
-        let repaired = raw.to_toml();
-        if repaired != text {
-            fs::write(&path, repaired)?;
+        let (raw, needs_repair) = RawConfig::load_with_defaults(&text)?;
+        if needs_repair {
+            fs::write(&path, raw.to_toml())?;
         }
         Ok(Self {
             shortcuts: raw.shortcuts.into_shortcuts()?,
@@ -95,6 +170,25 @@ impl TuiConfig {
             path,
             created_default,
         })
+    }
+
+    /// Persist the current display options back to the config file at `path`.
+    /// Only the display section is updated; all other settings are preserved as-is.
+    pub fn save_display(
+        path: &std::path::Path,
+        input_lines: u16,
+        accounts_panel_width: u16,
+        rooms_panel_width_adj: i16,
+    ) -> Result<(), ConfigError> {
+        let text = fs::read_to_string(path)?;
+        let (mut raw, _) = RawConfig::load_with_defaults(&text)?;
+        raw.display.input_lines = input_lines;
+        raw.display.accounts_panel_width =
+            (accounts_panel_width != DEFAULT_ACCOUNTS_PANEL_WIDTH).then_some(accounts_panel_width);
+        raw.display.rooms_panel_width_adj =
+            (rooms_panel_width_adj != 0).then_some(rooms_panel_width_adj);
+        fs::write(path, raw.to_toml())?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -147,6 +241,12 @@ pub struct Shortcuts {
     pub react_message: KeyBinding,
     pub unreact_message: KeyBinding,
     pub focus_next: KeyBinding,
+    pub focus_prev: KeyBinding,
+    pub find: KeyBinding,
+    pub toggle_accounts_panel: KeyBinding,
+    pub toggle_rooms_panel: KeyBinding,
+    pub toggle_unread_filter: KeyBinding,
+    pub refresh: KeyBinding,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +258,15 @@ pub struct ColorScheme {
     pub own_message_sender: Color,
     pub input_hint: Color,
     pub status: Color,
+    pub accounts_foreground: Color,
+    pub rooms_foreground: Color,
+    pub messages_foreground: Color,
+    pub input_foreground: Color,
+    pub accounts_background: Color,
+    pub rooms_background: Color,
+    pub messages_background: Color,
+    pub input_background: Color,
+    pub popup_background: Color,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +276,9 @@ pub struct DisplayOptions {
     pub sender_name: SenderNameStyle,
     pub input_lines: u16,
     pub confirm_logout: bool,
+    pub search_wrap: bool,
+    pub accounts_panel_width: u16,
+    pub rooms_panel_width_adj: i16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +333,7 @@ impl KeyBinding {
             KeyCode::Right => "Right".to_owned(),
             KeyCode::PageUp => "PageUp".to_owned(),
             KeyCode::PageDown => "PageDown".to_owned(),
+            KeyCode::F(n) => format!("F{n}"),
             _ => "?".to_owned(),
         });
         parts.join("-")
@@ -235,13 +348,13 @@ struct RawConfig {
 }
 
 impl RawConfig {
-    fn load_with_defaults(text: &str) -> Result<Self, ConfigError> {
+    fn load_with_defaults(text: &str) -> Result<(Self, bool), ConfigError> {
         let parsed = toml::from_str::<PartialRawConfig>(text)?;
         let mut raw = Self::default_values();
-        raw.shortcuts.merge(parsed.shortcuts);
-        raw.colors.merge(parsed.colors);
-        raw.display.merge(parsed.display);
-        Ok(raw)
+        let repaired = raw.shortcuts.merge(parsed.shortcuts)
+            | raw.colors.merge(parsed.colors)
+            | raw.display.merge(parsed.display);
+        Ok((raw, repaired))
     }
 
     fn default_values() -> Self {
@@ -272,7 +385,13 @@ impl RawConfig {
                 redact_message: "d".to_owned(),
                 react_message: "shift-r".to_owned(),
                 unreact_message: "shift-u".to_owned(),
-                focus_next: "ctrl-space".to_owned(),
+                focus_next: "f6".to_owned(),
+                focus_prev: "ctrl-f6".to_owned(),
+                find: "ctrl-f".to_owned(),
+                toggle_accounts_panel: "alt-a".to_owned(),
+                toggle_rooms_panel: "alt-r".to_owned(),
+                toggle_unread_filter: "alt-u".to_owned(),
+                refresh: "ctrl-l".to_owned(),
             },
             colors: RawColorScheme {
                 border: "gray".to_owned(),
@@ -282,6 +401,16 @@ impl RawConfig {
                 own_message_sender: "light-cyan".to_owned(),
                 input_hint: "dark-gray".to_owned(),
                 status: "cyan".to_owned(),
+                background: "default".to_owned(),
+                accounts_foreground: None,
+                rooms_foreground: None,
+                messages_foreground: None,
+                input_foreground: None,
+                accounts_background: None,
+                rooms_background: None,
+                messages_background: None,
+                input_background: None,
+                popup_background: None,
             },
             display: RawDisplayOptions {
                 debug: false,
@@ -289,23 +418,67 @@ impl RawConfig {
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
                 confirm_logout: true,
+                search_wrap: true,
+                accounts_panel_width: None,
+                rooms_panel_width_adj: None,
             },
         }
     }
 
     fn to_toml(&self) -> String {
+        let display_extra = {
+            let mut s = String::new();
+            if let Some(w) = self.display.accounts_panel_width {
+                s.push_str(&format!("accounts_panel_width = {w}\n"));
+            }
+            if let Some(adj) = self.display.rooms_panel_width_adj {
+                s.push_str(&format!("rooms_panel_width_adj = {adj}\n"));
+            }
+            s
+        };
+        let pane_bg_lines = {
+            let mut s = String::new();
+            if let Some(ref v) = self.colors.accounts_foreground {
+                s.push_str(&format!("accounts_foreground = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.rooms_foreground {
+                s.push_str(&format!("rooms_foreground = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.messages_foreground {
+                s.push_str(&format!("messages_foreground = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.input_foreground {
+                s.push_str(&format!("input_foreground = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.accounts_background {
+                s.push_str(&format!("accounts_background = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.rooms_background {
+                s.push_str(&format!("rooms_background = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.messages_background {
+                s.push_str(&format!("messages_background = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.input_background {
+                s.push_str(&format!("input_background = \"{v}\"\n"));
+            }
+            if let Some(ref v) = self.colors.popup_background {
+                s.push_str(&format!("popup_background = \"{v}\"\n"));
+            }
+            s
+        };
         format!(
             r#"# axon-tui configuration.
 #
 # Key names are case-insensitive. Supported forms include:
-#   ctrl-n, ctrl-p, ctrl-c, ctrl-j, ctrl-k, ctrl-space, tab, enter, esc,
+#   ctrl-n, ctrl-p, ctrl-c, ctrl-j, ctrl-k, f6, ctrl-f6, tab, enter, esc,
 #   backspace, ctrl-a, ctrl-e, home, end, up, down, left, right,
 #   pageup, pagedown, space, r, t, shift-r
 #
 # Color names are case-insensitive. Supported names:
 #   black, red, green, yellow, blue, magenta, cyan, gray,
 #   dark-gray, light-red, light-green, light-yellow, light-blue,
-#   light-magenta, light-cyan, white
+#   light-magenta, light-cyan, white, default
 
 [shortcuts]
 next_room = "{next_room}"
@@ -334,7 +507,24 @@ redact_message = "{redact_message}"
 react_message = "{react_message}"
 unreact_message = "{unreact_message}"
 focus_next = "{focus_next}"
+focus_prev = "{focus_prev}"
+find = "{find}"
+toggle_accounts_panel = "{toggle_accounts_panel}"
+toggle_rooms_panel = "{toggle_rooms_panel}"
+toggle_unread_filter = "{toggle_unread_filter}"
+refresh = "{refresh}"
 
+# Select one theme by leaving its lines uncommented; comment out all others.
+# Named foreground colors: border, selected_room, unread_count, message_sender,
+#   own_message_sender, input_hint, status
+# Per-pane base foreground (uncolored text) and background:
+#   accounts_foreground, rooms_foreground, messages_foreground, input_foreground
+#   accounts_background, rooms_background, messages_background, input_background
+# Popup background: popup_background
+# Global background: background
+# All colors accept: black, red, green, yellow, blue, magenta, cyan, gray,
+#   dark-gray, light-red, light-green, light-yellow, light-blue, light-magenta,
+#   light-cyan, white, default
 [colors]
 border = "{border}"
 selected_room = "{selected_room}"
@@ -343,6 +533,61 @@ message_sender = "{message_sender}"
 own_message_sender = "{own_message_sender}"
 input_hint = "{input_hint}"
 status = "{status}"
+background = "{background}"
+{pane_bg_lines}
+# ── Dracula ───────────────────────────────────────────────────────────────────
+# border = "light-magenta"
+# selected_room = "light-magenta"
+# unread_count = "light-yellow"
+# message_sender = "light-cyan"
+# own_message_sender = "magenta"
+# input_hint = "dark-gray"
+# status = "light-magenta"
+# background = "black"
+# popup_background = "dark-gray"
+
+# ── Nord ──────────────────────────────────────────────────────────────────────
+# border = "light-blue"
+# selected_room = "light-blue"
+# unread_count = "light-yellow"
+# message_sender = "light-cyan"
+# own_message_sender = "cyan"
+# input_hint = "gray"
+# status = "light-blue"
+# background = "dark-gray"
+# accounts_foreground = "white"
+# rooms_foreground = "white"
+# accounts_background = "black"
+# rooms_background = "black"
+# popup_background = "dark-gray"
+
+# ── Solarized Dark ────────────────────────────────────────────────────────────
+# border = "yellow"
+# selected_room = "light-green"
+# unread_count = "light-red"
+# message_sender = "light-cyan"
+# own_message_sender = "cyan"
+# input_hint = "dark-gray"
+# status = "light-green"
+# background = "black"
+# popup_background = "dark-gray"
+
+# ── Paper (Light) ─────────────────────────────────────────────────────────────
+# border = "gray"
+# selected_room = "blue"
+# unread_count = "red"
+# message_sender = "blue"
+# own_message_sender = "dark-gray"
+# input_hint = "gray"
+# status = "blue"
+# background = "white"
+# accounts_foreground = "black"
+# rooms_foreground = "black"
+# messages_foreground = "black"
+# input_foreground = "black"
+# accounts_background = "gray"
+# rooms_background = "gray"
+# popup_background = "gray"
 
 [display]
 debug = {debug}
@@ -350,7 +595,8 @@ show_state_events = {show_state_events}
 sender_name = "{sender_name}"
 input_lines = {input_lines}
 confirm_logout = {confirm_logout}
-"#,
+search_wrap = {search_wrap}
+{display_extra}"#,
             next_room = self.shortcuts.next_room,
             previous_room = self.shortcuts.previous_room,
             next_account = self.shortcuts.next_account,
@@ -377,6 +623,12 @@ confirm_logout = {confirm_logout}
             react_message = self.shortcuts.react_message,
             unreact_message = self.shortcuts.unreact_message,
             focus_next = self.shortcuts.focus_next,
+            focus_prev = self.shortcuts.focus_prev,
+            find = self.shortcuts.find,
+            toggle_accounts_panel = self.shortcuts.toggle_accounts_panel,
+            toggle_rooms_panel = self.shortcuts.toggle_rooms_panel,
+            toggle_unread_filter = self.shortcuts.toggle_unread_filter,
+            refresh = self.shortcuts.refresh,
             border = self.colors.border,
             selected_room = self.colors.selected_room,
             unread_count = self.colors.unread_count,
@@ -384,11 +636,15 @@ confirm_logout = {confirm_logout}
             own_message_sender = self.colors.own_message_sender,
             input_hint = self.colors.input_hint,
             status = self.colors.status,
+            background = self.colors.background,
+            pane_bg_lines = pane_bg_lines,
             debug = self.display.debug,
             show_state_events = self.display.show_state_events,
             sender_name = self.display.sender_name,
             input_lines = self.display.input_lines,
             confirm_logout = self.display.confirm_logout,
+            search_wrap = self.display.search_wrap,
+            display_extra = display_extra,
         )
     }
 }
@@ -428,39 +684,85 @@ struct RawShortcuts {
     react_message: String,
     unreact_message: String,
     focus_next: String,
+    focus_prev: String,
+    find: String,
+    toggle_accounts_panel: String,
+    toggle_rooms_panel: String,
+    toggle_unread_filter: String,
+    refresh: String,
 }
 
 impl RawShortcuts {
-    fn merge(&mut self, partial: Option<PartialRawShortcuts>) {
+    fn merge(&mut self, partial: Option<PartialRawShortcuts>) -> bool {
         let Some(partial) = partial else {
-            return;
+            return true;
         };
-        assign_if_some(&mut self.next_room, partial.next_room);
-        assign_if_some(&mut self.previous_room, partial.previous_room);
-        assign_if_some(&mut self.next_account, partial.next_account);
-        assign_if_some(&mut self.previous_account, partial.previous_account);
-        assign_if_some(&mut self.quit, partial.quit);
-        assign_if_some(&mut self.complete, partial.complete);
-        assign_if_some(&mut self.submit, partial.submit);
-        assign_if_some(&mut self.clear_input, partial.clear_input);
-        assign_if_some(&mut self.backspace, partial.backspace);
-        assign_if_some(&mut self.cursor_start, partial.cursor_start);
-        assign_if_some(&mut self.cursor_end, partial.cursor_end);
-        assign_if_some(&mut self.cursor_left, partial.cursor_left);
-        assign_if_some(&mut self.cursor_right, partial.cursor_right);
-        assign_if_some(&mut self.edit_previous, partial.edit_previous);
-        assign_if_some(&mut self.edit_next, partial.edit_next);
-        assign_if_some(&mut self.message_down, partial.message_down);
-        assign_if_some(&mut self.message_up, partial.message_up);
-        assign_if_some(&mut self.message_page_up, partial.message_page_up);
-        assign_if_some(&mut self.message_page_down, partial.message_page_down);
-        assign_if_some(&mut self.reply, partial.reply);
-        assign_if_some(&mut self.thread, partial.thread);
-        assign_if_some(&mut self.edit_message, partial.edit_message);
-        assign_if_some(&mut self.redact_message, partial.redact_message);
-        assign_if_some(&mut self.react_message, partial.react_message);
-        assign_if_some(&mut self.unreact_message, partial.unreact_message);
-        assign_if_some(&mut self.focus_next, partial.focus_next);
+        let mut missing = false;
+        assign_or_flag(&mut self.next_room, partial.next_room, &mut missing);
+        assign_or_flag(&mut self.previous_room, partial.previous_room, &mut missing);
+        assign_or_flag(&mut self.next_account, partial.next_account, &mut missing);
+        assign_or_flag(
+            &mut self.previous_account,
+            partial.previous_account,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.quit, partial.quit, &mut missing);
+        assign_or_flag(&mut self.complete, partial.complete, &mut missing);
+        assign_or_flag(&mut self.submit, partial.submit, &mut missing);
+        assign_or_flag(&mut self.clear_input, partial.clear_input, &mut missing);
+        assign_or_flag(&mut self.backspace, partial.backspace, &mut missing);
+        assign_or_flag(&mut self.cursor_start, partial.cursor_start, &mut missing);
+        assign_or_flag(&mut self.cursor_end, partial.cursor_end, &mut missing);
+        assign_or_flag(&mut self.cursor_left, partial.cursor_left, &mut missing);
+        assign_or_flag(&mut self.cursor_right, partial.cursor_right, &mut missing);
+        assign_or_flag(&mut self.edit_previous, partial.edit_previous, &mut missing);
+        assign_or_flag(&mut self.edit_next, partial.edit_next, &mut missing);
+        assign_or_flag(&mut self.message_down, partial.message_down, &mut missing);
+        assign_or_flag(&mut self.message_up, partial.message_up, &mut missing);
+        assign_or_flag(
+            &mut self.message_page_up,
+            partial.message_page_up,
+            &mut missing,
+        );
+        assign_or_flag(
+            &mut self.message_page_down,
+            partial.message_page_down,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.reply, partial.reply, &mut missing);
+        assign_or_flag(&mut self.thread, partial.thread, &mut missing);
+        assign_or_flag(&mut self.edit_message, partial.edit_message, &mut missing);
+        assign_or_flag(
+            &mut self.redact_message,
+            partial.redact_message,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.react_message, partial.react_message, &mut missing);
+        assign_or_flag(
+            &mut self.unreact_message,
+            partial.unreact_message,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.focus_next, partial.focus_next, &mut missing);
+        assign_or_flag(&mut self.focus_prev, partial.focus_prev, &mut missing);
+        assign_or_flag(&mut self.find, partial.find, &mut missing);
+        assign_or_flag(
+            &mut self.toggle_accounts_panel,
+            partial.toggle_accounts_panel,
+            &mut missing,
+        );
+        assign_or_flag(
+            &mut self.toggle_rooms_panel,
+            partial.toggle_rooms_panel,
+            &mut missing,
+        );
+        assign_or_flag(
+            &mut self.toggle_unread_filter,
+            partial.toggle_unread_filter,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.refresh, partial.refresh, &mut missing);
+        missing
     }
 
     fn into_shortcuts(self) -> Result<Shortcuts, ConfigError> {
@@ -497,6 +799,21 @@ impl RawShortcuts {
             react_message: parse_key_binding("shortcuts.react_message", &self.react_message)?,
             unreact_message: parse_key_binding("shortcuts.unreact_message", &self.unreact_message)?,
             focus_next: parse_key_binding("shortcuts.focus_next", &self.focus_next)?,
+            focus_prev: parse_key_binding("shortcuts.focus_prev", &self.focus_prev)?,
+            find: parse_key_binding("shortcuts.find", &self.find)?,
+            toggle_accounts_panel: parse_key_binding(
+                "shortcuts.toggle_accounts_panel",
+                &self.toggle_accounts_panel,
+            )?,
+            toggle_rooms_panel: parse_key_binding(
+                "shortcuts.toggle_rooms_panel",
+                &self.toggle_rooms_panel,
+            )?,
+            toggle_unread_filter: parse_key_binding(
+                "shortcuts.toggle_unread_filter",
+                &self.toggle_unread_filter,
+            )?,
+            refresh: parse_key_binding("shortcuts.refresh", &self.refresh)?,
         })
     }
 }
@@ -531,6 +848,12 @@ struct PartialRawShortcuts {
     react_message: Option<String>,
     unreact_message: Option<String>,
     focus_next: Option<String>,
+    focus_prev: Option<String>,
+    find: Option<String>,
+    toggle_accounts_panel: Option<String>,
+    toggle_rooms_panel: Option<String>,
+    toggle_unread_filter: Option<String>,
+    refresh: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -542,23 +865,126 @@ struct RawColorScheme {
     own_message_sender: String,
     input_hint: String,
     status: String,
+    background: String,
+    accounts_foreground: Option<String>,
+    rooms_foreground: Option<String>,
+    messages_foreground: Option<String>,
+    input_foreground: Option<String>,
+    accounts_background: Option<String>,
+    rooms_background: Option<String>,
+    messages_background: Option<String>,
+    input_background: Option<String>,
+    popup_background: Option<String>,
 }
 
 impl RawColorScheme {
-    fn merge(&mut self, partial: Option<PartialRawColorScheme>) {
+    fn merge(&mut self, partial: Option<PartialRawColorScheme>) -> bool {
         let Some(partial) = partial else {
-            return;
+            return true;
         };
-        assign_if_some(&mut self.border, partial.border);
-        assign_if_some(&mut self.selected_room, partial.selected_room);
-        assign_if_some(&mut self.unread_count, partial.unread_count);
-        assign_if_some(&mut self.message_sender, partial.message_sender);
-        assign_if_some(&mut self.own_message_sender, partial.own_message_sender);
-        assign_if_some(&mut self.input_hint, partial.input_hint);
-        assign_if_some(&mut self.status, partial.status);
+        let mut missing = false;
+        assign_or_flag(&mut self.border, partial.border, &mut missing);
+        assign_or_flag(&mut self.selected_room, partial.selected_room, &mut missing);
+        assign_or_flag(&mut self.unread_count, partial.unread_count, &mut missing);
+        assign_or_flag(
+            &mut self.message_sender,
+            partial.message_sender,
+            &mut missing,
+        );
+        assign_or_flag(
+            &mut self.own_message_sender,
+            partial.own_message_sender,
+            &mut missing,
+        );
+        assign_or_flag(&mut self.input_hint, partial.input_hint, &mut missing);
+        assign_or_flag(&mut self.status, partial.status, &mut missing);
+        assign_or_flag(&mut self.background, partial.background, &mut missing);
+        if let Some(v) = partial.accounts_foreground {
+            self.accounts_foreground = Some(v);
+        }
+        if let Some(v) = partial.rooms_foreground {
+            self.rooms_foreground = Some(v);
+        }
+        if let Some(v) = partial.messages_foreground {
+            self.messages_foreground = Some(v);
+        }
+        if let Some(v) = partial.input_foreground {
+            self.input_foreground = Some(v);
+        }
+        if let Some(v) = partial.accounts_background {
+            self.accounts_background = Some(v);
+        }
+        if let Some(v) = partial.rooms_background {
+            self.rooms_background = Some(v);
+        }
+        if let Some(v) = partial.messages_background {
+            self.messages_background = Some(v);
+        }
+        if let Some(v) = partial.input_background {
+            self.input_background = Some(v);
+        }
+        if let Some(v) = partial.popup_background {
+            self.popup_background = Some(v);
+        }
+        missing
     }
 
     fn into_color_scheme(self) -> Result<ColorScheme, ConfigError> {
+        let background = parse_color("colors.background", &self.background)?;
+        let accounts_foreground = self
+            .accounts_foreground
+            .as_deref()
+            .map(|v| parse_color("colors.accounts_foreground", v))
+            .transpose()?
+            .unwrap_or(Color::Reset);
+        let rooms_foreground = self
+            .rooms_foreground
+            .as_deref()
+            .map(|v| parse_color("colors.rooms_foreground", v))
+            .transpose()?
+            .unwrap_or(Color::Reset);
+        let messages_foreground = self
+            .messages_foreground
+            .as_deref()
+            .map(|v| parse_color("colors.messages_foreground", v))
+            .transpose()?
+            .unwrap_or(Color::Reset);
+        let input_foreground = self
+            .input_foreground
+            .as_deref()
+            .map(|v| parse_color("colors.input_foreground", v))
+            .transpose()?
+            .unwrap_or(Color::Reset);
+        let accounts_background = self
+            .accounts_background
+            .as_deref()
+            .map(|v| parse_color("colors.accounts_background", v))
+            .transpose()?
+            .unwrap_or(background);
+        let rooms_background = self
+            .rooms_background
+            .as_deref()
+            .map(|v| parse_color("colors.rooms_background", v))
+            .transpose()?
+            .unwrap_or(background);
+        let messages_background = self
+            .messages_background
+            .as_deref()
+            .map(|v| parse_color("colors.messages_background", v))
+            .transpose()?
+            .unwrap_or(background);
+        let input_background = self
+            .input_background
+            .as_deref()
+            .map(|v| parse_color("colors.input_background", v))
+            .transpose()?
+            .unwrap_or(background);
+        let popup_background = self
+            .popup_background
+            .as_deref()
+            .map(|v| parse_color("colors.popup_background", v))
+            .transpose()?
+            .unwrap_or(background);
         Ok(ColorScheme {
             border: parse_color("colors.border", &self.border)?,
             selected_room: parse_color("colors.selected_room", &self.selected_room)?,
@@ -567,6 +993,15 @@ impl RawColorScheme {
             own_message_sender: parse_color("colors.own_message_sender", &self.own_message_sender)?,
             input_hint: parse_color("colors.input_hint", &self.input_hint)?,
             status: parse_color("colors.status", &self.status)?,
+            accounts_foreground,
+            rooms_foreground,
+            messages_foreground,
+            input_foreground,
+            accounts_background,
+            rooms_background,
+            messages_background,
+            input_background,
+            popup_background,
         })
     }
 }
@@ -580,6 +1015,16 @@ struct PartialRawColorScheme {
     own_message_sender: Option<String>,
     input_hint: Option<String>,
     status: Option<String>,
+    background: Option<String>,
+    accounts_foreground: Option<String>,
+    rooms_foreground: Option<String>,
+    messages_foreground: Option<String>,
+    input_foreground: Option<String>,
+    accounts_background: Option<String>,
+    rooms_background: Option<String>,
+    messages_background: Option<String>,
+    input_background: Option<String>,
+    popup_background: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -589,28 +1034,54 @@ struct RawDisplayOptions {
     sender_name: String,
     input_lines: u16,
     confirm_logout: bool,
+    search_wrap: bool,
+    accounts_panel_width: Option<u16>,
+    rooms_panel_width_adj: Option<i16>,
 }
 
 impl RawDisplayOptions {
-    fn merge(&mut self, partial: Option<PartialDisplayOptions>) {
+    fn merge(&mut self, partial: Option<PartialDisplayOptions>) -> bool {
         let Some(partial) = partial else {
-            return;
+            return true;
         };
+        let mut missing = false;
         if let Some(debug) = partial.debug {
             self.debug = debug;
+        } else {
+            missing = true;
         }
         if let Some(show_state_events) = partial.show_state_events {
             self.show_state_events = show_state_events;
+        } else {
+            missing = true;
         }
         if let Some(sender_name) = partial.sender_name {
             self.sender_name = sender_name;
+        } else {
+            missing = true;
         }
         if let Some(input_lines) = partial.input_lines {
-            self.input_lines = input_lines.max(1);
+            self.input_lines = input_lines.clamp(1, 10);
+        } else {
+            missing = true;
         }
         if let Some(confirm_logout) = partial.confirm_logout {
             self.confirm_logout = confirm_logout;
+        } else {
+            missing = true;
         }
+        if let Some(search_wrap) = partial.search_wrap {
+            self.search_wrap = search_wrap;
+        } else {
+            missing = true;
+        }
+        if let Some(v) = partial.accounts_panel_width {
+            self.accounts_panel_width = Some(v);
+        }
+        if let Some(v) = partial.rooms_panel_width_adj {
+            self.rooms_panel_width_adj = Some(v);
+        }
+        missing
     }
 
     fn into_display_options(self) -> Result<DisplayOptions, ConfigError> {
@@ -618,8 +1089,13 @@ impl RawDisplayOptions {
             debug: self.debug,
             show_state_events: self.show_state_events,
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
-            input_lines: self.input_lines.max(1),
+            input_lines: self.input_lines.clamp(1, 10),
             confirm_logout: self.confirm_logout,
+            search_wrap: self.search_wrap,
+            accounts_panel_width: self
+                .accounts_panel_width
+                .unwrap_or(DEFAULT_ACCOUNTS_PANEL_WIDTH),
+            rooms_panel_width_adj: self.rooms_panel_width_adj.unwrap_or(0),
         })
     }
 }
@@ -631,11 +1107,15 @@ struct PartialDisplayOptions {
     sender_name: Option<String>,
     input_lines: Option<u16>,
     confirm_logout: Option<bool>,
+    search_wrap: Option<bool>,
+    accounts_panel_width: Option<u16>,
+    rooms_panel_width_adj: Option<i16>,
 }
 
-fn assign_if_some(target: &mut String, value: Option<String>) {
-    if let Some(value) = value {
-        *target = value;
+fn assign_or_flag(target: &mut String, value: Option<String>, missing: &mut bool) {
+    match value {
+        Some(v) => *target = v,
+        None => *missing = true,
     }
 }
 
@@ -684,6 +1164,9 @@ fn parse_key_binding(field: &'static str, value: &str) -> Result<KeyBinding, Con
             "pageup" | "page_up" | "pgup" => key = Some(KeyCode::PageUp),
             "pagedown" | "page_down" | "pgdn" => key = Some(KeyCode::PageDown),
             "space" => key = Some(KeyCode::Char(' ')),
+            key_name if key_name.starts_with('f') && key_name[1..].parse::<u8>().is_ok() => {
+                key = Some(KeyCode::F(key_name[1..].parse().unwrap()));
+            }
             key_name if key_name.chars().count() == 1 => {
                 key = key_name.chars().next().map(KeyCode::Char);
             }
@@ -726,6 +1209,7 @@ fn parse_color(field: &'static str, value: &str) -> Result<Color, ConfigError> {
         "light-magenta" => Ok(Color::LightMagenta),
         "light-cyan" => Ok(Color::LightCyan),
         "white" => Ok(Color::White),
+        "default" | "reset" => Ok(Color::Reset),
         _ => Err(ConfigError::InvalidColor {
             field,
             value: value.to_owned(),
@@ -783,7 +1267,8 @@ mod tests {
 
     #[test]
     fn parses_default_config() {
-        let raw = RawConfig::load_with_defaults(DEFAULT_CONFIG).expect("default config parses");
+        let (raw, _) =
+            RawConfig::load_with_defaults(DEFAULT_CONFIG).expect("default config parses");
         let shortcuts = raw.shortcuts.into_shortcuts().expect("shortcuts");
 
         assert!(shortcuts
@@ -834,7 +1319,8 @@ status = "cyan"
         assert!(repaired.contains("message_page_up = \"pageup\""));
         assert!(repaired.contains("thread = \"t\""));
         assert!(repaired.contains("unreact_message = \"shift-u\""));
-        assert!(repaired.contains("focus_next = \"ctrl-space\""));
+        assert!(repaired.contains("focus_next = \"f6\""));
+        assert!(repaired.contains("focus_prev = \"ctrl-f6\""));
         assert!(repaired.contains("own_message_sender = \"light-cyan\""));
         assert!(repaired.contains("[display]"));
         assert!(repaired.contains("debug = false"));
@@ -875,6 +1361,29 @@ history_next = "ctrl-j"
         assert!(repaired.contains("edit_next = \"ctrl-j\""));
         assert!(!repaired.contains("history_previous"));
         assert!(!repaired.contains("history_next"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn preserves_user_comments_when_config_is_complete() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-comments-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let original = format!(
+            "# my personal config\n# do not overwrite this!\n{}",
+            DEFAULT_CONFIG
+        );
+        fs::write(&path, &original).expect("write config with comments");
+
+        TuiConfig::load_or_create_at(path.clone()).expect("load config with comments");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read config"),
+            original,
+            "user comments must not be discarded"
+        );
         let _ = fs::remove_file(path);
     }
 

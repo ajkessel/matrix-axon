@@ -3,8 +3,8 @@ use uuid::Uuid;
 use crate::api::{EventDto, RoomDto};
 
 use super::{
-    display_body_with_sender, format_time, relative_room_index, AccountSelection, App, RoomKey,
-    RoomTargetResolution, Status, TIMELINE_LIMIT,
+    display_body_with_sender, format_time, match_status, next_match_index, relative_room_index,
+    AccountSelection, App, RoomKey, RoomTargetResolution, Status, TIMELINE_LIMIT,
 };
 
 impl App {
@@ -188,66 +188,66 @@ impl App {
     }
 
     pub(crate) fn search_adjacent_account(&mut self, query: &str, forward: bool) {
-        let n = self.accounts.accounts.len();
-        if n == 0 {
+        let q = query.to_lowercase();
+        let all_matches = self.account_search_matches(&q);
+        if all_matches.is_empty() {
+            self.status = Status::from("no more matches".to_owned());
             return;
         }
-        let total = n + 1;
         let current_pos = match self.accounts.selected {
             AccountSelection::All => 0,
             AccountSelection::Account(i) => i + 1,
         };
-        let step: isize = if forward { 1 } else { -1 };
-        let q = query.to_lowercase();
-        for delta in 1..=total {
-            let pos = ((current_pos as isize + step * delta as isize).rem_euclid(total as isize))
-                as usize;
-            let label = if pos == 0 {
-                AccountSelection::All.display_label(None)
+        let found = next_match_index(
+            &all_matches,
+            Some(current_pos),
+            forward,
+            self.display.search_wrap,
+        );
+        if let Some(pos) = found {
+            self.accounts.selected = if pos == 0 {
+                AccountSelection::All
             } else {
                 AccountSelection::Account(pos - 1)
-                    .display_label(Some(&self.accounts.accounts[pos - 1].user_id))
             };
-            if label.to_lowercase().contains(&q) {
-                self.accounts.selected = if pos == 0 {
-                    AccountSelection::All
-                } else {
-                    AccountSelection::Account(pos - 1)
-                };
-                self.sync_room_selection_to_account_filter();
-                self.last_search = Some(query.to_owned());
-                return;
-            }
+            self.sync_room_selection_to_account_filter();
+            self.last_search = Some(query.to_owned());
+            let match_num = all_matches.iter().position(|&p| p == pos).unwrap_or(0) + 1;
+            self.status = match_status(match_num, all_matches.len());
         }
     }
 
     pub(crate) fn commit_account_search(&mut self, query: String) -> bool {
         let query_lower = query.to_lowercase();
-        let selection = std::iter::once((
-            AccountSelection::All.display_label(None),
-            AccountSelection::All,
-        ))
-        .chain(
-            self.accounts
-                .accounts
-                .iter()
-                .enumerate()
-                .map(|(index, account)| {
-                    let selection = AccountSelection::Account(index);
-                    (selection.display_label(Some(&account.user_id)), selection)
-                }),
-        )
-        .find(|(label, _)| label.to_lowercase().contains(&query_lower))
-        .map(|(_, selection)| selection);
-
+        let all_matches = self.account_search_matches(&query_lower);
         self.last_search = Some(query.clone());
-        let Some(selection) = selection else {
+        let Some(&pos) = all_matches.first() else {
             self.status = Status::from(format!("no account matches: {query}"));
             return false;
         };
-        self.accounts.selected = selection;
+        self.accounts.selected = if pos == 0 {
+            AccountSelection::All
+        } else {
+            AccountSelection::Account(pos - 1)
+        };
         self.sync_room_selection_to_account_filter();
+        self.status = match_status(1, all_matches.len());
         true
+    }
+
+    fn account_search_matches(&self, query_lower: &str) -> Vec<usize> {
+        std::iter::once(AccountSelection::All.display_label(None))
+            .chain(
+                self.accounts
+                    .accounts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| AccountSelection::Account(i).display_label(Some(&a.user_id))),
+            )
+            .enumerate()
+            .filter(|(_, label)| label.to_lowercase().contains(query_lower))
+            .map(|(pos, _)| pos)
+            .collect()
     }
 
     pub(super) fn switch_account(&mut self, target: &str) -> bool {

@@ -451,26 +451,11 @@ impl EventDto {
             .flatten()
     }
 
-    pub fn is_state_event(&self) -> bool {
-        self.state_key.is_some()
-            || matches!(
-                self.event_type.as_str(),
-                "m.room.avatar"
-                    | "m.room.canonical_alias"
-                    | "m.room.create"
-                    | "m.room.encryption"
-                    | "m.room.guest_access"
-                    | "m.room.history_visibility"
-                    | "m.room.join_rules"
-                    | "m.room.member"
-                    | "m.room.name"
-                    | "m.room.pinned_events"
-                    | "m.room.power_levels"
-                    | "m.room.server_acl"
-                    | "m.room.third_party_invite"
-                    | "m.room.tombstone"
-                    | "m.room.topic"
-            )
+    pub fn is_message_event(&self) -> bool {
+        matches!(
+            self.event_type.as_str(),
+            "m.room.message" | "m.room.encrypted" | "m.sticker"
+        )
     }
 
     pub fn is_membership_event(&self) -> bool {

@@ -4,8 +4,8 @@ use crate::api::{EventDto, LiveFrame, RoomDto};
 use crate::config::{DisplayOptions, SenderNameStyle};
 
 use super::{
-    collect_reactions, message_index_at_line, message_line_ranges, selected_message_target_index,
-    App, ConnectionState, LiveFrameAction, RoomKey, Status,
+    collect_reactions, match_status, message_index_at_line, message_line_ranges, next_match_index,
+    selected_message_target_index, App, ConnectionState, LiveFrameAction, RoomKey, Status,
 };
 
 impl App {
@@ -198,6 +198,35 @@ impl App {
             .find(|event| event.event_id == selected_message)
     }
 
+    pub(crate) fn select_first_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let event_id = events[0].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(0);
+        self.status = Status::from(format!("selected message 1 of {count}"));
+    }
+
+    pub(crate) fn select_last_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let last = count - 1;
+        let event_id = events[last].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(last);
+        self.status = Status::from(format!("selected message {count} of {count}"));
+    }
+
     pub(crate) fn move_selected_message(&mut self, offset: isize) {
         let Some((event_id, next, event_count)) = ({
             let events = self.selected_events();
@@ -310,16 +339,18 @@ impl App {
             return;
         }
         let query_lower = query.to_ascii_lowercase();
-        let start = self.rooms.selected.map(|index| index + 1).unwrap_or(0);
-        let count = self.rooms.rooms.len();
-        let found = (start..count)
-            .find(|&index| room_matches_search(&self.rooms.rooms[index], &query_lower));
+        let all_matches: Vec<usize> = self
+            .visible_room_indices()
+            .into_iter()
+            .filter(|&i| room_matches_search(&self.rooms.rooms[i], &query_lower))
+            .collect();
+        let found = all_matches.first().copied();
         self.last_search = Some(query);
         match found {
             Some(index) => {
                 self.rooms.selected = Some(index);
                 self.load_selected_timeline().await;
-                self.status = Status::from(format!("room match {} of {}", index + 1, count));
+                self.status = match_status(1, all_matches.len());
             }
             None => self.status = Status::Info("no match".to_owned()),
         }
@@ -327,24 +358,27 @@ impl App {
 
     pub(crate) async fn search_adjacent_room(&mut self, query: &str, forward: bool) {
         let query = query.to_ascii_lowercase();
-        let count = self.rooms.rooms.len();
-        if count == 0 {
+        let all_matches: Vec<usize> = self
+            .visible_room_indices()
+            .into_iter()
+            .filter(|&i| room_matches_search(&self.rooms.rooms[i], &query))
+            .collect();
+        if all_matches.is_empty() {
+            self.status = Status::Info("no more matches".to_owned());
             return;
         }
-        let found = if forward {
-            let start = self.rooms.selected.map(|index| index + 1).unwrap_or(0);
-            (start..count).find(|&index| room_matches_search(&self.rooms.rooms[index], &query))
-        } else {
-            let end = self.rooms.selected.unwrap_or(0);
-            (0..end)
-                .rev()
-                .find(|&index| room_matches_search(&self.rooms.rooms[index], &query))
-        };
+        let found = next_match_index(
+            &all_matches,
+            self.rooms.selected,
+            forward,
+            self.display.search_wrap,
+        );
         match found {
             Some(index) => {
                 self.rooms.selected = Some(index);
                 self.load_selected_timeline().await;
-                self.status = Status::from(format!("room match {} of {}", index + 1, count));
+                let match_num = all_matches.iter().position(|&i| i == index).unwrap_or(0) + 1;
+                self.status = match_status(match_num, all_matches.len());
             }
             None => self.status = Status::Info("no more matches".to_owned()),
         }
@@ -356,27 +390,40 @@ impl App {
         }
         let query_lower = query.to_ascii_lowercase();
         let current_id = self.messages.selection.clone();
-        let (found, count) = {
+        let (found, total_matches) = {
             let events = self.selected_events();
-            let count = events.len();
-            let start = current_id
-                .as_deref()
-                .and_then(|id| events.iter().position(|event| event.event_id == id))
-                .map(|index| index + 1)
-                .unwrap_or(0);
-            let found = events[start..]
+            let all_matches: Vec<(usize, String)> = events
                 .iter()
                 .enumerate()
-                .find(|(_, event)| message_matches_search(event, &query_lower))
-                .map(|(index, event)| (index + start, event.event_id.clone()));
-            (found, count)
+                .filter(|(_, event)| message_matches_search(event, &query_lower))
+                .map(|(i, event)| (i, event.event_id.clone()))
+                .collect();
+            let total = all_matches.len();
+            let cursor_pos = current_id
+                .as_deref()
+                .and_then(|id| events.iter().position(|e| e.event_id == id));
+            let found = if let Some(pos) = cursor_pos {
+                all_matches
+                    .iter()
+                    .find(|(i, _)| *i > pos)
+                    .or_else(|| all_matches.first())
+                    .cloned()
+            } else {
+                all_matches.first().cloned()
+            };
+            let match_num = found
+                .as_ref()
+                .and_then(|(i, _)| all_matches.iter().position(|(j, _)| j == i))
+                .map(|p| p + 1)
+                .unwrap_or(1);
+            (found.map(|(i, id)| (i, id, match_num)), total)
         };
         self.last_search = Some(query);
         match found {
-            Some((index, event_id)) => {
+            Some((index, event_id, match_num)) => {
                 self.messages.selection = Some(event_id);
                 self.ensure_message_index_visible(index);
-                self.status = Status::from(format!("message match {} of {}", index + 1, count));
+                self.status = match_status(match_num, total_matches);
             }
             None => self.status = Status::Info("no match".to_owned()),
         }
@@ -385,35 +432,46 @@ impl App {
     pub(crate) fn search_adjacent_message(&mut self, query: &str, forward: bool) {
         let query = query.to_ascii_lowercase();
         let current_id = self.messages.selection.clone();
-        let (found, count) = {
+        let (found, total_matches) = {
             let events = self.selected_events();
-            let count = events.len();
             let current_pos = current_id
                 .as_deref()
                 .and_then(|id| events.iter().position(|event| event.event_id == id));
+            let all_matches: Vec<(usize, String)> = events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| message_matches_search(event, &query))
+                .map(|(i, event)| (i, event.event_id.clone()))
+                .collect();
+            let total = all_matches.len();
             let found = if forward {
-                let start = current_pos.map(|index| index + 1).unwrap_or(0);
-                events[start..]
-                    .iter()
-                    .enumerate()
-                    .find(|(_, event)| message_matches_search(event, &query))
-                    .map(|(index, event)| (index + start, event.event_id.clone()))
+                let start = current_pos.map(|i| i + 1).unwrap_or(0);
+                let direct = all_matches.iter().find(|(i, _)| *i >= start).cloned();
+                if direct.is_some() || !self.display.search_wrap {
+                    direct
+                } else {
+                    all_matches.first().cloned()
+                }
             } else {
-                let end = current_pos.unwrap_or(count);
-                events[..end]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, event)| message_matches_search(event, &query))
-                    .map(|(index, event)| (index, event.event_id.clone()))
+                let end = current_pos.unwrap_or(events.len());
+                let direct = all_matches.iter().rev().find(|(i, _)| *i < end).cloned();
+                if direct.is_some() || !self.display.search_wrap {
+                    direct
+                } else {
+                    all_matches.last().cloned()
+                }
             };
-            (found, count)
+            let match_num = found
+                .as_ref()
+                .and_then(|(i, _)| all_matches.iter().position(|(j, _)| j == i))
+                .map(|p| p + 1);
+            (found.map(|(i, id)| (i, id, match_num.unwrap_or(1))), total)
         };
         match found {
-            Some((index, event_id)) => {
+            Some((index, event_id, match_num)) => {
                 self.messages.selection = Some(event_id);
                 self.ensure_message_index_visible(index);
-                self.status = Status::from(format!("message match {} of {}", index + 1, count));
+                self.status = match_status(match_num, total_matches);
             }
             None => self.status = Status::Info("no more matches".to_owned()),
         }
@@ -459,7 +517,7 @@ pub(crate) fn should_show_event(event: &EventDto, display: &DisplayOptions) -> b
     if event.event_type == "m.reaction" {
         return false;
     }
-    display.show_state_events || !event.is_state_event() || event.is_membership_event()
+    display.show_state_events || event.is_message_event() || event.is_membership_event()
 }
 
 fn room_matches_search(room: &RoomDto, query: &str) -> bool {

@@ -12,6 +12,8 @@ impl App {
             self.should_quit = true;
         } else if self.shortcuts.focus_next.matches(key) {
             self.cycle_focus();
+        } else if self.shortcuts.focus_prev.matches(key) {
+            self.cycle_focus_prev();
         } else if self.shortcuts.next_room.matches(key) {
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
@@ -40,6 +42,15 @@ impl App {
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(-1);
+        } else if self.shortcuts.toggle_accounts_panel.matches(key) && !self.is_mid_command() {
+            self.toggle_accounts_panel();
+        } else if self.shortcuts.toggle_rooms_panel.matches(key) && !self.is_mid_command() {
+            self.toggle_rooms_panel();
+        } else if self.shortcuts.toggle_unread_filter.matches(key) && !self.is_mid_command() {
+            self.toggle_unread_filter();
+        } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
+            self.refresh_rooms().await;
+            self.redraw_requested = true;
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
@@ -121,12 +132,15 @@ impl App {
 
     async fn handle_search_key(&mut self, key: KeyEvent, kind: SearchKind, mut query: String) {
         if self.shortcuts.clear_input.matches(key) {
+            self.reset_search_list_scroll(&kind);
+            self.clear_search_status();
             self.mode = match kind {
                 SearchKind::Rooms => Mode::RoomList,
                 SearchKind::Messages => Mode::MessageList,
                 SearchKind::Accounts => Mode::AccountList,
             };
         } else if self.shortcuts.submit.matches(key) {
+            self.reset_search_list_scroll(&kind);
             self.mode = match kind {
                 SearchKind::Rooms => Mode::RoomList,
                 SearchKind::Messages => Mode::MessageList,
@@ -137,23 +151,46 @@ impl App {
                 SearchKind::Messages => self.commit_message_search(query),
                 SearchKind::Accounts => {
                     if self.commit_account_search(query) {
+                        let search_status =
+                            std::mem::replace(&mut self.status, Status::Info(String::new()));
                         self.load_selected_timeline().await;
+                        self.status = search_status;
                     }
                 }
             }
         } else if self.shortcuts.backspace.matches(key) || key.code == KeyCode::Delete {
             query.pop();
+            self.reset_search_list_scroll(&kind);
             self.mode = Mode::Search(kind, query);
         } else if let KeyCode::Char(ch) = key.code {
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                 query.push(ch);
+                self.reset_search_list_scroll(&kind);
                 self.mode = Mode::Search(kind, query);
             }
         }
     }
 
+    fn reset_search_list_scroll(&mut self, kind: &SearchKind) {
+        match kind {
+            SearchKind::Rooms => self.rooms.scroll = 0,
+            SearchKind::Accounts => self.accounts.scroll = 0,
+            SearchKind::Messages => {}
+        }
+    }
+
+    fn clear_search_status(&mut self) {
+        if self.last_search.is_some() {
+            self.status = Status::Info(String::new());
+        }
+    }
+
     async fn handle_room_list_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Up {
+        if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
+            self.adjust_rooms_width(-2);
+        } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {
+            self.adjust_rooms_width(2);
+        } else if key.code == KeyCode::Up {
             self.switch_relative_room(-1).await;
         } else if key.code == KeyCode::Down {
             self.switch_relative_room(1).await;
@@ -175,8 +212,13 @@ impl App {
                 self.rooms.selected = Some(last);
                 self.load_selected_timeline().await;
             }
-        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+        } else if self.shortcuts.find.matches(key) {
+            self.rooms.scroll = 0;
             self.mode = Mode::Search(SearchKind::Rooms, String::new());
+        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+            self.clear_input_buffer();
+            self.insert_char('/');
+            self.mode = Mode::Compose;
         } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
             if let Some(q) = self.last_search.clone() {
                 self.search_adjacent_room(&q, true).await;
@@ -186,6 +228,7 @@ impl App {
                 self.search_adjacent_room(&q, false).await;
             }
         } else if self.shortcuts.submit.matches(key) || self.shortcuts.clear_input.matches(key) {
+            self.clear_search_status();
             self.mode = Mode::Compose;
         }
     }
@@ -203,8 +246,18 @@ impl App {
         } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(1);
-        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+        } else if key.code == KeyCode::Home {
+            self.dismiss_input_help();
+            self.select_first_message();
+        } else if key.code == KeyCode::End {
+            self.dismiss_input_help();
+            self.select_last_message();
+        } else if self.shortcuts.find.matches(key) {
             self.mode = Mode::Search(SearchKind::Messages, String::new());
+        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+            self.clear_input_buffer();
+            self.insert_char('/');
+            self.mode = Mode::Compose;
         } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
             if let Some(q) = self.last_search.clone() {
                 self.search_adjacent_message(&q, true);
@@ -232,6 +285,7 @@ impl App {
             self.dismiss_input_help();
             self.start_unreact_from_selected_message().await;
         } else if self.shortcuts.clear_input.matches(key) {
+            self.clear_search_status();
             self.mode = Mode::Compose;
         }
     }
@@ -240,12 +294,18 @@ impl App {
         if self.handle_input_navigation_key(key) {
             return;
         }
-        if self.shortcuts.edit_previous.matches(key) {
+        if key.code == KeyCode::Up && key.modifiers == KeyModifiers::ALT {
+            self.adjust_input_lines(1);
+        } else if key.code == KeyCode::Down && key.modifiers == KeyModifiers::ALT {
+            self.adjust_input_lines(-1);
+        } else if self.shortcuts.edit_previous.matches(key) {
             self.dismiss_input_help();
-            self.edit_previous();
+            self.move_selected_message(-1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.edit_next.matches(key) {
             self.dismiss_input_help();
-            self.edit_next();
+            self.move_selected_message(1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(-1);
@@ -497,6 +557,12 @@ impl App {
         } else if self.shortcuts.cursor_end.matches(key) || matches!(key.code, KeyCode::End) {
             self.dismiss_input_help();
             self.move_cursor_to_end();
+        } else if key.code == KeyCode::Left && key.modifiers == KeyModifiers::CONTROL {
+            self.dismiss_input_help();
+            self.move_cursor_word_left();
+        } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::CONTROL {
+            self.dismiss_input_help();
+            self.move_cursor_word_right();
         } else if self.shortcuts.cursor_left.matches(key) {
             self.dismiss_input_help();
             self.move_cursor_left();
@@ -562,6 +628,7 @@ impl App {
         self.input.react_tab = None;
         self.messages.selection = None;
         self.messages.scroll = usize::MAX;
+        self.status = Status::Info(String::new());
         self.mode = Mode::Compose;
     }
 
@@ -584,7 +651,11 @@ impl App {
     }
 
     async fn handle_account_list_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Up {
+        if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
+            self.adjust_accounts_width(-2);
+        } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {
+            self.adjust_accounts_width(2);
+        } else if key.code == KeyCode::Up {
             self.accounts.selected = match self.accounts.selected {
                 AccountSelection::All => AccountSelection::All,
                 AccountSelection::Account(0) => AccountSelection::All,
@@ -602,19 +673,42 @@ impl App {
             };
             self.sync_room_selection_to_account_filter();
             self.load_selected_timeline().await;
-        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+        } else if key.code == KeyCode::Home {
+            self.accounts.selected = AccountSelection::All;
+            self.sync_room_selection_to_account_filter();
+            self.load_selected_timeline().await;
+        } else if key.code == KeyCode::End {
+            if !self.accounts.accounts.is_empty() {
+                self.accounts.selected =
+                    AccountSelection::Account(self.accounts.accounts.len() - 1);
+                self.sync_room_selection_to_account_filter();
+                self.load_selected_timeline().await;
+            }
+        } else if self.shortcuts.find.matches(key) {
+            self.accounts.scroll = 0;
             self.mode = Mode::Search(SearchKind::Accounts, String::new());
+        } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
+            self.clear_input_buffer();
+            self.insert_char('/');
+            self.mode = Mode::Compose;
         } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
             if let Some(q) = self.last_search.clone() {
                 self.search_adjacent_account(&q, true);
+                let search_status =
+                    std::mem::replace(&mut self.status, Status::Info(String::new()));
                 self.load_selected_timeline().await;
+                self.status = search_status;
             }
         } else if key.code == KeyCode::Char('N') && key.modifiers == KeyModifiers::SHIFT {
             if let Some(q) = self.last_search.clone() {
                 self.search_adjacent_account(&q, false);
+                let search_status =
+                    std::mem::replace(&mut self.status, Status::Info(String::new()));
                 self.load_selected_timeline().await;
+                self.status = search_status;
             }
         } else if self.shortcuts.submit.matches(key) || self.shortcuts.clear_input.matches(key) {
+            self.clear_search_status();
             self.mode = Mode::Compose;
         }
     }
@@ -634,8 +728,10 @@ impl App {
             self.abandon_transient_input_mode();
             return;
         }
-        self.mode = if self.accounts_panel_visible() {
-            match self.mode {
+        let show_accounts = self.accounts_panel_visible();
+        let show_rooms = self.rooms_panel_visible();
+        let next = match (show_accounts, show_rooms) {
+            (true, true) => match self.mode {
                 Mode::Compose => Mode::AccountList,
                 Mode::AccountList | Mode::Search(SearchKind::Accounts, _) => Mode::RoomList,
                 Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::MessageList,
@@ -643,16 +739,89 @@ impl App {
                     Mode::Compose
                 }
                 _ => Mode::Compose,
-            }
-        } else {
-            match self.mode {
+            },
+            (true, false) => match self.mode {
+                Mode::Compose => Mode::AccountList,
+                Mode::AccountList | Mode::Search(SearchKind::Accounts, _) => Mode::MessageList,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::Compose
+                }
+                _ => Mode::Compose,
+            },
+            (false, true) => match self.mode {
                 Mode::Compose => Mode::RoomList,
                 Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::MessageList,
                 Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
                     Mode::Compose
                 }
                 _ => Mode::Compose,
-            }
+            },
+            (false, false) => match self.mode {
+                Mode::Compose | Mode::Popup(_) => Mode::MessageList,
+                _ => Mode::Compose,
+            },
         };
+        match next {
+            Mode::RoomList => self.rooms.scroll = 0,
+            Mode::AccountList => self.accounts.scroll = 0,
+            _ => {}
+        }
+        self.mode = next;
+    }
+
+    fn cycle_focus_prev(&mut self) {
+        if matches!(
+            self.mode,
+            Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
+                | Mode::ConfirmLogout { .. }
+                | Mode::ConfirmDelete { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::Unreacting { .. }
+        ) {
+            self.abandon_transient_input_mode();
+            return;
+        }
+        let show_accounts = self.accounts_panel_visible();
+        let show_rooms = self.rooms_panel_visible();
+        let prev = match (show_accounts, show_rooms) {
+            (true, true) => match self.mode {
+                Mode::Compose => Mode::MessageList,
+                Mode::AccountList | Mode::Search(SearchKind::Accounts, _) => Mode::Compose,
+                Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::AccountList,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::RoomList
+                }
+                _ => Mode::Compose,
+            },
+            (true, false) => match self.mode {
+                Mode::Compose => Mode::MessageList,
+                Mode::AccountList | Mode::Search(SearchKind::Accounts, _) => Mode::Compose,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::AccountList
+                }
+                _ => Mode::Compose,
+            },
+            (false, true) => match self.mode {
+                Mode::Compose => Mode::MessageList,
+                Mode::RoomList | Mode::Search(SearchKind::Rooms, _) => Mode::Compose,
+                Mode::MessageList | Mode::Search(SearchKind::Messages, _) | Mode::Popup(_) => {
+                    Mode::RoomList
+                }
+                _ => Mode::Compose,
+            },
+            (false, false) => match self.mode {
+                Mode::Compose | Mode::Popup(_) => Mode::MessageList,
+                _ => Mode::Compose,
+            },
+        };
+        match prev {
+            Mode::RoomList => self.rooms.scroll = 0,
+            Mode::AccountList => self.accounts.scroll = 0,
+            _ => {}
+        }
+        self.mode = prev;
     }
 }

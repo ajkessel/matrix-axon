@@ -11,6 +11,7 @@ use crate::config::SenderNameStyle;
 use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
 #[cfg(test)]
 use ratatui::style::Modifier;
+use std::path::PathBuf;
 mod completion;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleOutcome;
@@ -248,7 +249,17 @@ pub(crate) struct App {
     /// True while a login or logout request is awaiting its result, so the UI
     /// stays responsive but a second lifecycle verb can't race the first.
     pub(crate) lifecycle_busy: bool,
-    redraw_requested: bool,
+    pub(crate) redraw_requested: bool,
+    /// User-toggled hide for the accounts panel (independent of account count).
+    pub(crate) accounts_panel_hidden: bool,
+    /// User-toggled hide for the rooms panel.
+    pub(crate) rooms_panel_hidden: bool,
+    /// Path to the loaded config file, used by /saveconfig and /editconfig.
+    pub(crate) config_path: PathBuf,
+    /// Set by /editconfig; consumed by the main loop to suspend the TUI and open an editor.
+    pub(crate) edit_config_requested: bool,
+    /// When true, the room list shows only rooms with unread messages.
+    pub(crate) unread_filter: bool,
 }
 
 #[derive(Default)]
@@ -337,6 +348,7 @@ impl App {
         } else {
             "connecting to Axon".to_owned()
         };
+        let config_path = config.path.clone();
         Self {
             client,
             account_filter,
@@ -360,6 +372,11 @@ impl App {
             lifecycle_tx: None,
             lifecycle_busy: false,
             redraw_requested: false,
+            accounts_panel_hidden: false,
+            rooms_panel_hidden: false,
+            config_path,
+            edit_config_requested: false,
+            unread_filter: false,
         }
     }
 
@@ -370,6 +387,32 @@ impl App {
 
     pub(crate) fn take_redraw_request(&mut self) -> bool {
         std::mem::take(&mut self.redraw_requested)
+    }
+
+    pub(crate) fn take_edit_config_request(&mut self) -> bool {
+        std::mem::take(&mut self.edit_config_requested)
+    }
+
+    /// Called by the main loop after the editor process exits.
+    pub(crate) fn apply_editor_result(&mut self, result: std::io::Result<()>) {
+        match result {
+            Ok(()) => self.reload_config(),
+            Err(e) => self.status = Status::Info(format!("editor launch failed: {e}")),
+        }
+    }
+
+    fn reload_config(&mut self) {
+        let path = self.config_path.clone();
+        match TuiConfig::load_or_create_at(path) {
+            Ok(config) => {
+                self.shortcuts = config.shortcuts;
+                self.colors = config.colors;
+                self.display = config.display;
+                self.redraw_requested = true;
+                self.status = Status::Info("config reloaded".to_owned());
+            }
+            Err(e) => self.status = Status::Info(format!("config reload failed: {e}")),
+        }
     }
 
     /// Returns true when the user is mid-command in a transient input mode
@@ -388,6 +431,7 @@ impl App {
                     | Mode::Editing { .. }
                     | Mode::Reacting { .. }
                     | Mode::Unreacting { .. }
+                    | Mode::Search(..)
             )
     }
 
@@ -429,7 +473,54 @@ impl App {
     }
 
     pub(crate) fn accounts_panel_visible(&self) -> bool {
-        self.accounts.accounts.len() >= 2
+        !self.accounts_panel_hidden && self.accounts.accounts.len() >= 2
+    }
+
+    pub(crate) fn rooms_panel_visible(&self) -> bool {
+        !self.rooms_panel_hidden
+    }
+
+    pub(crate) fn toggle_accounts_panel(&mut self) {
+        self.accounts_panel_hidden = !self.accounts_panel_hidden;
+        if self.accounts_panel_hidden
+            && matches!(
+                self.mode,
+                Mode::AccountList | Mode::Search(SearchKind::Accounts, _)
+            )
+        {
+            self.mode = Mode::Compose;
+        }
+    }
+
+    pub(crate) fn toggle_rooms_panel(&mut self) {
+        self.rooms_panel_hidden = !self.rooms_panel_hidden;
+        if self.rooms_panel_hidden
+            && matches!(
+                self.mode,
+                Mode::RoomList | Mode::Search(SearchKind::Rooms, _)
+            )
+        {
+            self.mode = Mode::Compose;
+        }
+    }
+
+    pub(crate) fn adjust_accounts_width(&mut self, delta: i16) {
+        const MIN: u16 = 10;
+        const MAX: u16 = 60;
+        self.display.accounts_panel_width =
+            (self.display.accounts_panel_width as i16 + delta).clamp(MIN as i16, MAX as i16) as u16;
+    }
+
+    pub(crate) fn adjust_rooms_width(&mut self, delta: i16) {
+        self.display.rooms_panel_width_adj = self
+            .display
+            .rooms_panel_width_adj
+            .saturating_add(delta)
+            .clamp(-50, 50);
+    }
+
+    pub(crate) fn adjust_input_lines(&mut self, delta: i16) {
+        self.display.input_lines = (self.display.input_lines as i16 + delta).clamp(1, 10) as u16;
     }
 
     pub(crate) fn active_account_filter(&self) -> Option<Uuid> {
@@ -439,13 +530,30 @@ impl App {
         }
     }
 
+    pub(crate) fn toggle_unread_filter(&mut self) {
+        self.unread_filter = !self.unread_filter;
+        self.sync_room_selection_to_account_filter();
+    }
+
     pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
         let filter = self.active_account_filter();
+        let selected = self.rooms.selected;
         self.rooms
             .rooms
             .iter()
             .enumerate()
             .filter(|(_, r)| filter.is_none_or(|id| r.account_id == id))
+            .filter(|(i, r)| {
+                !self.unread_filter
+                    || selected == Some(*i)
+                    || self
+                        .rooms
+                        .unread
+                        .get(&RoomKey::from(*r))
+                        .copied()
+                        .unwrap_or(0)
+                        > 0
+            })
             .map(|(i, _)| i)
             .collect()
     }
@@ -531,6 +639,33 @@ impl App {
             .next()
             .map(char::len_utf8)
             .unwrap_or(0);
+    }
+
+    pub(crate) fn move_cursor_word_left(&mut self) {
+        let s = &self.input.buffer[..self.input.cursor];
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        let mut i = chars.len();
+        while i > 0 && chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        self.input.cursor = chars.get(i).map(|(idx, _)| *idx).unwrap_or(0);
+    }
+
+    pub(crate) fn move_cursor_word_right(&mut self) {
+        let s = &self.input.buffer[self.input.cursor..];
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        let mut i = 0;
+        while i < chars.len() && !chars[i].1.is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].1.is_whitespace() {
+            i += 1;
+        }
+        let advance = chars.get(i).map(|(idx, _)| *idx).unwrap_or(s.len());
+        self.input.cursor += advance;
     }
 
     pub(crate) fn edit_previous(&mut self) {
@@ -686,6 +821,23 @@ impl App {
             Command::Refresh => {
                 self.refresh_rooms().await;
                 self.redraw_requested = true;
+            }
+            Command::EditConfig => {
+                self.edit_config_requested = true;
+            }
+            Command::SaveConfig => {
+                match TuiConfig::save_display(
+                    &self.config_path,
+                    self.display.input_lines,
+                    self.display.accounts_panel_width,
+                    self.display.rooms_panel_width_adj,
+                ) {
+                    Ok(()) => {
+                        self.status =
+                            Status::Info(format!("config saved to {}", self.config_path.display()))
+                    }
+                    Err(e) => self.status = Status::Info(format!("save failed: {e}")),
+                }
             }
             Command::Quit => self.should_quit = true,
             Command::Send(body) => self.send_message_to_room(&body).await,
@@ -926,6 +1078,37 @@ pub(crate) fn selected_message_target_index(
             .saturating_add(offset as usize)
             .min(events.len().saturating_sub(1))
     }
+}
+
+/// Returns the next/previous value from `matches` (a sorted list of source-list indices)
+/// relative to `current`, with optional wrap-around.
+pub(crate) fn next_match_index(
+    matches: &[usize],
+    current: Option<usize>,
+    forward: bool,
+    wrap: bool,
+) -> Option<usize> {
+    if forward {
+        let after = current.map(|i| i + 1).unwrap_or(0);
+        let found = matches.iter().copied().find(|&i| i >= after);
+        if found.is_some() || !wrap {
+            found
+        } else {
+            matches.first().copied()
+        }
+    } else {
+        let before = current.unwrap_or(0);
+        let found = matches.iter().copied().rev().find(|&i| i < before);
+        if found.is_some() || !wrap {
+            found
+        } else {
+            matches.last().copied()
+        }
+    }
+}
+
+pub(crate) fn match_status(match_num: usize, total: usize) -> Status {
+    Status::from(format!("match {} of {}", match_num, total))
 }
 
 #[cfg(test)]
@@ -1348,6 +1531,9 @@ mod tests {
             sender_name: SenderNameStyle::DisplayName,
             input_lines: 1,
             confirm_logout: true,
+            search_wrap: true,
+            accounts_panel_width: 25,
+            rooms_panel_width_adj: 0,
         };
         let state = event_with_state_key(
             "$m.room.topic:example.com",
@@ -2105,7 +2291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arrow_up_navigates_timeline_messages_for_editing() {
+    async fn arrow_up_from_compose_enters_message_list_mode() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
         app.rooms.selected = Some(0);
@@ -2127,40 +2313,39 @@ mod tests {
             ],
         );
 
-        // Up from no selection: jump to the last message
+        // Up from no selection: jump to the last message and enter MessageList mode
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
-        assert_eq!(app.input.buffer, "second");
+        assert_eq!(app.input.buffer, "");
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));
-        assert!(matches!(app.mode, Mode::Editing { .. }));
+        assert!(matches!(app.mode, Mode::MessageList));
 
-        // Up again: move to the previous message
+        // Up again (now in MessageList): move to the previous message
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
-        assert_eq!(app.input.buffer, "first");
+        assert_eq!(app.input.buffer, "");
         assert_eq!(app.selected_message_id(), Some("$one:example.com"));
+        assert!(matches!(app.mode, Mode::MessageList));
 
         // Up at the first message: stay put
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
-        assert_eq!(app.input.buffer, "first");
+        assert_eq!(app.selected_message_id(), Some("$one:example.com"));
 
         // Down: move forward
         app.handle_key(KeyEvent::from(KeyCode::Down)).await;
-        assert_eq!(app.input.buffer, "second");
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));
+        assert!(matches!(app.mode, Mode::MessageList));
 
-        // Down past the last message: clear edit mode
+        // Down at the last message: stay put (Esc returns to Compose)
         app.handle_key(KeyEvent::from(KeyCode::Down)).await;
-        assert_eq!(app.input.buffer, "");
-        assert_eq!(app.input.cursor, 0);
-        assert!(matches!(app.mode, Mode::Compose));
-        assert!(app.selected_message_id().is_none());
+        assert_eq!(app.selected_message_id(), Some("$two:example.com"));
+        assert!(matches!(app.mode, Mode::MessageList));
     }
 
     #[tokio::test]
-    async fn arrow_up_does_nothing_with_no_room_selected() {
+    async fn arrow_up_with_no_messages_enters_message_list() {
         let mut app = app_with_rooms(Vec::new());
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
         assert_eq!(app.input.buffer, "");
-        assert!(matches!(app.mode, Mode::Compose));
+        assert!(matches!(app.mode, Mode::MessageList));
     }
 
     #[tokio::test]
@@ -2206,7 +2391,7 @@ mod tests {
         app.input.buffer = "old body".to_owned();
         app.input.cursor = app.input.buffer.len();
 
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL))
+        app.handle_key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE))
             .await;
 
         assert_eq!(app.mode, Mode::Compose);
@@ -3280,15 +3465,15 @@ mod tests {
         let lines = popup_shortcuts_lines(&config.shortcuts);
         let text = lines.join("\n");
 
-        assert!(text.contains("Ctrl-Space"));
+        assert!(text.contains("F6"));
         assert!(text.contains("Ctrl-N"));
         assert!(text.contains("Ctrl-P"));
         assert!(text.contains("Ctrl-J"));
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("PageUp"));
         assert!(text.contains("PageDown"));
-        assert!(text.contains("edit previous message"));
-        assert!(text.contains("edit next message"));
+        assert!(text.contains("select previous message"));
+        assert!(text.contains("select next message"));
     }
 
     #[test]

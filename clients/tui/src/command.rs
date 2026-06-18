@@ -23,6 +23,8 @@ pub enum Command {
     Help,
     Shortcuts,
     Refresh,
+    SaveConfig,
+    EditConfig,
     Quit,
     Send(String),
     Invalid(String),
@@ -83,6 +85,8 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/shortcuts", false),
     SlashCommand::supported("/refresh", false),
     SlashCommand::supported("/rooms", false),
+    SlashCommand::supported("/saveconfig", false),
+    SlashCommand::supported("/editconfig", false),
     SlashCommand::supported("/quit", false),
     SlashCommand::api_unsupported("/join", true),
     SlashCommand::api_unsupported("/leave", false),
@@ -187,6 +191,16 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "refresh rooms and redraw the display",
     },
     HelpCommand {
+        label: "/saveconfig",
+        insert_text: "/saveconfig",
+        description: "save current display settings (input lines, pane widths) to config file",
+    },
+    HelpCommand {
+        label: "/editconfig",
+        insert_text: "/editconfig",
+        description: "open the config file in $EDITOR (nano/notepad if unset)",
+    },
+    HelpCommand {
         label: "/quit, /q",
         insert_text: "/quit",
         description: "quit",
@@ -277,6 +291,8 @@ pub fn parse(input: &str) -> Command {
         "help" | "?" => Command::Help,
         "shortcuts" => Command::Shortcuts,
         "refresh" | "rooms" => Command::Refresh,
+        "saveconfig" => Command::SaveConfig,
+        "editconfig" => Command::EditConfig,
         "quit" | "q" => Command::Quit,
         other => {
             let command_name = format!("/{other}");

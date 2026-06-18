@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::api::RoomDto;
@@ -20,51 +20,75 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
         .split(frame.area());
-    const ACCOUNTS_WIDTH: u16 = 25;
     const ROOMS_NARROW_WIDTH: u16 = 32;
     const ROOMS_WIDE_MIN: u16 = 44;
     const ROOMS_WIDE_MAX: u16 = 70;
     const WIDE_THRESHOLD: u16 = 90;
     const ROOMS_WIDE_THRESHOLD: u16 = 110;
+    const MIN_ROOMS_WIDTH: u16 = 15;
 
     let show_accounts = app.accounts_panel_visible();
+    let show_rooms = app.rooms_panel_visible();
     let total_width = frame.area().width;
-    let wide_layout = show_accounts && total_width >= WIDE_THRESHOLD;
+    let wide_enough = total_width >= WIDE_THRESHOLD;
     let rooms_wide = total_width >= ROOMS_WIDE_THRESHOLD;
-    let rooms_width = if rooms_wide {
+    let accounts_width = app.display.accounts_panel_width;
+    let base_rooms_width = if rooms_wide {
         (total_width / 3).clamp(ROOMS_WIDE_MIN, ROOMS_WIDE_MAX)
     } else {
         ROOMS_NARROW_WIDTH
     };
+    let rooms_width = (base_rooms_width as i16 + app.display.rooms_panel_width_adj)
+        .max(MIN_ROOMS_WIDTH as i16) as u16;
 
-    let (accounts_area, rooms_area, messages_area) = if wide_layout {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(ACCOUNTS_WIDTH),
-                Constraint::Length(rooms_width),
-                Constraint::Min(20),
-            ])
-            .split(outer[0]);
-        (Some(body[0]), body[1], body[2])
-    } else if show_accounts {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(rooms_width), Constraint::Min(20)])
-            .split(outer[0]);
-        let total_acct_items = 1 + app.accounts.accounts.len();
-        let acct_height = ((total_acct_items as u16 + 2).min(body[0].height / 3)).max(3);
-        let left = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(acct_height), Constraint::Min(1)])
-            .split(body[0]);
-        (Some(left[0]), left[1], body[1])
-    } else {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(rooms_width), Constraint::Min(20)])
-            .split(outer[0]);
-        (None, body[0], body[1])
+    let (accounts_area, rooms_area, messages_area) = match (show_accounts, show_rooms, wide_enough)
+    {
+        (true, true, true) => {
+            // Three-column: [Accounts][Rooms][Messages]
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(accounts_width),
+                    Constraint::Length(rooms_width),
+                    Constraint::Min(20),
+                ])
+                .split(outer[0]);
+            (Some(body[0]), Some(body[1]), body[2])
+        }
+        (true, true, false) => {
+            // Narrow: [Accounts stacked on Rooms][Messages]
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(rooms_width), Constraint::Min(20)])
+                .split(outer[0]);
+            let total_acct_items = 1 + app.accounts.accounts.len();
+            let acct_height = ((total_acct_items as u16 + 2).min(body[0].height / 3)).max(3);
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(acct_height), Constraint::Min(1)])
+                .split(body[0]);
+            (Some(left[0]), Some(left[1]), body[1])
+        }
+        (true, false, _) => {
+            // Rooms hidden: [Accounts][Messages]
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(accounts_width), Constraint::Min(20)])
+                .split(outer[0]);
+            (Some(body[0]), None, body[1])
+        }
+        (false, true, _) => {
+            // No accounts panel: [Rooms][Messages]
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(rooms_width), Constraint::Min(20)])
+                .split(outer[0]);
+            (None, Some(body[0]), body[1])
+        }
+        (false, false, _) => {
+            // Messages only
+            (None, None, outer[0])
+        }
     };
 
     // Accounts panel
@@ -128,7 +152,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             })
             .collect();
 
-        let acct_border = if app.mode == Mode::AccountList {
+        let acct_active = app.mode == Mode::AccountList;
+        let acct_border = if acct_active {
             Style::default()
                 .fg(app.colors.selected_room)
                 .add_modifier(Modifier::BOLD)
@@ -142,8 +167,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(
             List::new(acct_items).block(
                 Block::default()
+                    .style(
+                        Style::default()
+                            .fg(app.colors.accounts_foreground)
+                            .bg(app.colors.accounts_background),
+                    )
                     .title(acct_title)
                     .borders(Borders::ALL)
+                    .border_type(if acct_active {
+                        BorderType::Double
+                    } else {
+                        BorderType::Plain
+                    })
                     .border_style(acct_border),
             ),
             accounts_area,
@@ -151,117 +186,133 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     // Room list with account filter
-    let visible_indices = app.visible_room_indices();
-    let show_account_label = app.active_account_filter().is_none() && app.accounts_panel_visible();
-    let rooms_selected_vis = app
-        .rooms
-        .selected
-        .and_then(|sel| visible_indices.iter().position(|&i| i == sel))
-        .unwrap_or(0);
-    let rows_available = rooms_area.height.saturating_sub(2) as usize;
-    let rooms_page_size = if rooms_wide {
-        rows_available.max(1)
-    } else {
-        (rows_available / 2).max(1)
-    };
-    app.rooms.page_size = rooms_page_size;
-    if rooms_selected_vis < app.rooms.scroll {
-        app.rooms.scroll = rooms_selected_vis;
-    } else if rooms_page_size > 0 && rooms_selected_vis >= app.rooms.scroll + rooms_page_size {
-        app.rooms.scroll = rooms_selected_vis + 1 - rooms_page_size;
-    }
-    let rooms_max_scroll = visible_indices.len().saturating_sub(rooms_page_size);
-    app.rooms.scroll = app.rooms.scroll.min(rooms_max_scroll);
-    let rooms_scroll = app.rooms.scroll;
+    if let Some(rooms_area) = rooms_area {
+        let visible_indices = app.visible_room_indices();
+        let show_account_label =
+            app.active_account_filter().is_none() && app.accounts_panel_visible();
+        let rooms_selected_vis = app
+            .rooms
+            .selected
+            .and_then(|sel| visible_indices.iter().position(|&i| i == sel))
+            .unwrap_or(0);
+        let rows_available = rooms_area.height.saturating_sub(2) as usize;
+        let rooms_page_size = if rooms_wide {
+            rows_available.max(1)
+        } else {
+            (rows_available / 2).max(1)
+        };
+        app.rooms.page_size = rooms_page_size;
+        if rooms_selected_vis < app.rooms.scroll {
+            app.rooms.scroll = rooms_selected_vis;
+        } else if rooms_page_size > 0 && rooms_selected_vis >= app.rooms.scroll + rooms_page_size {
+            app.rooms.scroll = rooms_selected_vis + 1 - rooms_page_size;
+        }
+        let rooms_max_scroll = visible_indices.len().saturating_sub(rooms_page_size);
+        app.rooms.scroll = app.rooms.scroll.min(rooms_max_scroll);
+        let rooms_scroll = app.rooms.scroll;
 
-    let room_items = visible_indices
-        .iter()
-        .enumerate()
-        .skip(rooms_scroll)
-        .take(rooms_page_size)
-        .map(|(vis_pos, &full_index)| {
-            let room = &app.rooms.rooms[full_index];
-            let key = RoomKey::from(room);
-            let unread_count = app.rooms.unread.get(&key).copied().unwrap_or_default();
-            let is_selected = Some(full_index) == app.rooms.selected;
-            let marker = if is_selected { ">" } else { " " };
-            let unread_str = if unread_count > 0 {
-                format!(" ({unread_count})")
-            } else {
-                String::new()
-            };
-            let latest = room
-                .last_event_id
-                .as_deref()
-                .map(|_| format!(" {}", format_time(room.last_activity_ts)))
-                .unwrap_or_default();
-            let alias = room
-                .canonical_alias
-                .as_deref()
-                .or(room.topic.as_deref())
-                .map(|value| format!(" {value}"))
-                .unwrap_or_default();
-            let account_tag = if show_account_label {
-                room.account_user_id
+        let room_items = visible_indices
+            .iter()
+            .enumerate()
+            .skip(rooms_scroll)
+            .take(rooms_page_size)
+            .map(|(vis_pos, &full_index)| {
+                let room = &app.rooms.rooms[full_index];
+                let key = RoomKey::from(room);
+                let unread_count = app.rooms.unread.get(&key).copied().unwrap_or_default();
+                let is_selected = Some(full_index) == app.rooms.selected;
+                let marker = if is_selected { ">" } else { " " };
+                let unread_str = if unread_count > 0 {
+                    format!(" ({unread_count})")
+                } else {
+                    String::new()
+                };
+                let latest = room
+                    .last_event_id
                     .as_deref()
-                    .map(|uid| {
-                        let localpart = account_localpart(uid).unwrap_or(uid);
-                        format!(" [{localpart}]")
-                    })
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let title_style = if is_selected {
-                Style::default()
-                    .fg(app.colors.selected_room)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().add_modifier(Modifier::BOLD)
-            };
-            if rooms_wide {
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
-                    Span::styled(room.title().to_owned(), title_style),
-                    Span::raw(account_tag),
-                    Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
-                    Span::raw(latest),
-                    Span::raw(alias),
-                ]))
-            } else {
-                ListItem::new(vec![
-                    Line::from(vec![
+                    .map(|_| format!(" {}", format_time(room.last_activity_ts)))
+                    .unwrap_or_default();
+                let alias = room
+                    .canonical_alias
+                    .as_deref()
+                    .or(room.topic.as_deref())
+                    .map(|value| format!(" {value}"))
+                    .unwrap_or_default();
+                let account_tag = if show_account_label {
+                    room.account_user_id
+                        .as_deref()
+                        .map(|uid| {
+                            let localpart = account_localpart(uid).unwrap_or(uid);
+                            format!(" [{localpart}]")
+                        })
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let title_style = if is_selected {
+                    Style::default()
+                        .fg(app.colors.selected_room)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                if rooms_wide {
+                    ListItem::new(Line::from(vec![
                         Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
                         Span::styled(room.title().to_owned(), title_style),
                         Span::raw(account_tag),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("    "),
                         Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
-                        Span::raw(format!("{latest}{alias}")),
-                    ]),
-                ])
-            }
-        });
-    let rooms_border = if app.mode == Mode::RoomList {
-        Style::default()
-            .fg(app.colors.selected_room)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.colors.border)
-    };
-    let rooms_title = if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
-        format!("Rooms  Search: {q}")
-    } else {
-        "Rooms".to_owned()
-    };
-    let rooms = List::new(room_items).block(
-        Block::default()
-            .title(rooms_title.as_str())
-            .borders(Borders::ALL)
-            .border_style(rooms_border),
-    );
-    frame.render_widget(rooms, rooms_area);
+                        Span::raw(latest),
+                        Span::raw(alias),
+                    ]))
+                } else {
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
+                            Span::styled(room.title().to_owned(), title_style),
+                            Span::raw(account_tag),
+                        ]),
+                        Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
+                            Span::raw(format!("{latest}{alias}")),
+                        ]),
+                    ])
+                }
+            });
+        let rooms_active = app.mode == Mode::RoomList;
+        let rooms_border = if rooms_active {
+            Style::default()
+                .fg(app.colors.selected_room)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.colors.border)
+        };
+        let rooms_title = if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
+            format!("Rooms  Search: {q}")
+        } else if app.unread_filter {
+            "Rooms (Unread)".to_owned()
+        } else {
+            "Rooms".to_owned()
+        };
+        let rooms = List::new(room_items).block(
+            Block::default()
+                .style(
+                    Style::default()
+                        .fg(app.colors.rooms_foreground)
+                        .bg(app.colors.rooms_background),
+                )
+                .title(rooms_title.as_str())
+                .borders(Borders::ALL)
+                .border_type(if rooms_active {
+                    BorderType::Double
+                } else {
+                    BorderType::Plain
+                })
+                .border_style(rooms_border),
+        );
+        frame.render_widget(rooms, rooms_area);
+    }
 
     let message_page_size = usize::from(messages_area.height.saturating_sub(2)).max(1);
     let message_width = usize::from(messages_area.width.saturating_sub(2)).max(1);
@@ -291,7 +342,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .selected_room()
         .map(RoomDto::title)
         .unwrap_or("No room selected");
-    let messages_border = if app.mode == Mode::MessageList {
+    let messages_active = app.mode == Mode::MessageList;
+    let messages_border = if messages_active {
         Style::default()
             .fg(app.colors.selected_room)
             .add_modifier(Modifier::BOLD)
@@ -305,19 +357,34 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     };
     let messages = Paragraph::new(message_lines).block(
         Block::default()
+            .style(
+                Style::default()
+                    .fg(app.colors.messages_foreground)
+                    .bg(app.colors.messages_background),
+            )
             .title(messages_title.as_str())
             .borders(Borders::ALL)
+            .border_type(if messages_active {
+                BorderType::Double
+            } else {
+                BorderType::Plain
+            })
             .border_style(messages_border),
     );
     frame.render_widget(messages, messages_area);
 
     let (command_line, command_title, mut cursor_col) = match &app.mode {
-        Mode::Search(_, q) => {
-            let hint = "  n: next match  N: prev match".to_owned();
+        Mode::Search(kind, q) => {
+            let kind_label = match kind {
+                SearchKind::Rooms => "Rooms",
+                SearchKind::Messages => "Messages",
+                SearchKind::Accounts => "Accounts",
+            };
+            let hint = "  n: next match  N: prev match";
             let q = q.clone();
-            let col = 2u16 + q.chars().count() as u16;
+            let col = 3u16 + q.chars().count() as u16;
             let line = Line::from(vec![
-                Span::styled("/ ", Style::default().fg(app.colors.input_hint)),
+                Span::styled("-> ", Style::default().fg(app.colors.input_hint)),
                 Span::raw(q),
                 Span::raw("  "),
                 Span::styled(
@@ -328,7 +395,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 Span::styled(hint, Style::default().fg(app.colors.input_hint)),
             ]);
-            (line, "Search", Some(col))
+            (line, format!("Search: {kind_label}"), Some(col))
         }
         Mode::LoginPassword { .. } | Mode::RecoveryKey { .. } => {
             let masked = mask_secret_input(&app.input.buffer);
@@ -345,9 +412,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 ),
             ]);
             let title = if matches!(app.mode, Mode::LoginPassword { .. }) {
-                "Password"
+                "Password".to_owned()
             } else {
-                "Recovery key"
+                "Recovery key".to_owned()
             };
             (line, title, Some(col))
         }
@@ -361,9 +428,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         .add_modifier(Modifier::ITALIC),
                 ),
             ]);
-            (line, "Confirm logout", None)
+            (line, "Confirm logout".to_owned(), None)
         }
         _ => {
+            let in_search_list = matches!(
+                app.mode,
+                Mode::RoomList | Mode::MessageList | Mode::AccountList
+            ) && app.last_search.is_some();
             let input_text = if app.show_input_help && app.input.buffer.is_empty() {
                 Span::styled(
                     "Type /help or /? for help",
@@ -374,7 +445,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 Span::raw(mask_login_command(&app.input.buffer))
             };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw("> "),
                 input_text,
                 Span::raw("  "),
@@ -384,7 +455,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         .fg(app.colors.status)
                         .add_modifier(Modifier::ITALIC),
                 ),
-            ]);
+            ];
+            if in_search_list {
+                spans.push(Span::styled(
+                    "  n: next match  N: prev match",
+                    Style::default().fg(app.colors.input_hint),
+                ));
+            }
+            let line = Line::from(spans);
             let col = if matches!(
                 app.mode,
                 Mode::Compose | Mode::LoginUsername | Mode::Editing { .. } | Mode::Reacting { .. }
@@ -394,10 +472,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 None
             };
-            (line, "", col)
+            let title = match &app.mode {
+                Mode::RoomList if app.last_search.is_some() => "Search: Rooms".to_owned(),
+                Mode::MessageList if app.last_search.is_some() => "Search: Messages".to_owned(),
+                Mode::AccountList if app.last_search.is_some() => "Search: Accounts".to_owned(),
+                _ => String::new(),
+            };
+            (line, title, col)
         }
     };
-    let input_border = if matches!(
+    let input_active = matches!(
         app.mode,
         Mode::Compose
             | Mode::LoginUsername
@@ -408,7 +492,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::Reacting { .. }
             | Mode::Unreacting { .. }
             | Mode::Search(_, _)
-    ) {
+    );
+    let input_border = if input_active {
         Style::default()
             .fg(app.colors.selected_room)
             .add_modifier(Modifier::BOLD)
@@ -418,8 +503,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let input = Paragraph::new(command_line)
         .block(
             Block::default()
+                .style(
+                    Style::default()
+                        .fg(app.colors.input_foreground)
+                        .bg(app.colors.input_background),
+                )
                 .title(command_title)
                 .borders(Borders::ALL)
+                .border_type(if input_active {
+                    BorderType::Double
+                } else {
+                    BorderType::Plain
+                })
                 .border_style(input_border),
         )
         .wrap(Wrap { trim: false });
@@ -516,6 +611,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         let popup = Paragraph::new(visible_lines)
             .block(
                 Block::default()
+                    .style(Style::default().bg(app.colors.popup_background))
                     .title(popup_title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(app.colors.selected_room)),
@@ -616,8 +712,8 @@ fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
                 Style::default()
             };
             Line::from(vec![
-                Span::styled(format!("{marker} {:<16}", command.label), style),
-                Span::raw(command.description),
+                Span::styled(format!("{marker} {:<40}", command.label), style),
+                Span::raw(format!("  {}", command.description)),
             ])
         })
         .collect()
@@ -807,81 +903,113 @@ fn room_display_number(visible_position: usize) -> usize {
 }
 
 // IMPORTANT: update this function whenever a keyboard shortcut is added or removed.
+// The shortcuts listed here should be the ones that are discoverable by users through the UI (e.g. not necessarily every single keybinding, but at least all the ones mentioned in the help text or error messages).
 pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
+    fn kv(key: impl std::fmt::Display, desc: &str) -> String {
+        format!("  {:<22}  {}", key, desc)
+    }
     vec![
         "Focus:".to_owned(),
-        format!(
-            "  {}   cycle focus: Input → Accounts → Rooms → Messages (Accounts panel when 2+ accounts)",
-            shortcuts.focus_next.label()
+        kv(
+            shortcuts.focus_next.label(),
+            "cycle focus: Input → Accounts → Rooms → Messages",
         ),
+        // kv(
+        //     shortcuts.focus_prev.label(),
+        //     "cycle focus backward: Input → Messages → Rooms → Accounts",
+        // ),
         "".to_owned(),
         "Always active:".to_owned(),
-        format!("  {}   next room", shortcuts.next_room.label()),
-        format!("  {}   previous room", shortcuts.previous_room.label()),
-        format!("  {}   next account (when 2+ accounts logged in)", shortcuts.next_account.label()),
-        format!("  {}   previous account (when 2+ accounts logged in)", shortcuts.previous_account.label()),
-        format!("  {}   next message", shortcuts.message_down.label()),
-        format!("  {}   previous message", shortcuts.message_up.label()),
-        format!("  {}   quit", shortcuts.quit.label()),
+        kv(shortcuts.next_room.label(), "next room"),
+        kv(shortcuts.previous_room.label(), "previous room"),
+        kv(
+            shortcuts.next_account.label(),
+            "next account (when 2+ accounts logged in)",
+        ),
+        kv(
+            shortcuts.previous_account.label(),
+            "previous account (when 2+ accounts logged in)",
+        ),
+        kv(shortcuts.message_down.label(), "next message"),
+        kv(shortcuts.message_up.label(), "previous message"),
+        kv(shortcuts.quit.label(), "quit"),
+        kv(
+            shortcuts.toggle_accounts_panel.label(),
+            "show/hide Accounts panel",
+        ),
+        kv(
+            shortcuts.toggle_rooms_panel.label(),
+            "show/hide Rooms panel",
+        ),
+        kv(
+            shortcuts.toggle_unread_filter.label(),
+            "toggle Rooms filter: show only rooms with unread messages",
+        ),
+        kv(
+            shortcuts.refresh.label(),
+            "refresh rooms and redraw (/refresh)",
+        ),
+        "".to_owned(),
+        "Panel resizing:".to_owned(),
+        kv(
+            "Alt-Left / Alt-Right",
+            "narrow / widen focused Accounts or Rooms panel",
+        ),
+        kv(
+            "Alt-Up / Alt-Down",
+            "add / remove a line from the message entry pane (Input focus)",
+        ),
         "".to_owned(),
         "Room list / Message list focus (Up/Down/PageUp/PageDown navigate):".to_owned(),
-        "  /            start search".to_owned(),
-        "  n            next search match (no wrap)".to_owned(),
-        "  N            previous search match (no wrap)".to_owned(),
-        format!("  {}   page up", shortcuts.message_page_up.label()),
-        format!("  {}   page down", shortcuts.message_page_down.label()),
-        format!(
-            "  Enter or {}   return to Input",
-            shortcuts.clear_input.label()
-        ),
+        kv(shortcuts.find.label(), "find (search) in focused list"),
+        kv("n", "next search match (no wrap)"),
+        kv("N", "previous search match (no wrap)"),
+        kv("/", "start /command (returns to Input)"),
+        // kv(shortcuts.message_page_up.label(), "page up"),
+        // kv(shortcuts.message_page_down.label(), "page down"),
+        //kv(
+        //    format!("Enter or {}", shortcuts.clear_input.label()),
+        //    "return to Input",
+        //),
         "".to_owned(),
         "Message actions (select a message first with Ctrl-J/K or arrow keys):".to_owned(),
-        format!("  {}   edit message", shortcuts.edit_message.label()),
-        format!("  {}   redact message", shortcuts.redact_message.label()),
-        format!(
-            "  {}   react to message (type emoji name, Tab to cycle, Enter to send)",
-            shortcuts.react_message.label()
+        kv(shortcuts.edit_message.label(), "edit message"),
+        kv(shortcuts.redact_message.label(), "redact message"),
+        kv(
+            shortcuts.react_message.label(),
+            "react to message (type emoji name, Tab to cycle, Enter to send)",
         ),
-        format!(
-            "  {}   withdraw one of your reactions",
-            shortcuts.unreact_message.label()
+        kv(
+            shortcuts.unreact_message.label(),
+            "withdraw one of your reactions",
         ),
-        format!(
-            "  {}   reply (pending API support)",
-            shortcuts.reply.label()
-        ),
-        format!(
-            "  {}   thread (pending API support)",
-            shortcuts.thread.label()
-        ),
+        kv(shortcuts.reply.label(), "reply (pending API support)"),
+        kv(shortcuts.thread.label(), "thread (pending API support)"),
         "".to_owned(),
         "Input:".to_owned(),
-        format!("  {}   submit / send", shortcuts.submit.label()),
-        format!(
-            "  {}   clear input / cancel / deselect",
-            shortcuts.clear_input.label()
+        kv(shortcuts.submit.label(), "submit / send"),
+        kv(
+            shortcuts.clear_input.label(),
+            "clear input / cancel / deselect",
         ),
-        format!(
-            "  {} / Shift-Tab   complete forward / backward",
-            shortcuts.complete.label()
+        kv(
+            format!("{} / Shift-Tab", shortcuts.complete.label()),
+            "complete forward / backward",
         ),
-        format!("  {}   backspace", shortcuts.backspace.label()),
-        "  Delete       delete forward".to_owned(),
-        "  Ctrl-U       kill line (erase typed text)".to_owned(),
-        format!(
-            "  {}   cursor to start of line",
-            shortcuts.cursor_start.label()
+        //kv(shortcuts.backspace.label(), "backspace"),
+        //kv("Delete", "delete forward"),
+        kv("Ctrl-U", "kill line (erase typed text)"),
+        //kv(shortcuts.cursor_start.label(), "cursor to start of line"),
+        //kv(shortcuts.cursor_end.label(), "cursor to end of line"),
+        //kv(shortcuts.cursor_left.label(), "cursor left"),
+        //kv(shortcuts.cursor_right.label(), "cursor right"),
+        kv(
+            shortcuts.edit_previous.label(),
+            "select previous message in timeline",
         ),
-        format!("  {}   cursor to end of line", shortcuts.cursor_end.label()),
-        format!("  {}   cursor left", shortcuts.cursor_left.label()),
-        format!("  {}   cursor right", shortcuts.cursor_right.label()),
-        format!(
-            "  {}   edit previous message in timeline",
-            shortcuts.edit_previous.label()
-        ),
-        format!(
-            "  {}   edit next message in timeline",
-            shortcuts.edit_next.label()
+        kv(
+            shortcuts.edit_next.label(),
+            "select next message in timeline",
         ),
     ]
 }
@@ -998,7 +1126,7 @@ mod tests {
         let config = TuiConfig::test_default();
         let text = popup_shortcuts_lines(&config.shortcuts).join("\n");
 
-        assert!(text.contains("Ctrl-Space"));
+        assert!(text.contains("F6"));
         assert!(text.contains("Ctrl-J"));
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("edit message"));
