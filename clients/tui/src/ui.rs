@@ -1319,13 +1319,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         //kv(shortcuts.cursor_end.label(), "cursor to end of line"),
         //kv(shortcuts.cursor_left.label(), "cursor left"),
         //kv(shortcuts.cursor_right.label(), "cursor right"),
-        kv(
+        format!(
+            "  {} / {}   select previous / next message",
             shortcuts.edit_previous.label(),
-            "select previous message in timeline",
-        ),
-        kv(
-            shortcuts.edit_next.label(),
-            "select next message in timeline",
+            shortcuts.edit_next.label()
         ),
     ]
 }

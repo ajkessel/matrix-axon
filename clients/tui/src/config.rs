@@ -858,6 +858,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "cursor_right"
                 | "edit_previous"
                 | "edit_next"
+                | "media_preview"
                 | "message_down"
                 | "message_up"
                 | "message_page_up"
@@ -1110,7 +1111,9 @@ struct PartialRawShortcuts {
     message_up: Option<String>,
     message_page_up: Option<String>,
     message_page_down: Option<String>,
+    #[serde(alias = "history_previous")]
     edit_previous: Option<String>,
+    #[serde(alias = "history_next")]
     edit_next: Option<String>,
     media_preview: Option<String>,
     reply: Option<String>,

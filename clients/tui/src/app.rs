@@ -3882,8 +3882,7 @@ mod tests {
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("PageUp"));
         assert!(text.contains("PageDown"));
-        assert!(text.contains("select previous message"));
-        assert!(text.contains("select next message"));
+        assert!(text.contains("select previous / next message"));
     }
 
     #[test]
