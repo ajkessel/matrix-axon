@@ -45,6 +45,7 @@ impl AxonClient {
         }
         let http = reqwest::ClientBuilder::new()
             .default_headers(default_headers)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .build()
             .expect("failed to build HTTP client");
         Self {
