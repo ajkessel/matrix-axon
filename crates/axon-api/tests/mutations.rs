@@ -20,7 +20,9 @@ use axon_api::{AppState, MessageSender};
 use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{Call, Outcome, StubLifecycle, StubSender, StubVerification};
+use common::{
+    Call, Outcome, StubLifecycle, StubSender, StubTokenVerifier, StubVerification, TEST_TOKEN,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
@@ -37,17 +39,24 @@ fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
     let lifecycle = Arc::new(StubLifecycle::ok(Uuid::nil()));
     let verify = Arc::new(StubVerification::ok("$unused-flow"));
-    axon_api::router(AppState::new(store, live, sender, lifecycle, verify))
+    let verifier = Arc::new(StubTokenVerifier::ok());
+    axon_api::router(AppState::new(
+        store, live, sender, lifecycle, verify, verifier,
+    ))
 }
 
-/// Issue a request (optional JSON body) and return `(status, parsed body)`.
+/// Issue a request (optional JSON body) and return `(status, parsed body)`. Every
+/// request carries the bearer token the auth gate (M7b) requires.
 async fn send(
     app: &axum::Router,
     method: &str,
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {TEST_TOKEN}"));
     let req = match body {
         Some(v) => builder
             .header("content-type", "application/json")

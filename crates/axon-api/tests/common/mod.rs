@@ -7,14 +7,56 @@
 
 #![allow(dead_code)] // each tests/*.rs is its own crate; not all use every helper.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, DeleteError, FlowStage, FlowSummary, LoginError, LogoutError, MessageSender,
-    RecoverError, SendError, VerificationService, VerifyError,
+    AccountLifecycle, ApiError, DeleteError, FlowStage, FlowSummary, LoginError, LogoutError,
+    MessageSender, RecoverError, SendError, TokenVerifier, VerificationService, VerifyError,
 };
 use uuid::Uuid;
+
+/// The bearer token the test router's [`StubTokenVerifier`] accepts. Helpers
+/// attach it as `Authorization: Bearer {TEST_TOKEN}` so the auth gate (M7b) lets
+/// functional requests through; auth-specific tests send a wrong token or none.
+pub const TEST_TOKEN: &str = "axon_test-token";
+
+/// An in-memory [`TokenVerifier`] for tests: accepts exactly one token string
+/// (while "active") and rejects everything else, so the `/v1/` auth gate can be
+/// exercised without a `tokens` row. The real DB-backed `StoreTokenVerifier` is
+/// covered by the axon-store token tests.
+///
+/// The shared `active` flag lets a test simulate out-of-process revocation of a
+/// live token: grab [`revocation_handle`](Self::revocation_handle) before wrapping
+/// the stub in an `Arc`, then flip it to `false` to make `verify` start rejecting.
+pub struct StubTokenVerifier {
+    accepted: String,
+    active: Arc<AtomicBool>,
+}
+
+impl StubTokenVerifier {
+    /// A verifier accepting [`TEST_TOKEN`] — the default for functional tests.
+    pub fn ok() -> Self {
+        Self {
+            accepted: TEST_TOKEN.to_owned(),
+            active: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// A handle to this stub's active flag. Store `false` into it to revoke the
+    /// token (subsequent `verify` calls return `Ok(false)`).
+    pub fn revocation_handle(&self) -> Arc<AtomicBool> {
+        self.active.clone()
+    }
+}
+
+#[async_trait]
+impl TokenVerifier for StubTokenVerifier {
+    async fn verify(&self, token: &str) -> Result<bool, ApiError> {
+        Ok(token == self.accepted && self.active.load(Ordering::SeqCst))
+    }
+}
 
 /// One recorded call to the stub, with the arguments the handler passed through.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,7 +242,7 @@ impl RecoverOutcome {
 
 /// An in-memory [`AccountLifecycle`] for tests: records each
 /// `login`/`logout`/`delete`/`recover` call and returns a preset outcome, so the
-/// lifecycle routes can be exercised (loopback guard, request decoding, error →
+/// lifecycle routes can be exercised (auth gate, request decoding, error →
 /// status mapping) without a real homeserver.
 pub struct StubLifecycle {
     login_outcome: LoginOutcome,
@@ -345,7 +387,7 @@ impl VerifyOutcome {
 }
 
 /// An in-memory [`VerificationService`] for tests: records each call and returns
-/// a preset outcome, so the verify routes can be exercised (loopback guard, path
+/// a preset outcome, so the verify routes can be exercised (auth gate, path
 /// /body decoding, error → status mapping, DTO shape) without a real client.
 pub struct StubVerification {
     outcome: VerifyOutcome,

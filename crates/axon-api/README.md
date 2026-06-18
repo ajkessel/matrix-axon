@@ -8,8 +8,9 @@ Implements all `/v1/` HTTP routes and the `/v1/ws` WebSocket endpoint. The OpenA
 
 ## Owns vs. consumes
 
-- **Owns:** route definitions and the axum `Router`.
-- **Consumes:** `axon-store` (reads/writes), `axon-core` types and auth middleware.
+- **Owns:** route definitions, the axum `Router`, and the bearer-token auth gate
+  (the `TokenVerifier` port + `require_bearer` middleware, M7b).
+- **Consumes:** `axon-store` (reads/writes) and `axon-core` types.
 
 ## Public API surface
 
@@ -21,7 +22,10 @@ Implements all `/v1/` HTTP routes and the `/v1/ws` WebSocket endpoint. The OpenA
 
 - `/healthz` is an unversioned operational liveness probe: it always returns
   `200 {"status":"ok"}` and does **not** touch the database, so a transient DB
-  outage does not trigger restarts.
+  outage does not trigger restarts. It is the one route outside the auth gate.
+- Every `/v1/` route — HTTP and the `/v1/ws` WebSocket — requires a bearer token
+  (M7b, ADR 0029). The HTTP gate is a single `require_bearer` layer; the socket
+  authenticates at upgrade time (a browser can't set the header on a socket).
 
 ## Status
 

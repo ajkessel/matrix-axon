@@ -49,6 +49,17 @@ pub struct ServerConfig {
     /// Port to bind. Defaults to `8080`.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Permit binding a non-loopback address while Axon serves plain HTTP.
+    ///
+    /// Axon terminates no TLS itself, and the `/v1/` API carries credentials
+    /// (login passwords, recovery keys, bearer tokens). The tech spec requires
+    /// client↔Axon TLS, so the safe deployment is to bind loopback and front
+    /// Axon with a TLS-terminating reverse proxy (or a private mesh VPN). The
+    /// server therefore **refuses** a non-loopback bind unless this is set —
+    /// an explicit, auditable "I accept cleartext on the wire" override for
+    /// trusted-network or testing scenarios. Defaults to `false`.
+    #[serde(default)]
+    pub allow_insecure_bind: bool,
 }
 
 /// Postgres connection settings.
@@ -209,6 +220,7 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            allow_insecure_bind: false,
         }
     }
 }
@@ -310,6 +322,19 @@ mod tests {
     }
 
     #[test]
+    fn allow_insecure_bind_defaults_false_and_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(!Config::load(None).expect("load").server.allow_insecure_bind);
+
+            jail.set_env("AXON_SERVER__ALLOW_INSECURE_BIND", "true");
+            assert!(Config::load(None).expect("load").server.allow_insecure_bind);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn missing_database_url_is_an_error() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
@@ -347,6 +372,7 @@ mod tests {
             server: ServerConfig {
                 host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
                 port: 1234,
+                allow_insecure_bind: false,
             },
             database: DatabaseConfig {
                 url: "x".into(),

@@ -1,12 +1,11 @@
 //! Interactive SAS device-verification endpoints.
 //!
 //! These drive the asynchronous SAS state machine over HTTP, with live progress
-//! pushed as `verification.*` frames on `/v1/ws`. The mutating verbs (start /
-//! confirm / cancel) are secret-/trust-bearing, so — like the other lifecycle
-//! verbs — they are loopback-restricted until the bearer-token auth layer lands;
-//! the two GET reads stay open (they expose no secrets, and a reconnecting client
-//! polls them to resume a flow). See [`crate::verification`] for the port these
-//! delegate to and the error → status mapping.
+//! pushed as `verification.*` frames on `/v1/ws`. Like every `/v1/` route they
+//! sit behind the bearer-token gate (M7b, ADR 0029); the two GET reads expose no
+//! secrets and a reconnecting client polls them to resume a flow. See
+//! [`crate::verification`] for the port these delegate to and the error → status
+//! mapping.
 
 use std::sync::Arc;
 
@@ -24,8 +23,8 @@ use crate::verification::VerificationService;
 /// asynchronously: watch `verification.*` frames over `/v1/ws`, or poll
 /// `GET …/verify/{flow_id}`.
 ///
-/// Trust-bearing, so loopback-only until the auth layer lands (see the
-/// `route_layer` in [`router`](crate::router)).
+/// Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route
+/// (M7b, ADR 0029).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/verify",
@@ -96,7 +95,7 @@ pub async fn get_flow(
 
 /// Confirm that the SAS matches, sending this side's MAC. Returns `204` once the
 /// confirm is sent; completion (`verification.done`) arrives asynchronously.
-/// Idempotent. Trust-bearing, so loopback-only until the auth layer lands.
+/// Idempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/verify/{flow_id}/confirm",
@@ -121,7 +120,7 @@ pub async fn confirm(
 }
 
 /// Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal
-/// flow succeeds. Trust-bearing, so loopback-only until the auth layer lands.
+/// flow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/verify/{flow_id}/cancel",

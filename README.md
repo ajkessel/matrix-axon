@@ -165,6 +165,24 @@ During very early development, there may be some breaking updates. If you get an
 | [AGENTS.md](AGENTS.md)                            | Orientation for contributors (human and agentic) |
 | [ADRs](docs/adr/)                                 | Decisions made during implementation             |
 
+## Deployment
+
+### Authentication
+
+All `/v1/` API endpoints require a bearer token. Mint one after startup:
+
+```bash
+axon token issue --label my-client   # prints the raw token once
+axon token list                       # list tokens (never shows secrets)
+axon token revoke <id>                # revoke a token
+```
+
+Tokens are instance-scoped — one token grants access to all accounts on that Axon instance. Supply the token to clients via their config file or environment; see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
+
+### TLS
+
+Axon serves plain HTTP. For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default). Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
+
 ## Status
 
 MVP in progress — **Milestone 2 of 12 complete** (config loader, Postgres pool + migrations, `/healthz`).

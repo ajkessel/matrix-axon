@@ -13,12 +13,16 @@ Entry point for the `axon` binary. Reads config, initializes all subsystems (`ax
 
 ## Notes
 
-- Boot sequence: load `Config` → init `tracing` (honors `RUST_LOG`, else
+- Subcommand dispatch (clap): no subcommand runs the server; `axon token …`
+  is a short-lived DB-only path (no sync engine, no HTTP listener).
+- Server boot sequence: load `Config` → init `tracing` (honors `RUST_LOG`, else
   the full `tracing_subscriber::EnvFilter` directive in `log.level`) →
-  `Store::connect` (runs migrations) → build `axon_api::router`
-  → bind + `axum::serve` with graceful shutdown on Ctrl-C / SIGTERM.
+  `Store::connect` (runs migrations) → build `axon_api::router` (with a
+  `StoreTokenVerifier` for the M7b auth gate) → bind + `axum::serve` with
+  graceful shutdown on Ctrl-C / SIGTERM.
 
 ## Status
 
 Boots the HTTP server with config + DB bootstrap and `/healthz` (Milestone 2).
-The `axon token` CLI subcommand arrives in Milestone 8.
+The `axon token` CLI subcommand (issue / list / revoke client bearer tokens)
+landed in M7b (ADR 0029).

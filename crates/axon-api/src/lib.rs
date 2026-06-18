@@ -10,11 +10,11 @@
 //! an unversioned operational liveness probe. The response envelope (`{data}` /
 //! `{error}`) lives in [`response`]; the OpenAPI document is [`ApiDoc`].
 
+mod auth;
 mod cursor;
 mod dto;
 mod extract;
 mod lifecycle;
-mod loopback;
 mod openapi;
 mod response;
 mod routes;
@@ -23,6 +23,7 @@ mod state;
 mod verification;
 mod ws;
 
+pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
@@ -31,8 +32,8 @@ pub use state::AppState;
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
 use axum::{
-    middleware::from_fn,
-    routing::{delete, get, post, put},
+    middleware::from_fn_with_state,
+    routing::{get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -43,50 +44,35 @@ use serde_json::{json, Value};
 /// so new shared dependencies can be added to `AppState` without touching
 /// existing routes.
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
+    // Every `/v1/…` HTTP route requires a valid bearer token (M7b). The guard is
+    // a single layer over this sub-router rather than a per-route attachment, so
+    // there is no route that can be added without it — including the lifecycle
+    // verbs that were loopback-restricted before auth existed. `/healthz` and the
+    // WebSocket are assembled outside it (below).
+    let verifier = state.verifier.clone();
+    let authed = Router::new()
         // Account read API: the cross-account list and a single account.
         .route("/v1/accounts", get(routes::accounts::list_accounts))
-        // Runtime login. Secret-bearing, so it is restricted to loopback clients
-        // until the bearer-token auth layer lands (a per-route guard, so the read
-        // routes above/below are unaffected).
-        .route(
-            "/v1/accounts/login",
-            post(routes::accounts::login).route_layer(from_fn(loopback::require_loopback)),
-        )
-        // Runtime logout. Like login it is a state-changing lifecycle verb, so it is
-        // loopback-restricted until the bearer-token auth layer lands.
+        // Runtime login / logout / recover — the secret-bearing lifecycle verbs.
+        .route("/v1/accounts/login", post(routes::accounts::login))
         .route(
             "/v1/accounts/{account_id}/logout",
-            post(routes::accounts::logout).route_layer(from_fn(loopback::require_loopback)),
+            post(routes::accounts::logout),
         )
-        // Recovery-key key acquisition. Secret-bearing (carries the 4S recovery
-        // key), so loopback-restricted until the bearer-token auth layer lands.
         .route(
             "/v1/accounts/{account_id}/recover",
-            post(routes::accounts::recover).route_layer(from_fn(loopback::require_loopback)),
+            post(routes::accounts::recover),
         )
-        // Read one account (open) and delete one account (loopback-restricted like
-        // the other lifecycle verbs, until bearer auth lands). The loopback guard is
-        // layered onto the DELETE method only so the sibling GET stays open.
+        // Read one account and delete one account (same path, two methods).
         .route(
             "/v1/accounts/{account_id}",
-            get(routes::accounts::get_account).merge(
-                delete(routes::accounts::delete_account)
-                    .route_layer(from_fn(loopback::require_loopback)),
-            ),
+            get(routes::accounts::get_account).delete(routes::accounts::delete_account),
         )
-        // Interactive SAS verification. The mutating verbs (start/confirm/cancel)
-        // are trust-bearing, so loopback-restricted until bearer auth lands; the
-        // GET reads stay open (a reconnecting client polls them to resume a flow).
-        // The loopback guard is layered onto the POST methods only so the sibling
-        // GETs stay open (same merge idiom as DELETE on /accounts/{account_id}).
+        // Interactive SAS verification: start/list on one path, per-flow read +
+        // confirm/cancel below.
         .route(
             "/v1/accounts/{account_id}/verify",
-            get(routes::verify::list_flows).merge(
-                post(routes::verify::start_verification)
-                    .route_layer(from_fn(loopback::require_loopback)),
-            ),
+            get(routes::verify::list_flows).post(routes::verify::start_verification),
         )
         .route(
             "/v1/accounts/{account_id}/verify/{flow_id}",
@@ -94,11 +80,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/accounts/{account_id}/verify/{flow_id}/confirm",
-            post(routes::verify::confirm).route_layer(from_fn(loopback::require_loopback)),
+            post(routes::verify::confirm),
         )
         .route(
             "/v1/accounts/{account_id}/verify/{flow_id}/cancel",
-            post(routes::verify::cancel).route_layer(from_fn(loopback::require_loopback)),
+            post(routes::verify::cancel),
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(
@@ -123,9 +109,18 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
             post(routes::messages::react),
         )
+        .route_layer(from_fn_with_state(verifier, auth::require_bearer));
+
+    Router::new()
+        // Unversioned operational liveness probe — no auth (a monitor must reach
+        // it without a token).
+        .route("/healthz", get(healthz))
+        .merge(authed)
         // Live event fan-out. Not in the OpenAPI document — a WebSocket upgrade
         // isn't expressible in OpenAPI 3.1; the frame protocol is documented in
-        // the `ws` module and ADR 0020.
+        // the `ws` module and ADR 0020. A browser can't set an `Authorization`
+        // header on a socket, so the handler authenticates the token itself at
+        // upgrade time rather than riding the `require_bearer` layer.
         .route("/v1/ws", get(ws::ws_handler))
         .with_state(state)
 }

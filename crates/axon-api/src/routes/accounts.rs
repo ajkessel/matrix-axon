@@ -1,9 +1,8 @@
 //! Account read endpoints: list the accounts this Axon manages, and read one.
 //!
-//! These are pure store reads (no secrets — the access token is never exposed)
-//! and, unlike the destructive/secret-bearing lifecycle verbs (login / recover /
-//! logout / delete, later subphases), are ordinary `/v1/` routes, not
-//! loopback-restricted.
+//! These are pure store reads (no secrets — the access token is never exposed).
+//! Like every `/v1/` route — the reads here and the destructive/secret-bearing
+//! lifecycle verbs alike — they sit behind the bearer-token gate (M7b, ADR 0029).
 
 use std::sync::Arc;
 
@@ -61,8 +60,8 @@ pub async fn list_accounts(
 /// rather than a misleading `401` — and never a silent login as a different
 /// identity.
 ///
-/// Secret-bearing, so this route is loopback-only until the auth layer lands (see
-/// the `route_layer` in [`router`](crate::router)).
+/// Secret-bearing; gated by the bearer-token auth layer like every `/v1/` route
+/// (M7b, ADR 0029).
 #[utoipa::path(
     post,
     path = "/v1/accounts/login",
@@ -70,7 +69,9 @@ pub async fn list_accounts(
     responses(
         (status = 200, description = "The active account (newly logged in, reactivated, or already active)", body = ApiResponse<AccountDto>),
         (status = 400, description = "Malformed request (e.g. invalid user ID, or a user ID written with the homeserver's hostname — the message suggests the canonical spelling)", body = crate::response::ErrorResponse),
-        (status = 401, description = "Credentials rejected by the homeserver", body = crate::response::ErrorResponse),
+        (status = 401, description = "Either the bearer gate rejected the request before the handler ran (missing, malformed, or revoked token — carries a WWW-Authenticate: Bearer challenge), or the request was authorized but the Matrix homeserver rejected the supplied credentials (post-auth — no challenge).", body = crate::response::ErrorResponse, headers(
+            ("WWW-Authenticate" = String, description = "RFC 6750 bearer challenge, present only on a gate rejection: `Bearer` for a missing/malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token. Absent when the 401 is the homeserver rejecting the supplied Matrix credentials."),
+        )),
         (status = 409, description = "The account is being deleted", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error (including failed homeserver discovery)", body = crate::response::ErrorResponse),
     ),
@@ -102,8 +103,8 @@ pub async fn login(
 /// already-logged-out account is a `200` no-op. An account mid-deletion
 /// (`deleting`) is a `409`; an unknown id is a `404`.
 ///
-/// Secret-bearing / destructive, so this route is loopback-only until the auth
-/// layer lands (see the `route_layer` in [`router`](crate::router)).
+/// Secret-bearing / destructive; gated by the bearer-token auth layer like every
+/// `/v1/` route (M7b, ADR 0029).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/logout",
@@ -150,8 +151,8 @@ pub async fn logout(
 /// account that never set up Secure Backup, is a `400` (a readable error, not a
 /// silent permanent UTD). An unknown id is a `404`.
 ///
-/// Secret-bearing, so this route is loopback-only until the auth layer lands (see
-/// the per-method `route_layer` in [`router`](crate::router)).
+/// Secret-bearing; gated by the bearer-token auth layer like every `/v1/` route
+/// (M7b, ADR 0029).
 #[utoipa::path(
     post,
     path = "/v1/accounts/{account_id}/recover",
@@ -197,9 +198,8 @@ pub async fn recover(
 /// or the account is still named by `sync.account` — boot provisioning would
 /// recreate it, so remove it from config before deleting.
 ///
-/// Destructive, so this route is loopback-only until the auth layer lands (see the
-/// per-method `route_layer` in [`router`](crate::router)) — the sibling `GET` on
-/// this path stays open.
+/// Destructive; gated by the bearer-token auth layer like every `/v1/` route
+/// (M7b, ADR 0029).
 #[utoipa::path(
     delete,
     path = "/v1/accounts/{account_id}",

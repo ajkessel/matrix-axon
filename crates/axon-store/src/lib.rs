@@ -12,12 +12,14 @@ mod events;
 mod migrations;
 mod rooms;
 mod state;
+mod tokens;
 
 pub use accounts::{Account, AccountState};
 pub use error::StoreError;
 pub use events::{EventCiphertext, EventCrypto, NewEvent, PendingUtd, TimelineCursor, TimelineRow};
 pub use rooms::RoomSummary;
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
+pub use tokens::{IssuedToken, Token};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 

@@ -28,6 +28,24 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -38,7 +56,7 @@
           "accounts"
         ],
         "summary": "Add or reactivate a Matrix account at runtime, then return the resulting\nactive account. Idempotent by Matrix `username`: a new identity is minted, a\nlogged-out (`deactivated`) account is reactivated using its stored endpoint,\nand an already-`active` account is returned **unchanged** (a no-op — the desired end\nstate already holds, so the password isn't consulted and nothing is touched).\nAn account mid-deletion (`deleting`) is a `409`. `username` must be a full\nMatrix user ID (a malformed one is a `400`); bad credentials are a `401`. The\npassword is used once and never stored.",
-        "description": "`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword. The URL is a connection endpoint; the Matrix ID keys identity.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing, so this route is loopback-only until the auth layer lands (see\nthe `route_layer` in [`router`](crate::router)).",
+        "description": "`homeserver_url` is optional: when omitted, the server discovers the\ncanonical homeserver from the user ID's server name (`.well-known/matrix/client`,\nfalling back to the server name itself) — so clients need only username +\npassword. The URL is a connection endpoint; the Matrix ID keys identity.\nA failed discovery is a `502`. The `username` domain is then checked against\nthe homeserver's own declared server name (best-effort): a user ID written\nwith the homeserver's hostname (`@adam:matrix.example.org`) is a `400` whose\nmessage suggests the ID they almost certainly meant (`@adam:example.org`),\nrather than a misleading `401` — and never a silent login as a different\nidentity.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -72,7 +90,15 @@
             }
           },
           "401": {
-            "description": "Credentials rejected by the homeserver",
+            "description": "Either the bearer gate rejected the request before the handler ran (missing, malformed, or revoked token — carries a WWW-Authenticate: Bearer challenge), or the request was authorized but the Matrix homeserver rejected the supplied credentials (post-auth — no challenge).",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge, present only on a gate rejection: `Bearer` for a missing/malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token. Absent when the 401 is the homeserver rejecting the supplied Matrix credentials."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -134,6 +160,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such account",
             "content": {
@@ -151,7 +195,7 @@
           "accounts"
         ],
         "summary": "Permanently delete an account and every trace of it: stops syncing it,\ninvalidates its device token upstream, removes its on-disk SDK store, and drops\nits row (cascading away its archived events, room state, and account data).\nReturns `204 No Content` — the resource is gone, so there is nothing to return.",
-        "description": "Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account\nlater is a fresh login with a new `account_id`. Idempotent and crash-safe — a\ndelete of an account already mid-teardown resumes it, and an interrupted delete\nis finished by the next boot's reconcile. An unknown id is a `404`. A `409` means\neither the account's sync task has not finished shutting down (transient, retry)\nor the account is still named by `sync.account` — boot provisioning would\nrecreate it, so remove it from config before deleting.\n\nDestructive, so this route is loopback-only until the auth layer lands (see the\nper-method `route_layer` in [`router`](crate::router)) — the sibling `GET` on\nthis path stays open.",
+        "description": "Unlike [`logout`] this is **not** reversible: re-adding the same Matrix account\nlater is a fresh login with a new `account_id`. Idempotent and crash-safe — a\ndelete of an account already mid-teardown resumes it, and an interrupted delete\nis finished by the next boot's reconcile. An unknown id is a `404`. A `409` means\neither the account's sync task has not finished shutting down (transient, retry)\nor the account is still named by `sync.account` — boot provisioning would\nrecreate it, so remove it from config before deleting.\n\nDestructive; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "delete_account",
         "parameters": [
           {
@@ -168,6 +212,24 @@
         "responses": {
           "204": {
             "description": "The account was deleted (or was already gone after a resumed teardown)"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such account",
@@ -231,6 +293,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such event",
             "content": {
@@ -250,7 +330,7 @@
           "accounts"
         ],
         "summary": "Log a Matrix account out, then return the resulting (now `deactivated`)\naccount. Stops syncing it, invalidates its device token upstream (best-effort\n— an unreachable homeserver never fails the logout), and moves it to a\nlogged-out state, **retaining all of its data** (archive, search, media) so a\nlater login reactivates the same `account_id`. Idempotent: logging out an\nalready-logged-out account is a `200` no-op. An account mid-deletion\n(`deleting`) is a `409`; an unknown id is a `404`.",
-        "description": "Secret-bearing / destructive, so this route is loopback-only until the auth\nlayer lands (see the `route_layer` in [`router`](crate::router)).",
+        "description": "Secret-bearing / destructive; gated by the bearer-token auth layer like every\n`/v1/` route (M7b, ADR 0029).",
         "operationId": "logout",
         "parameters": [
           {
@@ -271,6 +351,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse_AccountDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -304,7 +402,7 @@
           "accounts"
         ],
         "summary": "Acquire E2EE keys for an **active** account from its Secure-Storage (4S)\nrecovery key, then return the account with its `verified` flag re-derived. One\nSDK call imports the account's megolm key backup + cross-signing keys —\nself-verifying axon's device with no interactive partner — and any\nalready-stored UTDs the keys unlock are back-filled. The recovery key is used\nonce and never persisted.",
-        "description": "A `200` means the **keys were imported** (the recovery succeeded); the returned\n`verified` reflects the freshly-derived cross-signing state, which is `true` in\nthe normal case but is a *derived observation*, not a guaranteed postcondition\n(e.g. a partial Secure-Backup that imports the megolm key but not the\ncross-signing keys would import successfully yet stay unverified).\n\nThe account must be `active`: a logged-out (`deactivated`) account is a `409`\n(log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an\naccount that never set up Secure Backup, is a `400` (a readable error, not a\nsilent permanent UTD). An unknown id is a `404`.\n\nSecret-bearing, so this route is loopback-only until the auth layer lands (see\nthe per-method `route_layer` in [`router`](crate::router)).",
+        "description": "A `200` means the **keys were imported** (the recovery succeeded); the returned\n`verified` reflects the freshly-derived cross-signing state, which is `true` in\nthe normal case but is a *derived observation*, not a guaranteed postcondition\n(e.g. a partial Secure-Backup that imports the megolm key but not the\ncross-signing keys would import successfully yet stay unverified).\n\nThe account must be `active`: a logged-out (`deactivated`) account is a `409`\n(log in first), as is one mid-deletion (`deleting`). A wrong/rotated key, or an\naccount that never set up Secure Backup, is a `400` (a readable error, not a\nsilent permanent UTD). An unknown id is a `404`.\n\nSecret-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "recover",
         "parameters": [
           {
@@ -341,6 +439,24 @@
           },
           "400": {
             "description": "The recovery key was wrong/rotated, or the account has no Secure Backup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -440,6 +556,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Operation not permitted",
             "content": {
@@ -530,6 +664,24 @@
           },
           "400": {
             "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -639,6 +791,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "403": {
             "description": "Operation not permitted",
             "content": {
@@ -723,6 +893,24 @@
           },
           "400": {
             "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -832,6 +1020,24 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -866,6 +1072,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such account",
             "content": {
@@ -883,7 +1107,7 @@
           "verification"
         ],
         "summary": "Start a SAS verification against one of the account's trusted devices,\nreturning the new flow's `flow_id`. The exchange then proceeds\nasynchronously: watch `verification.*` frames over `/v1/ws`, or poll\n`GET …/verify/{flow_id}`.",
-        "description": "Trust-bearing, so loopback-only until the auth layer lands (see the\n`route_layer` in [`router`](crate::router)).",
+        "description": "Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "start_verification",
         "parameters": [
           {
@@ -920,6 +1144,24 @@
           },
           "400": {
             "description": "The named device is not a known device of this account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -990,6 +1232,24 @@
               }
             }
           },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such account, or no such (live or recently-terminal) flow",
             "content": {
@@ -1008,7 +1268,7 @@
         "tags": [
           "verification"
         ],
-        "summary": "Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal\nflow succeeds. Trust-bearing, so loopback-only until the auth layer lands.",
+        "summary": "Cancel the flow. Returns `204`. Idempotent — cancelling an already-terminal\nflow succeeds. Trust-bearing; gated by the bearer-token auth layer (M7b).",
         "operationId": "cancel",
         "parameters": [
           {
@@ -1034,6 +1294,24 @@
         "responses": {
           "204": {
             "description": "Cancelled (or already terminal)"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such account or flow",
@@ -1063,7 +1341,7 @@
         "tags": [
           "verification"
         ],
-        "summary": "Confirm that the SAS matches, sending this side's MAC. Returns `204` once the\nconfirm is sent; completion (`verification.done`) arrives asynchronously.\nIdempotent. Trust-bearing, so loopback-only until the auth layer lands.",
+        "summary": "Confirm that the SAS matches, sending this side's MAC. Returns `204` once the\nconfirm is sent; completion (`verification.done`) arrives asynchronously.\nIdempotent. Trust-bearing; gated by the bearer-token auth layer (M7b).",
         "operationId": "confirm",
         "parameters": [
           {
@@ -1089,6 +1367,24 @@
         "responses": {
           "204": {
             "description": "Confirm sent (or already confirmed)"
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such account or flow",
@@ -1149,6 +1445,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiResponse_Vec_RoomDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2112,8 +2426,19 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "bearer_token": {
+        "type": "http",
+        "scheme": "bearer"
+      }
     }
   },
+  "security": [
+    {
+      "bearer_token": []
+    }
+  ],
   "tags": [
     {
       "name": "accounts",

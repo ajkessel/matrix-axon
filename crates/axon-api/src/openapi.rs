@@ -5,7 +5,78 @@
 //! checked-in `openapi/openapi.json`, so drift between handlers and the spec is
 //! a failing test. The spec is the source of truth for generated clients.
 
-use utoipa::OpenApi;
+use utoipa::openapi::header::HeaderBuilder;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::{ContentBuilder, Object, Ref, RefOr, Response, ResponseBuilder, Type};
+use utoipa::{Modify, OpenApi};
+
+/// Injects the bearer-token security scheme (M7b) and documents the `401` every
+/// gated operation can now produce. The scheme is referenced by the global
+/// `security` requirement below; the `401` is added to each operation so the
+/// source-of-truth contract describes both the requirement and its failure shape.
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer_token",
+                SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()),
+            );
+        }
+
+        // Add a shared 401 (the enveloped ErrorResponse) to every operation that
+        // doesn't already declare one — every `/v1/` route is behind the gate.
+        for path_item in openapi.paths.paths.values_mut() {
+            let operations = [
+                path_item.get.as_mut(),
+                path_item.put.as_mut(),
+                path_item.post.as_mut(),
+                path_item.delete.as_mut(),
+                path_item.options.as_mut(),
+                path_item.head.as_mut(),
+                path_item.patch.as_mut(),
+                path_item.trace.as_mut(),
+            ];
+            for operation in operations.into_iter().flatten() {
+                operation
+                    .responses
+                    .responses
+                    .entry("401".to_owned())
+                    .or_insert_with(unauthorized_response);
+            }
+        }
+    }
+}
+
+/// The reusable `401 Unauthorized` response: the standard `{ error: { code,
+/// message } }` envelope, referencing the `ErrorResponse` component schema, plus
+/// the `WWW-Authenticate` challenge the bearer gate emits (RFC 6750 §3) — so the
+/// contract describes the failure's headers as well as its body.
+fn unauthorized_response() -> RefOr<Response> {
+    RefOr::T(
+        ResponseBuilder::new()
+            .description("Missing, malformed, or revoked bearer token")
+            .header(
+                "WWW-Authenticate",
+                HeaderBuilder::new()
+                    .description(Some(
+                        "RFC 6750 bearer challenge: `Bearer` for a missing or \
+                         malformed credential, `Bearer error=\"invalid_token\"` \
+                         for an unknown or revoked token.",
+                    ))
+                    .schema(Object::with_type(Type::String))
+                    .build(),
+            )
+            .content(
+                "application/json",
+                ContentBuilder::new()
+                    .schema(Some(Ref::from_schema_name("ErrorResponse")))
+                    .build(),
+            )
+            .build(),
+    )
+}
 
 #[derive(OpenApi)]
 #[openapi(
@@ -16,6 +87,10 @@ use utoipa::OpenApi;
                        resources nest under /v1/accounts/{account_id}; /v1/rooms is \
                        the cross-account aggregate.",
     ),
+    // Every documented route requires a bearer token (M7b); the scheme itself is
+    // registered by `SecurityAddon`.
+    modifiers(&SecurityAddon),
+    security(("bearer_token" = [])),
     paths(
         crate::routes::accounts::list_accounts,
         crate::routes::accounts::login,

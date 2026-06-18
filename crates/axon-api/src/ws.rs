@@ -13,18 +13,37 @@
 //! that arrive after it connects, and uses the HTTP read API for history. The
 //! fan-out rides a [`tokio::sync::broadcast`] channel, so a client too slow to
 //! keep up is told it lagged (and skips the backlog) rather than ever stalling
-//! the sync engine. There is no auth yet — bearer-token validation on the
-//! upgrade arrives with the rest of the API's auth (see ADR 0020).
+//! the sync engine.
+//!
+//! Like every `/v1/` route the socket requires a valid bearer token (M7b), but
+//! it can't ride the HTTP `require_bearer` layer: a browser can't set an
+//! `Authorization` header on a WebSocket. So the handler reads the token itself
+//! at upgrade time — from the `Authorization` header (non-browser clients like
+//! the TUI) or a `bearer.<token>` entry in `Sec-WebSocket-Protocol` (browsers) —
+//! and rejects with `401` before upgrading if it is missing or invalid. The
+//! token-bearing subprotocol is **never echoed** in the 101 response, so the
+//! secret doesn't land in response headers/logs.
+//!
+//! A long-lived socket also re-checks its token on an interval (revocation
+//! happens out-of-process, via the CLI, so there is no push signal) and closes
+//! when the token is revoked — otherwise a revoked client would keep receiving
+//! frames forever.
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use axon_core::{LiveFrame, VerificationFrame, VerificationFrameKind};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::auth::{self, TokenVerifier};
 use crate::dto::EventDto;
+use crate::state::WsRevalidationInterval;
 
 /// The `type` tag for a live timeline event frame. Namespaced so other frame
 /// kinds (e.g. the `verification.*` frames below) extend the protocol without
@@ -94,15 +113,50 @@ impl From<VerificationFrame> for VerificationFramePayload {
     }
 }
 
-/// `GET /v1/ws` — upgrade the connection and stream live frames to the client.
+/// `GET /v1/ws` — authenticate, then upgrade the connection and stream live
+/// frames to the client.
 pub async fn ws_handler(
     State(live): State<broadcast::Sender<LiveFrame>>,
+    State(verifier): State<Arc<dyn TokenVerifier>>,
+    State(WsRevalidationInterval(revalidation)): State<WsRevalidationInterval>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Token via the Authorization header, or a `bearer.<token>` subprotocol for
+    // browser clients that can't set headers on a socket.
+    let Some(token) = auth::bearer_from_headers(&headers)
+        .map(str::to_owned)
+        .or_else(|| bearer_subprotocol(&headers))
+    else {
+        // The upgrade is an ordinary HTTP request until the 101, so the same
+        // RFC 6750 `WWW-Authenticate` challenges as the HTTP gate apply here.
+        return auth::missing_token_response("missing bearer token");
+    };
+    match verifier.verify(&token).await {
+        Ok(true) => {}
+        Ok(false) => return auth::invalid_token_response("invalid or revoked token"),
+        Err(err) => return err.into_response(),
+    }
+
     // Subscribe before the upgrade completes so no event that arrives during the
-    // handshake is missed.
+    // handshake is missed. We deliberately do **not** echo the token-bearing
+    // subprotocol as the negotiated protocol — that would place the secret in the
+    // 101 response headers, where proxies and access logs may capture it. axum
+    // selects no subprotocol unless asked, and the handshake completes without one.
     let rx = live.subscribe();
-    ws.on_upgrade(move |socket| pump(socket, rx))
+    ws.on_upgrade(move |socket| pump(socket, rx, verifier, token, revalidation))
+}
+
+/// Find a `bearer.<token>` entry in the `Sec-WebSocket-Protocol` header and
+/// return the token. The credential is accepted here but never echoed back as
+/// the negotiated subprotocol (see [`ws_handler`]).
+fn bearer_subprotocol(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("sec-websocket-protocol")?.to_str().ok()?;
+    raw.split(',')
+        .map(str::trim)
+        .find_map(|proto| proto.strip_prefix("bearer."))
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
 }
 
 /// Serialize a [`LiveFrame`] to its `/v1/ws` envelope JSON. Each frame kind has
@@ -122,10 +176,42 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
     }
 }
 
-/// Forward live frames to one connected client until either side hangs up.
-async fn pump(mut socket: WebSocket, mut rx: broadcast::Receiver<LiveFrame>) {
+/// Forward live frames to one connected client until either side hangs up or the
+/// client's token is revoked.
+///
+/// `verifier` + `token` + `revalidation` drive a periodic token re-check:
+/// revocation happens out-of-process (the `axon token revoke` CLI writes the DB),
+/// so a live socket polls to notice it and closes when the token stops verifying.
+async fn pump(
+    mut socket: WebSocket,
+    mut rx: broadcast::Receiver<LiveFrame>,
+    verifier: Arc<dyn TokenVerifier>,
+    token: String,
+    revalidation: Duration,
+) {
+    let mut revalidate = tokio::time::interval(revalidation);
+    // The interval's first tick is immediate; consume it — we just verified the
+    // token at upgrade, so the first *re*-check should be one interval out.
+    revalidate.tick().await;
+
     loop {
         tokio::select! {
+            // Periodic token revalidation. A revoked token closes the socket; a
+            // transient verifier error is logged but does not drop a live client.
+            _ = revalidate.tick() => {
+                match verifier.verify(&token).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!("websocket token revoked; closing socket");
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "websocket token revalidation failed; keeping socket open");
+                    }
+                }
+            }
+
             // A live frame to push out.
             received = rx.recv() => match received {
                 Ok(frame) => {

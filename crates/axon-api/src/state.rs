@@ -7,15 +7,24 @@
 //! `State<broadcast::Sender<LiveFrame>>`, the read handlers are unchanged.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axon_core::LiveFrame;
 use axon_store::Store;
 use axum::extract::FromRef;
 use tokio::sync::broadcast;
 
+use crate::auth::TokenVerifier;
 use crate::lifecycle::AccountLifecycle;
 use crate::sender::MessageSender;
 use crate::verification::VerificationService;
+
+/// How often an established `/v1/ws` socket re-checks its bearer token. Token
+/// revocation happens out-of-process (the `axon token revoke` CLI writes the DB,
+/// the running server never gets an in-process signal), so a live socket has to
+/// poll to notice it; this bounds how long a revoked client keeps receiving
+/// frames. Tests shorten it via [`AppState::with_ws_revalidation_interval`].
+const DEFAULT_WS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Everything the HTTP/WebSocket handlers share. Cheap to [`Clone`] (its fields
 /// are all handles).
@@ -39,6 +48,15 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `lifecycle`.
     pub verify: Arc<dyn VerificationService>,
+    /// Bearer-token verifier (M7b): the seam the `/v1/` auth gate (the
+    /// `require_bearer` middleware and the WebSocket upgrade) checks every
+    /// request against. The shipped implementation is
+    /// [`StoreTokenVerifier`](crate::auth::StoreTokenVerifier); a future OAuth
+    /// issuer slots in here without touching any route.
+    pub verifier: Arc<dyn TokenVerifier>,
+    /// How often a live `/v1/ws` socket revalidates its token (see
+    /// [`DEFAULT_WS_REVALIDATION_INTERVAL`]).
+    ws_revalidation_interval: Duration,
 }
 
 impl AppState {
@@ -52,6 +70,7 @@ impl AppState {
         sender: Arc<dyn MessageSender>,
         lifecycle: Arc<dyn AccountLifecycle>,
         verify: Arc<dyn VerificationService>,
+        verifier: Arc<dyn TokenVerifier>,
     ) -> Self {
         Self {
             store,
@@ -59,7 +78,17 @@ impl AppState {
             sender,
             lifecycle,
             verify,
+            verifier,
+            ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
         }
+    }
+
+    /// Override the `/v1/ws` token-revalidation cadence. Production uses the
+    /// default; tests set a short interval to exercise revocation of a live
+    /// socket without waiting the full default.
+    pub fn with_ws_revalidation_interval(mut self, interval: Duration) -> Self {
+        self.ws_revalidation_interval = interval;
+        self
     }
 }
 
@@ -90,5 +119,22 @@ impl FromRef<AppState> for Arc<dyn AccountLifecycle> {
 impl FromRef<AppState> for Arc<dyn VerificationService> {
     fn from_ref(state: &AppState) -> Arc<dyn VerificationService> {
         state.verify.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn TokenVerifier> {
+    fn from_ref(state: &AppState) -> Arc<dyn TokenVerifier> {
+        state.verifier.clone()
+    }
+}
+
+/// The `/v1/ws` token-revalidation cadence, extracted as router state by the
+/// WebSocket handler.
+#[derive(Clone, Copy)]
+pub struct WsRevalidationInterval(pub Duration);
+
+impl FromRef<AppState> for WsRevalidationInterval {
+    fn from_ref(state: &AppState) -> WsRevalidationInterval {
+        WsRevalidationInterval(state.ws_revalidation_interval)
     }
 }

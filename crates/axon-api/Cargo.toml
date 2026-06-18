@@ -18,8 +18,8 @@ utoipa     = { workspace = true, features = ["axum_extras", "uuid"] }
 base64     = { workspace = true }
 # `MessageSender` is an async trait used behind `Arc<dyn …>` in AppState.
 async-trait = { workspace = true }
-# broadcast channel: the live-event bus the /v1/ws handler subscribes to.
-tokio      = { workspace = true, features = ["sync"] }
+# broadcast channel (live-event bus) + time (periodic WS token revalidation).
+tokio      = { workspace = true, features = ["sync", "time"] }
 tracing    = { workspace = true }
 
 [dev-dependencies]

@@ -10,20 +10,23 @@
 //! # 5432 is the default; use your compose host port (e.g. 5433 if 5432 is taken).
 //! DATABASE_URL=postgres://axon:axon@127.0.0.1:5432/axon cargo test -p axon-api -- --ignored
 //! ```
+//!
+//! Every `/v1/` route requires a bearer token (M7b); the router here is built
+//! with a [`StubTokenVerifier`] that accepts [`TEST_TOKEN`], and the request
+//! helpers attach it. The auth gate itself is exercised by the
+//! `auth_gate_*` tests below.
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axon_api::{AccountLifecycle, AppState};
 use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
     DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, RecoverOutcome, StubLifecycle,
-    StubSender, StubVerification, VerifyCall, VerifyOutcome,
+    StubSender, StubTokenVerifier, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -35,13 +38,36 @@ async fn store() -> Store {
     Store::connect(&url, 5).await.expect("connect + migrate")
 }
 
-async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
-    let resp = app
-        .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .expect("request");
+/// The default `Authorization` header value the helpers send.
+fn bearer() -> String {
+    format!("Bearer {TEST_TOKEN}")
+}
+
+/// Core request driver: optional JSON body, optional full `Authorization` header
+/// value (the auth tests pass a wrong value or `None`). Returns `(status,
+/// response headers, parsed body)`; the body is `Null` for empty responses
+/// (e.g. a 204 or a pre-handler rejection).
+async fn request_parts(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(value) = auth {
+        builder = builder.header("authorization", value);
+    }
+    let req = match &body {
+        Some(value) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    let resp = app.clone().oneshot(req).await.expect("request");
     let status = resp.status();
+    let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("body");
@@ -50,7 +76,24 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     } else {
         serde_json::from_slice(&bytes).expect("json body")
     };
+    (status, headers, json)
+}
+
+/// As [`request_parts`], dropping the response headers — the common case.
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    auth: Option<&str>,
+) -> (StatusCode, Value) {
+    let (status, _headers, json) = request_parts(app, method, uri, body, auth).await;
     (status, json)
+}
+
+/// Authenticated `GET`.
+async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    request(app, "GET", uri, None, Some(&bearer())).await
 }
 
 async fn insert_message(
@@ -80,6 +123,34 @@ async fn insert_message(
         .await
         .expect("insert message");
     event_id
+}
+
+/// Build a router whose lifecycle routes are backed by `lifecycle`, gated by a
+/// [`StubTokenVerifier`] that accepts [`TEST_TOKEN`]. The sender and live bus are
+/// unused by these paths.
+fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        lifecycle,
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTokenVerifier::ok()),
+    ))
+}
+
+/// Build a router whose verify routes are backed by `verify` (other ports unused).
+fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        verify,
+        Arc::new(StubTokenVerifier::ok()),
+    ))
 }
 
 #[tokio::test]
@@ -148,6 +219,7 @@ async fn read_api_end_to_end() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTokenVerifier::ok()),
     ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
@@ -273,6 +345,7 @@ async fn accounts_read_api() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTokenVerifier::ok()),
     ));
 
     // GET /v1/accounts — the client-visible set: `active` and `deactivated` are
@@ -345,61 +418,74 @@ async fn accounts_read_api() {
     }
 }
 
-/// Build a router whose login route is backed by `lifecycle`. The sender and live
-/// bus are unused by the login path.
-fn login_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Router {
-    let (live, _rx) = tokio::sync::broadcast::channel(16);
-    axon_api::router(AppState::new(
-        store,
-        live,
-        Arc::new(StubSender::ok("$unused:localhost")),
-        lifecycle,
-        Arc::new(StubVerification::ok("$unused-flow")),
-    ))
+// ---- Bearer-token auth gate (M7b) ----
+//
+// The gate is a single middleware layer over every `/v1/` route, so one route
+// (login, backed by a stub that records calls) is representative: a missing or
+// wrong token is rejected *before* the handler runs, and a read route is gated
+// the same way.
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn auth_gate_rejects_missing_and_invalid_tokens_before_the_handler() {
+    let store = store().await;
+    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
+    let app = lifecycle_app(store, stub.clone());
+    let body = json!({
+        "homeserver_url": "https://hs.example.org",
+        "username": "@a:localhost",
+        "password": "pw",
+    });
+
+    // No Authorization header → 401, and the lifecycle port is never invoked. A
+    // missing credential gets the bare RFC 6750 `Bearer` challenge.
+    let (status, headers, err) =
+        request_parts(&app, "POST", "/v1/accounts/login", Some(body.clone()), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["error"]["code"], "unauthorized");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+
+    // A wrong token → 401, still short-circuited before the handler. A present
+    // but rejected token gets the `error="invalid_token"` challenge (§3.1).
+    let (status, headers, err) = request_parts(
+        &app,
+        "POST",
+        "/v1/accounts/login",
+        Some(body),
+        Some("Bearer not-the-test-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["error"]["code"], "unauthorized");
+    assert_eq!(
+        headers["www-authenticate"],
+        "Bearer error=\"invalid_token\""
+    );
+
+    assert!(
+        stub.calls().is_empty(),
+        "the auth gate must short-circuit before the lifecycle port"
+    );
 }
 
-/// Build a router whose verify routes are backed by `verify`. The other ports are
-/// unused by the verification path (the handlers delegate straight to the port and
-/// never touch the store).
-fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> axum::Router {
-    let (live, _rx) = tokio::sync::broadcast::channel(16);
-    axon_api::router(AppState::new(
-        store,
-        live,
-        Arc::new(StubSender::ok("$unused:localhost")),
-        Arc::new(StubLifecycle::ok(Uuid::nil())),
-        verify,
-    ))
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn auth_gate_covers_read_routes_but_healthz_is_open() {
+    let store = store().await;
+    let app = lifecycle_app(store, Arc::new(StubLifecycle::ok(Uuid::nil())));
+
+    // A plain read route is gated too: no token → 401 carrying the bearer challenge.
+    let (status, headers, err) = request_parts(&app, "GET", "/v1/accounts", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["error"]["code"], "unauthorized");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+
+    // The unversioned liveness probe carries no auth, so a monitor can reach it.
+    let (status, _) = request(&app, "GET", "/healthz", None, None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
-/// `POST /v1/accounts/login` with an optional peer address (installed as the
-/// `ConnectInfo<SocketAddr>` extension the loopback guard reads, mirroring
-/// `into_make_service_with_connect_info`). Returns `(status, parsed body)`.
-async fn post_login(
-    app: &axum::Router,
-    peer: Option<SocketAddr>,
-    body: Value,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri("/v1/accounts/login")
-        .header("content-type", "application/json");
-    if let Some(addr) = peer {
-        builder = builder.extension(ConnectInfo(addr));
-    }
-    let req = builder.body(Body::from(body.to_string())).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("json body")
-    };
-    (status, json)
-}
+// ---- Lifecycle: login / logout / delete / recover ----
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -414,13 +500,14 @@ async fn login_succeeds_routes_to_port_and_envelopes_account() {
     let account = store.upsert_account(&user, hs).await.expect("seed");
 
     let stub = Arc::new(StubLifecycle::ok(account.account_id));
-    let app = login_app(store.clone(), stub.clone());
+    let app = lifecycle_app(store.clone(), stub.clone());
 
-    let loopback = Some("127.0.0.1:54321".parse().unwrap());
-    let (status, body) = post_login(
+    let (status, body) = request(
         &app,
-        loopback,
-        json!({ "homeserver_url": hs, "username": user, "password": "hunter2" }),
+        "POST",
+        "/v1/accounts/login",
+        Some(json!({ "homeserver_url": hs, "username": user, "password": "hunter2" })),
+        Some(&bearer()),
     )
     .await;
 
@@ -460,15 +547,16 @@ async fn login_without_homeserver_url_forwards_none_for_discovery() {
         .expect("seed");
 
     let stub = Arc::new(StubLifecycle::ok(account.account_id));
-    let app = login_app(store.clone(), stub.clone());
+    let app = lifecycle_app(store.clone(), stub.clone());
 
     // No `homeserver_url` in the body: the handler must accept the request and
     // forward `None` so the lifecycle backend performs discovery.
-    let loopback = Some("127.0.0.1:54322".parse().unwrap());
-    let (status, body) = post_login(
+    let (status, body) = request(
         &app,
-        loopback,
-        json!({ "username": user, "password": "hunter2" }),
+        "POST",
+        "/v1/accounts/login",
+        Some(json!({ "username": user, "password": "hunter2" })),
+        Some(&bearer()),
     )
     .await;
 
@@ -492,52 +580,19 @@ async fn login_without_homeserver_url_forwards_none_for_discovery() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn login_requires_loopback_peer() {
-    let store = store().await;
-    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
-    let body = json!({
-        "homeserver_url": "https://hs.example.org",
-        "username": "@a:localhost",
-        "password": "pw",
-    });
-
-    // A non-loopback peer is rejected before the handler runs.
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = post_login(&app, off_box, body.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-
-    // No peer address at all also fails closed.
-    let (status, _) = post_login(&app, None, body.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The guard short-circuited both times: the lifecycle port was never invoked.
-    assert!(stub.calls().is_empty());
-
-    // A loopback peer passes the guard through to the (stubbed) port. The id is
-    // nil and not seeded, so the read-back 404s into a 500 — but the guard let it
-    // through, which is what this asserts.
-    let loopback = Some("127.0.0.1:12000".parse().unwrap());
-    let (status, _) = post_login(&app, loopback, body).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(stub.calls().len(), 1);
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn login_malformed_body_is_enveloped_400_and_skips_port() {
     let store = store().await;
     let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
+    let app = lifecycle_app(store, stub.clone());
 
     // Missing the required `password` field → JSON decode failure, but only after
-    // the loopback guard has admitted the request.
-    let loopback = Some("127.0.0.1:13000".parse().unwrap());
-    let (status, err) = post_login(
+    // the auth gate has admitted the request.
+    let (status, err) = request(
         &app,
-        loopback,
-        json!({ "homeserver_url": "https://hs.example.org", "username": "@a:localhost" }),
+        "POST",
+        "/v1/accounts/login",
+        Some(json!({ "homeserver_url": "https://hs.example.org", "username": "@a:localhost" })),
+        Some(&bearer()),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -549,7 +604,6 @@ async fn login_malformed_body_is_enveloped_400_and_skips_port() {
 #[ignore = "requires Postgres"]
 async fn login_error_maps_to_status() {
     let store = store().await;
-    let loopback: Option<SocketAddr> = Some("127.0.0.1:14000".parse().unwrap());
     let body = json!({
         "homeserver_url": "https://hs.example.org",
         "username": "@a:localhost",
@@ -585,38 +639,18 @@ async fn login_error_maps_to_status() {
     ];
 
     for (outcome, want_status, want_code) in cases {
-        let app = login_app(store.clone(), Arc::new(StubLifecycle::failing(outcome)));
-        let (status, err) = post_login(&app, loopback, body.clone()).await;
+        let app = lifecycle_app(store.clone(), Arc::new(StubLifecycle::failing(outcome)));
+        let (status, err) = request(
+            &app,
+            "POST",
+            "/v1/accounts/login",
+            Some(body.clone()),
+            Some(&bearer()),
+        )
+        .await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }
-}
-
-/// `POST /v1/accounts/{account_id}/logout` with an optional peer address (the
-/// `ConnectInfo<SocketAddr>` the loopback guard reads). Returns `(status, body)`.
-async fn post_logout(
-    app: &axum::Router,
-    peer: Option<SocketAddr>,
-    account_id: Uuid,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(format!("/v1/accounts/{account_id}/logout"));
-    if let Some(addr) = peer {
-        builder = builder.extension(ConnectInfo(addr));
-    }
-    let req = builder.body(Body::empty()).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("json body")
-    };
-    (status, json)
 }
 
 #[tokio::test]
@@ -637,10 +671,16 @@ async fn logout_succeeds_and_envelopes_deactivated_account() {
         .expect("deactivate");
 
     let stub = Arc::new(StubLifecycle::ok(account.account_id));
-    let app = login_app(store.clone(), stub.clone());
+    let app = lifecycle_app(store.clone(), stub.clone());
 
-    let loopback = Some("127.0.0.1:54300".parse().unwrap());
-    let (status, body) = post_logout(&app, loopback, account.account_id).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{}/logout", account.account_id),
+        None,
+        Some(&bearer()),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"]["account_id"], account.account_id.to_string());
@@ -657,29 +697,8 @@ async fn logout_succeeds_and_envelopes_deactivated_account() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn logout_requires_loopback_peer() {
-    let store = store().await;
-    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
-
-    // Non-loopback and missing-peer both fail closed before the handler runs.
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = post_logout(&app, off_box, Uuid::new_v4()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-
-    let (status, _) = post_logout(&app, None, Uuid::new_v4()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The guard short-circuited: the lifecycle port was never invoked.
-    assert!(stub.logout_calls().is_empty());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn logout_error_maps_to_status() {
     let store = store().await;
-    let loopback: Option<SocketAddr> = Some("127.0.0.1:14100".parse().unwrap());
     let id = Uuid::new_v4();
 
     let cases = [
@@ -701,41 +720,21 @@ async fn logout_error_maps_to_status() {
     ];
 
     for (outcome, want_status, want_code) in cases {
-        let app = login_app(
+        let app = lifecycle_app(
             store.clone(),
             Arc::new(StubLifecycle::logout_failing(outcome)),
         );
-        let (status, err) = post_logout(&app, loopback, id).await;
+        let (status, err) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{id}/logout"),
+            None,
+            Some(&bearer()),
+        )
+        .await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }
-}
-
-/// `DELETE /v1/accounts/{account_id}` with an optional peer address. Returns
-/// `(status, parsed body)` — the body is `Null` for the 204 success path.
-async fn delete_account(
-    app: &axum::Router,
-    peer: Option<SocketAddr>,
-    account_id: Uuid,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method("DELETE")
-        .uri(format!("/v1/accounts/{account_id}"));
-    if let Some(addr) = peer {
-        builder = builder.extension(ConnectInfo(addr));
-    }
-    let req = builder.body(Body::empty()).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("json body")
-    };
-    (status, json)
 }
 
 #[tokio::test]
@@ -743,11 +742,17 @@ async fn delete_account(
 async fn delete_succeeds_with_204_and_routes_to_port() {
     let store = store().await;
     let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
+    let app = lifecycle_app(store, stub.clone());
 
     let id = Uuid::new_v4();
-    let loopback = Some("127.0.0.1:54400".parse().unwrap());
-    let (status, body) = delete_account(&app, loopback, id).await;
+    let (status, body) = request(
+        &app,
+        "DELETE",
+        &format!("/v1/accounts/{id}"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
 
     // 204 No Content — the resource is gone, nothing to return.
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -758,46 +763,8 @@ async fn delete_succeeds_with_204_and_routes_to_port() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn delete_requires_loopback_but_get_on_same_path_stays_open() {
-    let store = store().await;
-    // Seed a real account so the open GET on the same path can read it back.
-    let user = format!("@del-http-{}:localhost", Uuid::new_v4());
-    let account = store
-        .upsert_account(&user, "https://hs.example.org")
-        .await
-        .expect("seed");
-    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store.clone(), stub.clone());
-
-    // DELETE from a non-loopback peer is rejected before the handler runs.
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = delete_account(&app, off_box, account.account_id).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-    // Missing peer fails closed too.
-    let (status, _) = delete_account(&app, None, account.account_id).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    // The guard short-circuited: the lifecycle port was never invoked.
-    assert!(stub.delete_calls().is_empty());
-
-    // The sibling GET on the *same* path carries no loopback layer — a plain read
-    // (no peer extension) still succeeds, proving the guard is DELETE-only.
-    let (status, body) = get(&app, &format!("/v1/accounts/{}", account.account_id)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"]["account_id"], account.account_id.to_string());
-
-    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
-        .bind(account.account_id)
-        .execute(store.pool())
-        .await
-        .expect("cleanup");
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn delete_error_maps_to_status() {
     let store = store().await;
-    let loopback: Option<SocketAddr> = Some("127.0.0.1:14200".parse().unwrap());
     let id = Uuid::new_v4();
 
     let cases = [
@@ -819,43 +786,21 @@ async fn delete_error_maps_to_status() {
     ];
 
     for (outcome, want_status, want_code) in cases {
-        let app = login_app(
+        let app = lifecycle_app(
             store.clone(),
             Arc::new(StubLifecycle::delete_failing(outcome)),
         );
-        let (status, err) = delete_account(&app, loopback, id).await;
+        let (status, err) = request(
+            &app,
+            "DELETE",
+            &format!("/v1/accounts/{id}"),
+            None,
+            Some(&bearer()),
+        )
+        .await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }
-}
-
-/// `POST /v1/accounts/{account_id}/recover` with an optional peer address and a
-/// JSON body. Returns `(status, body)`.
-async fn post_recover(
-    app: &axum::Router,
-    peer: Option<SocketAddr>,
-    account_id: Uuid,
-    body: Value,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(format!("/v1/accounts/{account_id}/recover"))
-        .header("content-type", "application/json");
-    if let Some(addr) = peer {
-        builder = builder.extension(ConnectInfo(addr));
-    }
-    let req = builder.body(Body::from(body.to_string())).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("json body")
-    };
-    (status, json)
 }
 
 #[tokio::test]
@@ -877,11 +822,16 @@ async fn recover_succeeds_and_envelopes_account_with_verified() {
         .expect("verify");
 
     let stub = Arc::new(StubLifecycle::ok(account.account_id));
-    let app = login_app(store.clone(), stub.clone());
+    let app = lifecycle_app(store.clone(), stub.clone());
 
-    let loopback = Some("127.0.0.1:54500".parse().unwrap());
-    let body = json!({ "recovery_key": "EsTc SomeRecoveryKey" });
-    let (status, resp) = post_recover(&app, loopback, account.account_id, body).await;
+    let (status, resp) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{}/recover", account.account_id),
+        Some(json!({ "recovery_key": "EsTc SomeRecoveryKey" })),
+        Some(&bearer()),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp["data"]["account_id"], account.account_id.to_string());
@@ -901,36 +851,21 @@ async fn recover_succeeds_and_envelopes_account_with_verified() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn recover_requires_loopback_peer() {
-    let store = store().await;
-    let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
-    let body = json!({ "recovery_key": "k" });
-
-    // Non-loopback and missing-peer both fail closed before the handler runs.
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = post_recover(&app, off_box, Uuid::new_v4(), body.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-
-    let (status, _) = post_recover(&app, None, Uuid::new_v4(), body).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The guard short-circuited: the lifecycle port was never invoked.
-    assert!(stub.recover_calls().is_empty());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn recover_malformed_body_is_enveloped_400_and_skips_port() {
     let store = store().await;
     let stub = Arc::new(StubLifecycle::ok(Uuid::nil()));
-    let app = login_app(store, stub.clone());
+    let app = lifecycle_app(store, stub.clone());
 
-    // A loopback peer so the request reaches body decoding (missing
-    // `recovery_key`), proving the 400 is decode-side, not the guard.
-    let loopback = Some("127.0.0.1:13500".parse().unwrap());
-    let (status, _) = post_recover(&app, loopback, Uuid::new_v4(), json!({})).await;
+    // A valid token so the request reaches body decoding (missing `recovery_key`),
+    // proving the 400 is decode-side, not the auth gate.
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{}/recover", Uuid::new_v4()),
+        Some(json!({})),
+        Some(&bearer()),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(stub.recover_calls().is_empty());
 }
@@ -939,7 +874,6 @@ async fn recover_malformed_body_is_enveloped_400_and_skips_port() {
 #[ignore = "requires Postgres"]
 async fn recover_error_maps_to_status() {
     let store = store().await;
-    let loopback: Option<SocketAddr> = Some("127.0.0.1:14300".parse().unwrap());
     let id = Uuid::new_v4();
     let body = json!({ "recovery_key": "k" });
 
@@ -967,48 +901,24 @@ async fn recover_error_maps_to_status() {
     ];
 
     for (outcome, want_status, want_code) in cases {
-        let app = login_app(
+        let app = lifecycle_app(
             store.clone(),
             Arc::new(StubLifecycle::recover_failing(outcome)),
         );
-        let (status, err) = post_recover(&app, loopback, id, body.clone()).await;
+        let (status, err) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{id}/recover"),
+            Some(body.clone()),
+            Some(&bearer()),
+        )
+        .await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }
 }
 
 // ---- Interactive SAS verification (M7a PR6) ----
-
-/// `POST` to a verify route with an optional peer address (the
-/// `ConnectInfo<SocketAddr>` the loopback guard reads) and an optional JSON body
-/// (start carries one; confirm/cancel don't). Returns `(status, parsed body)`.
-async fn post_verify(
-    app: &axum::Router,
-    peer: Option<SocketAddr>,
-    uri: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method("POST").uri(uri);
-    if body.is_some() {
-        builder = builder.header("content-type", "application/json");
-    }
-    if let Some(addr) = peer {
-        builder = builder.extension(ConnectInfo(addr));
-    }
-    let payload = body.map(|b| b.to_string()).unwrap_or_default();
-    let req = builder.body(Body::from(payload)).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).expect("json body")
-    };
-    (status, json)
-}
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -1018,12 +928,12 @@ async fn verify_start_succeeds_and_returns_flow_id() {
     let app = verify_app(store, verify.clone());
 
     let account_id = Uuid::new_v4();
-    let loopback = Some("127.0.0.1:55000".parse().unwrap());
-    let (status, body) = post_verify(
+    let (status, body) = request(
         &app,
-        loopback,
+        "POST",
         &format!("/v1/accounts/{account_id}/verify"),
         Some(json!({ "device_id": "TRUSTEDDEV" })),
+        Some(&bearer()),
     )
     .await;
 
@@ -1041,42 +951,12 @@ async fn verify_start_succeeds_and_returns_flow_id() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn verify_start_requires_loopback_peer() {
-    let store = store().await;
-    let verify = Arc::new(StubVerification::ok("$flow-abc"));
-    let app = verify_app(store, verify.clone());
-    let account_id = Uuid::new_v4();
-    let uri = format!("/v1/accounts/{account_id}/verify");
-    let body = json!({ "device_id": "D" });
-
-    // Non-loopback and missing-peer both fail closed before the handler runs.
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = post_verify(&app, off_box, &uri, Some(body.clone())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-
-    let (status, _) = post_verify(&app, None, &uri, Some(body.clone())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // The guard short-circuited: the verification port was never invoked.
-    assert!(verify.calls().is_empty());
-
-    // A loopback peer passes through to the port.
-    let loopback = Some("127.0.0.1:55001".parse().unwrap());
-    let (status, _) = post_verify(&app, loopback, &uri, Some(body)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(verify.calls().len(), 1);
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn verify_get_returns_flow_state_dto_and_stays_open() {
+async fn verify_get_returns_flow_state_dto() {
     let store = store().await;
     let verify = Arc::new(StubVerification::ok("$flow-xyz"));
     let app = verify_app(store, verify.clone());
     let account_id = Uuid::new_v4();
 
-    // The GET read carries no loopback layer — a plain request (no peer) is admitted.
     let (status, body) = get(&app, &format!("/v1/accounts/{account_id}/verify/$flow-xyz")).await;
 
     assert_eq!(status, StatusCode::OK);
@@ -1101,7 +981,7 @@ async fn verify_get_returns_flow_state_dto_and_stays_open() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn verify_list_returns_flows_and_stays_open() {
+async fn verify_list_returns_flows() {
     let store = store().await;
     let verify = Arc::new(StubVerification::ok("$flow-1"));
     let app = verify_app(store, verify.clone());
@@ -1123,22 +1003,23 @@ async fn verify_confirm_and_cancel_return_204_and_route() {
     let verify = Arc::new(StubVerification::ok("$flow-2"));
     let app = verify_app(store, verify.clone());
     let account_id = Uuid::new_v4();
-    let loopback = Some("127.0.0.1:55002".parse().unwrap());
 
-    let (status, _) = post_verify(
+    let (status, _) = request(
         &app,
-        loopback,
+        "POST",
         &format!("/v1/accounts/{account_id}/verify/$flow-2/confirm"),
         None,
+        Some(&bearer()),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _) = post_verify(
+    let (status, _) = request(
         &app,
-        loopback,
+        "POST",
         &format!("/v1/accounts/{account_id}/verify/$flow-2/cancel"),
         None,
+        Some(&bearer()),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -1160,26 +1041,8 @@ async fn verify_confirm_and_cancel_return_204_and_route() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn verify_confirm_requires_loopback_peer() {
-    let store = store().await;
-    let verify = Arc::new(StubVerification::ok("$flow-3"));
-    let app = verify_app(store, verify.clone());
-    let account_id = Uuid::new_v4();
-    let uri = format!("/v1/accounts/{account_id}/verify/$flow-3/confirm");
-
-    let off_box = Some("203.0.113.7:443".parse().unwrap());
-    let (status, err) = post_verify(&app, off_box, &uri, None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(err["error"]["code"], "forbidden");
-
-    assert!(verify.calls().is_empty());
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
 async fn verify_error_maps_to_status() {
     let store = store().await;
-    let loopback: Option<SocketAddr> = Some("127.0.0.1:55003".parse().unwrap());
     let account_id = Uuid::new_v4();
     let body = json!({ "device_id": "D" });
 
@@ -1218,11 +1081,12 @@ async fn verify_error_maps_to_status() {
 
     for (outcome, want_status, want_code) in cases {
         let app = verify_app(store.clone(), Arc::new(StubVerification::failing(outcome)));
-        let (status, err) = post_verify(
+        let (status, err) = request(
             &app,
-            loopback,
+            "POST",
             &format!("/v1/accounts/{account_id}/verify"),
             Some(body.clone()),
+            Some(&bearer()),
         )
         .await;
         assert_eq!(status, want_status);
