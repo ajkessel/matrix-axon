@@ -11,7 +11,8 @@ pub(crate) struct Args {
 
 impl Args {
     pub(crate) fn parse() -> anyhow::Result<Self> {
-        let mut base_url: Option<String> = env::var("AXON_BASE_URL").ok().filter(|s| !s.is_empty());
+        let mut base_url: Option<String> =
+            env::var("AXON_BASE_URL").ok().filter(|s| !s.is_empty());
         let mut account_id = None;
         let mut token = normalize_token(env::var("AXON_TOKEN").ok());
         let mut args = env::args().skip(1);
