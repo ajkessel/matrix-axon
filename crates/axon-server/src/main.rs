@@ -50,6 +50,12 @@ async fn main() -> anyhow::Result<()> {
 
 /// Run the long-lived HTTP/WebSocket server until a shutdown signal arrives.
 async fn serve(config: Config) -> anyhow::Result<()> {
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_hash = env!("GIT_HASH"),
+        "axon starting",
+    );
+
     // Fail fast (before any side effects) on an unsafe bind. Axon serves plain
     // HTTP and the /v1 API carries credentials (login passwords, recovery keys,
     // bearer tokens); the tech spec requires client↔Axon TLS. So a non-loopback
