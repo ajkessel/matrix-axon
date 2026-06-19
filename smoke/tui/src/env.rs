@@ -87,5 +87,9 @@ pub fn child_env(config_home: &Path, home: &Path) -> Vec<(String, String)> {
         ("LC_ALL".to_owned(), "C.UTF-8".to_owned()),
         // Keep the binary from picking up a developer .env at the working dir.
         ("RUST_LOG".to_owned(), "off".to_owned()),
+        // Disable the terminal image-protocol query: from_query_stdio() leaves a
+        // background thread blocked on stdin when no response arrives, causing it
+        // to race crossterm for injected keystrokes and swallow them silently.
+        ("AXON_NO_IMAGE_QUERY".to_owned(), "1".to_owned()),
     ]
 }
