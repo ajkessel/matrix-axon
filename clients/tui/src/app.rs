@@ -784,6 +784,33 @@ impl App {
             .unwrap_or(0);
     }
 
+    pub(crate) fn delete_word_back(&mut self) {
+        self.input.react_command_completion = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
+        self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
+        self.input.account_command_completion = None;
+        if self.input.cursor == 0 {
+            return;
+        }
+        let s = &self.input.buffer[..self.input.cursor];
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        let mut i = chars.len();
+        while i > 0 && chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        let new_cursor = chars.get(i).map(|(idx, _)| *idx).unwrap_or(0);
+        self.input
+            .buffer
+            .replace_range(new_cursor..self.input.cursor, "");
+        self.input.cursor = new_cursor;
+    }
+
     pub(crate) fn move_cursor_word_left(&mut self) {
         let s = &self.input.buffer[..self.input.cursor];
         let chars: Vec<(usize, char)> = s.char_indices().collect();

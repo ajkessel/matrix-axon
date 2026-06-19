@@ -580,6 +580,11 @@ impl App {
         } else if self.shortcuts.cursor_right.matches(key) {
             self.dismiss_input_help();
             self.move_cursor_right();
+        } else if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('w') | KeyCode::Backspace)
+        {
+            self.dismiss_input_help();
+            self.delete_word_back();
         } else if self.shortcuts.backspace.matches(key) {
             self.dismiss_input_help();
             self.backspace();
