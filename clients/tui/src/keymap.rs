@@ -307,16 +307,10 @@ impl App {
             self.adjust_input_lines(-1);
         } else if self.shortcuts.edit_previous.matches(key) {
             self.dismiss_input_help();
-            self.move_selected_message(-1);
-            if self.messages.selection.is_some() {
-                self.mode = Mode::MessageList;
-            }
+            self.edit_previous();
         } else if self.shortcuts.edit_next.matches(key) {
             self.dismiss_input_help();
-            self.move_selected_message(1);
-            if self.messages.selection.is_some() {
-                self.mode = Mode::MessageList;
-            }
+            self.edit_next();
         } else if self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(-1);

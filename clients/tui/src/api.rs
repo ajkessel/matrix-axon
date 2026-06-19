@@ -973,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_empty_mxc_server_or_media_id() {
-        let client = AxonClient::new("http://127.0.0.1:8080".to_owned());
+        let client = AxonClient::new("http://127.0.0.1:8080".to_owned(), None);
 
         assert!(matches!(
             client.get_media(Uuid::nil(), "mxc:///media").await,

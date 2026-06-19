@@ -214,35 +214,6 @@ impl App {
             .find(|event| event.event_id == selected_message)
     }
 
-    pub(crate) fn select_first_message(&mut self) {
-        let events = self.selected_events();
-        if events.is_empty() {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        }
-        let count = events.len();
-        let event_id = events[0].event_id.clone();
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(0);
-        self.status = Status::from(self.selection_status(0, count));
-    }
-
-    pub(crate) fn select_last_message(&mut self) {
-        let events = self.selected_events();
-        if events.is_empty() {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        }
-        let count = events.len();
-        let last = count - 1;
-        let event_id = events[last].event_id.clone();
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(last);
-        self.status = Status::from(self.selection_status(last, count));
-    }
-
     pub(crate) fn move_selected_message(&mut self, offset: isize) {
         let Some((event_id, next, event_count)) = ({
             let events = self.selected_events();

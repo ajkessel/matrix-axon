@@ -1578,7 +1578,7 @@ media_preview = "i"
 "#,
         )
         .expect("custom config parses");
-        let shortcuts = raw.shortcuts.into_shortcuts().expect("shortcuts");
+        let shortcuts = raw.0.shortcuts.into_shortcuts().expect("shortcuts");
 
         assert!(shortcuts
             .edit_previous

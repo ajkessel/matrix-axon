@@ -161,9 +161,16 @@ if [ "$_pkg" = "axon-server" ]; then
 	postgres_user=${POSTGRES_USER:-axon}
 	postgres_password=${POSTGRES_PASSWORD:-axon}
 	postgres_db=${POSTGRES_DB:-axon}
+	postgres_port=${POSTGRES_PORT:-5432}
 
-	if ! postgres_error=$(compose exec -e "PGPASSWORD=$postgres_password" postgres \
-		psql -h localhost -U "$postgres_user" -d "$postgres_db" -c "SELECT 1" 2>&1); then
+	pg_check() {
+		docker run --rm --network host \
+			-e "PGPASSWORD=$postgres_password" postgres:16 \
+			psql -h 127.0.0.1 -p "$postgres_port" \
+			-U "$postgres_user" -d "$postgres_db" -c "SELECT 1" 2>&1
+	}
+
+	if ! postgres_error=$(pg_check); then
 		case "$postgres_error" in
 		*"password authentication failed"* | *"role "*" does not exist"* | *"database "*" does not exist"*) ;;
 		*)
@@ -189,9 +196,7 @@ if [ "$_pkg" = "axon-server" ]; then
 				echo "Error: Docker Compose could not restart Postgres after the reset."
 				exit 1
 			fi
-			if ! postgres_error=$(compose exec -e "PGPASSWORD=$postgres_password" postgres \
-				psql -h localhost -U "$postgres_user" -d "$postgres_db" \
-				-c "SELECT 1" 2>&1); then
+			if ! postgres_error=$(pg_check); then
 				echo "Error: Postgres still rejects the configured credentials after the reset."
 				printf '%s\n' "$postgres_error"
 				exit 1
