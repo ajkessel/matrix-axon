@@ -1241,6 +1241,14 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
     fn kv(key: impl std::fmt::Display, desc: &str) -> String {
         format!("  {:<22}  {}", key, desc)
     }
+    fn kv2(
+        key1: impl std::fmt::Display,
+        key2: impl std::fmt::Display,
+        desc1: &str,
+        desc2: &str,
+    ) -> String {
+        format!("  {} / {}   {}/{}", key1, key2, desc1, desc2)
+    }
     vec![
         "Focus:".to_owned(),
         kv(
@@ -1253,18 +1261,24 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         // ),
         "".to_owned(),
         "Always active:".to_owned(),
-        kv(shortcuts.next_room.label(), "next room"),
-        kv(shortcuts.previous_room.label(), "previous room"),
-        kv(
-            shortcuts.next_account.label(),
-            "next account (when 2+ accounts logged in)",
+        kv2(
+            shortcuts.next_room.label(),
+            shortcuts.previous_room.label(),
+            "next",
+            "previous room",
         ),
-        kv(
+        kv2(
+            shortcuts.next_account.label(),
             shortcuts.previous_account.label(),
+            "next",
             "previous account (when 2+ accounts logged in)",
         ),
-        kv(shortcuts.message_down.label(), "next message"),
-        kv(shortcuts.message_up.label(), "previous message"),
+        kv2(
+            shortcuts.message_down.label(),
+            shortcuts.message_up.label(),
+            "next",
+            "previous message",
+        ),
         kv(shortcuts.quit.label(), "quit"),
         kv(
             shortcuts.toggle_accounts_panel.label(),
