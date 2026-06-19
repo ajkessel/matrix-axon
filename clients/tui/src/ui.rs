@@ -19,7 +19,19 @@ use crate::config::Shortcuts;
 use crate::wrap::{plain_rich_lines, wrap_rich_lines};
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    let input_box_height = app.display.input_lines + 2; // content lines + top/bottom borders
+    let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
+        let inner_width = frame.area().width.saturating_sub(2) as usize;
+        let content_len = 2 + app.input.buffer.chars().count();
+        let actual_lines = if inner_width > 0 {
+            content_len.div_ceil(inner_width).max(1) as u16
+        } else {
+            1
+        };
+        actual_lines.clamp(app.display.input_lines, max_lines)
+    } else {
+        app.display.input_lines
+    };
+    let input_box_height = effective_input_lines + 2; // content lines + top/bottom borders
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
@@ -635,9 +647,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
-    frame.render_widget(input, outer[1]);
     if let Some(col) = cursor_col {
-        // col = prefix_len + chars_before_cursor; compute visual row/col for wrapping
         let inner_width = outer[1].width.saturating_sub(2) as usize;
         let (vis_row, vis_col) = if inner_width > 0 && col as usize > inner_width {
             let overflow = col as usize - inner_width;
@@ -645,10 +655,22 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             (0, col as usize)
         };
+        let scroll_row = if vis_row >= effective_input_lines as usize {
+            (vis_row + 1 - effective_input_lines as usize) as u16
+        } else {
+            0
+        };
+        let input = input.scroll((scroll_row, 0));
+        frame.render_widget(input, outer[1]);
         frame.set_cursor_position((
             outer[1].x.saturating_add(1).saturating_add(vis_col as u16),
-            outer[1].y.saturating_add(1).saturating_add(vis_row as u16),
+            outer[1]
+                .y
+                .saturating_add(1)
+                .saturating_add((vis_row as u16).saturating_sub(scroll_row)),
         ));
+    } else {
+        frame.render_widget(input, outer[1]);
     }
 
     if let Mode::Popup(kind) = app.mode {

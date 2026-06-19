@@ -140,6 +140,7 @@ debug = false
 show_state_events = false
 sender_name = "display_name"
 input_lines = 1
+# max_input_lines = 10
 confirm_logout = true
 search_wrap = true
 
@@ -295,6 +296,7 @@ pub struct DisplayOptions {
     pub show_state_events: bool,
     pub sender_name: SenderNameStyle,
     pub input_lines: u16,
+    pub max_input_lines: Option<u16>,
     pub confirm_logout: bool,
     pub search_wrap: bool,
     pub accounts_panel_width: u16,
@@ -444,6 +446,7 @@ impl RawConfig {
                 show_state_events: false,
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
+                max_input_lines: None,
                 confirm_logout: true,
                 search_wrap: true,
                 accounts_panel_width: None,
@@ -903,6 +906,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "show_state_events"
                 | "sender_name"
                 | "input_lines"
+                | "max_input_lines"
                 | "confirm_logout"
                 | "search_wrap"
                 | "accounts_panel_width"
@@ -1308,6 +1312,7 @@ struct RawDisplayOptions {
     show_state_events: bool,
     sender_name: String,
     input_lines: u16,
+    max_input_lines: Option<u16>,
     confirm_logout: bool,
     search_wrap: bool,
     accounts_panel_width: Option<u16>,
@@ -1340,6 +1345,9 @@ impl RawDisplayOptions {
         } else {
             missing = true;
         }
+        if let Some(v) = partial.max_input_lines {
+            self.max_input_lines = Some(v.clamp(1, 100));
+        }
         if let Some(confirm_logout) = partial.confirm_logout {
             self.confirm_logout = confirm_logout;
         } else {
@@ -1365,6 +1373,7 @@ impl RawDisplayOptions {
             show_state_events: self.show_state_events,
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
             input_lines: self.input_lines.clamp(1, 10),
+            max_input_lines: self.max_input_lines.map(|v| v.clamp(1, 100)),
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
             accounts_panel_width: self
@@ -1381,6 +1390,7 @@ struct PartialDisplayOptions {
     show_state_events: Option<bool>,
     sender_name: Option<String>,
     input_lines: Option<u16>,
+    max_input_lines: Option<u16>,
     confirm_logout: Option<bool>,
     search_wrap: Option<bool>,
     accounts_panel_width: Option<u16>,

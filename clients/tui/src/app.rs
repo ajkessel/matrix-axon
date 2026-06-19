@@ -1911,6 +1911,7 @@ mod tests {
             show_state_events: false,
             sender_name: SenderNameStyle::DisplayName,
             input_lines: 1,
+            max_input_lines: None,
             confirm_logout: true,
             search_wrap: true,
             accounts_panel_width: 25,
