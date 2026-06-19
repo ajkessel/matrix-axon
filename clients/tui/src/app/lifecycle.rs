@@ -66,6 +66,13 @@ pub(crate) enum LifecycleOutcome {
         user_id: String,
         result: Result<(), String>,
     },
+    /// Result of an optimistic send — used to swap the temp ID for the real
+    /// one on success or mark the echo as failed without a blocking await.
+    MessageSent {
+        key: super::RoomKey,
+        temp_id: String,
+        result: Result<String, String>,
+    },
 }
 
 impl App {
@@ -393,6 +400,36 @@ impl App {
     /// loop: refresh views and report a final status. Runs only fast, local
     /// Axon calls, so blocking here is acceptable.
     pub(crate) async fn handle_lifecycle_outcome(&mut self, outcome: LifecycleOutcome) {
+        if let LifecycleOutcome::MessageSent {
+            key,
+            temp_id,
+            result,
+        } = outcome
+        {
+            match result {
+                Ok(event_id) => {
+                    if let Some(events) = self.messages.events.get_mut(&key) {
+                        if let Some(e) = events.iter_mut().find(|e| e.event_id == temp_id) {
+                            e.event_id = event_id.clone();
+                        }
+                    }
+                    self.live.pending_own_event_id = Some(event_id.clone());
+                    self.status = Status::EventAction {
+                        debug: format!("sent: {event_id}"),
+                        redacted: "sent",
+                    };
+                }
+                Err(err) => {
+                    if let Some(events) = self.messages.events.get_mut(&key) {
+                        if let Some(e) = events.iter_mut().find(|e| e.event_id == temp_id) {
+                            e.body = Some(format!("[send failed: {err}]"));
+                        }
+                    }
+                    self.status = Status::Info(format!("send failed: {err}"));
+                }
+            }
+            return;
+        }
         self.lifecycle_busy = false;
         if !matches!(self.mode, Mode::Popup(_)) {
             self.pending_command_response = None;
@@ -562,6 +599,7 @@ impl App {
                     self.status = Status::from(format!("delete failed for {user_id}: {error}"));
                 }
             },
+            LifecycleOutcome::MessageSent { .. } => unreachable!(),
         }
         self.queue_completed_command_response();
     }
@@ -1017,7 +1055,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_failure_is_queued_for_overflow_handling() {
         let mut app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );

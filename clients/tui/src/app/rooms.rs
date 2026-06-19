@@ -412,6 +412,9 @@ pub(crate) fn account_localpart(user_id: &str) -> Option<&str> {
 }
 
 fn apply_edits(events: &mut Vec<EventDto>) {
+    // Collect all edit relations, tracking whether each target is present on
+    // this page. An edit whose target lives on an older (not-yet-loaded) page
+    // must NOT be removed: suppressing it would make the edit invisible.
     let edits: Vec<(String, String)> = events
         .iter()
         .filter_map(|event| {
@@ -419,10 +422,129 @@ fn apply_edits(events: &mut Vec<EventDto>) {
             Some((target.to_owned(), body.to_owned()))
         })
         .collect();
+    let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (target_id, new_body) in &edits {
         if let Some(event) = events.iter_mut().find(|event| &event.event_id == target_id) {
             event.body = Some(new_body.clone());
+            applied.insert(target_id.clone());
         }
     }
-    events.retain(|event| event.edit_relation().is_none());
+    // Only collapse an edit event once its target has been updated on this page.
+    events.retain(|event| {
+        event
+            .edit_relation()
+            .is_none_or(|(target, _)| !applied.contains(target))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use crate::api::EventDto;
+
+    use super::apply_edits;
+
+    fn msg(event_id: &str, body: &str) -> EventDto {
+        EventDto {
+            account_id: Uuid::nil(),
+            event_id: event_id.to_owned(),
+            room_id: "!room:localhost".to_owned(),
+            sender: "@alice:localhost".to_owned(),
+            state_key: None,
+            origin_ts: 0,
+            event_type: "m.room.message".to_owned(),
+            content: Some(json!({"msgtype": "m.text", "body": body})),
+            body: Some(body.to_owned()),
+            relates_to: None,
+            redacted: false,
+            redaction_event_id: None,
+        }
+    }
+
+    fn edit(event_id: &str, target_id: &str, new_body: &str) -> EventDto {
+        EventDto {
+            account_id: Uuid::nil(),
+            event_id: event_id.to_owned(),
+            room_id: "!room:localhost".to_owned(),
+            sender: "@alice:localhost".to_owned(),
+            state_key: None,
+            origin_ts: 1,
+            event_type: "m.room.message".to_owned(),
+            content: Some(json!({
+                "msgtype": "m.text",
+                "body": format!("* {new_body}"),
+                "m.new_content": {"msgtype": "m.text", "body": new_body},
+                "m.relates_to": {"rel_type": "m.replace", "event_id": target_id},
+            })),
+            body: Some(format!("* {new_body}")),
+            relates_to: Some(json!({"rel_type": "m.replace", "event_id": target_id})),
+            redacted: false,
+            redaction_event_id: None,
+        }
+    }
+
+    #[test]
+    fn apply_edits_updates_original_and_removes_edit_event() {
+        let mut events = vec![msg("$orig", "hello"), edit("$edit", "$orig", "hello world")];
+        apply_edits(&mut events);
+        assert_eq!(events.len(), 1, "edit event should be removed");
+        assert_eq!(
+            events[0].body.as_deref(),
+            Some("hello world"),
+            "original body should be replaced with new content"
+        );
+    }
+
+    #[test]
+    fn apply_edits_leaves_unrelated_messages_untouched() {
+        let mut events = vec![
+            msg("$a", "first"),
+            msg("$b", "second"),
+            edit("$edit", "$a", "first edited"),
+        ];
+        apply_edits(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].body.as_deref(), Some("first edited"));
+        assert_eq!(events[1].body.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn apply_edits_keeps_edit_event_when_original_not_in_page() {
+        // If the original message is on an older page that hasn't been loaded,
+        // the edit event must remain visible rather than disappearing silently.
+        let mut events = vec![msg("$b", "second"), edit("$edit", "$missing", "edited")];
+        apply_edits(&mut events);
+        // edit event kept (target not in this page); $b untouched
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_id, "$b");
+        assert_eq!(events[1].event_id, "$edit");
+    }
+
+    #[test]
+    fn edit_relation_returns_none_without_relates_to() {
+        let event = msg("$m", "body");
+        assert!(event.edit_relation().is_none());
+    }
+
+    #[test]
+    fn edit_relation_returns_none_when_content_missing_new_content() {
+        let event = EventDto {
+            account_id: Uuid::nil(),
+            event_id: "$e".to_owned(),
+            room_id: "!r:localhost".to_owned(),
+            sender: "@a:localhost".to_owned(),
+            state_key: None,
+            origin_ts: 0,
+            event_type: "m.room.message".to_owned(),
+            content: Some(json!({"msgtype": "m.text", "body": "* edited"})),
+            body: Some("* edited".to_owned()),
+            relates_to: Some(json!({"rel_type": "m.replace", "event_id": "$orig"})),
+            redacted: false,
+            redaction_event_id: None,
+        };
+        // relates_to is set but content has no m.new_content → None
+        assert!(event.edit_relation().is_none());
+    }
 }

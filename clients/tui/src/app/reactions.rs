@@ -107,6 +107,10 @@ impl App {
             self.status = Status::from("select a displayed message before reacting".to_owned());
             return;
         };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(super::PENDING_ECHO_MSG.to_owned());
+            return;
+        }
         let event_id = event.event_id.clone();
         self.input.buffer.clear();
         self.input.cursor = 0;

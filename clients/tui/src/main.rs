@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use api::{websocket_task, AxonClient};
 use app::{App, LiveFrameAction};
-use args::Args;
+use args::{normalize_token, Args};
 use config::TuiConfig;
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use crossterm::execute;
@@ -33,7 +33,42 @@ use uuid::Uuid;
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse()?;
     let config = TuiConfig::load_or_create_default()?;
-    let client = AxonClient::new(args.base_url);
+    let base_url = args
+        .base_url
+        .or_else(|| config.base_url.clone())
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_owned());
+    let token = args.token.or_else(|| normalize_token(config.token.clone()));
+    if let Some(ref t) = token {
+        if reqwest::header::HeaderValue::from_str(&api::bearer_value_str(t)).is_err() {
+            eprintln!(
+                "Error: the bearer token contains characters that are invalid in an HTTP header \
+                 value (e.g. control characters or non-ASCII bytes).\n\
+                 \nCheck your config file ({path}) or AXON_TOKEN environment variable.",
+                path = config.path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    let client = AxonClient::new(base_url, token.clone());
+
+    if token.is_none() {
+        if let Err(api::ApiError::Status { status, .. }) = client.list_accounts().await {
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                eprintln!(
+                    "Error: this Axon server requires authentication but no bearer token is configured.\n\
+                     \nMint a token on the server:\n\
+                     \n    axon token issue --label <name>\n\
+                     \nThen add it to your config file ({path}):\n\
+                     \n    [server]\n    bearer_token = \"<token>\"\n\
+                     \nOr supply it at launch:\n\
+                     \n    axon-tui --token <token>\n    AXON_TOKEN=<token> axon-tui",
+                    path = config.path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let mut terminal = TerminalGuard::enter()?;
     let result = run_app(&mut terminal.terminal, client, args.account_id, config).await;
     terminal.leave()?;

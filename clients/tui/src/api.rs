@@ -2,6 +2,7 @@ use std::fmt;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -14,19 +15,41 @@ use uuid::Uuid;
 
 const LIVE_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const LIVE_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Timeout for read-only / probe requests (list calls, timeline fetches, etc.).
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Message-mutation timeout. These routes can block on the sync engine acquiring
+/// encryption keys; lifecycle operations such as recovery are deliberately not
+/// capped here because their documented work can legitimately exceed 60 seconds.
+const MESSAGE_MUTATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// Generous timeout for lifecycle operations (login, logout, recover, delete).
+/// Recovery imports the megolm key backup and cross-signing keys, which can
+/// legitimately exceed 60 s on a real account.
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
     http: reqwest::Client,
     base_url: String,
+    token: Option<String>,
 }
 
 impl AxonClient {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, token: Option<String>) -> Self {
         let base_url = base_url.trim_end_matches('/').to_owned();
+        let mut default_headers = HeaderMap::new();
+        if let Some(ref t) = token {
+            if let Ok(v) = HeaderValue::from_str(&bearer_value_str(t)) {
+                default_headers.insert(AUTHORIZATION, v);
+            }
+        }
+        let http = reqwest::ClientBuilder::new()
+            .default_headers(default_headers)
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            http: reqwest::Client::new(),
+            http,
             base_url,
+            token,
         }
     }
 
@@ -34,17 +57,21 @@ impl AxonClient {
         &self.base_url
     }
 
+    pub fn has_bearer_token(&self) -> bool {
+        self.token.is_some()
+    }
+
     pub async fn list_rooms(&self, account_id: Option<Uuid>) -> Result<Vec<RoomDto>, ApiError> {
         let mut request = self.http.get(format!("{}/v1/rooms", self.base_url));
         if let Some(account_id) = account_id {
             request = request.query(&[("account_id", account_id)]);
         }
-        self.send(request).await
+        self.send(read_request(request)).await
     }
 
     pub async fn list_accounts(&self) -> Result<Vec<AccountDto>, ApiError> {
         let request = self.http.get(format!("{}/v1/accounts", self.base_url));
-        self.send(request).await
+        self.send(read_request(request)).await
     }
 
     /// Log a Matrix account in through Axon. `homeserver_url` is sent only when
@@ -69,14 +96,14 @@ impl AxonClient {
             .http
             .post(format!("{}/v1/accounts/login", self.base_url))
             .json(&body);
-        self.send(request).await
+        self.send(lifecycle(request)).await
     }
 
     pub async fn logout(&self, account_id: Uuid) -> Result<AccountDto, ApiError> {
         let request = self
             .http
             .post(format!("{}/v1/accounts/{account_id}/logout", self.base_url));
-        self.send(request).await
+        self.send(lifecycle(request)).await
     }
 
     pub async fn recover(
@@ -91,14 +118,14 @@ impl AxonClient {
                 self.base_url
             ))
             .json(&serde_json::json!({ "recovery_key": recovery_key }));
-        self.send(request).await
+        self.send(lifecycle(request)).await
     }
 
     pub async fn delete_account(&self, account_id: Uuid) -> Result<(), ApiError> {
         let request = self
             .http
             .delete(format!("{}/v1/accounts/{account_id}", self.base_url));
-        self.send_no_body(request).await
+        self.send_no_body(lifecycle(request)).await
     }
 
     pub async fn room_timeline(
@@ -119,7 +146,7 @@ impl AxonClient {
         if let Some(cursor) = cursor {
             request = request.query(&[("cursor", cursor)]);
         }
-        self.send(request).await
+        self.send(read_request(request)).await
     }
 
     pub async fn send_message(
@@ -128,15 +155,13 @@ impl AxonClient {
         room_id: &str,
         body: &str,
     ) -> Result<SendResultDto, ApiError> {
-        let request = self
-            .http
-            .post(format!(
-                "{}/v1/accounts/{}/rooms/{}/send",
-                self.base_url,
-                account_id,
-                path_segment(room_id)
-            ))
-            .json(&serde_json::json!({ "body": body }));
+        let request = self.http.post(format!(
+            "{}/v1/accounts/{}/rooms/{}/send",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
+        let request = message_mutation(request).json(&serde_json::json!({ "body": body }));
         self.send(request).await
     }
 
@@ -147,16 +172,14 @@ impl AxonClient {
         event_id: &str,
         body: &str,
     ) -> Result<SendResultDto, ApiError> {
-        let request = self
-            .http
-            .put(format!(
-                "{}/v1/accounts/{}/rooms/{}/events/{}",
-                self.base_url,
-                account_id,
-                path_segment(room_id),
-                path_segment(event_id)
-            ))
-            .json(&serde_json::json!({ "body": body }));
+        let request = self.http.put(format!(
+            "{}/v1/accounts/{}/rooms/{}/events/{}",
+            self.base_url,
+            account_id,
+            path_segment(room_id),
+            path_segment(event_id)
+        ));
+        let request = message_mutation(request).json(&serde_json::json!({ "body": body }));
         self.send(request).await
     }
 
@@ -167,13 +190,14 @@ impl AxonClient {
         event_id: &str,
         reason: Option<&str>,
     ) -> Result<SendResultDto, ApiError> {
-        let mut request = self.http.delete(format!(
+        let request = self.http.delete(format!(
             "{}/v1/accounts/{}/rooms/{}/events/{}",
             self.base_url,
             account_id,
             path_segment(room_id),
             path_segment(event_id)
         ));
+        let mut request = message_mutation(request);
         if let Some(reason) = reason {
             request = request.query(&[("reason", reason)]);
         }
@@ -187,16 +211,14 @@ impl AxonClient {
         event_id: &str,
         key: &str,
     ) -> Result<SendResultDto, ApiError> {
-        let request = self
-            .http
-            .post(format!(
-                "{}/v1/accounts/{}/rooms/{}/events/{}/reactions",
-                self.base_url,
-                account_id,
-                path_segment(room_id),
-                path_segment(event_id)
-            ))
-            .json(&serde_json::json!({ "key": key }));
+        let request = self.http.post(format!(
+            "{}/v1/accounts/{}/rooms/{}/events/{}/reactions",
+            self.base_url,
+            account_id,
+            path_segment(room_id),
+            path_segment(event_id)
+        ));
+        let request = message_mutation(request).json(&serde_json::json!({ "key": key }));
         self.send(request).await
     }
 
@@ -207,7 +229,7 @@ impl AxonClient {
             account_id,
             path_segment(event_id)
         ));
-        self.send(request).await
+        self.send(read_request(request)).await
     }
 
     async fn send<T: DeserializeOwned>(
@@ -259,6 +281,22 @@ impl AxonClient {
     }
 }
 
+fn read_request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.timeout(HTTP_REQUEST_TIMEOUT)
+}
+
+fn lifecycle(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.timeout(LIFECYCLE_TIMEOUT)
+}
+
+fn message_mutation(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.timeout(MESSAGE_MUTATION_TIMEOUT)
+}
+
+pub(crate) fn bearer_value_str(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
 pub async fn websocket_task(client: AxonClient, tx: mpsc::UnboundedSender<LiveFrame>) {
     let url = match client.ws_url() {
         Ok(url) => url,
@@ -270,13 +308,31 @@ pub async fn websocket_task(client: AxonClient, tx: mpsc::UnboundedSender<LiveFr
 
     let mut backoff = LIVE_RECONNECT_INITIAL_BACKOFF;
     loop {
-        let reason = match tokio_tungstenite::connect_async(&url).await {
-            Ok((mut socket, _)) => {
-                let _ = tx.send(LiveFrame::Connected);
-                backoff = LIVE_RECONNECT_INITIAL_BACKOFF;
-                read_websocket(&mut socket, &tx).await
+        let req_result: Result<_, String> = (|| {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION as WS_AUTHORIZATION;
+            use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
+            let mut req = url
+                .as_str()
+                .into_client_request()
+                .map_err(|e| e.to_string())?;
+            if let Some(t) = client.token.as_deref() {
+                let value =
+                    WsHeaderValue::from_str(&bearer_value_str(t)).map_err(|e| e.to_string())?;
+                req.headers_mut().insert(WS_AUTHORIZATION, value);
             }
-            Err(err) => err.to_string(),
+            Ok(req)
+        })();
+        let reason = match req_result {
+            Err(e) => e,
+            Ok(req) => match tokio_tungstenite::connect_async(req).await {
+                Ok((mut socket, _)) => {
+                    let _ = tx.send(LiveFrame::Connected);
+                    backoff = LIVE_RECONNECT_INITIAL_BACKOFF;
+                    read_websocket(&mut socket, &tx).await
+                }
+                Err(err) => err.to_string(),
+            },
         };
 
         let _ = tx.send(LiveFrame::Reconnecting {
@@ -528,8 +584,8 @@ pub struct WsEnvelope<T> {
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    #[error("{0}")]
+    Request(String),
     #[error("invalid API JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid base URL: {0}")]
@@ -538,6 +594,16 @@ pub enum ApiError {
     UnsupportedScheme(String),
     #[error("HTTP {status}: {message}")]
     Status { status: StatusCode, message: String },
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(err: reqwest::Error) -> Self {
+        ApiError::Request(if err.is_timeout() {
+            "request timed out".to_owned()
+        } else {
+            format!("request failed: {err}")
+        })
+    }
 }
 
 fn path_segment(value: &str) -> Escaped<'_> {
@@ -707,6 +773,32 @@ mod tests {
         assert_eq!(
             next_live_reconnect_backoff(Duration::from_secs(30)),
             Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn timeout_buckets_are_correct() {
+        let client = AxonClient::new("http://127.0.0.1:8080".to_owned(), None);
+        let read = read_request(client.http.get("http://127.0.0.1:8080/v1/accounts"))
+            .build()
+            .unwrap();
+        let mutation = message_mutation(
+            client
+                .http
+                .post("http://127.0.0.1:8080/v1/accounts/id/rooms/room/send"),
+        )
+        .build()
+        .unwrap();
+        let lc = lifecycle(client.http.post("http://127.0.0.1:8080/v1/accounts/login"))
+            .build()
+            .unwrap();
+
+        assert_eq!(read.timeout(), Some(&HTTP_REQUEST_TIMEOUT));
+        assert_eq!(mutation.timeout(), Some(&MESSAGE_MUTATION_TIMEOUT));
+        assert_eq!(
+            lc.timeout(),
+            Some(&LIFECYCLE_TIMEOUT),
+            "lifecycle ops need a generous timeout to survive megolm key import"
         );
     }
 

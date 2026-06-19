@@ -61,6 +61,7 @@ Matrix `formatted_body` is HTML, not Markdown. Render it only when `content.form
 - The config file lives at `$XDG_CONFIG_HOME/axon-tui/config.toml`, falling back to `~/.config/axon-tui/config.toml`.
 - On first run, create a default config file with all default shortcuts, colors, and display options.
 - Existing config files must be backward-compatible. If new default keys are added, load older configs by filling missing defaults and rewrite the repaired file instead of failing startup.
+- Every config rewrite must preserve supported settings and user comments. If an unsupported option would otherwise be removed, retain it as a commented-out line with an explanatory comment immediately above it.
 - Invalid user-provided key names or color names may remain errors; missing fields should not.
 
 ## Verification

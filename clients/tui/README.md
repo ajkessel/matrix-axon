@@ -14,8 +14,14 @@ Options:
 
 ```bash
 --base-url URL      Axon server URL, default http://127.0.0.1:8080
---account-id UUID  Restrict account and room views to one Axon account
+--account-id UUID   Restrict account and room views to one Axon account
+--token TOKEN       Axon bearer token
 ```
+
+The bearer token is read from `--token`, then `AXON_TOKEN`, then
+`[server].bearer_token` in the config file. Empty token values are ignored.
+The server URL is read from `--base-url`, then `[server].base_url`, then the
+loopback default.
 
 ## What works today
 
@@ -275,7 +281,12 @@ saved values appear in `[display]` and are restored on the next launch.
 Run `/editconfig` to open the config file directly in your `$EDITOR`. If
 `$EDITOR` is not set, `nano` is used on macOS/Linux and `notepad` on Windows.
 The TUI suspends while the editor is open and reloads the config automatically
-when the editor exits.
+when the editor exits. Server URL and bearer-token changes take effect on the
+next launch.
+
+Whenever axon-tui rewrites the config, it preserves supported settings and
+comments. Unsupported options are retained as commented-out lines with an
+explanatory comment immediately above them instead of being deleted.
 
 ## Formatted Messages
 

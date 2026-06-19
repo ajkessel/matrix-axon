@@ -7,6 +7,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use serde::Deserialize;
 use thiserror::Error;
+use toml_edit::{DocumentMut, Item, Value};
+
+const INVALID_OPTION_COMMENT: &str =
+    "# Commented out because this is not a valid axon-tui config option.";
 
 pub const DEFAULT_CONFIG: &str = r#"# axon-tui configuration.
 #
@@ -137,6 +141,14 @@ sender_name = "display_name"
 input_lines = 1
 confirm_logout = true
 search_wrap = true
+
+# ── Server connection ─────────────────────────────────────────────────────────
+# Uncomment and set these if your Axon server is not on the default address
+# (http://127.0.0.1:8080) or requires bearer-token authentication.
+#
+# [server]
+# base_url = "https://axon.example.com"
+# bearer_token = "<token>"
 "#;
 
 pub const DEFAULT_ACCOUNTS_PANEL_WIDTH: u16 = 25;
@@ -148,6 +160,8 @@ pub struct TuiConfig {
     pub display: DisplayOptions,
     pub path: PathBuf,
     pub created_default: bool,
+    pub base_url: Option<String>,
+    pub token: Option<String>,
 }
 
 impl TuiConfig {
@@ -160,8 +174,9 @@ impl TuiConfig {
         let created_default = ensure_default_config(&path)?;
         let text = fs::read_to_string(&path)?;
         let (raw, needs_repair) = RawConfig::load_with_defaults(&text)?;
-        if needs_repair {
-            fs::write(&path, raw.to_toml())?;
+        let (preserved, commented_invalid) = comment_invalid_options(&text);
+        if needs_repair || commented_invalid {
+            fs::write(&path, raw.rewrite_preserving(&preserved, false)?)?;
         }
         Ok(Self {
             shortcuts: raw.shortcuts.into_shortcuts()?,
@@ -169,6 +184,8 @@ impl TuiConfig {
             display: raw.display.into_display_options()?,
             path,
             created_default,
+            base_url: raw.base_url,
+            token: raw.token,
         })
     }
 
@@ -183,11 +200,10 @@ impl TuiConfig {
         let text = fs::read_to_string(path)?;
         let (mut raw, _) = RawConfig::load_with_defaults(&text)?;
         raw.display.input_lines = input_lines;
-        raw.display.accounts_panel_width =
-            (accounts_panel_width != DEFAULT_ACCOUNTS_PANEL_WIDTH).then_some(accounts_panel_width);
-        raw.display.rooms_panel_width_adj =
-            (rooms_panel_width_adj != 0).then_some(rooms_panel_width_adj);
-        fs::write(path, raw.to_toml())?;
+        raw.display.accounts_panel_width = Some(accounts_panel_width);
+        raw.display.rooms_panel_width_adj = Some(rooms_panel_width_adj);
+        let (preserved, _) = comment_invalid_options(&text);
+        fs::write(path, raw.rewrite_preserving(&preserved, true)?)?;
         Ok(())
     }
 
@@ -209,6 +225,8 @@ impl TuiConfig {
                 .expect("default display options parse"),
             path: PathBuf::from("/tmp/axon-tui-test-config.toml"),
             created_default: false,
+            base_url: None,
+            token: None,
         }
     }
 }
@@ -345,6 +363,8 @@ struct RawConfig {
     shortcuts: RawShortcuts,
     colors: RawColorScheme,
     display: RawDisplayOptions,
+    base_url: Option<String>,
+    token: Option<String>,
 }
 
 impl RawConfig {
@@ -354,6 +374,10 @@ impl RawConfig {
         let repaired = raw.shortcuts.merge(parsed.shortcuts)
             | raw.colors.merge(parsed.colors)
             | raw.display.merge(parsed.display);
+        if let Some(server) = parsed.server {
+            raw.token = server.bearer_token;
+            raw.base_url = server.base_url;
+        }
         Ok((raw, repaired))
     }
 
@@ -422,7 +446,62 @@ impl RawConfig {
                 accounts_panel_width: None,
                 rooms_panel_width_adj: None,
             },
+            base_url: None,
+            token: None,
         }
+    }
+
+    fn rewrite_preserving(
+        &self,
+        original: &str,
+        replace_saved_display: bool,
+    ) -> Result<String, ConfigError> {
+        let mut document = original.parse::<DocumentMut>()?;
+        let defaults = self.to_toml().parse::<DocumentMut>()?;
+
+        for section in ["shortcuts", "colors", "display"] {
+            merge_missing_table(&mut document, &defaults, section);
+        }
+
+        if replace_saved_display {
+            // If the user wrote `display = { ... }` (inline table), as_table_mut()
+            // returns None. Replace the whole entry with the regular table from
+            // defaults so we can update individual keys safely.
+            if document["display"].as_table_mut().is_none() {
+                document["display"] = defaults["display"].clone();
+            }
+            let display = document["display"]
+                .as_table_mut()
+                .expect("display is a regular table");
+            replace_integer_preserving_decor(
+                display
+                    .get_mut("input_lines")
+                    .expect("display defaults include input_lines"),
+                i64::from(self.display.input_lines),
+            );
+            replace_integer_preserving_decor(
+                display
+                    .get_mut("accounts_panel_width")
+                    .expect("saved display includes accounts_panel_width"),
+                i64::from(
+                    self.display
+                        .accounts_panel_width
+                        .expect("save_display sets accounts_panel_width"),
+                ),
+            );
+            replace_integer_preserving_decor(
+                display
+                    .get_mut("rooms_panel_width_adj")
+                    .expect("saved display includes rooms_panel_width_adj"),
+                i64::from(
+                    self.display
+                        .rooms_panel_width_adj
+                        .expect("save_display sets rooms_panel_width_adj"),
+                ),
+            );
+        }
+
+        Ok(document.to_string())
     }
 
     fn to_toml(&self) -> String {
@@ -649,11 +728,197 @@ search_wrap = {search_wrap}
     }
 }
 
+fn replace_integer_preserving_decor(item: &mut Item, replacement: i64) {
+    let decor = item.as_value().map(|value| value.decor().clone());
+    let mut replacement = Value::from(replacement);
+    if let Some(decor) = decor {
+        *replacement.decor_mut() = decor;
+    }
+    *item = Item::Value(replacement);
+}
+
+fn merge_missing_table(document: &mut DocumentMut, defaults: &DocumentMut, section: &str) {
+    let Some(default_item) = defaults.get(section) else {
+        return;
+    };
+    if document.get(section).is_none() {
+        document[section] = default_item.clone();
+        return;
+    }
+
+    let Some(table) = document[section].as_table_mut() else {
+        return;
+    };
+    let Some(default_table) = default_item.as_table() else {
+        return;
+    };
+    for (key, item) in default_table {
+        if !table.contains_key(key) {
+            table.insert(key, item.clone());
+        }
+    }
+}
+
+fn comment_invalid_options(text: &str) -> (String, bool) {
+    let mut output = String::with_capacity(text.len());
+    let mut section: Option<&str> = None;
+    let mut invalid_section = false;
+    let mut invalid_option_continuation = false;
+    let mut changed = false;
+
+    for line in text.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = content.trim();
+
+        if let Some(table_name) = table_name(trimmed) {
+            if is_valid_section(table_name) {
+                section = Some(table_name);
+                invalid_section = false;
+                invalid_option_continuation = false;
+                output.push_str(line);
+            } else {
+                section = None;
+                invalid_section = true;
+                invalid_option_continuation = false;
+                push_commented_invalid_line(&mut output, content, line.ends_with('\n'));
+                changed = true;
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            output.push_str(line);
+            continue;
+        }
+
+        let key = assignment_key(trimmed);
+        let invalid_option = invalid_section
+            || key.is_some_and(|key| !is_valid_option(section, key))
+            || (key.is_none() && invalid_option_continuation);
+        if invalid_option {
+            push_commented_invalid_line(&mut output, content, line.ends_with('\n'));
+            invalid_option_continuation = !invalid_section;
+            changed = true;
+        } else {
+            invalid_option_continuation = false;
+            output.push_str(line);
+        }
+    }
+
+    (output, changed)
+}
+
+fn push_commented_invalid_line(output: &mut String, line: &str, had_newline: bool) {
+    output.push_str(INVALID_OPTION_COMMENT);
+    output.push('\n');
+    output.push_str("# ");
+    output.push_str(line);
+    if had_newline {
+        output.push('\n');
+    }
+}
+
+fn table_name(line: &str) -> Option<&str> {
+    let header = line
+        .split_once('#')
+        .map_or(line, |(header, _)| header)
+        .trim();
+    header.strip_prefix('[')?.strip_suffix(']').map(str::trim)
+}
+
+fn assignment_key(line: &str) -> Option<&str> {
+    line.split_once('=').map(|(key, _)| key.trim())
+}
+
+fn is_valid_section(section: &str) -> bool {
+    matches!(section, "shortcuts" | "colors" | "display" | "server")
+}
+
+fn is_valid_option(section: Option<&str>, key: &str) -> bool {
+    match section {
+        Some("shortcuts") => matches!(
+            key,
+            "next_room"
+                | "previous_room"
+                | "next_account"
+                | "previous_account"
+                | "quit"
+                | "complete"
+                | "submit"
+                | "clear_input"
+                | "backspace"
+                | "cursor_start"
+                | "cursor_end"
+                | "cursor_left"
+                | "cursor_right"
+                | "edit_previous"
+                | "edit_next"
+                | "message_down"
+                | "message_up"
+                | "message_page_up"
+                | "message_page_down"
+                | "reply"
+                | "thread"
+                | "edit_message"
+                | "redact_message"
+                | "react_message"
+                | "unreact_message"
+                | "focus_next"
+                | "focus_prev"
+                | "find"
+                | "toggle_accounts_panel"
+                | "toggle_rooms_panel"
+                | "toggle_unread_filter"
+                | "refresh"
+        ),
+        Some("colors") => matches!(
+            key,
+            "border"
+                | "selected_room"
+                | "unread_count"
+                | "message_sender"
+                | "own_message_sender"
+                | "input_hint"
+                | "status"
+                | "background"
+                | "accounts_foreground"
+                | "rooms_foreground"
+                | "messages_foreground"
+                | "input_foreground"
+                | "accounts_background"
+                | "rooms_background"
+                | "messages_background"
+                | "input_background"
+                | "popup_background"
+        ),
+        Some("display") => matches!(
+            key,
+            "debug"
+                | "show_state_events"
+                | "sender_name"
+                | "input_lines"
+                | "confirm_logout"
+                | "search_wrap"
+                | "accounts_panel_width"
+                | "rooms_panel_width_adj"
+        ),
+        Some("server") => matches!(key, "base_url" | "bearer_token"),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct PartialRawConfig {
     shortcuts: Option<PartialRawShortcuts>,
     colors: Option<PartialRawColorScheme>,
     display: Option<PartialDisplayOptions>,
+    server: Option<PartialRawServer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PartialRawServer {
+    base_url: Option<String>,
+    bearer_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1239,6 +1504,8 @@ pub enum ConfigError {
     Io(#[from] io::Error),
     #[error("config TOML is invalid: {0}")]
     Toml(#[from] toml::de::Error),
+    #[error("config TOML could not be rewritten: {0}")]
+    TomlEdit(#[from] toml_edit::TomlError),
     #[error("invalid key binding for {field}: {value}")]
     InvalidKey { field: &'static str, value: String },
     #[error("invalid color for {field}: {value}")]
@@ -1301,6 +1568,10 @@ unread_count = "yellow"
 message_sender = "green"
 input_hint = "dark-gray"
 status = "cyan"
+
+[server]
+base_url = "https://axon.example.com"
+bearer_token = "secret-token"
 "#,
         )
         .expect("write old config");
@@ -1327,6 +1598,10 @@ status = "cyan"
         assert!(repaired.contains("show_state_events = false"));
         assert!(repaired.contains("sender_name = \"display_name\""));
         assert!(repaired.contains("confirm_logout = true"));
+        assert!(repaired.contains("base_url = \"https://axon.example.com\""));
+        assert!(repaired.contains("bearer_token = \"secret-token\""));
+        assert_eq!(config.base_url.as_deref(), Some("https://axon.example.com"));
+        assert_eq!(config.token.as_deref(), Some("secret-token"));
         let _ = fs::remove_file(path);
     }
 
@@ -1359,8 +1634,109 @@ history_next = "ctrl-j"
         let repaired = fs::read_to_string(&path).expect("read repaired config");
         assert!(repaired.contains("edit_previous = \"ctrl-k\""));
         assert!(repaired.contains("edit_next = \"ctrl-j\""));
-        assert!(!repaired.contains("history_previous"));
-        assert!(!repaired.contains("history_next"));
+        assert!(repaired.contains(&format!(
+            "{INVALID_OPTION_COMMENT}\n# history_previous = \"ctrl-k\""
+        )));
+        assert!(repaired.contains(&format!(
+            "{INVALID_OPTION_COMMENT}\n# history_next = \"ctrl-j\""
+        )));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_display_preserves_server_and_comments_invalid_options() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-save-server-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let config_with_inline_comment =
+            DEFAULT_CONFIG.replacen("input_lines = 1", "input_lines = 1 # keep height", 1);
+        let original = format!(
+            "{config_with_inline_comment}\n\
+             # keep this server comment\n\
+             [server]\n\
+             base_url = \"https://axon.example.com\"\n\
+             bearer_token = \"secret-token\"\n\
+             retired_option = \"keep me\"\n"
+        );
+        fs::write(&path, original).expect("write config");
+
+        TuiConfig::save_display(&path, 3, 25, 0).expect("save display");
+
+        let saved = fs::read_to_string(&path).expect("read saved config");
+        assert!(saved.contains("# keep this server comment"));
+        assert!(saved.contains("base_url = \"https://axon.example.com\""));
+        assert!(saved.contains("bearer_token = \"secret-token\""));
+        assert!(saved.contains(&format!(
+            "{INVALID_OPTION_COMMENT}\n# retired_option = \"keep me\""
+        )));
+        assert!(saved.contains("input_lines = 3"));
+        assert!(saved.contains("input_lines = 3 # keep height"));
+        assert!(saved.contains("accounts_panel_width = 25"));
+        assert!(saved.contains("rooms_panel_width_adj = 0"));
+
+        let config = TuiConfig::load_or_create_at(path.clone()).expect("reload saved config");
+        assert_eq!(config.base_url.as_deref(), Some("https://axon.example.com"));
+        assert_eq!(config.token.as_deref(), Some("secret-token"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rewrite_comments_out_invalid_tables_without_deleting_them() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-invalid-table-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let original = format!(
+            "{DEFAULT_CONFIG}\n\
+             [retired]\n\
+             first = \"one\"\n\
+             second = 2\n"
+        );
+        fs::write(&path, original).expect("write config");
+
+        TuiConfig::load_or_create_at(path.clone()).expect("load and rewrite config");
+
+        let saved = fs::read_to_string(&path).expect("read rewritten config");
+        assert!(saved.contains(&format!("{INVALID_OPTION_COMMENT}\n# [retired]")));
+        assert!(saved.contains(&format!("{INVALID_OPTION_COMMENT}\n# first = \"one\"")));
+        assert!(saved.contains(&format!("{INVALID_OPTION_COMMENT}\n# second = 2")));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rewrite_comments_every_line_of_multiline_invalid_option() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-invalid-multiline-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let original = format!(
+            "{DEFAULT_CONFIG}\n\
+             [server]\n\
+             retired_hosts = [\n\
+               \"one.example.com\",\n\
+               \"two.example.com\",\n\
+             ]\n"
+        );
+        fs::write(&path, original).expect("write config");
+
+        TuiConfig::load_or_create_at(path.clone()).expect("load and rewrite config");
+
+        let saved = fs::read_to_string(&path).expect("read rewritten config");
+        for line in [
+            "retired_hosts = [",
+            "\"one.example.com\",",
+            "\"two.example.com\",",
+            "]",
+        ] {
+            assert!(
+                saved.contains(&format!("{INVALID_OPTION_COMMENT}\n# {line}")),
+                "missing commented invalid line: {line}"
+            );
+        }
         let _ = fs::remove_file(path);
     }
 
@@ -1406,6 +1782,27 @@ input_lines = "one"
             fs::read_to_string(&path).expect("read invalid config"),
             original
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_display_survives_inline_table_display_section() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-inline-table-display-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let original = DEFAULT_CONFIG.replacen(
+            "[display]\ndebug = false\nshow_state_events = false\nsender_name = \"display_name\"\ninput_lines = 1\nconfirm_logout = true\nsearch_wrap = true",
+            "display = { input_lines = 2 }",
+            1,
+        );
+        fs::write(&path, &original).expect("write config with inline display table");
+
+        TuiConfig::save_display(&path, 3, 25, 0).expect("save display with inline table");
+
+        let saved = fs::read_to_string(&path).expect("read saved config");
+        assert!(saved.contains("input_lines = 3"));
         let _ = fs::remove_file(path);
     }
 

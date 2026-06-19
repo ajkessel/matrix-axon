@@ -850,8 +850,22 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         }
     };
 
+    let auth_line = if app.client.has_bearer_token() {
+        "Auth: bearer-token".to_owned()
+    } else {
+        "Auth: none (insecure, unauthenticated)".to_owned()
+    };
+
+    let version = format!(
+        "Version: {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_HASH"),
+    );
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
+        auth_line,
+        version,
         conn_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
@@ -1148,7 +1162,7 @@ mod tests {
     #[test]
     fn overflowing_command_response_opens_popup() {
         let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -1170,7 +1184,7 @@ mod tests {
     #[test]
     fn fitting_command_response_stays_in_entry_box() {
         let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -1190,7 +1204,7 @@ mod tests {
     #[test]
     fn restored_command_input_reduces_available_response_width() {
         let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -1262,7 +1276,7 @@ mod tests {
     #[test]
     fn room_info_popup_lists_summary_and_known_members() {
         let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );

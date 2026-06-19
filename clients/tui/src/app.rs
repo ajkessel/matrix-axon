@@ -30,6 +30,8 @@ pub(crate) use rooms::account_localpart;
 use timeline::should_show_event;
 
 const TIMELINE_LIMIT: usize = 50;
+pub(super) const PENDING_ECHO_MSG: &str =
+    "message not yet confirmed by server — please wait a moment and try again";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -840,7 +842,7 @@ impl App {
                 }
             }
             Command::Quit => self.should_quit = true,
-            Command::Send(body) => self.send_message_to_room(&body).await,
+            Command::Send(body) => self.send_message_to_room(&body),
             Command::Invalid(message)
             | Command::ApiUnsupported(message)
             | Command::Unknown(message) => {
@@ -895,6 +897,10 @@ impl App {
             self.status = Status::from("select a displayed message before replying".to_owned());
             return;
         };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(PENDING_ECHO_MSG.to_owned());
+            return;
+        }
         self.status = Status::EventAction {
             debug: format!("reply to {} waits for the Axon write API", event.event_id),
             redacted: "reply to message waits for the Axon write API",
@@ -917,6 +923,9 @@ impl App {
             .selected_message_id()
             .map(str::to_owned)
             .ok_or_else(|| "no displayed messages".to_owned())?;
+        if event_id.starts_with("local-echo:") {
+            return Err(PENDING_ECHO_MSG.to_owned());
+        }
         let reaction_key = self
             .take_reaction_key(input)
             .ok_or_else(|| format!("unknown or ambiguous emoji: {input}"))?;
@@ -929,6 +938,10 @@ impl App {
                 Status::from("select a displayed message before starting a thread".to_owned());
             return;
         };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(PENDING_ECHO_MSG.to_owned());
+            return;
+        }
         self.status = Status::EventAction {
             debug: format!(
                 "thread from {} waits for the Axon write API",
@@ -943,6 +956,10 @@ impl App {
             self.status = Status::from("select a displayed message before editing".to_owned());
             return;
         };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(PENDING_ECHO_MSG.to_owned());
+            return;
+        }
         let event_id = event.event_id.clone();
         let body = event.display_body();
         self.input.buffer = body;
@@ -956,26 +973,78 @@ impl App {
         };
     }
 
-    async fn send_message_to_room(&mut self, body: &str) {
+    fn send_message_to_room(&mut self, body: &str) {
         let Some(room) = self.selected_room().cloned() else {
             self.status = Status::from("select a room before sending".to_owned());
             return;
         };
-        match self
-            .client
-            .send_message(room.account_id, &room.room_id, body)
-            .await
-        {
-            Ok(r) => {
-                self.messages.scroll = usize::MAX;
-                self.live.pending_own_event_id = Some(r.event_id.clone());
-                self.status = Status::EventAction {
-                    debug: format!("sent: {}", r.event_id),
-                    redacted: "sent",
-                };
-            }
-            Err(err) => self.status = Status::Info(format!("send failed: {err}")),
-        }
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let sender = room
+            .account_user_id
+            .clone()
+            .or_else(|| self.live.own_senders.get(&room.account_id).cloned())
+            .or_else(|| {
+                // Fallback: account_user_id is always present on AccountDto even
+                // when the room DTO omits it (e.g. the server hasn't joined yet).
+                self.accounts
+                    .accounts
+                    .iter()
+                    .find(|a| a.account_id == room.account_id)
+                    .map(|a| a.user_id.clone())
+            })
+            .unwrap_or_default();
+        // Optimistic echo: insert before spawning so the message appears on the
+        // very next frame. The spawned task delivers the real event_id (or error)
+        // back via the lifecycle channel without blocking the render loop.
+        let temp_id = format!("local-echo:{now_ms}");
+        let key = RoomKey {
+            account_id: room.account_id,
+            room_id: room.room_id.clone(),
+        };
+        let echo = EventDto {
+            account_id: room.account_id,
+            event_id: temp_id.clone(),
+            room_id: room.room_id.clone(),
+            sender,
+            state_key: None,
+            origin_ts: now_ms,
+            event_type: "m.room.message".to_owned(),
+            content: None,
+            body: Some(body.to_owned()),
+            relates_to: None,
+            redacted: false,
+            redaction_event_id: None,
+        };
+        self.messages.scroll = usize::MAX;
+        // Clear selection so the next message-targeted command auto-selects
+        // rather than staying on whatever message was selected before the send.
+        self.messages.selection = None;
+        self.messages
+            .events
+            .entry(key.clone())
+            .or_default()
+            .push(echo);
+
+        let client = self.client.clone();
+        let body = body.to_owned();
+        tokio::spawn(async move {
+            let result = client
+                .send_message(room.account_id, &room.room_id, &body)
+                .await
+                .map(|r| r.event_id)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(LifecycleOutcome::MessageSent {
+                key,
+                temp_id,
+                result,
+            });
+        });
     }
 
     pub(crate) async fn send_edit(&mut self, event_id: &str, body: &str) {
@@ -1009,6 +1078,10 @@ impl App {
             self.status = Status::from("select a displayed message before redacting".to_owned());
             return;
         };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(PENDING_ECHO_MSG.to_owned());
+            return;
+        }
         let event_id = event.event_id.clone();
         let room = self.selected_room().cloned().expect("event implies room");
         match self
@@ -1187,7 +1260,7 @@ mod tests {
 
     fn app_with_rooms(rooms: Vec<RoomDto>) -> App {
         let mut app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -1236,7 +1309,7 @@ mod tests {
         let filter_id = Uuid::from_u128(1);
         let other_id = Uuid::from_u128(2);
         let mut app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             Some(filter_id),
             TuiConfig::test_default(),
         );
@@ -3479,7 +3552,7 @@ mod tests {
     #[test]
     pub(crate) fn new_app_starts_with_one_time_input_help() {
         let app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -3491,7 +3564,7 @@ mod tests {
     #[tokio::test]
     async fn first_input_action_dismisses_input_help() {
         let mut app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
@@ -3505,7 +3578,7 @@ mod tests {
     #[tokio::test]
     async fn room_switch_shortcut_dismisses_input_help_when_no_rooms_exist() {
         let mut app = App::new(
-            AxonClient::new("http://127.0.0.1:8080".to_owned()),
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
         );
