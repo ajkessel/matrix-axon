@@ -1247,7 +1247,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         desc1: &str,
         desc2: &str,
     ) -> String {
-        format!("  {} / {}   {}/{}", key1, key2, desc1, desc2)
+        format!(
+            "  {:<22}  {} / {}",
+            format!("{} / {}", key1, key2),
+            desc1,
+            desc2
+        )
     }
     vec![
         "Focus:".to_owned(),
@@ -1355,10 +1360,13 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         //kv(shortcuts.cursor_end.label(), "cursor to end of line"),
         //kv(shortcuts.cursor_left.label(), "cursor left"),
         //kv(shortcuts.cursor_right.label(), "cursor right"),
-        format!(
-            "  {} / {}   select previous / next message",
-            shortcuts.edit_previous.label(),
-            shortcuts.edit_next.label()
+        kv(
+            format!(
+                "{} / {}",
+                shortcuts.edit_previous.label(),
+                shortcuts.edit_next.label()
+            ),
+            "select previous / next message",
         ),
     ]
 }
