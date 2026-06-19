@@ -192,6 +192,21 @@ impl App {
         self.messages.selection.as_deref()
     }
 
+    fn selection_status(&self, index: usize, count: usize) -> String {
+        let mut s = format!("selected message {} of {}", index + 1, count);
+        if self
+            .selected_message_event()
+            .and_then(|e| e.image_mxc())
+            .is_some()
+        {
+            s.push_str(&format!(
+                "  [{}: preview image]",
+                self.shortcuts.media_preview.label()
+            ));
+        }
+        s
+    }
+
     pub(crate) fn selected_message_event(&self) -> Option<&EventDto> {
         let selected_message = self.messages.selection.as_deref()?;
         self.selected_events()
@@ -210,7 +225,7 @@ impl App {
         let event_id = events[0].event_id.clone();
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(0);
-        self.status = Status::from(format!("selected message 1 of {count}"));
+        self.status = Status::from(self.selection_status(0, count));
     }
 
     pub(crate) fn select_last_message(&mut self) {
@@ -225,7 +240,7 @@ impl App {
         let event_id = events[last].event_id.clone();
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(last);
-        self.status = Status::from(format!("selected message {count} of {count}"));
+        self.status = Status::from(self.selection_status(last, count));
     }
 
     pub(crate) fn move_selected_message(&mut self, offset: isize) {
@@ -248,7 +263,7 @@ impl App {
         };
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
+        self.status = Status::from(self.selection_status(next, event_count));
     }
 
     pub(crate) fn jump_to_first_message(&mut self) {
@@ -338,7 +353,7 @@ impl App {
         };
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
+        self.status = Status::from(self.selection_status(next, event_count));
     }
 
     pub(crate) fn ensure_message_index_visible(&mut self, index: usize) {
