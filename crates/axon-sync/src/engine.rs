@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{LiveEvent, LiveFrame, SyncConfig};
+use axon_core::{LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -250,6 +250,14 @@ impl SyncEngine {
             self.cancel.clone(),
             self.locks.clone(),
         )
+    }
+
+    /// The runtime sender-trust port, for the API layer's verification-bundle
+    /// route (M7c). `axon-server` wraps this in an adapter implementing its
+    /// `SenderTrustService` port. Shares this engine's store and client manager;
+    /// it's a read-only port and takes no lifecycle lock (see [`trust`]).
+    pub fn sender_trust(&self) -> crate::trust::SenderTrustEngine {
+        crate::trust::SenderTrustEngine::new(self.store.clone(), self.manager.clone())
     }
 
     /// Cancel all per-account tasks and wait for them to finish. Safe to call
@@ -498,12 +506,23 @@ async fn persist_timeline_event(
         "persisted event"
     );
 
+    // Sibling rows are best-effort: a failure here must not take down sync. Done
+    // *before* the live emit so the frame can carry the verdict actually persisted
+    // (the `COALESCE`d snapshot), not the freshly-derived one — they diverge on a
+    // duplicate delivery whose trust changed, and a live subscriber must see the
+    // same immutable snapshot a later timeline read returns (ADR 0031).
+    let stored_trust =
+        persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
+
     // Fan the event out to any live `/v1/ws` subscribers. Skip the work entirely
     // when nobody is listening (the common case for a headless server) so we
     // don't clone the content needlessly. `send` errors only when there are no
     // receivers — harmless to ignore (a receiver may have dropped between the
     // count check and the send), and never fatal to sync.
     if ctx.live_tx.receiver_count() > 0 {
+        // The effective stored verdict, so a live subscriber and a subsequent
+        // timeline read agree. `None` for UTDs (no `enc_info` yet) and unencrypted
+        // events.
         let _ = ctx.live_tx.send(LiveFrame::Timeline(LiveEvent {
             account_id: ctx.account_id,
             event_id: event_id.clone(),
@@ -515,23 +534,27 @@ async fn persist_timeline_event(
             content: new_ev.content.clone(),
             body: decrypted_body_text.clone(),
             relates_to: new_ev.relates_to.clone(),
+            sender_trust: stored_trust,
         }));
     }
-
-    // Sibling rows are best-effort: a failure here must not take down sync.
-    persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
 }
 
 /// Write the crypto sibling rows for an event already persisted to `events`.
 /// `ciphertext` is the `m.room.encrypted` content for UTDs (`None` otherwise);
 /// `enc_info` is the SDK decryption info for decrypted events (`None` for UTDs).
+///
+/// Returns the **effective stored `sender_trust`** verdict (the `COALESCE`d value
+/// the crypto-sibling upsert settled on), so the caller can emit a live frame
+/// carrying the persisted snapshot rather than the freshly-derived verdict — they
+/// diverge on a duplicate delivery whose trust changed (ADR 0031). `None` for a
+/// UTD (no `enc_info`), an unencrypted event, or if the sibling write failed.
 async fn persist_event_siblings(
     ctx: &PersistContext,
     event_id: &str,
     room_id: &str,
     ciphertext: Option<serde_json::Value>,
     enc_info: Option<&EncryptionInfo>,
-) {
+) -> Option<String> {
     if let Some(ciphertext) = ciphertext {
         let algorithm = ciphertext
             .get("algorithm")
@@ -562,14 +585,18 @@ async fn persist_event_siblings(
 
     if let Some(info) = enc_info {
         let meta = crate::meta::crypto_meta(info);
-        if let Err(err) = ctx
+        match ctx
             .store
             .upsert_event_crypto(&meta.as_event_crypto(ctx.account_id, event_id))
             .await
         {
-            tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist crypto sibling");
+            Ok(stored_trust) => return stored_trust,
+            Err(err) => {
+                tracing::warn!(account_id = %ctx.account_id, event_id, error = %err, "failed to persist crypto sibling");
+            }
         }
     }
+    None
 }
 
 /// Event handler: project a room-state event into the `room_state` table (the
@@ -795,6 +822,18 @@ async fn run_account(
         verify_cancel.clone(),
     ));
 
+    // Sender-trust overlay watcher (M7c): push `sender_trust.violation` frames when
+    // a sender's identity enters a verification violation. Same child-token +
+    // join-handle lifecycle as the watchers above, so it ends with this run and is
+    // drained cleanly below. Read-only (no persisted state), so no identity lock.
+    let trust_cancel = cancel.child_token();
+    let trust_handle = tokio::spawn(watch_sender_trust(
+        client.clone(),
+        account.account_id,
+        live_tx.clone(),
+        trust_cancel.clone(),
+    ));
+
     let mut state = sync_service.state();
     let result = loop {
         tokio::select! {
@@ -827,6 +866,14 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "verification watcher did not shut down cleanly"
+        );
+    }
+    trust_cancel.cancel();
+    if let Err(err) = trust_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "sender-trust watcher did not shut down cleanly"
         );
     }
 
@@ -884,6 +931,77 @@ async fn watch_verification(
                         &cancel,
                     )
                     .await;
+                }
+                None => return,
+            },
+        }
+    }
+}
+
+/// Watch for sender identity changes and surface verification-violation
+/// *transitions* as live `sender_trust.violation` overlay frames (M7c). The
+/// per-event `sender_trust` snapshot the read API returns is immutable (what
+/// Matrix's evidence said when the event arrived); a *current* identity can later
+/// enter — or leave — a violation (the sender's cross-signing key changed). This
+/// watcher pushes that fact so a client re-evaluates the affected sender — it
+/// names the `user_id`, not per-event diffs; the verification bundle / timeline
+/// re-read is the source of truth.
+///
+/// Subscribes to the SDK's `user_identities_stream` and tracks which senders it
+/// has reported as in-violation, so it emits exactly on a *change*: a frame with
+/// `verification_violation: true` when a sender enters a violation and one with
+/// `false` when it clears — the latter is what lets a client un-badge from the
+/// live stream alone. Runs until `cancel` fires or the subscription closes; never
+/// persists anything (the snapshot is the durable record).
+async fn watch_sender_trust(
+    client: Client,
+    account_id: Uuid,
+    live_tx: broadcast::Sender<LiveFrame>,
+    cancel: CancellationToken,
+) {
+    use futures_util::{pin_mut, StreamExt};
+    use matrix_sdk::ruma::OwnedUserId;
+    use std::collections::HashSet;
+
+    let stream = match client.encryption().user_identities_stream().await {
+        Ok(stream) => stream,
+        Err(err) => {
+            // Known limitation (GH issue #101): a subscribe failure disables the
+            // overlay for the rest of this run with no retry. The bundle read
+            // endpoint still reports current trust, so it's degraded, not blind.
+            tracing::warn!(%account_id, error = %err, "could not subscribe to identity changes; sender-trust overlay disabled for this run");
+            return;
+        }
+    };
+    pin_mut!(stream);
+    // Senders we've reported as in-violation, so we emit only on a transition (and
+    // a clear emits a single `false` frame rather than going silent).
+    let mut in_violation: HashSet<OwnedUserId> = HashSet::new();
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            next = stream.next() => match next {
+                Some(updates) => {
+                    for identity in updates.new.values().chain(updates.changed.values()) {
+                        let user_id = identity.user_id().to_owned();
+                        let violation = identity.has_verification_violation();
+                        // `insert`/`remove` return whether the set actually changed —
+                        // our transition test, so an unrelated identity change for a
+                        // sender whose violation state is unchanged emits nothing.
+                        let changed = if violation {
+                            in_violation.insert(user_id.clone())
+                        } else {
+                            in_violation.remove(&user_id)
+                        };
+                        if changed {
+                            tracing::debug!(%account_id, %user_id, verification_violation = violation, "sender trust changed");
+                            let _ = live_tx.send(LiveFrame::SenderTrustChanged(SenderTrustFrame {
+                                account_id,
+                                user_id: user_id.as_str().to_owned(),
+                                verification_violation: violation,
+                            }));
+                        }
+                    }
                 }
                 None => return,
             },

@@ -3,7 +3,9 @@
 //! `engine.rs`/`redecrypt.rs` so they're trivially unit-testable. See ADR 0015.
 
 use axon_store::EventCrypto;
-use matrix_sdk::deserialized_responses::{AlgorithmInfo, EncryptionInfo, VerificationState};
+use matrix_sdk::deserialized_responses::{
+    AlgorithmInfo, EncryptionInfo, VerificationLevel, VerificationState,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -43,6 +45,7 @@ pub(crate) struct CryptoMeta {
     forwarder_device_id: Option<String>,
     device_id: Option<String>,
     verification_state: &'static str,
+    sender_trust: &'static str,
 }
 
 impl CryptoMeta {
@@ -64,7 +67,34 @@ impl CryptoMeta {
             forwarder_device_id: self.forwarder_device_id.as_deref(),
             device_id: self.device_id.as_deref(),
             verification_state: self.verification_state,
+            sender_trust: Some(self.sender_trust),
         }
+    }
+}
+
+/// Map the SDK's [`VerificationState`] to the four-valued M7c sender-trust
+/// verdict recorded at decrypt time. This is the standard Matrix per-message
+/// shield, collapsed to what a client needs to badge a sender:
+///
+/// * `verified` — the sending device is cross-signed by the sender's own master
+///   key (it's really them).
+/// * `verification_violation` — the sender's identity was already in conflict
+///   when the event arrived (previously verified, identity since changed).
+/// * `unknown` — the message couldn't be linked back to any device (deleted
+///   device, key from an insecure source).
+/// * `unverified` — everything else unverified (unverified identity, unsigned
+///   device, mismatched sender).
+///
+/// Unlike the coarse [`crypto_meta`] `verification_state` (`verified`/
+/// `unverified`), this preserves the *reason* a message is unverified.
+pub(crate) fn sender_trust(state: &VerificationState) -> &'static str {
+    match state {
+        VerificationState::Verified => "verified",
+        VerificationState::Unverified(VerificationLevel::VerificationViolation) => {
+            "verification_violation"
+        }
+        VerificationState::Unverified(VerificationLevel::None(_)) => "unknown",
+        VerificationState::Unverified(_) => "unverified",
     }
 }
 
@@ -95,6 +125,7 @@ pub(crate) fn crypto_meta(info: &EncryptionInfo) -> CryptoMeta {
     };
 
     CryptoMeta {
+        sender_trust: sender_trust(&info.verification_state),
         session_id,
         curve25519_key,
         ed25519_key,
@@ -158,5 +189,42 @@ mod tests {
     #[test]
     fn redacts_absent_is_none() {
         assert_eq!(redacts(&json!({ "type": "m.room.message" })), None);
+    }
+
+    #[test]
+    fn sender_trust_maps_every_verification_level() {
+        use matrix_sdk::deserialized_responses::DeviceLinkProblem;
+
+        assert_eq!(sender_trust(&VerificationState::Verified), "verified");
+        assert_eq!(
+            sender_trust(&VerificationState::Unverified(
+                VerificationLevel::VerificationViolation
+            )),
+            "verification_violation"
+        );
+        // "couldn't link to a device" → unknown, regardless of the link problem.
+        assert_eq!(
+            sender_trust(&VerificationState::Unverified(VerificationLevel::None(
+                DeviceLinkProblem::MissingDevice
+            ))),
+            "unknown"
+        );
+        assert_eq!(
+            sender_trust(&VerificationState::Unverified(VerificationLevel::None(
+                DeviceLinkProblem::InsecureSource
+            ))),
+            "unknown"
+        );
+        // Everything else unverified collapses to the plain verdict.
+        for level in [
+            VerificationLevel::UnverifiedIdentity,
+            VerificationLevel::UnsignedDevice,
+            VerificationLevel::MismatchedSender,
+        ] {
+            assert_eq!(
+                sender_trust(&VerificationState::Unverified(level)),
+                "unverified"
+            );
+        }
     }
 }

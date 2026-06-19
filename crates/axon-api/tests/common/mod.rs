@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, ApiError, DeleteError, FlowStage, FlowSummary, LoginError, LogoutError,
-    MessageSender, RecoverError, SendError, TokenVerifier, VerificationService, VerifyError,
+    AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, LoginError,
+    LogoutError, MessageSender, RecoverError, SendError, SenderTrustService, TokenVerifier,
+    TrustBundle, TrustError, TrustSnapshot, VerificationService, VerifyError,
 };
 use uuid::Uuid;
 
@@ -587,5 +588,64 @@ impl MessageSender for StubSender {
             key: key.to_owned(),
         });
         self.outcome.to_result()
+    }
+}
+
+/// An in-memory [`SenderTrustService`] for tests: returns a preset bundle (or
+/// error), so the verification-bundle route can be exercised (auth gate, path
+/// decoding, error → status mapping, DTO shape) without a real client.
+pub struct StubTrust {
+    bundle: Option<TrustBundle>,
+    error: Option<fn() -> TrustError>,
+}
+
+impl StubTrust {
+    /// A stub returning a representative bundle: a `verified` at-decrypt snapshot
+    /// paired with a currently-cross-signed, verified sender.
+    pub fn ok() -> Self {
+        Self {
+            bundle: Some(TrustBundle {
+                sender: "@bob:localhost".to_owned(),
+                snapshot: Some(TrustSnapshot {
+                    sender_trust: Some("verified".to_owned()),
+                    verification_state: Some("verified".to_owned()),
+                    device_id: Some("BOBDEVICE".to_owned()),
+                    curve25519_key: Some("CURVE".to_owned()),
+                    ed25519_key: Some("ED".to_owned()),
+                    session_id: Some("session-1".to_owned()),
+                    forwarded: Some(false),
+                    forwarder_user_id: None,
+                    forwarder_device_id: None,
+                }),
+                current: CurrentTrust {
+                    device_known: true,
+                    device_cross_signed: Some(true),
+                    identity_known: true,
+                    identity_verified: Some(true),
+                    verification_violation: Some(false),
+                    previously_verified: Some(true),
+                    master_key: Some("MASTER".to_owned()),
+                },
+            }),
+            error: None,
+        }
+    }
+
+    /// A stub returning the given error for every call.
+    pub fn failing(error: fn() -> TrustError) -> Self {
+        Self {
+            bundle: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[async_trait]
+impl SenderTrustService for StubTrust {
+    async fn bundle(&self, _account_id: Uuid, _event_id: &str) -> Result<TrustBundle, TrustError> {
+        if let Some(make) = self.error {
+            return Err(make());
+        }
+        Ok(self.bundle.clone().expect("ok stub has a bundle"))
     }
 }

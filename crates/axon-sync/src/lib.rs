@@ -23,10 +23,12 @@ mod manager;
 mod meta;
 mod reconcile;
 mod redecrypt;
+mod trust;
 mod verification;
 
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
 pub use gateway::SdkGateway;
 pub use lifecycle::{AccountLifecycle, LifecycleError};
+pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};

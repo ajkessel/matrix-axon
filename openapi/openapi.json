@@ -324,6 +324,96 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/events/{event_id}/verification": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Read the per-event verification bundle (M7c): the durable at-decrypt sender-\ntrust snapshot plus live cross-signing evidence for the sender's device and\nidentity. An unknown account/event is a 404; a logged-out account is a 409\n(no live client to read evidence from). Gated by the bearer-token auth layer\nlike every `/v1/` route.",
+        "operationId": "get_verification_bundle",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event's verification bundle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_VerificationBundleDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account or event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error reading the sender's keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/logout": {
       "post": {
         "tags": [
@@ -1671,6 +1761,13 @@
                 "type": "string",
                 "description": "Matrix user ID of the sender."
               },
+              "sender_trust": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
+              },
               "state_key": {
                 "type": [
                   "string",
@@ -2029,6 +2126,102 @@
           }
         }
       },
+      "ApiResponse_VerificationBundleDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The per-event verification bundle (M7c): the durable at-decrypt trust\nsnapshot plus live cross-signing evidence. The two are deliberately separate\n(ADR 0031) — the snapshot is what Matrix's evidence said when the event\narrived; `current` is read live and can differ.",
+            "required": [
+              "event_id",
+              "sender",
+              "current"
+            ],
+            "properties": {
+              "current": {
+                "$ref": "#/components/schemas/CurrentTrustDto",
+                "description": "The current (live) trust evidence."
+              },
+              "event_id": {
+                "type": "string",
+                "description": "Matrix event the bundle is about."
+              },
+              "sender": {
+                "type": "string",
+                "description": "Matrix user id of the event's sender."
+              },
+              "snapshot": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TrustSnapshotDto",
+                    "description": "The at-decrypt snapshot, or `null` for unencrypted events and a UTD not\nyet re-decrypted."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "CurrentTrustDto": {
+        "type": "object",
+        "description": "The live evidence half of a [`VerificationBundleDto`].",
+        "required": [
+          "device_known",
+          "identity_known"
+        ],
+        "properties": {
+          "device_cross_signed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the sending device is currently cross-signed by the sender's own\nmaster key. `null` when the device isn't known."
+          },
+          "device_known": {
+            "type": "boolean",
+            "description": "Whether the sending device is currently known to axon."
+          },
+          "identity_known": {
+            "type": "boolean",
+            "description": "Whether the sender's user identity is currently known."
+          },
+          "identity_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the sender's identity is currently verified. `null` when unknown."
+          },
+          "master_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sender's current master cross-signing key (base64), if known."
+          },
+          "previously_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the sender's identity was ever previously verified. `null` when\nunknown."
+          },
+          "verification_violation": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the sender's identity is currently in a verification violation\n(previously verified, identity since changed). `null` when unknown."
+          }
+        }
+      },
       "EditRequest": {
         "type": "object",
         "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.",
@@ -2157,6 +2350,13 @@
           "sender": {
             "type": "string",
             "description": "Matrix user ID of the sender."
+          },
+          "sender_trust": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
           },
           "state_key": {
             "type": [
@@ -2423,6 +2623,109 @@
               "null"
             ],
             "description": "Opaque cursor for the next (older) page, or `null` at the end."
+          }
+        }
+      },
+      "TrustSnapshotDto": {
+        "type": "object",
+        "description": "The at-decrypt snapshot half of a [`VerificationBundleDto`].",
+        "properties": {
+          "curve25519_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sending device's curve25519 identity key."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sending device's id at decrypt time."
+          },
+          "ed25519_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sending device's claimed ed25519 signing key."
+          },
+          "forwarded": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the Megolm key reached axon forwarded (key-share) rather than\ndirectly from the sender's device."
+          },
+          "forwarder_device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If forwarded, the device id that forwarded the key."
+          },
+          "forwarder_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If forwarded, the user id that forwarded the key."
+          },
+          "sender_trust": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The four-valued sender-trust verdict at decrypt time."
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Megolm session id the event was encrypted with."
+          },
+          "verification_state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The coarse `verified`/`unverified` verification state at decrypt time."
+          }
+        }
+      },
+      "VerificationBundleDto": {
+        "type": "object",
+        "description": "The per-event verification bundle (M7c): the durable at-decrypt trust\nsnapshot plus live cross-signing evidence. The two are deliberately separate\n(ADR 0031) — the snapshot is what Matrix's evidence said when the event\narrived; `current` is read live and can differ.",
+        "required": [
+          "event_id",
+          "sender",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/CurrentTrustDto",
+            "description": "The current (live) trust evidence."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Matrix event the bundle is about."
+          },
+          "sender": {
+            "type": "string",
+            "description": "Matrix user id of the event's sender."
+          },
+          "snapshot": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TrustSnapshotDto",
+                "description": "The at-decrypt snapshot, or `null` for unencrypted events and a UTD not\nyet re-decrypted."
+              }
+            ]
           }
         }
       }

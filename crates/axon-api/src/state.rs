@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 use crate::auth::TokenVerifier;
 use crate::lifecycle::AccountLifecycle;
 use crate::sender::MessageSender;
+use crate::trust::SenderTrustService;
 use crate::verification::VerificationService;
 
 /// How often an established `/v1/ws` socket re-checks its bearer token. Token
@@ -48,6 +49,10 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `lifecycle`.
     pub verify: Arc<dyn VerificationService>,
+    /// Sender-trust port for the per-event verification-bundle handler (M7c).
+    /// Injected by the binary via an adapter over the sync engine, same as
+    /// `verify`.
+    pub trust: Arc<dyn SenderTrustService>,
     /// Bearer-token verifier (M7b): the seam the `/v1/` auth gate (the
     /// `require_bearer` middleware and the WebSocket upgrade) checks every
     /// request against. The shipped implementation is
@@ -64,12 +69,14 @@ impl AppState {
     /// live-event sender (see `axon_sync::SyncEngine::live_events`), an
     /// outbound-message [`MessageSender`], an [`AccountLifecycle`], and a
     /// [`VerificationService`].
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         live: broadcast::Sender<LiveFrame>,
         sender: Arc<dyn MessageSender>,
         lifecycle: Arc<dyn AccountLifecycle>,
         verify: Arc<dyn VerificationService>,
+        trust: Arc<dyn SenderTrustService>,
         verifier: Arc<dyn TokenVerifier>,
     ) -> Self {
         Self {
@@ -78,6 +85,7 @@ impl AppState {
             sender,
             lifecycle,
             verify,
+            trust,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
         }
@@ -119,6 +127,12 @@ impl FromRef<AppState> for Arc<dyn AccountLifecycle> {
 impl FromRef<AppState> for Arc<dyn VerificationService> {
     fn from_ref(state: &AppState) -> Arc<dyn VerificationService> {
         state.verify.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn SenderTrustService> {
+    fn from_ref(state: &AppState) -> Arc<dyn SenderTrustService> {
+        state.trust.clone()
     }
 }
 

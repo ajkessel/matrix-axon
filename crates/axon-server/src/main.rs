@@ -10,6 +10,7 @@ mod cli;
 mod gateway;
 mod lifecycle;
 mod token;
+mod trust;
 mod verification;
 
 use std::sync::Arc;
@@ -24,6 +25,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use crate::cli::{Cli, Command};
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
+use crate::trust::TrustAdapter;
 use crate::verification::VerificationAdapter;
 
 #[tokio::main]
@@ -84,11 +86,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // MessageSender port) so the mutation routes can send via the SDK, its
     // lifecycle engine (adapted onto the AccountLifecycle port) so the login route
     // can add/reactivate accounts at runtime, and its verification engine (adapted
-    // onto the VerificationService port) so the verify routes can drive SAS flows.
-    // The bearer-token verifier (M7b) is backed straight by the store.
+    // onto the VerificationService port) so the verify routes can drive SAS flows,
+    // and its sender-trust engine (adapted onto the SenderTrustService port) so the
+    // verification-bundle route can read per-event trust (M7c). The bearer-token
+    // verifier (M7b) is backed straight by the store.
     let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
+    let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
     let app = axon_api::router(axon_api::AppState::new(
         store,
@@ -96,6 +101,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sender,
         lifecycle,
         verify,
+        trust,
         verifier,
     ));
 

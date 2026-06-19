@@ -27,6 +27,11 @@ pub enum LiveFrame {
     Timeline(LiveEvent),
     /// A state change in an interactive (SAS) device-verification flow.
     Verification(VerificationFrame),
+    /// A sender's *current* device trust changed (M7c) — e.g. their identity
+    /// entered a verification violation. An overlay distinct from the immutable
+    /// per-event snapshot: it names the affected sender so clients re-evaluate
+    /// (re-read the bundle / timeline), it does not carry per-event diffs.
+    SenderTrustChanged(SenderTrustFrame),
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -39,6 +44,29 @@ impl From<VerificationFrame> for LiveFrame {
     fn from(frame: VerificationFrame) -> Self {
         LiveFrame::Verification(frame)
     }
+}
+
+impl From<SenderTrustFrame> for LiveFrame {
+    fn from(frame: SenderTrustFrame) -> Self {
+        LiveFrame::SenderTrustChanged(frame)
+    }
+}
+
+/// A change in a *sender's* current device trust (M7c), ready to fan out over the
+/// live-event bus. Deliberately coarse: it names the sender whose trust changed
+/// (and the new violation state) so a client can re-evaluate that sender's
+/// messages by re-reading the timeline / verification bundle — the per-event
+/// snapshot the read API returns is the source of truth, this is only the push
+/// notification that it's worth re-reading.
+#[derive(Debug, Clone)]
+pub struct SenderTrustFrame {
+    /// Axon account whose view this change is in.
+    pub account_id: Uuid,
+    /// Matrix user id of the sender whose current trust changed.
+    pub user_id: String,
+    /// Whether the sender's identity is now in a verification violation
+    /// (previously verified, identity since changed).
+    pub verification_violation: bool,
 }
 
 /// A state change in an interactive SAS verification flow, ready to fan out over
@@ -113,4 +141,10 @@ pub struct LiveEvent {
     pub body: Option<String>,
     /// The event's `m.relates_to` object, if any.
     pub relates_to: Option<Value>,
+    /// The sender-trust verdict snapshot (M7c): `verified`, `unverified`,
+    /// `unknown`, or `verification_violation`. `None` for unencrypted events and
+    /// for UTDs (whose verdict is only known once re-decryption back-fills it —
+    /// re-decryption does not re-emit a live frame, so clients re-read the
+    /// timeline for the back-filled value).
+    pub sender_trust: Option<String>,
 }

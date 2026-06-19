@@ -20,6 +20,7 @@ mod response;
 mod routes;
 mod sender;
 mod state;
+mod trust;
 mod verification;
 mod ws;
 
@@ -29,6 +30,7 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
 pub use state::AppState;
+pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
 use axum::{
@@ -94,6 +96,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/events/{event_id}",
             get(routes::events::get_event),
+        )
+        // Per-event verification bundle (M7c): at-decrypt snapshot + live evidence.
+        .route(
+            "/v1/accounts/{account_id}/events/{event_id}/verification",
+            get(routes::events::get_verification_bundle),
         )
         // Mutations (M6). account_id is nested in the path; the response is the
         // created event id. Edit (PUT) and redact (DELETE) share one path.

@@ -20,7 +20,9 @@ use std::time::Duration;
 use axon_api::AppState;
 use axon_core::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
-use common::{StubLifecycle, StubSender, StubTokenVerifier, StubVerification, TEST_TOKEN};
+use common::{
+    StubLifecycle, StubSender, StubTokenVerifier, StubTrust, StubVerification, TEST_TOKEN,
+};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
@@ -61,6 +63,7 @@ async fn ws_streams_live_events() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
     ));
 
@@ -98,6 +101,7 @@ async fn ws_streams_live_events() {
             content: Some(json!({ "membership": "join", "displayname": "Alice" })),
             body: None,
             relates_to: None,
+            sender_trust: None,
         }))
         .expect("a connected subscriber");
     assert_eq!(receivers, 1, "exactly the connected socket subscribed");
@@ -171,6 +175,7 @@ async fn ws_upgrade_rejected_without_a_token() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
     ));
 
@@ -234,6 +239,7 @@ fn sample_frame(account_id: Uuid) -> LiveFrame {
         content: None,
         body: Some("hi".to_owned()),
         relates_to: None,
+        sender_trust: None,
     })
 }
 
@@ -252,6 +258,7 @@ async fn ws_socket_closes_when_token_is_revoked() {
             Arc::new(StubSender::ok("$unused:localhost")),
             Arc::new(StubLifecycle::ok(Uuid::nil())),
             Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
             Arc::new(stub),
         )
         // Short cadence so the revocation is observed within the test, not 30s.

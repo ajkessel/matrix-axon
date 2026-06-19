@@ -222,3 +222,16 @@ impl From<crate::verification::VerifyError> for ApiError {
         }
     }
 }
+
+impl From<crate::trust::TrustError> for ApiError {
+    fn from(err: crate::trust::TrustError) -> Self {
+        use crate::trust::TrustError;
+        match err {
+            TrustError::NotFound(msg) => ApiError::not_found(msg),
+            TrustError::NotActive(msg) => ApiError::conflict(msg),
+            TrustError::Upstream(msg) => ApiError::bad_gateway(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            TrustError::Internal => ApiError::internal(),
+        }
+    }
+}

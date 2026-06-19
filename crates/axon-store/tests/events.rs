@@ -381,8 +381,28 @@ async fn event_crypto_siblings_upsert_and_cascade() {
     let room_id = format!("!room-{}:localhost", Uuid::new_v4());
     let event_id = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "hi").await;
 
-    // Initial write (e.g. unverified at first sight).
-    store
+    // Helper: read back the coarse state + the M7c verdict.
+    let read_back = |account_id, event_id: String| {
+        let pool = pool.clone();
+        async move {
+            let row = sqlx_core::query::query(
+                "SELECT verification_state AS v, sender_trust AS t FROM event_sender_device_keys \
+                 WHERE account_id = $1 AND event_id = $2",
+            )
+            .bind(account_id)
+            .bind(&event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("device row");
+            let state: String = row.try_get("v").expect("v");
+            let trust: Option<String> = row.try_get("t").expect("t");
+            (state, trust)
+        }
+    };
+
+    // Initial write with no verdict yet (e.g. a UTD persisted before decryption).
+    // The upsert returns the effective stored verdict — still NULL here.
+    let returned = store
         .upsert_event_crypto(&EventCrypto {
             account_id,
             event_id: &event_id,
@@ -394,12 +414,46 @@ async fn event_crypto_siblings_upsert_and_cascade() {
             forwarder_device_id: None,
             device_id: Some("DEVICEA"),
             verification_state: "unverified",
+            sender_trust: None,
         })
         .await
         .expect("crypto insert");
+    assert_eq!(returned, None, "no verdict recorded yet");
 
-    // Re-write upserts (e.g. device later verified) — no duplicate-key error.
-    store
+    // Re-decryption first records a verdict: a NULL snapshot is populated, and the
+    // upsert returns the newly-stored verdict (the value a live frame would emit).
+    let returned = store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id: &event_id,
+            session_id: Some("session-1"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: false,
+            forwarder_user_id: None,
+            forwarder_device_id: None,
+            device_id: Some("DEVICEA"),
+            verification_state: "unverified",
+            sender_trust: Some("unverified"),
+        })
+        .await
+        .expect("crypto upsert (populate null)");
+    assert_eq!(returned.as_deref(), Some("unverified"));
+    let (state, trust) = read_back(account_id, event_id.clone()).await;
+    assert_eq!(state, "unverified");
+    assert_eq!(
+        trust.as_deref(),
+        Some("unverified"),
+        "a NULL snapshot is populated by the first non-null verdict"
+    );
+
+    // A duplicate delivery whose *newly-derived* trust differs (the device is
+    // verified afterwards) must NOT rewrite the immutable at-decrypt snapshot. The
+    // coarse legacy `verification_state` still overwrites, but `sender_trust` is
+    // frozen — and crucially the upsert RETURNS the frozen verdict, not the fresh
+    // one, so the live `timeline.event` frame agrees with the persisted snapshot
+    // and HTTP reads (ADR 0031).
+    let returned = store
         .upsert_event_crypto(&EventCrypto {
             account_id,
             event_id: &event_id,
@@ -411,22 +465,25 @@ async fn event_crypto_siblings_upsert_and_cascade() {
             forwarder_device_id: None,
             device_id: Some("DEVICEA"),
             verification_state: "verified",
+            sender_trust: Some("verified"),
         })
         .await
-        .expect("crypto upsert");
-
-    let state: String = sqlx_core::query::query(
-        "SELECT verification_state AS v FROM event_sender_device_keys \
-         WHERE account_id = $1 AND event_id = $2",
-    )
-    .bind(account_id)
-    .bind(&event_id)
-    .fetch_one(&pool)
-    .await
-    .expect("device row")
-    .try_get("v")
-    .expect("v");
-    assert_eq!(state, "verified");
+        .expect("crypto upsert (freeze)");
+    assert_eq!(
+        returned.as_deref(),
+        Some("unverified"),
+        "the upsert returns the frozen verdict a live frame must emit, not the fresh one"
+    );
+    let (state, trust) = read_back(account_id, event_id.clone()).await;
+    assert_eq!(
+        state, "verified",
+        "coarse verification_state still overwrites"
+    );
+    assert_eq!(
+        trust.as_deref(),
+        Some("unverified"),
+        "the immutable sender_trust snapshot keeps its first non-null verdict"
+    );
 
     // Deleting the event cascades to both sibling tables.
     sqlx_core::query::query("DELETE FROM events WHERE account_id = $1 AND event_id = $2")
@@ -448,6 +505,79 @@ async fn event_crypto_siblings_upsert_and_cascade() {
         .expect("c");
         assert_eq!(n, 0, "{table} should cascade-delete");
     }
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// M7c: `event_sender_trust` reads the at-decrypt snapshot back — the sender is
+/// always present (it's on `events`), the sibling fields appear once a crypto row
+/// is written, and an unknown event is `None`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_sender_trust_reads_snapshot() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@trust-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+    let event_id = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "hi").await;
+
+    // Before any crypto sibling: the row exists (sender set) but no verdict.
+    let pre = store
+        .event_sender_trust(account_id, &event_id)
+        .await
+        .expect("query")
+        .expect("event exists");
+    assert_eq!(pre.sender, "@alice:localhost");
+    assert_eq!(pre.verification_state, None);
+    assert_eq!(pre.sender_trust, None);
+    assert_eq!(pre.session_id, None);
+    assert_eq!(pre.forwarded, None);
+
+    // After a crypto sibling with a verdict, the snapshot fields come back —
+    // including the Megolm session provenance from the sibling session row.
+    store
+        .upsert_event_crypto(&EventCrypto {
+            account_id,
+            event_id: &event_id,
+            session_id: Some("session-7"),
+            curve25519_key: Some("CURVE"),
+            ed25519_key: Some("ED"),
+            forwarded: true,
+            forwarder_user_id: Some("@carol:localhost"),
+            forwarder_device_id: Some("CAROLDEVICE"),
+            device_id: Some("BOBDEVICE"),
+            verification_state: "unverified",
+            sender_trust: Some("verification_violation"),
+        })
+        .await
+        .expect("crypto insert");
+
+    let post = store
+        .event_sender_trust(account_id, &event_id)
+        .await
+        .expect("query")
+        .expect("event exists");
+    assert_eq!(post.device_id.as_deref(), Some("BOBDEVICE"));
+    assert_eq!(post.verification_state.as_deref(), Some("unverified"));
+    assert_eq!(post.sender_trust.as_deref(), Some("verification_violation"));
+    // Megolm session provenance (the spec's content-authentication evidence).
+    assert_eq!(post.session_id.as_deref(), Some("session-7"));
+    assert_eq!(post.forwarded, Some(true));
+    assert_eq!(post.forwarder_user_id.as_deref(), Some("@carol:localhost"));
+    assert_eq!(post.forwarder_device_id.as_deref(), Some("CAROLDEVICE"));
+
+    // An unknown event is None (a 404 at the API).
+    let missing = store
+        .event_sender_trust(account_id, "$nope:localhost")
+        .await
+        .expect("query");
+    assert!(missing.is_none());
 
     common::cleanup_account(&pool, account_id).await;
 }

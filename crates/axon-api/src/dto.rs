@@ -81,6 +81,12 @@ pub struct EventDto {
     pub redacted: bool,
     /// The `event_id` of the redaction that masked this event, if redacted.
     pub redaction_event_id: Option<String>,
+    /// Sender-device trust snapshot at decrypt time (M7c): `verified`,
+    /// `unverified`, `unknown`, or `verification_violation`. `null` for
+    /// unencrypted events and rows with no recorded verdict (e.g. a UTD not yet
+    /// re-decrypted). This is the at-receipt snapshot; the sender's *current*
+    /// trust is available from the per-event verification bundle.
+    pub sender_trust: Option<String>,
 }
 
 impl From<axon_core::LiveEvent> for EventDto {
@@ -102,6 +108,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             relates_to: e.relates_to,
             redacted: false,
             redaction_event_id: None,
+            sender_trust: e.sender_trust,
         }
     }
 }
@@ -123,6 +130,101 @@ impl EventDto {
             relates_to: row.relates_to,
             redacted: row.redaction_event_id.is_some(),
             redaction_event_id: row.redaction_event_id,
+            sender_trust: row.sender_trust,
+        }
+    }
+}
+
+/// The per-event verification bundle (M7c): the durable at-decrypt trust
+/// snapshot plus live cross-signing evidence. The two are deliberately separate
+/// (ADR 0031) — the snapshot is what Matrix's evidence said when the event
+/// arrived; `current` is read live and can differ.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct VerificationBundleDto {
+    /// Matrix event the bundle is about.
+    pub event_id: String,
+    /// Matrix user id of the event's sender.
+    pub sender: String,
+    /// The at-decrypt snapshot, or `null` for unencrypted events and a UTD not
+    /// yet re-decrypted.
+    pub snapshot: Option<TrustSnapshotDto>,
+    /// The current (live) trust evidence.
+    pub current: CurrentTrustDto,
+}
+
+/// The at-decrypt snapshot half of a [`VerificationBundleDto`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TrustSnapshotDto {
+    /// The four-valued sender-trust verdict at decrypt time.
+    pub sender_trust: Option<String>,
+    /// The coarse `verified`/`unverified` verification state at decrypt time.
+    pub verification_state: Option<String>,
+    /// The sending device's id at decrypt time.
+    pub device_id: Option<String>,
+    /// The sending device's curve25519 identity key.
+    pub curve25519_key: Option<String>,
+    /// The sending device's claimed ed25519 signing key.
+    pub ed25519_key: Option<String>,
+    /// The Megolm session id the event was encrypted with.
+    pub session_id: Option<String>,
+    /// Whether the Megolm key reached axon forwarded (key-share) rather than
+    /// directly from the sender's device.
+    pub forwarded: Option<bool>,
+    /// If forwarded, the user id that forwarded the key.
+    pub forwarder_user_id: Option<String>,
+    /// If forwarded, the device id that forwarded the key.
+    pub forwarder_device_id: Option<String>,
+}
+
+/// The live evidence half of a [`VerificationBundleDto`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CurrentTrustDto {
+    /// Whether the sending device is currently known to axon.
+    pub device_known: bool,
+    /// Whether the sending device is currently cross-signed by the sender's own
+    /// master key. `null` when the device isn't known.
+    pub device_cross_signed: Option<bool>,
+    /// Whether the sender's user identity is currently known.
+    pub identity_known: bool,
+    /// Whether the sender's identity is currently verified. `null` when unknown.
+    pub identity_verified: Option<bool>,
+    /// Whether the sender's identity is currently in a verification violation
+    /// (previously verified, identity since changed). `null` when unknown.
+    pub verification_violation: Option<bool>,
+    /// Whether the sender's identity was ever previously verified. `null` when
+    /// unknown.
+    pub previously_verified: Option<bool>,
+    /// The sender's current master cross-signing key (base64), if known.
+    pub master_key: Option<String>,
+}
+
+impl VerificationBundleDto {
+    /// Map a port-layer [`TrustBundle`](crate::trust::TrustBundle) into the wire
+    /// DTO, threading in the `event_id` from the request path.
+    pub fn from_bundle(event_id: String, bundle: crate::trust::TrustBundle) -> Self {
+        VerificationBundleDto {
+            event_id,
+            sender: bundle.sender,
+            snapshot: bundle.snapshot.map(|s| TrustSnapshotDto {
+                sender_trust: s.sender_trust,
+                verification_state: s.verification_state,
+                device_id: s.device_id,
+                curve25519_key: s.curve25519_key,
+                ed25519_key: s.ed25519_key,
+                session_id: s.session_id,
+                forwarded: s.forwarded,
+                forwarder_user_id: s.forwarder_user_id,
+                forwarder_device_id: s.forwarder_device_id,
+            }),
+            current: CurrentTrustDto {
+                device_known: bundle.current.device_known,
+                device_cross_signed: bundle.current.device_cross_signed,
+                identity_known: bundle.current.identity_known,
+                identity_verified: bundle.current.identity_verified,
+                verification_violation: bundle.current.verification_violation,
+                previously_verified: bundle.current.previously_verified,
+                master_key: bundle.current.master_key,
+            },
         }
     }
 }

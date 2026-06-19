@@ -26,7 +26,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
     DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, RecoverOutcome, StubLifecycle,
-    StubSender, StubTokenVerifier, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
+    StubSender, StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome,
+    TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -136,6 +137,7 @@ fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Ro
         Arc::new(StubSender::ok("$unused:localhost")),
         lifecycle,
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
     ))
 }
@@ -149,6 +151,22 @@ fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> a
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         verify,
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+    ))
+}
+
+/// Build a router whose verification-bundle route is backed by `trust` (other
+/// ports unused).
+fn trust_app(store: Store, trust: Arc<dyn axon_api::SenderTrustService>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        trust,
         Arc::new(StubTokenVerifier::ok()),
     ))
 }
@@ -219,6 +237,7 @@ async fn read_api_end_to_end() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
     ));
 
@@ -345,6 +364,7 @@ async fn accounts_read_api() {
         Arc::new(StubSender::ok("$unused:localhost")),
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
     ));
 
@@ -1087,6 +1107,77 @@ async fn verify_error_maps_to_status() {
             &format!("/v1/accounts/{account_id}/verify"),
             Some(body.clone()),
             Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+// ---- Per-event verification bundle (M7c) ----
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verification_bundle_returns_snapshot_and_current() {
+    let store = store().await;
+    let app = trust_app(store, Arc::new(StubTrust::ok()));
+    let account_id = Uuid::new_v4();
+
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/$evt:localhost/verification"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["event_id"], "$evt:localhost");
+    assert_eq!(body["data"]["sender"], "@bob:localhost");
+    // The at-decrypt snapshot half.
+    assert_eq!(body["data"]["snapshot"]["sender_trust"], "verified");
+    assert_eq!(body["data"]["snapshot"]["device_id"], "BOBDEVICE");
+    // Megolm session provenance rides the snapshot half.
+    assert_eq!(body["data"]["snapshot"]["session_id"], "session-1");
+    assert_eq!(body["data"]["snapshot"]["forwarded"], false);
+    // The live-evidence half — separate from the snapshot.
+    assert_eq!(body["data"]["current"]["device_cross_signed"], true);
+    assert_eq!(body["data"]["current"]["identity_verified"], true);
+    assert_eq!(body["data"]["current"]["verification_violation"], false);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verification_bundle_error_maps_to_status() {
+    let store = store().await;
+    let account_id = Uuid::new_v4();
+
+    let cases = [
+        (
+            (|| axon_api::TrustError::NotFound("no event".into())) as fn() -> axon_api::TrustError,
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            || axon_api::TrustError::NotActive("logged out".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            || axon_api::TrustError::Upstream("hs down".into()),
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+        ),
+        (
+            || axon_api::TrustError::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (make_err, want_status, want_code) in cases {
+        let app = trust_app(store.clone(), Arc::new(StubTrust::failing(make_err)));
+        let (status, err) = get(
+            &app,
+            &format!("/v1/accounts/{account_id}/events/$evt:localhost/verification"),
         )
         .await;
         assert_eq!(status, want_status);

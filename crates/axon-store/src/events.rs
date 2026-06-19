@@ -99,6 +99,11 @@ pub struct EventCrypto<'a> {
     /// Verification state of the sending device at decrypt time: `verified` or
     /// `unverified`. A snapshot — it can change later as devices are verified.
     pub verification_state: &'a str,
+    /// The four-valued sender-trust verdict at decrypt time (M7c): `verified`,
+    /// `unverified`, `unknown`, or `verification_violation`. `None` when no
+    /// verdict could be derived. A snapshot — distinct from the sender's
+    /// *current* trust, which the verification bundle reads live.
+    pub sender_trust: Option<&'a str>,
 }
 
 /// A persisted event still awaiting decryption (a UTD): `content IS NULL`, with
@@ -177,6 +182,11 @@ pub struct TimelineRow {
     pub redacts: Option<String>,
     /// The `event_id` of the redaction that masked this row, if it was redacted.
     pub redaction_event_id: Option<String>,
+    /// The sender-trust verdict snapshot from the crypto sibling (M7c), if one
+    /// was recorded: `verified`, `unverified`, `unknown`, or
+    /// `verification_violation`. `None` for unencrypted events and rows decrypted
+    /// before the snapshot existed.
+    pub sender_trust: Option<String>,
 }
 
 impl TimelineRow {
@@ -204,6 +214,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             relates_to: row.try_get("relates_to")?,
             redacts: row.try_get("redacts")?,
             redaction_event_id: row.try_get("redaction_event_id")?,
+            sender_trust: row.try_get("sender_trust")?,
         })
     }
 }
@@ -220,7 +231,8 @@ const TIMELINE_SELECT: &str =
             e.origin_ts, e.event_type, \
             CASE WHEN r.event_id IS NULL THEN e.content END AS content, \
             CASE WHEN r.event_id IS NULL THEN e.decrypted_body_text END AS decrypted_body_text, \
-            e.relates_to, e.redacts, r.event_id AS redaction_event_id \
+            e.relates_to, e.redacts, r.event_id AS redaction_event_id, \
+            sd.sender_trust \
      FROM events e \
      LEFT JOIN LATERAL ( \
          SELECT rr.event_id FROM events rr \
@@ -228,7 +240,9 @@ const TIMELINE_SELECT: &str =
            AND rr.event_type = 'm.room.redaction' \
            AND rr.redacts = e.event_id \
          LIMIT 1 \
-     ) r ON TRUE";
+     ) r ON TRUE \
+     LEFT JOIN event_sender_device_keys sd \
+         ON sd.account_id = e.account_id AND sd.event_id = e.event_id";
 
 impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
@@ -285,7 +299,26 @@ impl Store {
     /// tables (megolm session + sender device keys). Upserts: a UTD has no
     /// provenance at persist time, so the authoritative write happens on
     /// re-decryption; a later, better state overwrites an earlier one.
-    pub async fn upsert_event_crypto(&self, c: &EventCrypto<'_>) -> Result<(), StoreError> {
+    ///
+    /// **Exception — `sender_trust` is write-once-non-null.** The four-valued
+    /// verdict is an *immutable at-decrypt snapshot* (M7c, ADR 0031): the trust
+    /// Matrix's evidence reported when the event first decrypted. A duplicate
+    /// delivery or a later re-decryption after the sender's trust changed must
+    /// not rewrite history, so it is `COALESCE`d — the first recorded non-null
+    /// verdict wins, while a still-`NULL` value (the initial UTD never decrypted)
+    /// is still populated by the re-decryption that first reads the event. The
+    /// coarse legacy `verification_state` keeps its overwrite contract untouched.
+    ///
+    /// Returns the **effective stored `sender_trust`** after the upsert (the
+    /// `COALESCE`d value), so a caller emitting a live `timeline.event` frame can
+    /// advertise the *persisted* verdict rather than the freshly-derived one —
+    /// the two diverge on a duplicate delivery whose trust changed, and the wire
+    /// contract is that the live frame carries the same frozen snapshot as the
+    /// HTTP read (ADR 0031).
+    pub async fn upsert_event_crypto(
+        &self,
+        c: &EventCrypto<'_>,
+    ) -> Result<Option<String>, StoreError> {
         sqlx_core::query::query(
             "INSERT INTO event_megolm_session \
              (account_id, event_id, session_id, sender_curve25519_key, \
@@ -310,15 +343,17 @@ impl Store {
         .execute(&self.pool)
         .await?;
 
-        sqlx_core::query::query(
+        let stored = sqlx_core::query::query(
             "INSERT INTO event_sender_device_keys \
-             (account_id, event_id, device_id, curve25519_key, ed25519_key, verification_state) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
+             (account_id, event_id, device_id, curve25519_key, ed25519_key, verification_state, sender_trust) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (account_id, event_id) DO UPDATE SET \
                device_id = EXCLUDED.device_id, \
                curve25519_key = EXCLUDED.curve25519_key, \
                ed25519_key = EXCLUDED.ed25519_key, \
-               verification_state = EXCLUDED.verification_state",
+               verification_state = EXCLUDED.verification_state, \
+               sender_trust = COALESCE(event_sender_device_keys.sender_trust, EXCLUDED.sender_trust) \
+             RETURNING sender_trust",
         )
         .bind(c.account_id)
         .bind(c.event_id)
@@ -326,9 +361,10 @@ impl Store {
         .bind(c.curve25519_key)
         .bind(c.ed25519_key)
         .bind(c.verification_state)
-        .execute(&self.pool)
+        .bind(c.sender_trust)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(())
+        Ok(stored.try_get("sender_trust")?)
     }
 
     /// Load the pending UTDs in `room_id` encrypted with `session_id` — the rows
@@ -461,5 +497,83 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    /// Read the at-decrypt sender-trust snapshot for `(account_id, event_id)` —
+    /// the event's `sender` plus, if the event was decrypted, the crypto
+    /// sibling's recorded device keys and trust verdicts. Returns `None` only
+    /// when no such event exists for the account (a `404`); an event with no
+    /// crypto sibling (unencrypted, or a UTD not yet re-decrypted) comes back
+    /// with the `sender` set and the sibling fields `None`. The first production
+    /// reader of `event_sender_device_keys` (M7c verification bundle).
+    pub async fn event_sender_trust(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Option<EventSenderTrust>, StoreError> {
+        let row = sqlx_core::query_as::query_as::<Postgres, EventSenderTrust>(
+            "SELECT e.sender, sd.device_id, sd.curve25519_key, sd.ed25519_key, \
+                    sd.verification_state, sd.sender_trust, \
+                    ms.session_id, ms.forwarded, ms.forwarder_user_id, ms.forwarder_device_id \
+             FROM events e \
+             LEFT JOIN event_sender_device_keys sd \
+                 ON sd.account_id = e.account_id AND sd.event_id = e.event_id \
+             LEFT JOIN event_megolm_session ms \
+                 ON ms.account_id = e.account_id AND ms.event_id = e.event_id \
+             WHERE e.account_id = $1 AND e.event_id = $2",
+        )
+        .bind(account_id)
+        .bind(event_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+}
+
+/// The at-decrypt sender-trust snapshot for one event (M7c). The sibling fields
+/// are `None` when the event has no `event_sender_device_keys` row (unencrypted
+/// events, or a UTD not yet re-decrypted); `verification_state.is_some()` is the
+/// signal that a snapshot was recorded (the column is `NOT NULL` in the sibling).
+#[derive(Debug, Clone)]
+pub struct EventSenderTrust {
+    /// Matrix user id of the event's sender (always present).
+    pub sender: String,
+    /// The sending device's id at decrypt time.
+    pub device_id: Option<String>,
+    /// The sending device's curve25519 identity key.
+    pub curve25519_key: Option<String>,
+    /// The sending device's claimed ed25519 signing key.
+    pub ed25519_key: Option<String>,
+    /// The coarse `verified`/`unverified` verification state at decrypt time.
+    pub verification_state: Option<String>,
+    /// The four-valued sender-trust verdict at decrypt time.
+    pub sender_trust: Option<String>,
+    /// The Megolm session id the event was encrypted with (from the sibling
+    /// `event_megolm_session` row; `None` for an unencrypted event or a UTD not
+    /// yet re-decrypted).
+    pub session_id: Option<String>,
+    /// Whether the Megolm key reached us forwarded (key-share) rather than
+    /// directly from the sender's device. `None` when no session row exists.
+    pub forwarded: Option<bool>,
+    /// If forwarded, the user id that forwarded the key.
+    pub forwarder_user_id: Option<String>,
+    /// If forwarded, the device id that forwarded the key.
+    pub forwarder_device_id: Option<String>,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for EventSenderTrust {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(EventSenderTrust {
+            sender: row.try_get("sender")?,
+            device_id: row.try_get("device_id")?,
+            curve25519_key: row.try_get("curve25519_key")?,
+            ed25519_key: row.try_get("ed25519_key")?,
+            verification_state: row.try_get("verification_state")?,
+            sender_trust: row.try_get("sender_trust")?,
+            session_id: row.try_get("session_id")?,
+            forwarded: row.try_get("forwarded")?,
+            forwarder_user_id: row.try_get("forwarder_user_id")?,
+            forwarder_device_id: row.try_get("forwarder_device_id")?,
+        })
     }
 }

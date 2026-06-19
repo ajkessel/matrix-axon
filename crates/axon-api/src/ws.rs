@@ -32,7 +32,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axon_core::{LiveFrame, VerificationFrame, VerificationFrameKind};
+use axon_core::{LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -81,6 +81,27 @@ struct VerificationFramePayload {
 struct EmojiPair {
     symbol: String,
     description: String,
+}
+
+/// The `type` tag for a sender-trust overlay frame (M7c).
+const SENDER_TRUST_VIOLATION: &str = "sender_trust.violation";
+
+/// The wire payload for a `sender_trust.violation` frame: the sender whose
+/// current trust changed and the new violation state. Clients re-read the
+/// timeline / verification bundle for that sender rather than diffing per-event.
+#[derive(Debug, Serialize)]
+struct SenderTrustFramePayload {
+    user_id: String,
+    verification_violation: bool,
+}
+
+impl From<SenderTrustFrame> for SenderTrustFramePayload {
+    fn from(frame: SenderTrustFrame) -> Self {
+        Self {
+            user_id: frame.user_id,
+            verification_violation: frame.verification_violation,
+        }
+    }
 }
 
 /// The `type` tag for a verification frame of the given kind.
@@ -173,6 +194,11 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             account_id: frame.account_id,
             payload: VerificationFramePayload::from(frame),
         }),
+        LiveFrame::SenderTrustChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: SENDER_TRUST_VIOLATION,
+            account_id: frame.account_id,
+            payload: SenderTrustFramePayload::from(frame),
+        }),
     }
 }
 
@@ -256,7 +282,7 @@ async fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axon_core::{LiveEvent, VerificationFrame, VerificationFrameKind};
+    use axon_core::{LiveEvent, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
     use serde_json::Value;
 
     fn decode(frame: LiveFrame) -> Value {
@@ -277,10 +303,12 @@ mod tests {
             content: None,
             body: Some("hi".to_owned()),
             relates_to: None,
+            sender_trust: Some("verified".to_owned()),
         }));
         assert_eq!(v["type"], "timeline.event");
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["event_id"], "$e:localhost");
+        assert_eq!(v["payload"]["sender_trust"], "verified");
     }
 
     #[test]
@@ -345,5 +373,19 @@ mod tests {
             outcome: None,
         }));
         assert_eq!(done["type"], "verification.done");
+    }
+
+    #[test]
+    fn sender_trust_violation_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::SenderTrustChanged(SenderTrustFrame {
+            account_id,
+            user_id: "@bob:localhost".to_owned(),
+            verification_violation: true,
+        }));
+        assert_eq!(v["type"], "sender_trust.violation");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["user_id"], "@bob:localhost");
+        assert_eq!(v["payload"]["verification_violation"], true);
     }
 }
