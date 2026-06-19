@@ -73,7 +73,17 @@ async fn main() -> anyhow::Result<()> {
     // Query the terminal for image protocol support before entering raw mode /
     // alternate screen — from_query_stdio() temporarily enables raw mode itself
     // and must not be called while it is already active.
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    //
+    // Skip the query when AXON_NO_IMAGE_QUERY is set: from_query_stdio() spawns
+    // a background thread that blocks on stdin until the terminal responds with
+    // capability data. In headless/PTY environments (e.g. smoke tests) no
+    // response ever arrives, leaving that thread alive and racing crossterm for
+    // stdin reads — causing injected keystrokes to be silently consumed.
+    let picker = if std::env::var_os("AXON_NO_IMAGE_QUERY").is_none() {
+        Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+    } else {
+        Picker::halfblocks()
+    };
     let mut terminal = TerminalGuard::enter()?;
     let result = run_app(
         &mut terminal.terminal,
