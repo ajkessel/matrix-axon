@@ -10,7 +10,8 @@ pub(crate) struct Args {
 
 impl Args {
     pub(crate) fn parse() -> anyhow::Result<Self> {
-        let mut base_url = "http://127.0.0.1:8080".to_owned();
+        let mut base_url =
+            env::var("AXON_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned());
         let mut account_id = None;
         let mut args = env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -28,6 +29,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!("Usage: axon-tui [--base-url URL] [--account-id UUID]");
+                    println!("  AXON_BASE_URL env var sets the default base URL (overrides built-in default).");
                     std::process::exit(0);
                 }
                 other => anyhow::bail!("unknown argument: {other}"),
