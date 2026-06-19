@@ -33,15 +33,15 @@ impl App {
             self.cycle_account(-1);
             self.load_selected_timeline().await;
         } else if self.shortcuts.message_down.matches(key) {
-            // Ctrl+J always navigates messages regardless of focus
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.message_up.matches(key) {
-            // Ctrl+K always navigates messages regardless of focus
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(-1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.toggle_accounts_panel.matches(key) && !self.is_mid_command() {
             self.toggle_accounts_panel();
         } else if self.shortcuts.toggle_rooms_panel.matches(key) && !self.is_mid_command() {

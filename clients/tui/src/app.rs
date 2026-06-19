@@ -2814,7 +2814,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
             .await;
 
-        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.mode, Mode::MessageList);
         assert_eq!(app.input.buffer, "");
         assert_eq!(app.input.cursor, 0);
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));
