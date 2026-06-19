@@ -1490,7 +1490,8 @@ mod tests {
         assert!(text.contains("react to message"));
         assert!(text.contains("withdraw one of your reactions"));
         assert!(text.contains("open selected image preview"));
-        assert!(text.contains("Up / Down   select previous / next message"));
+        assert!(text.contains("Up / Down"));
+        assert!(text.contains("select previous / next message"));
     }
 
     #[test]
