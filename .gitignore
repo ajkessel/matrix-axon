@@ -42,3 +42,6 @@ clients/web/dist/
 
 # matrix-rust-sdk per-account state + crypto stores (runtime data, never tracked)
 axon-data/
+
+# Smoke harness failure artifacts (PTY transcripts, screens, logs, journals)
+smoke-artifacts/

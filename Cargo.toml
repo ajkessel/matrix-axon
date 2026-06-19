@@ -12,6 +12,7 @@ members = [
     "crates/axon-api",
     "crates/axon-itest",
     "clients/tui",
+    "smoke/tui",
 ]
 
 [workspace.package]
@@ -78,6 +79,11 @@ clap = { version = "4", features = ["derive"] }
 # the encoding.
 sha2 = { version = "0.10" }
 rand = { version = "0.9" }
+
+# Smoke harnesses (smoke/*). Cross-platform PTY + a terminal screen model so the
+# TUI smoke suite can drive the real binary and assert on rendered rows.
+portable-pty = { version = "0.9" }
+vt100        = { version = "0.16" }
 
 # Errors
 thiserror = { version = "2" }

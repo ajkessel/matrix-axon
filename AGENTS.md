@@ -33,6 +33,8 @@ matrix-axon/
   clients/
     tui/                     # axon-tui — terminal client for the Axon API, should grow to support all API endpoints as they are enabled
     web/                     # axon-web (Vite + React + TS) — alpha client
+  smoke/                     # black-box smoke harnesses (depend on no axon-* crate; ADR 0025)
+    tui/                     # axon-tui-smoke — PTY-drives the real axon-tui against an in-process API stub
   openapi/                   # OpenAPI 3.1 spec (source of truth)
   docs/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)
@@ -44,6 +46,7 @@ matrix-axon/
   .github/workflows/
     lint-and-test.yml        # cargo fmt + clippy + test on every push/PR
     integration.yml          # E2EE re-decryption test (Synapse + Postgres) on PRs
+    smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 adds the server gate)
 ```
 
 ## Key conventions

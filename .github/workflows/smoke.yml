@@ -1,0 +1,56 @@
+name: smoke
+
+# S1 black-box smoke coverage. PR 1 (this) runs the TUI PTY suite against an
+# in-process Axum stub. PR 2 expands this same `smoke` job into the full S1 gate
+# (server boot/login/inbound/outbound/shutdown against managed Postgres +
+# Synapse) and makes it a required check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-smoke-
+
+      - name: Enforce smoke black-box boundary (no axon-* deps)
+        run: ./scripts/check-smoke-isolation.sh axon-tui-smoke
+
+      - name: Build axon-tui (binary under test)
+        run: cargo build -p axon-tui
+
+      - name: Build axon-tui-smoke (harness)
+        run: cargo build -p axon-tui-smoke
+
+      - name: Run TUI smoke suite
+        env:
+          # Use the binary we just built; skip the in-harness rebuild.
+          AXON_TUI_BIN: target/debug/axon-tui
+        run: cargo run -p axon-tui-smoke -- --profile stub
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tui-smoke-artifacts
+          path: smoke-artifacts/
+          if-no-files-found: ignore
