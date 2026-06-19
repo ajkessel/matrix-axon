@@ -238,10 +238,10 @@ impl App {
     }
 
     async fn handle_message_list_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Up {
+        if key.code == KeyCode::Up || self.shortcuts.message_up.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(-1);
-        } else if key.code == KeyCode::Down {
+        } else if key.code == KeyCode::Down || self.shortcuts.message_down.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(1);
         } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
