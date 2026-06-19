@@ -140,7 +140,7 @@ debug = false
 show_state_events = false
 sender_name = "display_name"
 input_lines = 1
-# max_input_lines = 10
+max_input_lines = 10
 confirm_logout = true
 search_wrap = true
 
@@ -446,7 +446,7 @@ impl RawConfig {
                 show_state_events: false,
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
-                max_input_lines: None,
+                max_input_lines: Some(10),
                 confirm_logout: true,
                 search_wrap: true,
                 accounts_panel_width: None,
