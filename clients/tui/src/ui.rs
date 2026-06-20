@@ -6,13 +6,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use ratatui_image::protocol::Protocol;
 use ratatui_image::{FontSize, Image, Resize};
 
 use crate::api::RoomDto;
 use crate::app::{
-    account_localpart, format_time, image_body_row_count, message_display_lines,
-    message_line_ranges, AccountSelection, App, ImageCardRows, ImageState, MediaKey, Mode,
-    PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind, IMAGE_CARD_ROWS, IMAGE_THUMB_ROWS,
+    account_localpart, format_time, message_layout, AccountSelection, App, ImageState,
+    ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
+    IMAGE_THUMB_ROWS,
 };
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
@@ -339,15 +340,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .map(|event| app.sender_label(event))
         .collect::<Vec<_>>();
     let reactions = app.selected_reactions();
-    // Build a map of image card heights from the cache so small images don't
-    // allocate the full IMAGE_CARD_ROWS in the message layout.
+    // Build thumbnail heights from the cache. The shared message layout adds
+    // each image's wrapped label/caption rows and computes all line ranges once.
     let font_size = app.picker.font_size();
-    let image_card_rows: ImageCardRows = selected_events
+    let image_thumb_rows: ImageThumbRows = selected_events
         .iter()
-        .zip(sender_labels.iter())
-        .filter_map(|(event, sender_label)| {
+        .filter_map(|event| {
             let (account_id, mxc_url) = event.image_mxc()?;
-            let body_rows = image_body_row_count(event, sender_label, message_width, &app.colors);
             let key = MediaKey::new(account_id, mxc_url.clone());
             let thumb_h = if let Some(ImageState::Ready(img)) = app.image_cache.get(&key) {
                 let nat = Resize::natural_size(img, font_size);
@@ -355,15 +354,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 IMAGE_THUMB_ROWS
             };
-            let total = body_rows + thumb_h;
-            if total != IMAGE_CARD_ROWS {
-                Some(((account_id, mxc_url), total))
+            if thumb_h != IMAGE_THUMB_ROWS {
+                Some(((account_id, mxc_url), thumb_h))
             } else {
                 None
             }
         })
         .collect();
-    let message_rows = message_display_lines(
+    let layout = message_layout(
         selected_events.as_slice(),
         sender_labels.as_slice(),
         app.selected_message_id(),
@@ -371,13 +369,25 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         message_width,
         &reactions,
         &app.live.own_senders,
-        &image_card_rows,
+        &image_thumb_rows,
     );
-    let message_scroll = app.messages.scroll.min(message_rows.len());
-    let message_lines = message_rows
-        .into_iter()
+    let total_lines = layout
+        .ranges
+        .last()
+        .map(|range| range.end)
+        .unwrap_or_default();
+    let max_scroll = total_lines.saturating_sub(message_page_size);
+    let message_scroll = if app.messages.scroll == usize::MAX {
+        max_scroll
+    } else {
+        app.messages.scroll.min(max_scroll)
+    };
+    let message_lines = layout
+        .lines
+        .iter()
         .skip(message_scroll)
         .take(message_page_size)
+        .cloned()
         .collect::<Vec<_>>();
     let title = app
         .selected_room()
@@ -419,35 +429,25 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // when that complete reserved region is visible; partial scrolling therefore
     // cannot paint outside the message's rows or cover adjacent text.
     let (media_requests, thumb_specs) = {
-        let ranges = message_line_ranges(
-            selected_events.as_slice(),
-            sender_labels.as_slice(),
-            message_width,
-            &reactions,
-            &app.colors,
-            &image_card_rows,
-        );
         let visible_end = message_scroll.saturating_add(message_page_size);
         let mut requests = Vec::new();
         let specs: Vec<(Rect, Size, MediaKey)> = selected_events
             .iter()
-            .zip(sender_labels.iter())
             .enumerate()
-            .filter_map(|(idx, (event, sender_label))| {
+            .filter_map(|(idx, event)| {
                 let (account_id, mxc_url) = event.image_mxc()?;
-                let range = &ranges[idx];
+                let range = &layout.ranges[idx];
                 if range.end <= message_scroll || range.start >= visible_end {
                     return None;
                 }
                 let media = MediaKey::new(account_id, mxc_url.clone());
                 requests.push((media.clone(), event.image_is_encrypted()));
-                let body_rows =
-                    image_body_row_count(event, sender_label, message_width, &app.colors);
-                let total = image_card_rows
-                    .get(&(account_id, mxc_url))
+                let image_key = (account_id, mxc_url);
+                let body_rows = layout.image_body_rows.get(&image_key).copied().unwrap_or(1);
+                let thumb_h = image_thumb_rows
+                    .get(&image_key)
                     .copied()
-                    .unwrap_or(IMAGE_CARD_ROWS);
-                let thumb_h = total.saturating_sub(body_rows).max(1);
+                    .unwrap_or(IMAGE_THUMB_ROWS);
                 let (rect, size) = image_thumbnail_spec(
                     messages_area,
                     message_width,
@@ -462,6 +462,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .collect();
         (requests, specs)
     };
+    let layout_event_ids = selected_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    app.set_message_layout(layout_event_ids, layout.ranges);
     for (key, encrypted) in &media_requests {
         app.request_image(key.account_id, key.mxc_url.clone(), *encrypted);
     }
@@ -917,7 +922,12 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
         Some(ImageState::Ready(_)) => {
             match app.proto_cache.get(&protocol_key) {
                 Some(ProtocolState::Ready(protocol)) => {
-                    frame.render_widget(Image::new(protocol), image_area);
+                    render_preview_protocol(
+                        frame,
+                        protocol,
+                        image_area,
+                        app.sixel_preview_generation,
+                    );
                 }
                 Some(ProtocolState::Failed(error)) => {
                     frame.render_widget(
@@ -938,6 +948,28 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
             }
         }
         _ => frame.render_widget(Paragraph::new("Loading image..."), inner),
+    }
+}
+
+fn render_preview_protocol(
+    frame: &mut Frame<'_>,
+    protocol: &Protocol,
+    area: Rect,
+    sixel_generation: u64,
+) {
+    if let Protocol::Sixel(sixel) = protocol {
+        let mut refreshed = sixel.clone();
+        // tmux forwards Sixel but does not retain it when the client display is
+        // refreshed. Vary a harmless trailing SGR sequence so ratatui observes
+        // a changed cell and retransmits the image instead of diffing it away.
+        refreshed.data.push_str(if sixel_generation % 2 == 0 {
+            "\x1b[0m"
+        } else {
+            "\x1b[00m"
+        });
+        frame.render_widget(Image::new(&Protocol::Sixel(refreshed)), area);
+    } else {
+        frame.render_widget(Image::new(protocol), area);
     }
 }
 

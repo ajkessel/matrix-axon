@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::{websocket_task, AxonClient};
-use app::{App, LiveFrameAction};
+use app::{App, LiveFrameAction, Mode, PopupKind};
 use args::{normalize_token, Args};
 use config::TuiConfig;
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
@@ -98,18 +98,22 @@ fn terminal_image_picker() -> Picker {
     // hardcodes an arbitrary 10x20 cell, so on terminals whose real cells differ
     // (notably Retina iTerm2) every graphic comes out scaled wrong. Seed the picker
     // with the terminal's actual cell size, derived from the TIOCGWINSZ ioctl via
-    // crossterm::window_size(). Unlike Picker::from_query_stdio() this never reads
-    // stdin, so it can't race the input thread.
-    let mut picker = match query_font_size() {
-        Some(font_size) => {
-            // from_fontsize is the only public way to inject a font size in 11.x.
-            #[allow(deprecated)]
-            {
-                Picker::from_fontsize(font_size)
-            }
-        }
-        None => Picker::halfblocks(),
-    };
+    // crossterm::window_size(). Inside tmux those pixel dimensions describe the
+    // outer window while rows/columns can describe only the pane, so we refuse
+    // that mismatched ratio unless AXON_FONT_SIZE supplies an explicit value.
+    if inside_tmux() {
+        enable_tmux_passthrough();
+    }
+    let font_size = query_font_size();
+    let mut picker = picker_with_tmux_state(font_size);
+    // Inside tmux, graphics protocols need an explicit pixel-to-cell ratio:
+    // tmux's reported pixel dimensions can describe the outer window rather
+    // than the current pane. Outside tmux, retain ratatui-image's established
+    // fallback behavior; it works on terminals such as Windows Terminal that
+    // advertise Sixel but do not report pixel dimensions through TIOCGWINSZ.
+    if font_size.is_none() && inside_tmux() {
+        return picker;
+    }
     let protocol = std::env::var("AXON_IMAGE_PROTOCOL")
         .ok()
         .and_then(|value| parse_image_protocol(&value))
@@ -122,6 +126,50 @@ fn terminal_image_picker() -> Picker {
         picker.set_protocol_type(protocol);
     }
     picker
+}
+
+fn picker_with_tmux_state(font_size: Option<FontSize>) -> Picker {
+    // ratatui-image 11 recognizes tmux only from TERM=tmux* or
+    // TERM_PROGRAM=tmux, while many real tmux sessions use TERM=screen-* and
+    // expose only TMUX. Temporarily provide the hint its constructor expects so
+    // generated Sixel/iTerm2/Kitty sequences use tmux passthrough. Restore the
+    // user's TERM immediately; this runs before any worker threads are started.
+    let needs_tmux_hint = inside_tmux()
+        && !std::env::var("TERM").is_ok_and(|term| term.starts_with("tmux"))
+        && !std::env::var("TERM_PROGRAM").is_ok_and(|program| program == "tmux");
+    let original_term = std::env::var_os("TERM");
+    if needs_tmux_hint {
+        std::env::set_var("TERM", "tmux-256color");
+    }
+
+    let picker = match font_size {
+        Some(font_size) => {
+            // from_fontsize is the only public way to inject a font size in 11.x.
+            #[allow(deprecated)]
+            {
+                Picker::from_fontsize(font_size)
+            }
+        }
+        None => Picker::halfblocks(),
+    };
+
+    if needs_tmux_hint {
+        if let Some(original_term) = original_term {
+            std::env::set_var("TERM", original_term);
+        } else {
+            std::env::remove_var("TERM");
+        }
+    }
+    picker
+}
+
+fn enable_tmux_passthrough() {
+    let _ = std::process::Command::new("tmux")
+        .args(["set", "-p", "allow-passthrough", "on"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Probe the terminal for Sixel support with a Primary Device Attributes (DA1)
@@ -161,7 +209,7 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
     if crossterm::terminal::enable_raw_mode().is_err() {
         return None;
     }
-    let response = read_da1_response(query);
+    let response = read_terminal_response(query, b'c');
     let _ = crossterm::terminal::disable_raw_mode();
 
     if sixel_in_da1(&response?) {
@@ -174,7 +222,7 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
 /// Send a DA1 query and collect the reply, polling the tty with a bounded deadline
 /// so a non-responding terminal (or a dropped tmux passthrough) can't stall
 /// startup. Returns the raw bytes read, or None if nothing arrived.
-fn read_da1_response(query: &[u8]) -> Option<Vec<u8>> {
+fn read_terminal_response(query: &[u8], terminator: u8) -> Option<Vec<u8>> {
     use std::io::Write;
 
     let mut stdout = io::stdout();
@@ -212,8 +260,7 @@ fn read_da1_response(query: &[u8]) -> Option<Vec<u8>> {
             break;
         }
         buf.extend_from_slice(&chunk[..read as usize]);
-        // A DA1 reply is terminated by 'c'; stop as soon as we have a full one.
-        if buf.contains(&b'c') || buf.len() > 256 {
+        if buf.contains(&terminator) || buf.len() > 256 {
             break;
         }
     }
@@ -235,10 +282,12 @@ fn sixel_in_da1(response: &[u8]) -> bool {
 }
 
 /// Determine the terminal cell size in pixels, used to scale graphics-protocol
-/// images correctly. An explicit `AXON_FONT_SIZE=WxH` override wins; otherwise we
-/// query the tty via the TIOCGWINSZ ioctl (crossterm::window_size). Returns None
-/// when querying is disabled, the terminal reports no pixel size (width/height of
-/// 0 is common over SSH or in dumb terminals), or stdout is not a tty.
+/// images correctly. An explicit `AXON_FONT_SIZE=WxH` override wins. Otherwise,
+/// ask the terminal directly with XTWINOPS `CSI 16 t`, forwarding the query
+/// through tmux passthrough when necessary. As a final non-tmux fallback, derive
+/// the ratio from TIOCGWINSZ. We never use that ratio inside tmux because its
+/// pixel dimensions may describe the outer window while rows/columns describe
+/// only the current pane.
 fn query_font_size() -> Option<FontSize> {
     if let Some(font_size) = std::env::var("AXON_FONT_SIZE")
         .ok()
@@ -249,8 +298,43 @@ fn query_font_size() -> Option<FontSize> {
     if std::env::var_os("AXON_NO_IMAGE_QUERY").is_some() {
         return None;
     }
+    if let Some(font_size) = query_cell_size_via_xtwinops() {
+        return Some(font_size);
+    }
+    if inside_tmux() {
+        return None;
+    }
     let window = crossterm::terminal::window_size().ok()?;
     font_size_from_window(window.columns, window.rows, window.width, window.height)
+}
+
+fn query_cell_size_via_xtwinops() -> Option<FontSize> {
+    let is_tty =
+        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 };
+    if !is_tty {
+        return None;
+    }
+    let query: &[u8] = if inside_tmux() {
+        b"\x1bPtmux;\x1b\x1b[16t\x1b\\"
+    } else {
+        b"\x1b[16t"
+    };
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return None;
+    }
+    let response = read_terminal_response(query, b't');
+    let _ = crossterm::terminal::disable_raw_mode();
+    parse_cell_size_response(&response?)
+}
+
+fn parse_cell_size_response(response: &[u8]) -> Option<FontSize> {
+    let text = String::from_utf8_lossy(response);
+    let start = text.find("[6;")?;
+    let values = text[start + 3..].split_once('t')?.0;
+    let (height, width) = values.split_once(';')?;
+    let height: u16 = height.parse().ok()?;
+    let width: u16 = width.parse().ok()?;
+    (width > 0 && height > 0).then(|| FontSize::new(width, height))
 }
 
 /// Divide the window's pixel dimensions by its cell grid to get per-cell pixels.
@@ -341,16 +425,26 @@ async fn run_app(
     app.load_selected_timeline().await;
 
     let mut tick = time::interval(Duration::from_millis(100));
+    let mut next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
     loop {
-        // `take_redraw_request` signals that cached image content changed; for
-        // halfblocks rendering ratatui's diff-based draw handles the update
-        // without a full terminal clear (which queries cursor position and fails
-        // in some terminals, e.g. WSL2 pass-through).
+        // The image protocols clear their own render areas (Sixel/iTerm2) or
+        // remove placements when their placeholders disappear (Kitty). A
+        // terminal-wide clear here causes visible flicker and is unnecessary.
         let _ = app.take_redraw_request();
         terminal.draw(|frame| draw(frame, &mut app))?;
 
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                if inside_tmux()
+                    && app.picker.protocol_type() == ProtocolType::Sixel
+                    && app.mode == Mode::Popup(PopupKind::MediaPreview)
+                    && Instant::now() >= next_sixel_preview_refresh
+                {
+                    app.sixel_preview_generation =
+                        app.sixel_preview_generation.wrapping_add(1);
+                    next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
+                }
+            }
             Some(key) = key_rx.recv() => {
                 if app.handle_key(key).await {
                     break;
@@ -521,6 +615,18 @@ mod tests {
         assert_eq!(wh(parse_font_size("0x20")), None);
         assert_eq!(wh(parse_font_size("7")), None);
         assert_eq!(wh(parse_font_size("axb")), None);
+    }
+
+    #[test]
+    fn parses_xtwinops_cell_size_response() {
+        assert_eq!(wh(parse_cell_size_response(b"\x1b[6;18;9t")), Some((9, 18)));
+        assert_eq!(
+            wh(parse_cell_size_response(b"noise\x1b[6;20;10t")),
+            Some((10, 20))
+        );
+        assert_eq!(wh(parse_cell_size_response(b"\x1b[6;0;9t")), None);
+        assert_eq!(wh(parse_cell_size_response(b"\x1b[4;900;1600t")), None);
+        assert_eq!(wh(parse_cell_size_response(b"not a response")), None);
     }
 
     #[test]

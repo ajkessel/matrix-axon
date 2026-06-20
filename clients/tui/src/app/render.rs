@@ -11,16 +11,20 @@ use crate::config::ColorScheme;
 use crate::html::formatted_message_body_lines;
 use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
 
-/// Map from `(account_id, mxc_url)` to the total display rows allocated for
-/// that image card (1 sender row + N thumbnail rows). Entries are only present
-/// when the image is already in the cache and its natural size is smaller than
-/// `IMAGE_CARD_ROWS`; absent entries default to `IMAGE_CARD_ROWS`.
-pub(crate) type ImageCardRows = HashMap<(Uuid, String), usize>;
+/// Map from `(account_id, mxc_url)` to the rows allocated for its thumbnail.
+/// Entries are only needed when a cached image is naturally shorter than
+/// `IMAGE_THUMB_ROWS`; absent entries default to `IMAGE_THUMB_ROWS`.
+pub(crate) type ImageThumbRows = HashMap<(Uuid, String), usize>;
+
+pub(crate) struct MessageLayout {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) ranges: Vec<Range<usize>>,
+    pub(crate) image_body_rows: HashMap<(Uuid, String), usize>,
+}
 
 /// Rows reserved in the message list for image/sticker events so the inline
 /// thumbnail has enough vertical space to be legible.
 pub(crate) const IMAGE_THUMB_ROWS: usize = 6;
-pub(crate) const IMAGE_CARD_ROWS: usize = IMAGE_THUMB_ROWS + 1;
 
 pub(crate) fn format_time(origin_ts: i64) -> String {
     let Ok(millis) = u64::try_from(origin_ts) else {
@@ -41,39 +45,6 @@ pub(crate) fn format_time(origin_ts: i64) -> String {
     )
 }
 
-pub(crate) fn message_line_ranges(
-    events: &[&EventDto],
-    sender_labels: &[String],
-    width: usize,
-    reactions: &HashMap<String, Vec<(String, usize)>>,
-    colors: &ColorScheme,
-    image_card_rows: &ImageCardRows,
-) -> Vec<Range<usize>> {
-    let empty = vec![];
-    let mut start = 0;
-    events
-        .iter()
-        .zip(sender_labels)
-        .map(|(event, sender_label)| {
-            let event_reactions = reactions
-                .get(&event.event_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&empty);
-            let count = message_display_line_count(
-                event,
-                sender_label,
-                width,
-                event_reactions,
-                colors,
-                image_card_rows,
-            );
-            let range = start..start + count;
-            start += count;
-            range
-        })
-        .collect()
-}
-
 pub(crate) fn message_index_at_line(ranges: &[Range<usize>], line: usize) -> usize {
     ranges
         .iter()
@@ -81,34 +52,8 @@ pub(crate) fn message_index_at_line(ranges: &[Range<usize>], line: usize) -> usi
         .unwrap_or_else(|| ranges.len().saturating_sub(1))
 }
 
-fn message_display_line_count(
-    event: &EventDto,
-    sender_label: &str,
-    width: usize,
-    event_reactions: &[(String, usize)],
-    colors: &ColorScheme,
-    image_card_rows: &ImageCardRows,
-) -> usize {
-    let body_lines = if let Some((account_id, mxc_url)) = event.image_mxc() {
-        *image_card_rows
-            .get(&(account_id, mxc_url))
-            .unwrap_or(&IMAGE_CARD_ROWS)
-    } else {
-        message_body_lines(
-            event,
-            sender_label,
-            first_body_width(sender_label, event.origin_ts, width),
-            continuation_body_width(width),
-            colors,
-        )
-        .len()
-        .max(1)
-    };
-    body_lines + usize::from(!event_reactions.is_empty())
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn message_display_lines(
+pub(crate) fn message_layout(
     events: &[&EventDto],
     sender_labels: &[String],
     selected_message: Option<&str>,
@@ -116,82 +61,88 @@ pub(crate) fn message_display_lines(
     width: usize,
     reactions: &HashMap<String, Vec<(String, usize)>>,
     own_senders: &HashMap<Uuid, String>,
-    image_card_rows: &ImageCardRows,
-) -> Vec<Line<'static>> {
+    image_thumb_rows: &ImageThumbRows,
+) -> MessageLayout {
     let reaction_style = Style::default().fg(colors.input_hint);
-    events
-        .iter()
-        .zip(sender_labels)
-        .flat_map(|(event, sender_label)| {
-            let is_selected = selected_message == Some(event.event_id.as_str());
-            let is_own = own_senders.get(&event.account_id) == Some(&event.sender);
-            let marker = if is_selected { "> " } else { "  " };
-            let time_style = if is_selected {
-                Style::default().fg(colors.selected_room)
+    let mut lines = Vec::new();
+    let mut ranges = Vec::with_capacity(events.len());
+    let mut image_body_rows = HashMap::new();
+
+    for (event, sender_label) in events.iter().zip(sender_labels) {
+        let is_selected = selected_message == Some(event.event_id.as_str());
+        let is_own = own_senders.get(&event.account_id) == Some(&event.sender);
+        let marker = if is_selected { "> " } else { "  " };
+        let time_style = if is_selected {
+            Style::default().fg(colors.selected_room)
+        } else {
+            Style::default()
+        };
+        let sender_color = if is_own {
+            colors.own_message_sender
+        } else {
+            colors.message_sender
+        };
+        let mut body_lines = message_body_lines(
+            event,
+            sender_label,
+            first_body_width(sender_label, event.origin_ts, width),
+            continuation_body_width(width),
+            colors,
+        );
+        let body_row_count = body_lines.len().max(1);
+        if let Some((account_id, mxc_url)) = event.image_mxc() {
+            let key = (account_id, mxc_url);
+            image_body_rows.insert(key.clone(), body_row_count);
+            let thumbnail_rows = image_thumb_rows
+                .get(&key)
+                .copied()
+                .unwrap_or(IMAGE_THUMB_ROWS);
+            body_lines.resize_with(body_row_count + thumbnail_rows, Vec::new);
+        }
+
+        let range_start = lines.len();
+        for (index, body) in body_lines.into_iter().enumerate() {
+            if index == 0 {
+                let mut spans = vec![
+                    Span::styled(marker, time_style),
+                    Span::styled(format!("{} ", format_time(event.origin_ts)), time_style),
+                    Span::styled(
+                        format!("{sender_label}: "),
+                        Style::default()
+                            .fg(sender_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                spans.extend(body);
+                lines.push(Line::from(spans));
             } else {
-                Style::default()
-            };
-            let sender_color = if is_own {
-                colors.own_message_sender
-            } else {
-                colors.message_sender
-            };
-            let mut body_lines = message_body_lines(
-                event,
-                sender_label,
-                first_body_width(sender_label, event.origin_ts, width),
-                continuation_body_width(width),
-                colors,
-            );
-            // Keep the media label on the first row and reserve dedicated rows
-            // below it. The thumbnail never overlays sender, timestamp, or
-            // caption text.
-            if let Some((account_id, mxc_url)) = event.image_mxc() {
-                let card_rows = *image_card_rows
-                    .get(&(account_id, mxc_url))
-                    .unwrap_or(&IMAGE_CARD_ROWS);
-                body_lines.resize_with(card_rows, Vec::new);
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(body);
+                lines.push(Line::from(spans));
             }
-            let event_reactions = reactions.get(&event.event_id).cloned().unwrap_or_default();
-            let reaction_line = if event_reactions.is_empty() {
-                None
-            } else {
+        }
+
+        if let Some(event_reactions) = reactions.get(&event.event_id) {
+            if !event_reactions.is_empty() {
                 let text = event_reactions
                     .iter()
                     .map(|(key, count)| format!("{key} {count}"))
                     .collect::<Vec<_>>()
                     .join("  ");
-                Some(Line::from(vec![
+                lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(text, reaction_style),
-                ]))
-            };
-            let body_iter = body_lines
-                .into_iter()
-                .enumerate()
-                .map(move |(index, body)| {
-                    if index == 0 {
-                        let mut spans = vec![
-                            Span::styled(marker, time_style),
-                            Span::styled(format!("{} ", format_time(event.origin_ts)), time_style),
-                            Span::styled(
-                                format!("{sender_label}: "),
-                                Style::default()
-                                    .fg(sender_color)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ];
-                        spans.extend(body);
-                        Line::from(spans)
-                    } else {
-                        let mut spans = vec![Span::raw("  ")];
-                        spans.extend(body);
-                        Line::from(spans)
-                    }
-                });
-            body_iter.chain(reaction_line)
-        })
-        .collect()
+                ]));
+            }
+        }
+        ranges.push(range_start..lines.len());
+    }
+
+    MessageLayout {
+        lines,
+        ranges,
+        image_body_rows,
+    }
 }
 
 fn first_body_width(sender_label: &str, origin_ts: i64, width: usize) -> usize {
@@ -236,26 +187,6 @@ fn message_body_lines(
         first_width,
         continuation_width,
     ))
-}
-
-/// Number of rendered body lines for an image event (label + any caption
-/// lines). This is the row offset from the sender line to where the inline
-/// thumbnail starts.
-pub(crate) fn image_body_row_count(
-    event: &EventDto,
-    sender_label: &str,
-    width: usize,
-    colors: &ColorScheme,
-) -> usize {
-    message_body_lines(
-        event,
-        sender_label,
-        first_body_width(sender_label, event.origin_ts, width),
-        continuation_body_width(width),
-        colors,
-    )
-    .len()
-    .max(1)
 }
 
 fn continuation_body_width(width: usize) -> usize {

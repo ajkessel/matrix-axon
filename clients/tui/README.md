@@ -310,6 +310,32 @@ environment hints; half-block rendering is the portable fallback. Set
 `AXON_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks` to override
 detection without running a terminal capability query.
 
+### Sixel inside tmux
+
+Sixel works through tmux passthrough, but tmux does not retain Sixel graphics as
+part of its pane contents. A tmux client refresh can therefore erase an image
+even though axon-tui's text-cell buffer has not changed. While an image preview
+is open, axon-tui retransmits it every five seconds inside tmux. This keeps the
+preview visible, but the retransmission may cause a brief flicker.
+
+Possible workarounds:
+
+- Use halfblocks inside tmux for the most reliable, flicker-free rendering:
+  `AXON_IMAGE_PROTOCOL=halfblocks axon-tui`.
+- If tmux's status refresh is triggering the disappearance, disable its periodic
+  update with `tmux set -g status-interval 0`. This affects the whole tmux
+  server; set a nonzero interval later to restore automatic status updates.
+- If automatic cell-size detection is unavailable or inaccurate, set the
+  terminal's character-cell size explicitly, for example
+  `AXON_FONT_SIZE=9x18 axon-tui`. The format is width-by-height in pixels.
+- Set `AXON_NO_IMAGE_QUERY=1` to disable startup terminal queries. Unless an
+  explicit protocol and usable font size are supplied, this falls back to
+  halfblocks.
+
+Windows Terminal supports the cell-size query used by axon-tui. In tmux, the
+query and Sixel output require `allow-passthrough`; axon-tui enables it for the
+current pane at startup.
+
 ## Formatted Messages
 
 When an event includes Matrix HTML formatting (`content.format =

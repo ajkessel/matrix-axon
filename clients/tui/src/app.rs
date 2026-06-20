@@ -30,8 +30,8 @@ mod timeline;
 
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
-    display_body_with_sender, format_time, image_body_row_count, message_display_lines,
-    message_index_at_line, message_line_ranges, ImageCardRows, IMAGE_CARD_ROWS, IMAGE_THUMB_ROWS,
+    display_body_with_sender, format_time, message_index_at_line, message_layout, ImageThumbRows,
+    IMAGE_THUMB_ROWS,
 };
 pub(crate) use rooms::account_localpart;
 #[cfg(test)]
@@ -285,6 +285,9 @@ pub(crate) struct App {
     /// Bounded cache of protocols encoded for a specific image and cell size.
     pub(crate) proto_cache: HashMap<ProtocolKey, ProtocolState>,
     proto_cache_order: VecDeque<ProtocolKey>,
+    /// Changes periodically while a Sixel preview is open inside tmux, forcing
+    /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
+    pub(crate) sixel_preview_generation: u64,
 }
 
 #[derive(Default)]
@@ -332,6 +335,8 @@ pub(crate) struct MessagePane {
     pub(crate) scroll: usize,
     pub(crate) page_size: usize,
     pub(crate) width: usize,
+    pub(crate) line_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) layout_event_ids: Vec<String>,
 }
 
 impl Default for MessagePane {
@@ -342,6 +347,8 @@ impl Default for MessagePane {
             scroll: usize::MAX,
             page_size: 1,
             width: 80,
+            line_ranges: Vec::new(),
+            layout_event_ids: Vec::new(),
         }
     }
 }
@@ -408,6 +415,7 @@ impl App {
             picker,
             proto_cache: HashMap::new(),
             proto_cache_order: VecDeque::new(),
+            sixel_preview_generation: 0,
             redraw_requested: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
@@ -1998,7 +2006,7 @@ mod tests {
         };
         let sender_labels = vec!["@me:example.com".to_owned()];
         let own_senders = HashMap::from([(account_id, "@me:example.com".to_owned())]);
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -2006,8 +2014,9 @@ mod tests {
             80,
             &HashMap::new(),
             &own_senders,
-            &ImageCardRows::new(),
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         assert_eq!(lines[0].spans[2].style.fg, Some(colors.own_message_sender));
     }
@@ -2163,7 +2172,7 @@ mod tests {
             )
         };
         let sender_labels = vec!["@alice:example.com".to_owned()];
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -2171,8 +2180,9 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
-            &ImageCardRows::new(),
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         assert!(lines[0].spans.iter().any(|span| {
             span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
@@ -2206,7 +2216,7 @@ mod tests {
             )
         };
         let sender_labels = vec!["@alice:example.com".to_owned()];
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -2214,8 +2224,9 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
-            &ImageCardRows::new(),
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         let text = lines[0]
             .spans
@@ -2224,6 +2235,81 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("fallback"));
         assert!(!text.contains("alert"));
+    }
+
+    #[test]
+    fn image_layout_counts_caption_and_cached_thumbnail_rows_once() {
+        let colors = TuiConfig::test_default().colors;
+        let event = event_with_id(
+            "$image:example.com",
+            "m.room.message",
+            Some("caption"),
+            serde_json::json!({
+                "msgtype": "m.image",
+                "body": "caption",
+                "filename": "photo.jpg",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let key = (event.account_id, "mxc://example.com/photo".to_owned());
+        let layout = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            None,
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(key.clone(), 2)]),
+        );
+
+        assert_eq!(layout.image_body_rows.get(&key), Some(&2));
+        assert_eq!(layout.ranges, vec![0..4]);
+        assert_eq!(layout.lines.len(), 4);
+    }
+
+    #[test]
+    fn message_navigation_uses_rendered_image_ranges() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.page_size = 3;
+        app.messages.scroll = 0;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$image:example.com",
+                    "m.room.message",
+                    Some("caption"),
+                    serde_json::json!({
+                        "msgtype": "m.image",
+                        "body": "caption",
+                        "filename": "photo.jpg",
+                        "url": "mxc://example.com/photo"
+                    }),
+                ),
+                event_with_id(
+                    "$next:example.com",
+                    "m.room.message",
+                    Some("next"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "next" }),
+                ),
+            ],
+        );
+        app.set_message_layout(
+            vec![
+                "$image:example.com".to_owned(),
+                "$next:example.com".to_owned(),
+            ],
+            vec![0..4, 4..5],
+        );
+
+        app.messages.selection = Some("$next:example.com".to_owned());
+        app.ensure_message_index_visible(1);
+
+        assert_eq!(app.messages.scroll, 2);
     }
 
     #[test]

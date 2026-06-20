@@ -4,8 +4,8 @@ use crate::api::{EventDto, LiveFrame, RoomDto};
 use crate::config::{DisplayOptions, SenderNameStyle};
 
 use super::{
-    collect_reactions, match_status, message_index_at_line, message_line_ranges, next_match_index,
-    selected_message_target_index, App, ConnectionState, ImageCardRows, LiveFrameAction, RoomKey,
+    collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
+    selected_message_target_index, App, ConnectionState, ImageThumbRows, LiveFrameAction, RoomKey,
     Status,
 };
 
@@ -273,16 +273,7 @@ impl App {
             if events.is_empty() {
                 None
             } else {
-                let sender_labels = self.sender_labels(events.as_slice());
-                let reactions = self.selected_reactions();
-                let ranges = message_line_ranges(
-                    events.as_slice(),
-                    sender_labels.as_slice(),
-                    self.messages.width,
-                    &reactions,
-                    &self.colors,
-                    &ImageCardRows::new(),
-                );
+                let ranges = self.selected_message_ranges(events.as_slice());
                 let total_lines = ranges
                     .last()
                     .map(|range| range.end)
@@ -329,16 +320,7 @@ impl App {
 
     pub(crate) fn ensure_message_index_visible(&mut self, index: usize) {
         let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
-        let reactions = self.selected_reactions();
-        let ranges = message_line_ranges(
-            events.as_slice(),
-            sender_labels.as_slice(),
-            self.messages.width,
-            &reactions,
-            &self.colors,
-            &ImageCardRows::new(),
-        );
+        let ranges = self.selected_message_ranges(events.as_slice());
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -497,19 +479,42 @@ impl App {
 
     fn selected_display_line_count(&self) -> usize {
         let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
+        self.selected_message_ranges(events.as_slice())
+            .last()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    }
+
+    fn selected_message_ranges(
+        &self,
+        events: &[&crate::api::EventDto],
+    ) -> Vec<std::ops::Range<usize>> {
+        let current_event_ids = events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        if current_event_ids.iter().copied().eq(self
+            .messages
+            .layout_event_ids
+            .iter()
+            .map(String::as_str))
+        {
+            return self.messages.line_ranges.clone();
+        }
+
+        let sender_labels = self.sender_labels(events);
         let reactions = self.selected_reactions();
-        message_line_ranges(
-            events.as_slice(),
+        message_layout(
+            events,
             sender_labels.as_slice(),
+            self.messages.selection.as_deref(),
+            &self.colors,
             self.messages.width,
             &reactions,
-            &self.colors,
-            &ImageCardRows::new(),
+            &self.live.own_senders,
+            &ImageThumbRows::new(),
         )
-        .last()
-        .map(|range| range.end)
-        .unwrap_or_default()
+        .ranges
     }
 
     pub(crate) fn sender_labels(&self, events: &[&EventDto]) -> Vec<String> {
@@ -522,13 +527,22 @@ impl App {
     pub(crate) fn set_message_viewport(&mut self, page_size: usize, width: usize) {
         self.messages.page_size = page_size.max(1);
         self.messages.width = width.max(1);
-        let line_count = self.selected_display_line_count();
+    }
+
+    pub(crate) fn set_message_layout(
+        &mut self,
+        event_ids: Vec<String>,
+        ranges: Vec<std::ops::Range<usize>>,
+    ) {
+        let line_count = ranges.last().map(|range| range.end).unwrap_or_default();
         let max_scroll = line_count.saturating_sub(self.messages.page_size);
         self.messages.scroll = if self.messages.scroll == usize::MAX {
             max_scroll
         } else {
             self.messages.scroll.min(max_scroll)
         };
+        self.messages.layout_event_ids = event_ids;
+        self.messages.line_ranges = ranges;
     }
 }
 

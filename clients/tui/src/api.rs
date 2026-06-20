@@ -540,6 +540,23 @@ pub struct EventDto {
     pub redaction_event_id: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum MediaKind {
+    Image,
+    File,
+    Audio,
+    Video,
+    Sticker,
+}
+
+struct ParsedMedia<'a> {
+    kind: MediaKind,
+    url: Option<&'a str>,
+    filename: &'a str,
+    caption: Option<&'a str>,
+    encrypted: bool,
+}
+
 impl EventDto {
     pub fn display_body(&self) -> String {
         if self.redacted {
@@ -572,28 +589,19 @@ impl EventDto {
     /// `m.audio`, `m.video`, `m.sticker`). Returns `None` for text messages
     /// and non-message events.
     fn media_label(&self) -> Option<String> {
-        let content = self.content.as_ref()?;
-        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
-        // m.sticker events don't have a msgtype but have their own event type
-        let is_sticker = self.event_type == "m.sticker";
-        let explicit_filename = content.get("filename").and_then(|v| v.as_str());
-        let body_text = content.get("body").and_then(|v| v.as_str());
-        // When `filename` is absent `body` is the filename. When both are present
-        // and differ, `body` is a user-authored caption shown as a second line.
-        let filename = explicit_filename.or(body_text).unwrap_or("media");
-        let caption = explicit_filename
-            .is_some()
-            .then(|| body_text.filter(|b| *b != filename))
-            .flatten();
-        let suffix = caption.map(|c| format!("\n{c}")).unwrap_or_default();
-        match (msgtype, is_sticker) {
-            (Some("m.image"), _) => Some(format!("[image: {filename}]{suffix}")),
-            (Some("m.file"), _) => Some(format!("[file: {filename}]{suffix}")),
-            (Some("m.audio"), _) => Some(format!("[audio: {filename}]{suffix}")),
-            (Some("m.video"), _) => Some(format!("[video: {filename}]{suffix}")),
-            (_, true) => Some(format!("[sticker: {filename}]{suffix}")),
-            _ => None,
-        }
+        let media = self.parsed_media()?;
+        let kind = match media.kind {
+            MediaKind::Image => "image",
+            MediaKind::File => "file",
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+            MediaKind::Sticker => "sticker",
+        };
+        let suffix = media
+            .caption
+            .map(|caption| format!("\n{caption}"))
+            .unwrap_or_default();
+        Some(format!("[{kind}: {}]{suffix}", media.filename))
     }
 
     /// Returns `true` when this image/sticker event uses encrypted media
@@ -601,71 +609,68 @@ impl EventDto {
     /// proxy attempts server-side decryption, but may not have the key for
     /// older messages — in that case it returns raw ciphertext.
     pub fn image_is_encrypted(&self) -> bool {
-        let Some(content) = self.content.as_ref() else {
-            return false;
-        };
-        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
-        let is_image = matches!(msgtype, Some("m.image")) || self.event_type == "m.sticker";
-        is_image
-            && content.get("url").and_then(|v| v.as_str()).is_none()
-            && content
-                .get("file")
-                .and_then(|f| f.get("url"))
-                .and_then(|v| v.as_str())
-                .is_some()
+        self.image_media().is_some_and(|media| media.encrypted)
     }
 
     /// Extract the `mxc://` URI and account from an image or sticker event.
     /// Returns `(account_id, mxc_url)` when the event carries a downloadable
     /// image, `None` otherwise.
     pub fn image_mxc(&self) -> Option<(Uuid, String)> {
-        let content = self.content.as_ref()?;
-        let msgtype = content.get("msgtype").and_then(|v| v.as_str());
-        let is_image = matches!(msgtype, Some("m.image")) || self.event_type == "m.sticker";
-        if !is_image {
-            return None;
-        }
-        // Plain media has `content.url`; encrypted media has `content.file.url`.
-        // The Axon media proxy handles decryption server-side, so both paths
-        // yield decodable image bytes.
-        let url = content
-            .get("url")
-            .and_then(|v| v.as_str())
-            .or_else(|| content.get("file")?.get("url")?.as_str())?;
-        if !url.starts_with("mxc://") {
-            return None;
-        }
-        Some((self.account_id, url.to_owned()))
+        let media = self.image_media()?;
+        Some((self.account_id, media.url?.to_owned()))
     }
 
     /// Returns the filename for an image/sticker event (the `filename` field if
     /// present, otherwise `body`). Returns `None` for non-image events.
     pub fn image_filename(&self) -> Option<String> {
-        let content = self.content.as_ref()?;
-        self.image_mxc()?;
-        let explicit_filename = content.get("filename").and_then(|v| v.as_str());
-        let body_text = content.get("body").and_then(|v| v.as_str());
-        Some(
-            explicit_filename
-                .or(body_text)
-                .unwrap_or("media")
-                .to_owned(),
-        )
+        Some(self.image_media()?.filename.to_owned())
     }
 
     /// Returns the user-authored caption for an image/sticker event — present
     /// only when `filename` and `body` are both set and differ. Returns `None`
     /// for non-image events or images without a caption.
     pub fn image_caption(&self) -> Option<String> {
+        self.image_media()?.caption.map(str::to_owned)
+    }
+
+    fn parsed_media(&self) -> Option<ParsedMedia<'_>> {
         let content = self.content.as_ref()?;
-        self.image_mxc()?;
-        let explicit_filename = content.get("filename").and_then(|v| v.as_str())?;
-        let body_text = content.get("body").and_then(|v| v.as_str())?;
-        if body_text != explicit_filename {
-            Some(body_text.to_owned())
-        } else {
-            None
+        let kind = match content.get("msgtype").and_then(|value| value.as_str()) {
+            Some("m.image") => MediaKind::Image,
+            Some("m.file") => MediaKind::File,
+            Some("m.audio") => MediaKind::Audio,
+            Some("m.video") => MediaKind::Video,
+            _ if self.event_type == "m.sticker" => MediaKind::Sticker,
+            _ => return None,
+        };
+        let explicit_filename = content.get("filename").and_then(|value| value.as_str());
+        let body = content.get("body").and_then(|value| value.as_str());
+        let filename = explicit_filename.or(body).unwrap_or("media");
+        let caption = explicit_filename.and_then(|_| body.filter(|body| *body != filename));
+        let plain_url = content.get("url").and_then(|value| value.as_str());
+        let encrypted_url = content
+            .get("file")
+            .and_then(|file| file.get("url"))
+            .and_then(|value| value.as_str());
+        let url = plain_url.or(encrypted_url);
+        Some(ParsedMedia {
+            kind,
+            url,
+            filename,
+            caption,
+            encrypted: plain_url.is_none() && encrypted_url.is_some(),
+        })
+    }
+
+    fn image_media(&self) -> Option<ParsedMedia<'_>> {
+        let media = self.parsed_media()?;
+        if !matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
+            return None;
         }
+        if !media.url.is_some_and(|url| url.starts_with("mxc://")) {
+            return None;
+        }
+        Some(media)
     }
 
     pub fn formatted_body(&self) -> Option<&str> {
@@ -900,6 +905,41 @@ mod tests {
             response.data.events[0].formatted_body(),
             Some("<strong>hello</strong>")
         );
+    }
+
+    #[test]
+    fn image_accessors_share_encrypted_media_metadata() {
+        let event: EventDto = serde_json::from_value(serde_json::json!({
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "event_id": "$event:localhost",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "origin_ts": 1234,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.image",
+                "body": "A caption",
+                "filename": "photo.jpg",
+                "file": { "url": "mxc://localhost/photo" }
+            },
+            "body": "A caption",
+            "relates_to": null,
+            "redacted": false,
+            "redaction_event_id": null
+        }))
+        .unwrap();
+
+        assert_eq!(
+            event.image_mxc(),
+            Some((
+                Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+                "mxc://localhost/photo".to_owned()
+            ))
+        );
+        assert!(event.image_is_encrypted());
+        assert_eq!(event.image_filename().as_deref(), Some("photo.jpg"));
+        assert_eq!(event.image_caption().as_deref(), Some("A caption"));
+        assert_eq!(event.display_body(), "[image: photo.jpg]\nA caption");
     }
 
     #[test]
