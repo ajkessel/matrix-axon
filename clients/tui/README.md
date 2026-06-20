@@ -304,9 +304,11 @@ visible or explicitly previewed. Downloads, image decoding, EXIF orientation,
 resizing, and terminal-protocol encoding run as bounded background work so room
 navigation and input remain responsive. Decoded images are dimension-checked
 and downscaled before caching. The client keeps at most 16 decoded images and
-32 encoded terminal images, runs at most four media workers, and
-rejects media responses larger than 20 MiB. Kitty, Sixel, and iTerm2 are used
-when detected; half-block rendering is the portable fallback.
+32 encoded terminal images, runs at most four media workers, and rejects media
+responses larger than 20 MiB. Kitty and iTerm2 are selected from safe terminal
+environment hints; half-block rendering is the portable fallback. Set
+`AXON_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks` to override
+detection without running a terminal capability query.
 
 ## Formatted Messages
 

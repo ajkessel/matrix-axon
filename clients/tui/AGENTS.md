@@ -27,6 +27,7 @@
 - Fetch media only through Axon's account-scoped `/v1/media` proxy. Cache keys must include `account_id`; an `mxc://` URL alone is not an Axon resource identity.
 - Keep media work demand-driven and bounded. Request only visible thumbnails or an explicitly opened preview, cap response size, bound decoded-image and encoded-protocol caches, and limit concurrent workers.
 - Never download, decode, apply EXIF orientation, resize, or encode a terminal image on the input or draw loop. Those operations belong in background work, and late results for evicted entries must be discarded.
+- Do not probe terminal image capabilities by reading stdin before launch; unsupported terminals can leave a detached reader that steals keystrokes. Use safe environment hints, an explicit `AXON_IMAGE_PROTOCOL` override, and halfblocks as the fallback.
 - Inline images own fixed rows in the message flow. Render a terminal graphic only when its complete reserved region is visible so scrolling cannot place it over neighboring text.
 - Keep the larger image view explicit and modal rather than automatically changing the message-pane layout when selection moves.
 

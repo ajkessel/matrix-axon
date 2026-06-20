@@ -24,7 +24,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use tokio::sync::mpsc;
 use tokio::time;
 use ui::draw;
@@ -70,20 +70,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Query the terminal for image protocol support before entering raw mode /
-    // alternate screen — from_query_stdio() temporarily enables raw mode itself
-    // and must not be called while it is already active.
-    //
-    // Skip the query when AXON_NO_IMAGE_QUERY is set: from_query_stdio() spawns
-    // a background thread that blocks on stdin until the terminal responds with
-    // capability data. In headless/PTY environments (e.g. smoke tests) no
-    // response ever arrives, leaving that thread alive and racing crossterm for
-    // stdin reads — causing injected keystrokes to be silently consumed.
-    let picker = if std::env::var_os("AXON_NO_IMAGE_QUERY").is_none() {
-        Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
-    } else {
-        Picker::halfblocks()
-    };
+    // Do not use Picker::from_query_stdio(): on terminals that don't answer its
+    // capability query, ratatui-image leaves a detached stdin reader behind.
+    // That reader can race the TUI input thread and silently consume keystrokes.
+    // Use safe environment hints (or an explicit override) and fall back to
+    // halfblocks, which works everywhere without touching stdin.
+    let picker = terminal_image_picker();
     let mut terminal = TerminalGuard::enter()?;
     let result = run_app(
         &mut terminal.terminal,
@@ -95,6 +87,49 @@ async fn main() -> anyhow::Result<()> {
     .await;
     terminal.leave()?;
     result
+}
+
+fn terminal_image_picker() -> Picker {
+    let mut picker = Picker::halfblocks();
+    let protocol = std::env::var("AXON_IMAGE_PROTOCOL")
+        .ok()
+        .and_then(|value| parse_image_protocol(&value))
+        .or_else(detect_image_protocol_from_env);
+    if let Some(protocol) = protocol {
+        picker.set_protocol_type(protocol);
+    }
+    picker
+}
+
+fn parse_image_protocol(value: &str) -> Option<ProtocolType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "halfblocks" | "half-blocks" => Some(ProtocolType::Halfblocks),
+        "kitty" => Some(ProtocolType::Kitty),
+        "sixel" => Some(ProtocolType::Sixel),
+        "iterm2" | "iterm" => Some(ProtocolType::Iterm2),
+        _ => None,
+    }
+}
+
+fn detect_image_protocol_from_env() -> Option<ProtocolType> {
+    if std::env::var_os("AXON_NO_IMAGE_QUERY").is_some() {
+        return None;
+    }
+    if std::env::var_os("ITERM_SESSION_ID").is_some()
+        || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
+        || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "iTerm.app")
+    {
+        return Some(ProtocolType::Iterm2);
+    }
+    let inside_tmux = std::env::var_os("TMUX").is_some()
+        || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "tmux");
+    if !inside_tmux
+        && (std::env::var_os("KITTY_WINDOW_ID").is_some()
+            || std::env::var("TERM").is_ok_and(|value| value.contains("kitty")))
+    {
+        return Some(ProtocolType::Kitty);
+    }
+    None
 }
 
 async fn run_app(
@@ -273,5 +308,22 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = self.leave();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_explicit_image_protocol_overrides() {
+        assert_eq!(parse_image_protocol("kitty"), Some(ProtocolType::Kitty));
+        assert_eq!(parse_image_protocol("SIXEL"), Some(ProtocolType::Sixel));
+        assert_eq!(parse_image_protocol("iterm"), Some(ProtocolType::Iterm2));
+        assert_eq!(
+            parse_image_protocol("half-blocks"),
+            Some(ProtocolType::Halfblocks)
+        );
+        assert_eq!(parse_image_protocol("unknown"), None);
     }
 }

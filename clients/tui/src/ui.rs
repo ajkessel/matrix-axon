@@ -863,6 +863,7 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
             wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
         })
         .unwrap_or(0);
+    let (target_size, caption_h) = fit_preview_caption(target_size, caption_h, max_inner);
 
     // Compute the popup area from target_size now — before we know whether the
     // protocol is ready — so the border never jumps when encoding finishes.
@@ -938,6 +939,21 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
         }
         _ => frame.render_widget(Paragraph::new("Loading image..."), inner),
     }
+}
+
+fn fit_preview_caption(target: Size, caption_h: u16, bounds: Rect) -> (Size, u16) {
+    if caption_h == 0 || bounds.height == 0 {
+        return (target, 0);
+    }
+    let caption_h = caption_h.min(bounds.height.saturating_sub(1));
+    let image_h = target
+        .height
+        .min(bounds.height.saturating_sub(caption_h))
+        .max(1);
+    (
+        Size::new(target.width.min(bounds.width), image_h),
+        caption_h,
+    )
 }
 
 fn mask_login_command(input: &str) -> String {
@@ -1506,6 +1522,15 @@ mod tests {
         assert_eq!(size, Size::new(46, 6));
         assert!(image_thumbnail_spec(area, 48, &range, 4, 10, 6, 1).is_none());
         assert!(image_thumbnail_spec(area, 48, &range, 0, 8, 6, 1).is_none());
+    }
+
+    #[test]
+    fn preview_reserves_height_for_caption() {
+        let bounds = Rect::new(0, 0, 80, 20);
+        let (image, caption_h) = fit_preview_caption(Size::new(80, 20), 3, bounds);
+
+        assert_eq!(image, Size::new(80, 17));
+        assert_eq!(caption_h, 3);
     }
 
     #[test]

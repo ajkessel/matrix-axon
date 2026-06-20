@@ -25,6 +25,9 @@ const MESSAGE_MUTATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Recovery imports the megolm key backup and cross-signing keys, which can
 /// legitimately exceed 60 s on a real account.
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Media downloads run on a shared worker pool, so a stalled response must not
+/// hold one of those workers forever.
+const MEDIA_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -237,13 +240,13 @@ impl AxonClient {
         if server.is_empty() || media_id.is_empty() {
             return Err(ApiError::Url("malformed mxc:// URI".to_owned()));
         }
-        let request = self.http.get(format!(
+        let request = media_request(self.http.get(format!(
             "{}/v1/media/{}/{}/{}",
             self.base_url,
             account_id,
             path_segment(server),
             path_segment(media_id),
-        ));
+        )));
         let response = request.send().await?;
         let status = response.status();
         if status.is_success() {
@@ -347,6 +350,10 @@ fn lifecycle(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 
 fn message_mutation(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request.timeout(MESSAGE_MUTATION_TIMEOUT)
+}
+
+fn media_request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.timeout(MEDIA_TIMEOUT)
 }
 
 pub(crate) fn bearer_value_str(token: &str) -> String {
@@ -953,6 +960,13 @@ mod tests {
         let lc = lifecycle(client.http.post("http://127.0.0.1:8080/v1/accounts/login"))
             .build()
             .unwrap();
+        let media = media_request(
+            client
+                .http
+                .get("http://127.0.0.1:8080/v1/media/id/server/media"),
+        )
+        .build()
+        .unwrap();
 
         assert_eq!(read.timeout(), Some(&HTTP_REQUEST_TIMEOUT));
         assert_eq!(mutation.timeout(), Some(&MESSAGE_MUTATION_TIMEOUT));
@@ -960,6 +974,11 @@ mod tests {
             lc.timeout(),
             Some(&LIFECYCLE_TIMEOUT),
             "lifecycle ops need a generous timeout to survive megolm key import"
+        );
+        assert_eq!(
+            media.timeout(),
+            Some(&MEDIA_TIMEOUT),
+            "stalled media responses must release the bounded worker pool"
         );
     }
 
