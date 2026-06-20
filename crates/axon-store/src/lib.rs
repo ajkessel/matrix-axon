@@ -17,8 +17,8 @@ mod tokens;
 pub use accounts::{Account, AccountState};
 pub use error::StoreError;
 pub use events::{
-    EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, TimelineCursor,
-    TimelineRow,
+    EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
+    ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use rooms::RoomSummary;
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};

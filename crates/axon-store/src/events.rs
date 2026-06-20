@@ -187,6 +187,24 @@ pub struct TimelineRow {
     /// `verification_violation`. `None` for unencrypted events and rows decrypted
     /// before the snapshot existed.
     pub sender_trust: Option<String>,
+    /// Relation aggregation (M8), resolved at read time. `true` when at least one
+    /// *valid* `m.replace` edit (authored by the original sender, not redacted)
+    /// targets this event; the row's [`content`](Self::content) /
+    /// [`decrypted_body_text`](Self::decrypted_body_text) are the latest edit's
+    /// replacement rather than the original. Always `false` for a redacted row
+    /// (redaction masks the edit too) and for reads that don't aggregate.
+    pub edited: bool,
+    /// Number of valid edits targeting this event (M8). `0` when unedited.
+    pub edit_count: i64,
+    /// `origin_server_ts` of the winning (latest) edit, in milliseconds (M8).
+    /// `None` when unedited or redacted.
+    pub latest_edit_ts: Option<i64>,
+    /// Per-emoji reaction tally (M8) as a JSON object
+    /// `{ "👍": { "count": 2, "senders": [...], "me": true }, … }`, resolved over
+    /// every non-redacted `m.annotation` targeting this event regardless of the
+    /// timeline window. `None` when the event has no reactions or for reads that
+    /// don't aggregate.
+    pub reactions: Option<Value>,
 }
 
 impl TimelineRow {
@@ -215,25 +233,61 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             redacts: row.try_get("redacts")?,
             redaction_event_id: row.try_get("redaction_event_id")?,
             sender_trust: row.try_get("sender_trust")?,
+            edited: row.try_get("edited")?,
+            edit_count: row.try_get("edit_count")?,
+            latest_edit_ts: row.try_get("latest_edit_ts")?,
+            reactions: row.try_get("reactions")?,
         })
     }
 }
 
-/// Shared SELECT projection for timeline reads, with read-time redaction
-/// masking. A `LEFT JOIN LATERAL … LIMIT 1` finds at most one redaction
-/// targeting each event (a plain JOIN would duplicate a multiply-redacted row);
-/// when one exists, `content` and `decrypted_body_text` are masked to `NULL` and
-/// `redaction_event_id` is set. Callers append their own `WHERE` (binding
-/// `account_id` as `$1`) plus any ordering / pagination. Selects exactly the
-/// columns [`TimelineRow`] reads.
+/// Shared SELECT projection for timeline reads, with read-time redaction masking
+/// **and M8 relation aggregation** (edit collapse + reaction tally). Three
+/// `LEFT JOIN LATERAL`s enrich each event `e`:
+///
+/// * `r` — the redaction match (`LIMIT 1` so a multiply-redacted row stays a
+///   single row; a plain JOIN would duplicate it and corrupt page size). When
+///   set, `content`/`decrypted_body_text` are masked to `NULL` and
+///   `redaction_event_id` is the redaction's id.
+/// * `edit` — the latest *valid* `m.replace` targeting `e`, resolved by the M8
+///   rules: edit and target must be in the same room (relations are room-local);
+///   edit `sender` must equal `e`'s sender (authorship, unenforced upstream per
+///   ADR 0021); edit and target must share the same `event_type`; neither may be
+///   a state event and the target must not itself be an `m.replace` (MSC2676);
+///   the replacement `msgtype` must match the target's; and the edit must be
+///   well-formed (`m.new_content` present) and not itself redacted.
+///   `ORDER BY origin_ts DESC, id DESC LIMIT 1` makes the winner deterministic
+///   when timestamps collide; `COUNT(*) OVER ()` carries the total valid-edit
+///   count alongside the winner. The replacement body/content override the
+///   original, **unless the target is redacted** — redaction wins (and zeroes
+///   `edit_count` too).
+/// * `react` — every non-redacted `m.reaction` (`m.annotation`) in the same room
+///   targeting `e`, grouped by `key` into a `{key: {count, senders, me}}` JSON
+///   object; `(sender, key)` is deduplicated via `COUNT(DISTINCT sender)`, and
+///   `me` compares against the account's own `user_id` (the `accounts` join
+///   `ac`). Restricted to the `m.reaction` event type — generic `m.annotation`
+///   aggregation is tracked separately (GH issue #112).
+///
+/// Callers append their own `WHERE` (binding `account_id` as `$1`) plus ordering
+/// / pagination. Selects exactly the columns [`TimelineRow`] reads.
 const TIMELINE_SELECT: &str =
     "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
             e.origin_ts, e.event_type, \
-            CASE WHEN r.event_id IS NULL THEN e.content END AS content, \
-            CASE WHEN r.event_id IS NULL THEN e.decrypted_body_text END AS decrypted_body_text, \
+            CASE WHEN r.event_id IS NOT NULL THEN NULL \
+                 WHEN edit.new_content IS NOT NULL THEN edit.new_content \
+                 ELSE e.content END AS content, \
+            CASE WHEN r.event_id IS NOT NULL THEN NULL \
+                 WHEN edit.new_body IS NOT NULL THEN edit.new_body \
+                 ELSE e.decrypted_body_text END AS decrypted_body_text, \
             e.relates_to, e.redacts, r.event_id AS redaction_event_id, \
-            sd.sender_trust \
+            sd.sender_trust, \
+            (r.event_id IS NULL AND edit.new_content IS NOT NULL) AS edited, \
+            CASE WHEN r.event_id IS NULL THEN COALESCE(edit.edit_count, 0) ELSE 0 END \
+                AS edit_count, \
+            CASE WHEN r.event_id IS NULL THEN edit.latest_edit_ts END AS latest_edit_ts, \
+            react.reactions AS reactions \
      FROM events e \
+     JOIN accounts ac ON ac.account_id = e.account_id \
      LEFT JOIN LATERAL ( \
          SELECT rr.event_id FROM events rr \
          WHERE rr.account_id = e.account_id \
@@ -241,6 +295,58 @@ const TIMELINE_SELECT: &str =
            AND rr.redacts = e.event_id \
          LIMIT 1 \
      ) r ON TRUE \
+     LEFT JOIN LATERAL ( \
+         SELECT ev.content->'m.new_content'          AS new_content, \
+                ev.content->'m.new_content'->>'body' AS new_body, \
+                ev.origin_ts                          AS latest_edit_ts, \
+                COUNT(*) OVER ()                       AS edit_count \
+         FROM events ev \
+         WHERE ev.account_id = e.account_id \
+           AND ev.room_id = e.room_id \
+           AND ev.relates_to->>'rel_type' = 'm.replace' \
+           AND ev.relates_to->>'event_id' = e.event_id \
+           AND ev.sender = e.sender \
+           AND ev.event_type = e.event_type \
+           AND ev.raw_event->>'state_key' IS NULL \
+           AND e.raw_event->>'state_key' IS NULL \
+           AND e.relates_to->>'rel_type' IS DISTINCT FROM 'm.replace' \
+           AND ev.content->'m.new_content' IS NOT NULL \
+           AND (ev.content->'m.new_content'->>'msgtype' \
+                IS NOT DISTINCT FROM e.content->>'msgtype') \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM events rr \
+               WHERE rr.account_id = ev.account_id \
+                 AND rr.event_type = 'm.room.redaction' \
+                 AND rr.redacts = ev.event_id \
+           ) \
+         ORDER BY ev.origin_ts DESC, ev.id DESC \
+         LIMIT 1 \
+     ) edit ON TRUE \
+     LEFT JOIN LATERAL ( \
+         SELECT jsonb_object_agg(t.key, t.tally) AS reactions \
+         FROM ( \
+             SELECT rx.relates_to->>'key' AS key, \
+                    jsonb_build_object( \
+                        'count', COUNT(DISTINCT rx.sender), \
+                        'senders', jsonb_agg(DISTINCT rx.sender), \
+                        'me', bool_or(rx.sender = ac.user_id) \
+                    ) AS tally \
+             FROM events rx \
+             WHERE rx.account_id = e.account_id \
+               AND rx.room_id = e.room_id \
+               AND rx.event_type = 'm.reaction' \
+               AND rx.relates_to->>'rel_type' = 'm.annotation' \
+               AND rx.relates_to->>'event_id' = e.event_id \
+               AND rx.relates_to->>'key' IS NOT NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM events rr \
+                   WHERE rr.account_id = rx.account_id \
+                     AND rr.event_type = 'm.room.redaction' \
+                     AND rr.redacts = rx.event_id \
+               ) \
+             GROUP BY rx.relates_to->>'key' \
+         ) t \
+     ) react ON TRUE \
      LEFT JOIN event_sender_device_keys sd \
          ON sd.account_id = e.account_id AND sd.event_id = e.event_id";
 
@@ -452,6 +558,15 @@ impl Store {
     /// `decrypted_body_text` masked to `None` and `redaction_event_id` set to the
     /// redaction's `event_id`. The masking is read-time only — the stored row and
     /// its ciphertext sibling are untouched.
+    ///
+    /// Relations are **collapsed** (M8): standalone `m.replace` edit events and
+    /// `m.annotation` reaction events are excluded from the page — they are
+    /// surfaced instead on their target row (the latest edited body in place,
+    /// plus [`edited`](TimelineRow::edited) / [`edit_count`](TimelineRow::edit_count)
+    /// / [`reactions`](TimelineRow::reactions)), so a client gets the resolved view
+    /// regardless of where the relation landed in the timeline. Replies and thread
+    /// members keep their own rows. The forensic edit events stay on disk; only
+    /// the read collapses them.
     pub async fn room_timeline(
         &self,
         account_id: Uuid,
@@ -461,8 +576,19 @@ impl Store {
     ) -> Result<Vec<TimelineRow>, StoreError> {
         // The redaction match (in TIMELINE_SELECT) is a LATERAL subselect with
         // LIMIT 1 so a target event redacted more than once still yields a single
-        // row (a plain JOIN would duplicate it and corrupt the page size).
-        let mut sql = format!("{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2");
+        // row (a plain JOIN would duplicate it and corrupt the page size). The
+        // strip drops standalone relation events now folded into their target:
+        // every `m.replace` (edited body shown in place), but `m.annotation` only
+        // when it is an `m.reaction` (the type we aggregate into the per-event
+        // tally). Non-`m.reaction` annotations are neither aggregated (GH #112)
+        // nor collapsed, so they must stay visible as raw rows. `COALESCE(...,'')`
+        // keeps NULL-`rel_type` rows (ordinary messages, replies) visible.
+        let mut sql = format!(
+            "{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2 \
+             AND COALESCE(e.relates_to->>'rel_type', '') <> 'm.replace' \
+             AND NOT (COALESCE(e.relates_to->>'rel_type', '') = 'm.annotation' \
+                      AND e.event_type = 'm.reaction')"
+        );
         if before.is_some() {
             sql.push_str(" AND (e.origin_ts, e.id) < ($3, $4)");
         }
@@ -529,6 +655,181 @@ impl Store {
         Ok(row)
     }
 
+    /// The forensic edit history of an event (M8): every `m.replace` targeting
+    /// `event_id`, oldest first, *unfiltered* by the resolution rules. Unlike the
+    /// collapsed timeline (which surfaces only the latest valid edit), this is the
+    /// raw trail — including edits from a non-sender or an incompatible
+    /// `msgtype` — for clients that want to show or audit "edited N times". Each
+    /// row's `content` is that edit event's own content (with `m.new_content`).
+    /// Redacted edits come back masked like any other redacted row.
+    pub async fn event_edits(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Vec<TimelineRow>, StoreError> {
+        let sql = format!(
+            "{TIMELINE_SELECT} WHERE e.account_id = $1 \
+               AND e.relates_to->>'rel_type' = 'm.replace' \
+               AND e.relates_to->>'event_id' = $2 \
+               AND e.room_id = ( \
+                   SELECT t.room_id FROM events t \
+                   WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
+               ) \
+             ORDER BY e.origin_ts ASC, e.id ASC"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// Per-emoji reaction tally for an event (M8): every non-redacted
+    /// `m.reaction` (`m.annotation`) in the target's room, grouped by `key`.
+    /// `(sender, key)` is deduplicated so a sender who reacted with the same emoji
+    /// twice counts once, and `me` reports whether this account's own user
+    /// reacted. Restricted to the `m.reaction` event type — generic
+    /// `m.annotation` aggregation by `(event_type, key)` is tracked separately
+    /// (GH issue #112). Resolves over every reaction on disk regardless of the
+    /// timeline window — the fix for the dropped-reaction bug (GH issue #22).
+    /// Empty when the event has no reactions.
+    pub async fn event_reactions(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Vec<ReactionTally>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, ReactionTally>(
+            "SELECT rx.relates_to->>'key'        AS key, \
+                    COUNT(DISTINCT rx.sender)     AS count, \
+                    array_agg(DISTINCT rx.sender) AS senders, \
+                    bool_or(rx.sender = ac.user_id) AS me \
+             FROM events rx \
+             JOIN accounts ac ON ac.account_id = rx.account_id \
+             WHERE rx.account_id = $1 \
+               AND rx.event_type = 'm.reaction' \
+               AND rx.relates_to->>'rel_type' = 'm.annotation' \
+               AND rx.relates_to->>'event_id' = $2 \
+               AND rx.relates_to->>'key' IS NOT NULL \
+               AND rx.room_id = ( \
+                   SELECT t.room_id FROM events t \
+                   WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM events rr \
+                   WHERE rr.account_id = rx.account_id \
+                     AND rr.event_type = 'm.room.redaction' \
+                     AND rr.redacts = rx.event_id \
+               ) \
+             GROUP BY rx.relates_to->>'key' \
+             ORDER BY count DESC, key ASC",
+        )
+        .bind(account_id)
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Direct replies to an event (M8): events whose nested
+    /// `m.relates_to.m.in_reply_to.event_id` is `event_id` **and** which carry no
+    /// `rel_type` — that last clause is what distinguishes a plain reply from a
+    /// thread member (which also nests an `m.in_reply_to` fallback). Oldest first,
+    /// redaction-masked: a redacted reply is still returned (structure preserved)
+    /// but with its content masked.
+    pub async fn event_replies(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Vec<TimelineRow>, StoreError> {
+        let sql = format!(
+            "{TIMELINE_SELECT} WHERE e.account_id = $1 \
+               AND e.relates_to->>'rel_type' IS NULL \
+               AND e.relates_to->'m.in_reply_to'->>'event_id' = $2 \
+               AND e.room_id = ( \
+                   SELECT t.room_id FROM events t \
+                   WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
+               ) \
+             ORDER BY e.origin_ts ASC, e.id ASC"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// The threads in a room (M8): one summary per distinct `m.thread` root, most
+    /// recently active first. `reply_count` counts thread members including
+    /// redacted ones (structure is preserved so a redacted root doesn't make its
+    /// thread vanish); the latest reply is resolved deterministically by
+    /// `(origin_ts, id)`. The root event itself is not a member — fetch it with
+    /// [`get_event`](Self::get_event) or page the thread with
+    /// [`thread_timeline`](Self::thread_timeline).
+    pub async fn room_threads(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<ThreadSummary>, StoreError> {
+        let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(
+            "SELECT th.root_event_id, th.reply_count, \
+                    th.latest_reply_event_id, th.latest_reply_ts \
+             FROM ( \
+                 SELECT relates_to->>'event_id' AS root_event_id, \
+                        COUNT(*)                  AS reply_count, \
+                        (array_agg(event_id ORDER BY origin_ts DESC, id DESC))[1] \
+                            AS latest_reply_event_id, \
+                        MAX(origin_ts)            AS latest_reply_ts \
+                 FROM events \
+                 WHERE account_id = $1 AND room_id = $2 \
+                   AND relates_to->>'rel_type' = 'm.thread' \
+                 GROUP BY relates_to->>'event_id' \
+             ) th \
+             ORDER BY th.latest_reply_ts DESC, th.root_event_id",
+        )
+        .bind(account_id)
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// A thread-scoped timeline read (M8): the `m.thread` members whose root is
+    /// `root_id`, newest first, with the same `(origin_ts, id)` cursor pagination
+    /// and redaction masking as [`room_timeline`](Self::room_timeline). Reactions
+    /// and edits to thread members are aggregated onto their rows like any other
+    /// timeline read. The thread root is not included.
+    pub async fn thread_timeline(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        root_id: &str,
+        before: Option<TimelineCursor>,
+        limit: i64,
+    ) -> Result<Vec<TimelineRow>, StoreError> {
+        let mut sql = format!(
+            "{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2 \
+               AND e.relates_to->>'rel_type' = 'm.thread' \
+               AND e.relates_to->>'event_id' = $3"
+        );
+        if before.is_some() {
+            sql.push_str(" AND (e.origin_ts, e.id) < ($4, $5)");
+        }
+        sql.push_str(" ORDER BY e.origin_ts DESC, e.id DESC LIMIT ");
+        sql.push_str(if before.is_some() { "$6" } else { "$4" });
+
+        let mut q = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
+            .bind(account_id)
+            .bind(room_id)
+            .bind(root_id);
+        if let Some(cursor) = before {
+            q = q.bind(cursor.origin_ts).bind(cursor.id);
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows)
+    }
+
     /// Find the first event for `account_id` whose media URL matches `mxc_url`.
     /// Checks primary and thumbnail URLs for both plain and encrypted media so
     /// the caller can recover the matching encryption descriptor when needed.
@@ -567,6 +868,56 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+}
+
+/// One emoji's reaction tally for an event (M8), from
+/// [`Store::event_reactions`].
+#[derive(Debug, Clone)]
+pub struct ReactionTally {
+    /// The reaction key — typically an emoji, e.g. `👍`.
+    pub key: String,
+    /// Number of distinct senders who reacted with this key (deduplicated).
+    pub count: i64,
+    /// The distinct Matrix user ids that reacted with this key.
+    pub senders: Vec<String>,
+    /// Whether this Axon account's own user is among the senders.
+    pub me: bool,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for ReactionTally {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(ReactionTally {
+            key: row.try_get("key")?,
+            count: row.try_get("count")?,
+            senders: row.try_get("senders")?,
+            me: row.try_get("me")?,
+        })
+    }
+}
+
+/// A thread summary for a room (M8), from [`Store::room_threads`]: the thread
+/// root, its reply count, and the latest reply.
+#[derive(Debug, Clone)]
+pub struct ThreadSummary {
+    /// The `event_id` of the thread root (the event the members relate to).
+    pub root_event_id: String,
+    /// Number of thread members, counting redacted ones for structure.
+    pub reply_count: i64,
+    /// The `event_id` of the most recent thread member, if any.
+    pub latest_reply_event_id: Option<String>,
+    /// `origin_server_ts` of the most recent member, in milliseconds.
+    pub latest_reply_ts: Option<i64>,
+}
+
+impl sqlx_core::from_row::FromRow<'_, PgRow> for ThreadSummary {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx_core::Error> {
+        Ok(ThreadSummary {
+            root_event_id: row.try_get("root_event_id")?,
+            reply_count: row.try_get("reply_count")?,
+            latest_reply_event_id: row.try_get("latest_reply_event_id")?,
+            latest_reply_ts: row.try_get("latest_reply_ts")?,
+        })
     }
 }
 
