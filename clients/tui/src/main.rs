@@ -25,6 +25,7 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::FontSize;
 use tokio::sync::mpsc;
 use tokio::time;
 use ui::draw;
@@ -90,7 +91,24 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn terminal_image_picker() -> Picker {
-    let mut picker = Picker::halfblocks();
+    // Halfblocks works without a real font size, but the graphics protocols
+    // (iTerm2/Kitty/Sixel) encode each image at `cells * font_size` pixels and
+    // then ask the terminal to draw it at exactly that pixel size. Picker::halfblocks()
+    // hardcodes an arbitrary 10x20 cell, so on terminals whose real cells differ
+    // (notably Retina iTerm2) every graphic comes out scaled wrong. Seed the picker
+    // with the terminal's actual cell size, derived from the TIOCGWINSZ ioctl via
+    // crossterm::window_size(). Unlike Picker::from_query_stdio() this never reads
+    // stdin, so it can't race the input thread.
+    let mut picker = match query_font_size() {
+        Some(font_size) => {
+            // from_fontsize is the only public way to inject a font size in 11.x.
+            #[allow(deprecated)]
+            {
+                Picker::from_fontsize(font_size)
+            }
+        }
+        None => Picker::halfblocks(),
+    };
     let protocol = std::env::var("AXON_IMAGE_PROTOCOL")
         .ok()
         .and_then(|value| parse_image_protocol(&value))
@@ -99,6 +117,49 @@ fn terminal_image_picker() -> Picker {
         picker.set_protocol_type(protocol);
     }
     picker
+}
+
+/// Determine the terminal cell size in pixels, used to scale graphics-protocol
+/// images correctly. An explicit `AXON_FONT_SIZE=WxH` override wins; otherwise we
+/// query the tty via the TIOCGWINSZ ioctl (crossterm::window_size). Returns None
+/// when querying is disabled, the terminal reports no pixel size (width/height of
+/// 0 is common over SSH or in dumb terminals), or stdout is not a tty.
+fn query_font_size() -> Option<FontSize> {
+    if let Some(font_size) = std::env::var("AXON_FONT_SIZE")
+        .ok()
+        .and_then(|value| parse_font_size(&value))
+    {
+        return Some(font_size);
+    }
+    if std::env::var_os("AXON_NO_IMAGE_QUERY").is_some() {
+        return None;
+    }
+    let window = crossterm::terminal::window_size().ok()?;
+    font_size_from_window(window.columns, window.rows, window.width, window.height)
+}
+
+/// Divide the window's pixel dimensions by its cell grid to get per-cell pixels.
+fn font_size_from_window(columns: u16, rows: u16, width: u16, height: u16) -> Option<FontSize> {
+    if columns == 0 || rows == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let cell_width = width / columns;
+    let cell_height = height / rows;
+    if cell_width == 0 || cell_height == 0 {
+        return None;
+    }
+    Some(FontSize::new(cell_width, cell_height))
+}
+
+/// Parse an `AXON_FONT_SIZE=WxH` override (e.g. "7x15").
+fn parse_font_size(value: &str) -> Option<FontSize> {
+    let (width, height) = value.trim().split_once(['x', 'X'])?;
+    let width: u16 = width.trim().parse().ok()?;
+    let height: u16 = height.trim().parse().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(FontSize::new(width, height))
 }
 
 fn parse_image_protocol(value: &str) -> Option<ProtocolType> {
@@ -325,5 +386,30 @@ mod tests {
             Some(ProtocolType::Halfblocks)
         );
         assert_eq!(parse_image_protocol("unknown"), None);
+    }
+
+    // FontSize lacks PartialEq upstream, so compare its fields directly.
+    fn wh(font_size: Option<FontSize>) -> Option<(u16, u16)> {
+        font_size.map(|f| (f.width, f.height))
+    }
+
+    #[test]
+    fn parses_font_size_override() {
+        assert_eq!(wh(parse_font_size("7x15")), Some((7, 15)));
+        assert_eq!(wh(parse_font_size(" 10 X 20 ")), Some((10, 20)));
+        assert_eq!(wh(parse_font_size("0x20")), None);
+        assert_eq!(wh(parse_font_size("7")), None);
+        assert_eq!(wh(parse_font_size("axb")), None);
+    }
+
+    #[test]
+    fn derives_cell_size_from_window_pixels() {
+        // 80 cols x 24 rows over a 560x360 px window -> 7x15 cells.
+        assert_eq!(wh(font_size_from_window(80, 24, 560, 360)), Some((7, 15)));
+        // Terminals that don't report pixel dimensions yield None (fall back to halfblocks).
+        assert_eq!(wh(font_size_from_window(80, 24, 0, 0)), None);
+        assert_eq!(wh(font_size_from_window(0, 0, 560, 360)), None);
+        // Sub-cell pixel size (rounds to 0) is rejected rather than producing a 0px cell.
+        assert_eq!(wh(font_size_from_window(600, 24, 560, 360)), None);
     }
 }

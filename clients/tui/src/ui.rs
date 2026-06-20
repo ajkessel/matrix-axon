@@ -1197,10 +1197,23 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         env!("GIT_HASH"),
     );
 
+    let graphics_line = {
+        use ratatui_image::picker::ProtocolType;
+        let protocol = match app.picker.protocol_type() {
+            ProtocolType::Halfblocks => "halfblocks",
+            ProtocolType::Sixel => "sixel",
+            ProtocolType::Kitty => "kitty",
+            ProtocolType::Iterm2 => "iterm2",
+        };
+        let FontSize { width, height } = app.picker.font_size();
+        format!("Terminal graphics: {protocol}  (cell {width}x{height}px)")
+    };
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
         version,
+        graphics_line,
         conn_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
