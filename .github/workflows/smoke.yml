@@ -6,9 +6,7 @@ name: smoke
 # Synapse) and makes it a required check.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

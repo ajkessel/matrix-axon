@@ -11,7 +11,7 @@ Axon is a self-hosted personal agent for Matrix: a persistent state layer (sync,
 | `docs/mvp/implementation.md` | Milestone-by-milestone build plan (authoritative for agentic contributors) |
 | `docs/adr/` | Architecture decision records — decisions made during implementation |
 | `docs/integration-testing.md` | Running axon against a local Synapse (sync + M3c re-decryption) by hand |
-| `scripts/integration-test.sh` | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Also runs in CI (`.github/workflows/integration.yml`). |
+| `scripts/integration-test.sh` | One-command end-to-end re-decryption test: seeds an encrypted room + key backup via `axon-itest`, runs axon as a fresh device, and asserts UTDs back-fill. Runnable in CI on demand via `.github/workflows/integration.yml` (manual `workflow_dispatch`). |
 
 ## Directory layout
 
@@ -43,9 +43,9 @@ matrix-axon/
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
-  .github/workflows/
-    lint-and-test.yml        # cargo fmt + clippy + test on every push/PR
-    integration.yml          # E2EE re-decryption test (Synapse + Postgres) on PRs
+  .github/workflows/        # all manual-dispatch only (workflow_dispatch) — no automatic push/PR runs
+    lint-and-test.yml        # cargo fmt + clippy + test
+    integration.yml          # E2EE re-decryption test (Synapse + Postgres)
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 adds the server gate)
 ```
 
@@ -64,6 +64,7 @@ matrix-axon/
 - **OpenAPI:** the spec is the source of truth. Handler types must compile against it (utoipa). Drift between spec and generated stubs is a bug.
 - **Pull requests:** every PR body includes, by default, a **Verification guide** (prereqs + copy-pasteable, end-to-end steps that exercise real behavior — not just `cargo check`) and a **Code review guide** (a suggested file-by-file review order, dependencies first, plus a "where to keep a close eye" section calling out correctness, security, and lifetime concerns). Match the format of PRs #6 and #7. Scope both guides to the PR's actual diff.
 - **`#N` is a GitHub autolink — never use it for anything else.** GitHub renders `#<number>` (in PR/issue bodies, comments, and commit messages) as a link to the issue or pull request with that number. Only write `#` immediately before a number when you mean a link to that exact, existing issue or PR. For every other numbered thing — review-comment indices, milestone phases, list items, ordinals, counts, versions — omit the `#` (write "comment 4", "step 3", "milestone 7a", "v2") so prose never sprouts bogus cross-links to unrelated issues.
+- **Robustness at boundaries.** Every place axon crosses a network or process boundary — a client calling `/v1/`, axon-server calling a homeserver, the TUI calling axon — is a "what could go wrong?" checkpoint. Before merging code that crosses one, account for: (1) **Timeouts** — every outbound call gets one; never `await` a remote unbounded. (2) **Bounded resources** — a fixed pool (workers, connections, semaphore permits) must be paired with timeouts and/or cancellation, so one slow/hung peer can't permanently consume it. (3) **Hostile input** — validate size and shape *before* allocating from it; cap bodies/images/list lengths; never size a buffer or allocation directly from a number the peer controls. (4) **Concurrency** — name the shared mutable state and the lock/owner guarding it (the cold-connect gate vs. live-task severing in 7a is the model), and state which lost-update/reconnect race is closed and how. (5) **Partial failure** — one account/room/event failing is logged and skipped, never fatal to the loop (the established "best-effort, never fatal to sync" philosophy).
 - **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend, no OAuth server — see `docs/mvp/implementation.md` "What not to build" for the full list.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
 
@@ -73,6 +74,14 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 * Make sure to run `cargo fmt --all` after finishing making changes
 * Make sure to fix any clippy issues `cargo clippy --all-targets --all-features -- -D warnings` after making changes
+
+**CI no longer runs automatically on push or PR.** We exhausted our free GitHub Actions usage, so the workflows are manual `workflow_dispatch` only — nothing runs these checks for you on push anymore. The local hooks are now the safety net. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-features --all-targets -- -D warnings
+cargo test --all
+```
 
 ## Current state
 

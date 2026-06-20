@@ -22,6 +22,15 @@
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Keep the account panel and `/account` navigation active-only.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
 
+## Rendering robustness
+
+The terminal is a boundary too — terminal size, content width, and remote media are all adversarial.
+
+- **Budget the whole area before allocating to one element.** Reserve space for captions, borders, status, and prompts first; never let a single element (a tall image preview, a long line) claim the full width/height and squeeze a sibling to zero.
+- **Survive degenerate sizes.** Handle a 1-row / 1-column terminal and a very large one; use saturating arithmetic so layout math like `width - n` never underflows.
+- **Measure display width, not bytes or `char` count** — grapheme / East-Asian width drives wrapping and truncation (see `wrap.rs`).
+- **Every fetch the TUI makes to axon has a timeout, media included.** `api.rs` already buckets HTTP timeouts; any new path (image/media fetch, a worker pool) must adopt the same — a hung fetch must not block input or permanently consume a bounded fetch pool.
+
 ## Mutations
 
 Account lifecycle operations map to:
