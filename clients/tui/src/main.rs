@@ -127,6 +127,14 @@ fn terminal_image_picker() -> Picker {
 /// Probe the terminal for Sixel support with a Primary Device Attributes (DA1)
 /// query: write `ESC [ c` and look for attribute `4` in the `ESC [ ? … c` reply.
 ///
+/// Inside tmux the query must reach the *outer* terminal, not tmux itself: tmux
+/// answers DA1 on its own and, when built with Sixel support, advertises Sixel
+/// (attribute 4) regardless of whether the outer terminal can display it — a
+/// guaranteed false positive. So inside tmux we wrap the query in tmux passthrough
+/// (`ESC P tmux; … ESC \`), which tmux forwards to the outer terminal so its real
+/// DA1 comes back. If passthrough is disabled the query is dropped and nothing
+/// returns, which correctly resolves to halfblocks.
+///
 /// Unlike `Picker::from_query_stdio()`, this never spawns a thread that can be
 /// left blocked on stdin. It runs at startup, before the input thread exists, and
 /// reads the tty through `poll(2)` with a hard deadline, so it can neither hang
@@ -142,12 +150,18 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
     if !is_tty {
         return None;
     }
+    // Inside tmux, ask the outer terminal via passthrough; otherwise query directly.
+    let query: &[u8] = if inside_tmux() {
+        b"\x1bPtmux;\x1b\x1b[c\x1b\\"
+    } else {
+        b"\x1b[c"
+    };
     // The reply needs raw mode so it arrives byte-for-byte without echo or line
     // buffering. Restore the prior mode regardless of how we leave.
     if crossterm::terminal::enable_raw_mode().is_err() {
         return None;
     }
-    let response = read_da1_response();
+    let response = read_da1_response(query);
     let _ = crossterm::terminal::disable_raw_mode();
 
     if sixel_in_da1(&response?) {
@@ -157,14 +171,14 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
     }
 }
 
-/// Send the DA1 query and collect the reply, polling the tty with a bounded
-/// deadline so a non-responding terminal can't stall startup. Returns the raw
-/// bytes read, or None if nothing arrived.
-fn read_da1_response() -> Option<Vec<u8>> {
+/// Send a DA1 query and collect the reply, polling the tty with a bounded deadline
+/// so a non-responding terminal (or a dropped tmux passthrough) can't stall
+/// startup. Returns the raw bytes read, or None if nothing arrived.
+fn read_da1_response(query: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
 
     let mut stdout = io::stdout();
-    stdout.write_all(b"\x1b[c").ok()?;
+    stdout.write_all(query).ok()?;
     stdout.flush().ok()?;
 
     let deadline = Instant::now() + Duration::from_millis(250);
@@ -283,15 +297,21 @@ fn detect_image_protocol_from_env() -> Option<ProtocolType> {
     {
         return Some(ProtocolType::Iterm2);
     }
-    let inside_tmux = std::env::var_os("TMUX").is_some()
-        || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "tmux");
-    if !inside_tmux
+    if !inside_tmux()
         && (std::env::var_os("KITTY_WINDOW_ID").is_some()
             || std::env::var("TERM").is_ok_and(|value| value.contains("kitty")))
     {
         return Some(ProtocolType::Kitty);
     }
     None
+}
+
+/// True when running inside a tmux session. Capability queries behave differently
+/// here: tmux answers them itself, so a query meant for the outer terminal must be
+/// wrapped in tmux passthrough.
+fn inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
+        || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "tmux")
 }
 
 async fn run_app(
