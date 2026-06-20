@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, LoginError,
-    LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError, SendError,
-    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
-    VerifyError,
+    AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, Formatted,
+    LoginError, LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError,
+    SendError, SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
+    VerificationService, VerifyError,
 };
 use uuid::Uuid;
 
@@ -67,12 +67,16 @@ pub enum Call {
         account_id: Uuid,
         room_id: String,
         body: String,
+        /// The `(format, formatted_body)` the handler passed, if any.
+        formatted: Option<(String, String)>,
     },
     Edit {
         account_id: Uuid,
         room_id: String,
         event_id: String,
         body: String,
+        /// The `(format, formatted_body)` the handler passed, if any.
+        formatted: Option<(String, String)>,
     },
     Redact {
         account_id: Uuid,
@@ -615,11 +619,13 @@ impl MessageSender for StubSender {
         account_id: Uuid,
         room_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::Send {
             account_id,
             room_id: room_id.to_owned(),
             body: body.to_owned(),
+            formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
         });
         self.outcome.to_result()
     }
@@ -630,12 +636,14 @@ impl MessageSender for StubSender {
         room_id: &str,
         event_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::Edit {
             account_id,
             room_id: room_id.to_owned(),
             event_id: event_id.to_owned(),
             body: body.to_owned(),
+            formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
         });
         self.outcome.to_result()
     }

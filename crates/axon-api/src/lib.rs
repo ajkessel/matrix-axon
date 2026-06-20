@@ -26,6 +26,7 @@ mod verification;
 mod ws;
 
 pub use auth::{StoreTokenVerifier, TokenVerifier};
+pub use axon_core::Formatted;
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use media::{MediaContent, MediaError, MediaProxy};
 pub use openapi::ApiDoc;

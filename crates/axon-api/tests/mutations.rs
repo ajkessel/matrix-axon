@@ -143,12 +143,14 @@ async fn mutations_route_to_sender_and_envelope_result() {
                 account_id,
                 room_id: room_id.to_owned(),
                 body: "hello".to_owned(),
+                formatted: None,
             },
             Call::Edit {
                 account_id,
                 room_id: room_id.to_owned(),
                 event_id: event_id.to_owned(),
                 body: "edited".to_owned(),
+                formatted: None,
             },
             Call::Redact {
                 account_id,
@@ -228,5 +230,109 @@ async fn malformed_body_is_enveloped_400_and_skips_sender() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(err["error"]["code"], "bad_request");
     // The body never decoded, so the sender was not invoked.
+    assert!(stub.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn formatted_fields_reach_the_sender() {
+    let store = store().await;
+    let stub = Arc::new(StubSender::ok("$created:localhost"));
+    let app = app(store, stub.clone());
+
+    let account_id = Uuid::new_v4();
+    let room_id = "!room:localhost";
+    let event_id = "$target:localhost";
+
+    // send with format + formatted_body
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/send"),
+        Some(json!({
+            "body": "hello",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<strong>hello</strong>",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // edit with format + formatted_body
+    let (status, _) = send(
+        &app,
+        "PUT",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}"),
+        Some(json!({
+            "body": "edited",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<em>edited</em>",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        stub.calls(),
+        vec![
+            Call::Send {
+                account_id,
+                room_id: room_id.to_owned(),
+                body: "hello".to_owned(),
+                formatted: Some((
+                    "org.matrix.custom.html".to_owned(),
+                    "<strong>hello</strong>".to_owned(),
+                )),
+            },
+            Call::Edit {
+                account_id,
+                room_id: room_id.to_owned(),
+                event_id: event_id.to_owned(),
+                body: "edited".to_owned(),
+                formatted: Some((
+                    "org.matrix.custom.html".to_owned(),
+                    "<em>edited</em>".to_owned(),
+                )),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invalid_formatting_is_400_and_skips_sender() {
+    let store = store().await;
+    let stub = Arc::new(StubSender::ok("$created:localhost"));
+    let app = app(store, stub.clone());
+    let account_id = Uuid::new_v4();
+    let uri = format!("/v1/accounts/{account_id}/rooms/!r:localhost/send");
+
+    // formatted_body without format → both must be present together.
+    let (status, err) = send(
+        &app,
+        "POST",
+        &uri,
+        Some(json!({ "body": "hi", "formatted_body": "<b>hi</b>" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+
+    // an unrecognized format value is rejected.
+    let (status, err) = send(
+        &app,
+        "POST",
+        &uri,
+        Some(json!({
+            "body": "hi",
+            "format": "text/markdown",
+            "formatted_body": "**hi**",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+
+    // Neither malformed request reached the sender.
     assert!(stub.calls().is_empty());
 }

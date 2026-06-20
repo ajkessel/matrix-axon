@@ -12,6 +12,7 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
+use axon_core::Formatted;
 use uuid::Uuid;
 
 /// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
@@ -38,21 +39,28 @@ pub enum SendError {
 /// as `Arc<dyn MessageSender>`.
 #[async_trait]
 pub trait MessageSender: Send + Sync {
-    /// Send a plain-text message to a room; returns the new event id.
+    /// Send a message to a room; returns the new event id. `body` is the
+    /// plain-text content; `formatted`, when present, carries the rich-text
+    /// rendering (validated at the handler so both its fields are set).
     async fn send_message(
         &self,
         account_id: Uuid,
         room_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError>;
 
     /// Edit an existing message (`m.replace`); returns the replacement event id.
+    /// `formatted` sets rich text on the replacement (see [`send_message`]).
+    ///
+    /// [`send_message`]: MessageSender::send_message
     async fn edit(
         &self,
         account_id: Uuid,
         room_id: &str,
         event_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError>;
 
     /// Redact an event, optionally with a reason; returns the redaction event id.

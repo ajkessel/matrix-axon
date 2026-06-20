@@ -136,10 +136,12 @@ than a generic `502`.
 - **Idempotency:** the SDK mints a fresh transaction id per `send` call, so a
   client that retries a send can create a duplicate. Acceptable pre-auth;
   revisit with M8 (a client-supplied idempotency/transaction key).
-- **Scope:** plain-text messages and edits only (`m.text`); richer msgtypes and
-  formatted bodies are additive later. No optimization yet to reuse one client
-  across `SyncService` restarts (the supervisor evicts on failure and rebuilds);
-  add it if reconnect churn matters.
+- **Scope:** `m.text` messages and edits. `body` is plain text; send/edit also
+  accept optional `format` + `formatted_body` (issue #77) — validated as a pair,
+  `format` only `org.matrix.custom.html`, carried verbatim onto the event. Axon
+  never interprets `body` as Markdown. Richer msgtypes are additive later. No
+  optimization yet to reuse one client across `SyncService` restarts (the
+  supervisor evicts on failure and rebuilds); add it if reconnect churn matters.
 - **Revisit** if mutations need richer content types, client-side idempotency
   keys (M8), or per-route status codes (`201` for creates).
 ```

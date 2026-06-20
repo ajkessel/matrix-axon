@@ -12,6 +12,7 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
+use axon_core::Formatted;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
@@ -62,18 +63,24 @@ impl SdkGateway {
             .ok_or_else(|| GatewayError::RoomNotFound(room_id.to_owned()))
     }
 
-    /// Send a plain-text `m.room.message`. Returns the new event id.
+    /// Send an `m.room.message`. `body` is the plain-text content; `formatted`,
+    /// when present, adds the rich-text rendering (`format` + `formatted_body`).
+    /// Returns the new event id.
     pub async fn send_message(
         &self,
         account_id: Uuid,
         room_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        let resp = room
-            .send(RoomMessageEventContent::text_plain(body))
-            .await
-            .map_err(map_sdk_err)?;
+        // `format` is validated to `org.matrix.custom.html` at the API boundary,
+        // so the typed `text_html` constructor carries it faithfully.
+        let content = match formatted {
+            None => RoomMessageEventContent::text_plain(body),
+            Some(f) => RoomMessageEventContent::text_html(body, f.body),
+        };
+        let resp = room.send(content).await.map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 
@@ -86,6 +93,7 @@ impl SdkGateway {
         room_id: &str,
         event_id: &str,
         body: &str,
+        formatted: Option<Formatted<'_>>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
@@ -104,13 +112,22 @@ impl SdkGateway {
             ));
         }
 
-        let content = json!({
+        let mut new_content = json!({ "msgtype": "m.text", "body": body });
+        let mut content = json!({
             "msgtype": "m.text",
             // The fallback body convention for clients that don't understand edits.
             "body": format!("* {body}"),
-            "m.new_content": { "msgtype": "m.text", "body": body },
             "m.relates_to": { "rel_type": "m.replace", "event_id": event_id },
         });
+        if let Some(f) = formatted {
+            // The replacement carries the formatting verbatim; the top-level
+            // fallback mirrors it with the same `* ` edit prefix as `body`.
+            new_content["format"] = json!(f.format);
+            new_content["formatted_body"] = json!(f.body);
+            content["format"] = json!(f.format);
+            content["formatted_body"] = json!(format!("* {}", f.body));
+        }
+        content["m.new_content"] = new_content;
         let resp = room
             .send_raw("m.room.message", content)
             .await

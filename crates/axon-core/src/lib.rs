@@ -8,7 +8,9 @@
 pub mod config;
 pub mod error;
 pub mod live;
+pub mod message;
 
 pub use config::{AccountProvision, Config, Credential, SyncConfig};
 pub use error::{ConfigError, Error, Result};
 pub use live::{LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
+pub use message::Formatted;

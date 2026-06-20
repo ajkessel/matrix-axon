@@ -2327,14 +2327,28 @@
       },
       "EditRequest": {
         "type": "object",
-        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.",
+        "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.",
         "required": [
           "body"
         ],
         "properties": {
           "body": {
             "type": "string",
-            "description": "The new message text."
+            "description": "The new plain-text message body (and formatting fallback)."
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be\npaired with `formatted_body`."
+          },
+          "formatted_body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rendered HTML body. Must be paired with `format`."
           }
         }
       },
@@ -2656,14 +2670,28 @@
       },
       "SendMessageRequest": {
         "type": "object",
-        "description": "Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as a\nplain-text `m.room.message`; `account_id`/`room_id` come from the path.",
+        "description": "Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as an\n`m.room.message`; `account_id`/`room_id` come from the path.\n\n`body` is the plain-text content (and the fallback for clients that don't\nrender formatting). To send rich text, supply `format` *and* `formatted_body`\ntogether: `format` must be `org.matrix.custom.html` and `formatted_body` the\nrendered HTML. Axon carries them verbatim — it never interprets `body` as\nMarkdown.",
         "required": [
           "body"
         ],
         "properties": {
           "body": {
             "type": "string",
-            "description": "The message text."
+            "description": "The plain-text message body (and formatting fallback)."
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be\npaired with `formatted_body`."
+          },
+          "formatted_body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rendered HTML body. Must be paired with `format`."
           }
         }
       },

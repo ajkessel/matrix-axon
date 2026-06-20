@@ -137,7 +137,9 @@ Each milestone has explicit deliverables and a verification step that exercises 
 ### 6. Mutations
 
 - `POST /v1/rooms/{room_id}/send` (send message; payload includes `account_id`).
-- `PUT /v1/rooms/{room_id}/events/{event_id}` (edit).
+  `body` is plain text; optional `format` + `formatted_body` (paired,
+  `org.matrix.custom.html` only) carry rich text verbatim (issue #77).
+- `PUT /v1/rooms/{room_id}/events/{event_id}` (edit; same optional formatting).
 - `DELETE /v1/rooms/{room_id}/events/{event_id}` (redact).
 - `POST /v1/rooms/{room_id}/events/{event_id}/reactions` (react).
 - All routed through matrix-rust-sdk's send path on the appropriate `Client`.

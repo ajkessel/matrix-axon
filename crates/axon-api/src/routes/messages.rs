@@ -11,10 +11,37 @@ use std::sync::Arc;
 use axum::extract::State;
 use uuid::Uuid;
 
+use axon_core::Formatted;
+
 use crate::dto::{EditRequest, ReactRequest, RedactQuery, SendMessageRequest, SendResultDto};
 use crate::extract::{Json, Path, Query};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::MessageSender;
+
+/// The only `format` Matrix defines for `formatted_body`.
+const HTML_FORMAT: &str = "org.matrix.custom.html";
+
+/// Validate and pair a request's optional `format` / `formatted_body` into a
+/// [`Formatted`]. Both must be supplied together (Matrix carries them as a pair),
+/// `format` must be the one recognized markup, and the HTML body must be
+/// non-empty — anything else is a `400` so a malformed request never reaches the
+/// homeserver. Returns `Ok(None)` for a plain message (neither field set).
+fn formatted<'a>(
+    format: &'a Option<String>,
+    formatted_body: &'a Option<String>,
+) -> Result<Option<Formatted<'a>>, ApiError> {
+    match (format.as_deref(), formatted_body.as_deref()) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(ApiError::bad_request(
+            "format and formatted_body must be provided together",
+        )),
+        (Some(format), Some(_)) if format != HTML_FORMAT => Err(ApiError::bad_request(format!(
+            "unsupported format {format:?}; only {HTML_FORMAT:?} is supported"
+        ))),
+        (Some(_), Some("")) => Err(ApiError::bad_request("formatted_body must not be empty")),
+        (Some(format), Some(body)) => Ok(Some(Formatted { format, body })),
+    }
+}
 
 /// Send a plain-text message to a room.
 #[utoipa::path(
@@ -39,7 +66,10 @@ pub async fn send_message(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
-    let event_id = sender.send_message(account_id, &room_id, &req.body).await?;
+    let fmt = formatted(&req.format, &req.formatted_body)?;
+    let event_id = sender
+        .send_message(account_id, &room_id, &req.body, fmt)
+        .await?;
     Ok(ApiResponse::new(SendResultDto { event_id }))
 }
 
@@ -67,8 +97,9 @@ pub async fn edit_message(
     Path((account_id, room_id, event_id)): Path<(Uuid, String, String)>,
     Json(req): Json<EditRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    let fmt = formatted(&req.format, &req.formatted_body)?;
     let new_id = sender
-        .edit(account_id, &room_id, &event_id, &req.body)
+        .edit(account_id, &room_id, &event_id, &req.body, fmt)
         .await?;
     Ok(ApiResponse::new(SendResultDto { event_id: new_id }))
 }

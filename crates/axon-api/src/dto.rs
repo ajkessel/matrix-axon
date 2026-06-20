@@ -229,20 +229,43 @@ impl VerificationBundleDto {
     }
 }
 
-/// Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as a
-/// plain-text `m.room.message`; `account_id`/`room_id` come from the path.
+/// Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as an
+/// `m.room.message`; `account_id`/`room_id` come from the path.
+///
+/// `body` is the plain-text content (and the fallback for clients that don't
+/// render formatting). To send rich text, supply `format` *and* `formatted_body`
+/// together: `format` must be `org.matrix.custom.html` and `formatted_body` the
+/// rendered HTML. Axon carries them verbatim — it never interprets `body` as
+/// Markdown.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
-    /// The message text.
+    /// The plain-text message body (and formatting fallback).
     pub body: String,
+    /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
+    /// paired with `formatted_body`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// The rendered HTML body. Must be paired with `format`.
+    #[serde(default)]
+    pub formatted_body: Option<String>,
 }
 
 /// Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
 /// target event's text via an `m.replace` relation.
+///
+/// Like [`SendMessageRequest`], `format` + `formatted_body` are optional and must
+/// be supplied together to set rich text on the replacement.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct EditRequest {
-    /// The new message text.
+    /// The new plain-text message body (and formatting fallback).
     pub body: String,
+    /// Markup name for `formatted_body` — only `org.matrix.custom.html`. Must be
+    /// paired with `formatted_body`.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// The rendered HTML body. Must be paired with `format`.
+    #[serde(default)]
+    pub formatted_body: Option<String>,
 }
 
 /// Request body for reacting to an event (`POST …/events/{event_id}/reactions`).
