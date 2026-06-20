@@ -470,6 +470,7 @@ dependencies = [
  "futures-util",
  "image",
  "kamadak-exif",
+ "libc",
  "ratatui",
  "ratatui-image",
  "reqwest",

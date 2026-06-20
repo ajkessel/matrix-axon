@@ -11,7 +11,7 @@ mod wrap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::{websocket_task, AxonClient};
 use app::{App, LiveFrameAction};
@@ -72,10 +72,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Do not use Picker::from_query_stdio(): on terminals that don't answer its
-    // capability query, ratatui-image leaves a detached stdin reader behind.
-    // That reader can race the TUI input thread and silently consume keystrokes.
-    // Use safe environment hints (or an explicit override) and fall back to
-    // halfblocks, which works everywhere without touching stdin.
+    // capability query, ratatui-image leaves a detached stdin reader behind. That
+    // reader can race the TUI input thread and silently consume keystrokes. Instead
+    // terminal_image_picker() uses environment hints plus a bounded, poll-based DA1
+    // probe (for Sixel) that runs here, before the input thread starts, and never
+    // leaves a thread blocked on stdin.
     let picker = terminal_image_picker();
     let mut terminal = TerminalGuard::enter()?;
     let result = run_app(
@@ -112,11 +113,111 @@ fn terminal_image_picker() -> Picker {
     let protocol = std::env::var("AXON_IMAGE_PROTOCOL")
         .ok()
         .and_then(|value| parse_image_protocol(&value))
-        .or_else(detect_image_protocol_from_env);
+        .or_else(detect_image_protocol_from_env)
+        // Sixel has no reliable environment variable, so it can only be found by
+        // asking the terminal directly. Run this last: it does terminal I/O, and
+        // the env checks already cover iTerm2/Kitty without touching the tty.
+        .or_else(detect_sixel_via_da1);
     if let Some(protocol) = protocol {
         picker.set_protocol_type(protocol);
     }
     picker
+}
+
+/// Probe the terminal for Sixel support with a Primary Device Attributes (DA1)
+/// query: write `ESC [ c` and look for attribute `4` in the `ESC [ ? … c` reply.
+///
+/// Unlike `Picker::from_query_stdio()`, this never spawns a thread that can be
+/// left blocked on stdin. It runs at startup, before the input thread exists, and
+/// reads the tty through `poll(2)` with a hard deadline, so it can neither hang
+/// nor race keystroke handling. Any reply bytes are fully drained here rather than
+/// leaking into the event loop.
+fn detect_sixel_via_da1() -> Option<ProtocolType> {
+    if std::env::var_os("AXON_NO_IMAGE_QUERY").is_some() {
+        return None;
+    }
+    // Only meaningful against a real terminal on both ends.
+    let is_tty =
+        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 };
+    if !is_tty {
+        return None;
+    }
+    // The reply needs raw mode so it arrives byte-for-byte without echo or line
+    // buffering. Restore the prior mode regardless of how we leave.
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return None;
+    }
+    let response = read_da1_response();
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    if sixel_in_da1(&response?) {
+        Some(ProtocolType::Sixel)
+    } else {
+        None
+    }
+}
+
+/// Send the DA1 query and collect the reply, polling the tty with a bounded
+/// deadline so a non-responding terminal can't stall startup. Returns the raw
+/// bytes read, or None if nothing arrived.
+fn read_da1_response() -> Option<Vec<u8>> {
+    use std::io::Write;
+
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x1b[c").ok()?;
+    stdout.flush().ok()?;
+
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut buf = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut poll_fd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll_fd points to a valid, initialized pollfd for the duration.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if ready <= 0 || poll_fd.revents & libc::POLLIN == 0 {
+            break; // timeout, error, or hangup
+        }
+        let mut chunk = [0u8; 64];
+        // SAFETY: chunk is a valid, sized buffer; read writes at most chunk.len() bytes.
+        let read = unsafe {
+            libc::read(
+                libc::STDIN_FILENO,
+                chunk.as_mut_ptr().cast::<libc::c_void>(),
+                chunk.len(),
+            )
+        };
+        if read <= 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read as usize]);
+        // A DA1 reply is terminated by 'c'; stop as soon as we have a full one.
+        if buf.contains(&b'c') || buf.len() > 256 {
+            break;
+        }
+    }
+    (!buf.is_empty()).then_some(buf)
+}
+
+/// True if a DA1 reply (`ESC [ ? Ps ; Ps ; … c`) advertises Sixel, which is
+/// attribute `4` among the semicolon-separated parameters.
+fn sixel_in_da1(response: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(response);
+    let Some(start) = text.find("[?") else {
+        return false;
+    };
+    let after = &text[start + 2..];
+    let Some(end) = after.find('c') else {
+        return false;
+    };
+    after[..end].split(';').any(|param| param.trim() == "4")
 }
 
 /// Determine the terminal cell size in pixels, used to scale graphics-protocol
@@ -411,5 +512,27 @@ mod tests {
         assert_eq!(wh(font_size_from_window(0, 0, 560, 360)), None);
         // Sub-cell pixel size (rounds to 0) is rejected rather than producing a 0px cell.
         assert_eq!(wh(font_size_from_window(600, 24, 560, 360)), None);
+    }
+
+    #[test]
+    fn detects_sixel_in_da1_response() {
+        // xterm in sixel mode: attribute 4 present.
+        assert!(sixel_in_da1(b"\x1b[?62;4;6;9;22c"));
+        // Attribute 4 in any position.
+        assert!(sixel_in_da1(b"\x1b[?4c"));
+        assert!(sixel_in_da1(b"\x1b[?1;2;4c"));
+    }
+
+    #[test]
+    fn rejects_da1_without_sixel() {
+        // VT100-style reply, no sixel.
+        assert!(!sixel_in_da1(b"\x1b[?1;2c"));
+        // "4" must be its own parameter, not a substring (e.g. 14, 64).
+        assert!(!sixel_in_da1(b"\x1b[?14;64c"));
+        // Garbage / no DA1 block.
+        assert!(!sixel_in_da1(b""));
+        assert!(!sixel_in_da1(b"not a response"));
+        // Unterminated reply.
+        assert!(!sixel_in_da1(b"\x1b[?62;4"));
     }
 }
