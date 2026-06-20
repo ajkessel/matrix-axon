@@ -581,3 +581,212 @@ async fn event_sender_trust_reads_snapshot() {
 
     common::cleanup_account(&pool, account_id).await;
 }
+
+// ── get_event_by_mxc_url ────────────────────────────────────────────────────
+
+async fn insert_image_event(
+    store: &axon_store::Store,
+    account_id: Uuid,
+    room_id: &str,
+    content: serde_json::Value,
+) -> String {
+    let event_id = format!("$img-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.room.message", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert image event");
+    event_id
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_plain_media() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-plain").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    let event_id = insert_image_event(
+        &store,
+        account_id,
+        &room_id,
+        json!({ "msgtype": "m.image", "body": "photo.jpg", "url": mxc }),
+    )
+    .await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup");
+    assert!(found.is_some(), "should find plain-media event");
+    assert_eq!(found.unwrap().event_id, event_id);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_encrypted_media() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-enc").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    // Encrypted images have no top-level `url`; the MXC lives in `file.url`.
+    let content = json!({
+        "msgtype": "m.image",
+        "body": "secret.jpg",
+        "file": {
+            "url": mxc,
+            "key": { "kty": "oct", "alg": "A256CTR", "k": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "key_ops": ["encrypt","decrypt"], "ext": true },
+            "iv": "AAAAAAAAAAAAAAAAAAAAAA==",
+            "hashes": { "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+            "v": "v2"
+        }
+    });
+    let event_id = insert_image_event(&store, account_id, &room_id, content).await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup");
+    assert!(found.is_some(), "should find encrypted-media event");
+    let row = found.unwrap();
+    assert_eq!(row.event_id, event_id);
+    // Caller extracts content.file to pass to the media proxy for decryption.
+    let file = row.content.unwrap();
+    assert!(file.get("file").is_some(), "content.file should be present");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_plain_thumbnail() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-plain-thumb").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    let content = json!({
+        "msgtype": "m.video",
+        "body": "clip.mp4",
+        "url": "mxc://example.org/plain-video",
+        "info": { "thumbnail_url": mxc }
+    });
+    let event_id = insert_image_event(&store, account_id, &room_id, content).await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup")
+        .expect("plain thumbnail event");
+    assert_eq!(found.event_id, event_id);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_encrypted_thumbnail() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-enc-thumb").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    let content = json!({
+        "msgtype": "m.video",
+        "body": "clip.mp4",
+        "url": "mxc://example.org/plain-video",
+        "info": {
+            "thumbnail_file": {
+                "url": mxc,
+                "key": { "kty": "oct", "alg": "A256CTR", "k": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "key_ops": ["encrypt","decrypt"], "ext": true },
+                "iv": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "hashes": { "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+                "v": "v2"
+            }
+        }
+    });
+    let event_id = insert_image_event(&store, account_id, &room_id, content).await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup")
+        .expect("encrypted thumbnail event");
+    assert_eq!(found.event_id, event_id);
+    assert_eq!(
+        found
+            .content
+            .as_ref()
+            .and_then(|content| content.pointer("/info/thumbnail_file/url"))
+            .and_then(serde_json::Value::as_str),
+        Some(mxc.as_str())
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_returns_none_for_unknown_url() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-miss").await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, "mxc://nowhere.example/doesnotexist")
+        .await
+        .expect("lookup");
+    assert!(found.is_none());
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_is_scoped_to_account() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let owner = common::test_account(&store, "mxc-owner").await;
+    let other = common::test_account(&store, "mxc-other").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    // Insert only under `owner`.
+    insert_image_event(
+        &store,
+        owner,
+        &room_id,
+        json!({ "msgtype": "m.image", "body": "photo.jpg", "url": mxc }),
+    )
+    .await;
+
+    // `other` must not see it.
+    let found = store
+        .get_event_by_mxc_url(other, &mxc)
+        .await
+        .expect("lookup");
+    assert!(found.is_none(), "must not cross account boundaries");
+
+    common::cleanup_account(&pool, owner).await;
+    common::cleanup_account(&pool, other).await;
+}

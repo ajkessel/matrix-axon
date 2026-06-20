@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod events;
+pub mod media;
 pub mod messages;
 pub mod rooms;
 pub mod verify;

@@ -30,6 +30,10 @@ pub enum GatewayError {
     #[error("room not found: {0}")]
     RoomNotFound(String),
 
+    /// The addressed media object no longer exists on the homeserver.
+    #[error("media not found: {0}")]
+    MediaNotFound(String),
+
     /// The operation isn't permitted: an attempt to edit a message the account
     /// didn't author, or a homeserver `M_FORBIDDEN` (e.g. redacting without the
     /// required power level).

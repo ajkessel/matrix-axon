@@ -1,1 +1,52 @@
 //! Media proxy with bounded LRU disk cache for MXC URLs.
+//!
+//! This crate provides MXC URI validation and is the planned home for a bounded
+//! on-disk cache. The actual authenticated download is done through the
+//! `axon-sync` SDK client (which carries the account's access token) and
+//! adapted onto the `axon-api` `MediaProxy` port by `axon-server`.
+
+/// Validate and decompose an `mxc://` URI into `(server_name, media_id)`.
+///
+/// Returns `None` if the URI does not start with `mxc://`, if either component
+/// is empty, or if the media ID contains a `/` (which would make it ambiguous
+/// in a URL path).
+pub fn parse_mxc(mxc_url: &str) -> Option<(&str, &str)> {
+    let rest = mxc_url.strip_prefix("mxc://")?;
+    let (server, media_id) = rest.split_once('/')?;
+    if server.is_empty() || media_id.is_empty() || media_id.contains('/') {
+        return None;
+    }
+    Some((server, media_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_mxc_uri() {
+        let (server, media_id) = parse_mxc("mxc://matrix.org/abc123XYZ").unwrap();
+        assert_eq!(server, "matrix.org");
+        assert_eq!(media_id, "abc123XYZ");
+    }
+
+    #[test]
+    fn rejects_non_mxc_scheme() {
+        assert!(parse_mxc("https://matrix.org/abc123").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_server() {
+        assert!(parse_mxc("mxc:///abc123").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_media_id() {
+        assert!(parse_mxc("mxc://matrix.org/").is_none());
+    }
+
+    #[test]
+    fn rejects_media_id_with_slash() {
+        assert!(parse_mxc("mxc://matrix.org/abc/def").is_none());
+    }
+}

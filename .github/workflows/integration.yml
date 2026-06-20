@@ -1,9 +1,9 @@
 name: Integration test
 
-# End-to-end test of the M3c re-decryption queue against a real Synapse. It's
-# slower than the unit/lint lane (it pulls Synapse + Postgres images and runs a
-# full seed → sync → recover flow), so it lives in its own workflow rather than
-# gating every push.
+# End-to-end test of the M3c re-decryption queue and encrypted media proxy
+# against a real Synapse. It's slower than the unit/lint lane (it pulls Synapse
+# + Postgres images and runs a full seed → sync → recover → media-fetch flow),
+# so it lives in its own workflow rather than gating every push.
 
 on:
   workflow_dispatch:

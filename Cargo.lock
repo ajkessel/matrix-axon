@@ -365,6 +365,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "matrix-sdk",
+ "mime",
  "serde",
  "serde_json",
  "tokio",
@@ -403,6 +404,7 @@ dependencies = [
  "axum",
  "clap",
  "dotenvy",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
@@ -434,6 +436,7 @@ name = "axon-sync"
 version = "0.1.0"
 dependencies = [
  "axon-core",
+ "axon-media",
  "axon-store",
  "axum",
  "futures-util",

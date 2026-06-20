@@ -21,7 +21,8 @@ use axon_api::AppState;
 use axon_core::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
 use common::{
-    StubLifecycle, StubSender, StubTokenVerifier, StubTrust, StubVerification, TEST_TOKEN,
+    StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust, StubVerification,
+    TEST_TOKEN,
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -65,6 +66,7 @@ async fn ws_streams_live_events() {
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ));
 
     // Serve on an ephemeral port in the background.
@@ -177,6 +179,7 @@ async fn ws_upgrade_rejected_without_a_token() {
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -260,6 +263,7 @@ async fn ws_socket_closes_when_token_is_revoked() {
             Arc::new(StubVerification::ok("$unused-flow")),
             Arc::new(StubTrust::ok()),
             Arc::new(stub),
+            Arc::new(StubMediaProxy),
         )
         // Short cadence so the revocation is observed within the test, not 30s.
         .with_ws_revalidation_interval(Duration::from_millis(150)),

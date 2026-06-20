@@ -9,6 +9,7 @@
 mod cli;
 mod gateway;
 mod lifecycle;
+mod media;
 mod token;
 mod trust;
 mod verification;
@@ -25,6 +26,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use crate::cli::{Cli, Command};
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
+use crate::media::MediaProxyAdapter;
 use crate::trust::TrustAdapter;
 use crate::verification::VerificationAdapter;
 
@@ -101,6 +103,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
+    let media = Arc::new(MediaProxyAdapter(sync_engine.media_proxy()));
     let app = axon_api::router(axon_api::AppState::new(
         store,
         sync_engine.live_events(),
@@ -109,6 +112,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         verify,
         trust,
         verifier,
+        media,
     ));
 
     let listener = tokio::net::TcpListener::bind(addr)

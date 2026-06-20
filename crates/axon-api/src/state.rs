@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::TokenVerifier;
 use crate::lifecycle::AccountLifecycle;
+use crate::media::MediaProxy;
 use crate::sender::MessageSender;
 use crate::trust::SenderTrustService;
 use crate::verification::VerificationService;
@@ -62,6 +63,10 @@ pub struct AppState {
     /// How often a live `/v1/ws` socket revalidates its token (see
     /// [`DEFAULT_WS_REVALIDATION_INTERVAL`]).
     ws_revalidation_interval: Duration,
+    /// Media-proxy port for the `GET /v1/media/{account_id}/…` handler. The
+    /// concrete implementation fetches via the SDK client's authenticated
+    /// connection and is injected by the binary via an adapter.
+    pub media: Arc<dyn MediaProxy>,
 }
 
 impl AppState {
@@ -78,6 +83,7 @@ impl AppState {
         verify: Arc<dyn VerificationService>,
         trust: Arc<dyn SenderTrustService>,
         verifier: Arc<dyn TokenVerifier>,
+        media: Arc<dyn MediaProxy>,
     ) -> Self {
         Self {
             store,
@@ -88,6 +94,7 @@ impl AppState {
             trust,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
+            media,
         }
     }
 
@@ -139,6 +146,12 @@ impl FromRef<AppState> for Arc<dyn SenderTrustService> {
 impl FromRef<AppState> for Arc<dyn TokenVerifier> {
     fn from_ref(state: &AppState) -> Arc<dyn TokenVerifier> {
         state.verifier.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MediaProxy> {
+    fn from_ref(state: &AppState) -> Arc<dyn MediaProxy> {
+        state.media.clone()
     }
 }
 

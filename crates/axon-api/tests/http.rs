@@ -20,14 +20,14 @@ mod common;
 
 use std::sync::Arc;
 
-use axon_api::{AccountLifecycle, AppState};
+use axon_api::{AccountLifecycle, AppState, MediaProxy};
 use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
-    DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, RecoverOutcome, StubLifecycle,
-    StubSender, StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome,
-    TEST_TOKEN,
+    ConfiguredMediaProxy, DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, MediaOutcome,
+    RecoverOutcome, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
+    StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -139,6 +139,7 @@ fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Ro
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ))
 }
 
@@ -153,6 +154,7 @@ fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> a
         verify,
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ))
 }
 
@@ -168,7 +170,156 @@ fn trust_app(store: Store, trust: Arc<dyn axon_api::SenderTrustService>) -> axum
         Arc::new(StubVerification::ok("$unused-flow")),
         trust,
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ))
+}
+
+/// Build a router whose media route is backed by `media` (other ports unused).
+fn media_app(store: Store, media: Arc<dyn MediaProxy>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        media,
+    ))
+}
+
+async fn insert_media_event(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    mxc_url: &str,
+) -> String {
+    let event_id = format!("$media-{}:localhost", Uuid::new_v4());
+    let content = json!({
+        "msgtype": "m.image",
+        "body": "image.png",
+        "url": mxc_url
+    });
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.room.message", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert media event");
+    event_id
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn media_route_fails_closed_for_missing_and_redacted_metadata() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@media-closed-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!media-closed-{}:localhost", Uuid::new_v4());
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"must not be returned"));
+    let app = media_app(store.clone(), media.clone());
+
+    let missing_mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    let missing_path = missing_mxc.trim_start_matches("mxc://");
+    let (status, body) = get(&app, &format!("/v1/media/{account_id}/{missing_path}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(media.calls().is_empty(), "store miss must not reach proxy");
+
+    let redacted_mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    let target = insert_media_event(&store, account_id, &room_id, &redacted_mxc).await;
+    let redaction_id = format!("$redact-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_001,
+            event_type: "m.room.redaction",
+            content: Some(json!({})),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": target }),
+            megolm_session_id: None,
+            redacts: Some(&target),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert redaction");
+
+    let redacted_path = redacted_mxc.trim_start_matches("mxc://");
+    let (status, body) = get(&app, &format!("/v1/media/{account_id}/{redacted_path}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(
+        media.calls().is_empty(),
+        "redacted media must not reach proxy"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn media_route_preserves_forbidden_and_not_connected_statuses() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@media-errors-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!media-errors-{}:localhost", Uuid::new_v4());
+    let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    insert_media_event(&store, account_id, &room_id, &mxc_url).await;
+    let media_path = mxc_url.trim_start_matches("mxc://");
+    let uri = format!("/v1/media/{account_id}/{media_path}");
+
+    let forbidden = Arc::new(ConfiguredMediaProxy::failing(MediaOutcome::Forbidden(
+        "media forbidden".to_owned(),
+    )));
+    let (status, body) = get(&media_app(store.clone(), forbidden), &uri).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "forbidden");
+
+    let not_connected = Arc::new(ConfiguredMediaProxy::failing(MediaOutcome::NotConnected(
+        "account unavailable".to_owned(),
+    )));
+    let (status, body) = get(&media_app(store.clone(), not_connected), &uri).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "service_unavailable");
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -239,6 +390,7 @@ async fn read_api_end_to_end() {
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
@@ -366,6 +518,7 @@ async fn accounts_read_api() {
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
     ));
 
     // GET /v1/accounts — the client-visible set: `active` and `deactivated` are

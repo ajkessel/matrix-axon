@@ -1509,6 +1509,109 @@
         }
       }
     },
+    "/v1/media/{account_id}/{server_name}/{media_id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Proxy an `mxc://` download through the account's homeserver connection.",
+        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's primary or thumbnail media descriptor.\nThe response body is the raw media bytes. `Content-Type` is always\n`application/octet-stream` for now (the matrix-rust-sdk media API does not\nsurface the upstream header); callers should sniff magic bytes to determine\nthe actual media type.",
+        "operationId": "get_media",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account whose credentials are used for the download",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "server_name",
+            "in": "path",
+            "description": "Server-name component of the MXC URI (the part after `mxc://`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "media_id",
+            "in": "path",
+            "description": "Media-ID component of the MXC URI",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media bytes; Content-Type is always `application/octet-stream` (sniff magic bytes for actual type)"
+          },
+          "400": {
+            "description": "Syntactically invalid MXC URI components",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found, or media not found on the homeserver",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal media-metadata lookup failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The homeserver was unreachable or returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/rooms": {
       "get": {
         "tags": [
@@ -2762,6 +2865,10 @@
     {
       "name": "verification",
       "description": "Interactive SAS device verification"
+    },
+    {
+      "name": "media",
+      "description": "Authenticated MXC media proxy"
     }
   ]
 }

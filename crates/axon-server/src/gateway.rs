@@ -26,6 +26,9 @@ fn map_err(err: GatewayError) -> SendError {
             SendError::Forbidden(format!("account not active: {id}"))
         }
         GatewayError::RoomNotFound(room) => SendError::NotFound(format!("room not found: {room}")),
+        GatewayError::MediaNotFound(media) => {
+            SendError::NotFound(format!("media not found: {media}"))
+        }
         GatewayError::Forbidden(msg) => SendError::Forbidden(msg),
         GatewayError::NotConnected(msg) => SendError::Unavailable(msg),
         GatewayError::Invalid(msg) => SendError::Invalid(msg),

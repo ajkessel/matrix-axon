@@ -13,4 +13,6 @@ Resolves `mxc://` URIs against the upstream homeserver for the relevant account,
 
 ## Status
 
-Stub — no public API yet.
+Preparatory route/decryption support is implemented by PR 70. The bounded
+on-disk LRU cache, range requests, cache headers, and resource bounds required
+for the complete Milestone 11 contract are tracked separately in #97.

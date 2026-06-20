@@ -1,9 +1,10 @@
 # Integration testing against a local Synapse
 
 axon's unit tests and the `#[ignore]` Postgres tests don't exercise the real
-thing: syncing against a live Matrix homeserver and (M3c) re-decrypting UTDs once
-megolm keys arrive. This doc covers the **automated** end-to-end test plus the
-manual walkthrough it's built from (handy for debugging).
+thing: syncing against a live Matrix homeserver, (M3c) re-decrypting UTDs once
+megolm keys arrive, and downloading an encrypted attachment as plaintext through
+the media proxy. This doc covers the **automated** end-to-end test plus the manual
+walkthrough it's built from (handy for debugging).
 
 The homeserver is **localhost-only and insecure by design** (no TLS, sqlite,
 dev secrets, wide-open rate limits — see `docker/synapse/homeserver.yaml`). Never
@@ -11,9 +12,10 @@ expose it or reuse its secrets.
 
 ## Quick start: the automated script
 
-One command runs the whole prize path — seed an encrypted room with a key
-backup, run axon as a fresh device that can't decrypt it, then hand it the
-recovery key and watch the UTDs flip to decrypted:
+One command runs the whole prize path — seed an encrypted room with messages and
+an image attachment, run axon as a fresh device that can't decrypt it, then hand
+it the recovery key, watch the UTDs flip to decrypted, and fetch the original
+image bytes through axon's media proxy:
 
 ```sh
 # macOS: a Homebrew Postgres usually holds 5432, so publish the compose one on 5433.
@@ -30,12 +32,16 @@ What it does, with no manual steps:
 2. Creates a throwaway `axon_itest` database (dropped + recreated each run) so the
    test is fully isolated from your dev `axon` DB.
 3. Registers a unique user and runs the **seeder** (`crates/axon-itest`, playing a
-   normal verified "device A"): creates an encrypted room, sends messages, and
-   enables Secure Backup to mint a fresh recovery key.
+   normal verified "device A"): creates an encrypted room, sends messages and a
+   deterministic PNG attachment, and enables Secure Backup to mint a fresh
+   recovery key.
 4. Runs axon as a fresh, unverified "device B" with **no** recovery key and
    asserts the message lands as a UTD (`m.room.encrypted`, `content IS NULL`).
 5. Restarts axon **with** the recovery key and asserts the row flips to a
    decrypted `m.room.message` and the UTD backlog drains to zero.
+6. Reads the attachment's decrypted `content.file` metadata from the event,
+   requests its MXC URL through `GET /v1/media/{account_id}/{server}/{media_id}`,
+   and compares the response byte-for-byte with the original PNG.
 
 On success it prints `PASS …`; on failure it dumps the tail of axon's log and
 exits non-zero. It tears the containers + test DB down at the end.
@@ -153,7 +159,9 @@ docker exec matrix-axon-postgres-1 psql -U axon -d axon -tAc \
 
 This is what the automated script does; here's the manual version using the
 **seeder** binary as the "device A" that creates encrypted history + a key backup
-(axon can't seed that itself — it's the unverified device under test).
+(axon can't seed that itself — it's the unverified device under test). Set
+`SEED_MEDIA_FILE` to also send an encrypted attachment; the automated script
+uses this to verify the media proxy after recovery.
 
 Build it and seed against a freshly registered user:
 

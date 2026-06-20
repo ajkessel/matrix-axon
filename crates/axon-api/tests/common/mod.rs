@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, LoginError,
-    LogoutError, MessageSender, RecoverError, SendError, SenderTrustService, TokenVerifier,
-    TrustBundle, TrustError, TrustSnapshot, VerificationService, VerifyError,
+    LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError, SendError,
+    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
+    VerifyError,
 };
 use uuid::Uuid;
 
@@ -523,6 +524,87 @@ impl AccountLifecycle for StubLifecycle {
             .unwrap()
             .push((account_id, recovery_key.to_owned()));
         self.recover_outcome.to_result()
+    }
+}
+
+/// A no-op [`MediaProxy`] for tests that don't exercise the media route.
+pub struct StubMediaProxy;
+
+#[async_trait]
+impl MediaProxy for StubMediaProxy {
+    async fn get_media(
+        &self,
+        _account_id: Uuid,
+        _mxc_url: &str,
+        _encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaContent, MediaError> {
+        Err(MediaError::NotFound("stub: no media".to_owned()))
+    }
+}
+
+/// One call recorded by [`ConfiguredMediaProxy`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaCall {
+    pub account_id: Uuid,
+    pub mxc_url: String,
+    pub encrypted_file: Option<serde_json::Value>,
+}
+
+/// The outcome [`ConfiguredMediaProxy`] returns for every call.
+#[derive(Clone)]
+pub enum MediaOutcome {
+    Ok(Vec<u8>),
+    Forbidden(String),
+    NotConnected(String),
+}
+
+/// A configurable media proxy for route-level status and call-path tests.
+pub struct ConfiguredMediaProxy {
+    outcome: MediaOutcome,
+    calls: Mutex<Vec<MediaCall>>,
+}
+
+impl ConfiguredMediaProxy {
+    pub fn ok(data: &[u8]) -> Self {
+        Self {
+            outcome: MediaOutcome::Ok(data.to_vec()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn failing(outcome: MediaOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<MediaCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MediaProxy for ConfiguredMediaProxy {
+    async fn get_media(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<MediaContent, MediaError> {
+        self.calls.lock().unwrap().push(MediaCall {
+            account_id,
+            mxc_url: mxc_url.to_owned(),
+            encrypted_file,
+        });
+        match &self.outcome {
+            MediaOutcome::Ok(data) => Ok(MediaContent {
+                data: data.clone(),
+                content_type: "application/octet-stream".to_owned(),
+            }),
+            MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
+            MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
+        }
     }
 }
 

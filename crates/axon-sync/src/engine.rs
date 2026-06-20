@@ -208,6 +208,13 @@ impl SyncEngine {
         SdkGateway::new(self.manager.clone())
     }
 
+    /// An authenticated media proxy over the per-account clients, for the API
+    /// layer's `GET /v1/media/{account_id}/…` route. `axon-server` wraps this
+    /// in an adapter implementing its `MediaProxy` port.
+    pub fn media_proxy(&self) -> crate::media::SdkMediaProxy {
+        crate::media::SdkMediaProxy::new(self.manager.clone())
+    }
+
     /// A producer handle for the live-event bus. The API layer holds this in its
     /// router state and calls [`broadcast::Sender::subscribe`] once per
     /// `/v1/ws` connection. Cloning is cheap and does not affect delivery.

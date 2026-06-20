@@ -15,6 +15,7 @@ mod cursor;
 mod dto;
 mod extract;
 mod lifecycle;
+mod media;
 mod openapi;
 mod response;
 mod routes;
@@ -26,6 +27,7 @@ mod ws;
 
 pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
+pub use media::{MediaContent, MediaError, MediaProxy};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use sender::{MessageSender, SendError};
@@ -115,6 +117,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
             post(routes::messages::react),
+        )
+        // Media proxy. Authenticated download of an `mxc://` resource through
+        // the account's live homeserver connection. Returns raw bytes, not the
+        // JSON envelope, so it is not expressible cleanly in the same response
+        // schema as the rest of the read API.
+        .route(
+            "/v1/media/{account_id}/{server_name}/{media_id}",
+            get(routes::media::get_media),
         )
         .route_layer(from_fn_with_state(verifier, auth::require_bearer));
 

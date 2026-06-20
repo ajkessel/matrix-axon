@@ -1,13 +1,14 @@
 //! Integration-test seeder — plays "device A", a normal verified Matrix client.
 //!
-//! It logs in, creates an *encrypted* room, sends a handful of messages, then
-//! enables Secure Backup (4S) so the megolm keys are uploaded to the server
-//! key backup and a fresh **recovery key** is minted. It prints a single line
-//! of JSON to stdout describing what it did:
+//! It logs in, creates an *encrypted* room, sends a handful of messages and an
+//! optional attachment, then enables Secure Backup (4S) so the megolm keys are
+//! uploaded to the server key backup and a fresh **recovery key** is minted. It
+//! prints a single line of JSON to stdout describing what it did:
 //!
 //! ```json
 //! {"user_id":"@alice-…:localhost","device_id":"…","room_id":"!…:localhost",
-//!  "recovery_key":"EsT… …","messages":["seed message 0", …]}
+//!  "recovery_key":"EsT… …","messages":["seed message 0", …],
+//!  "media_event_id":"$…"}
 //! ```
 //!
 //! axon (the unverified "device B" under test) then syncs the room as UTDs and,
@@ -20,6 +21,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use matrix_sdk::{
+    attachment::AttachmentConfig,
     ruma::{
         api::client::room::create_room::v3::Request as CreateRoomRequest,
         events::room::message::RoomMessageEventContent, OwnedUserId,
@@ -34,6 +36,7 @@ struct Config {
     store_dir: PathBuf,
     room_name: String,
     message_count: u32,
+    media_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -49,6 +52,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
+            media_file: std::env::var_os("SEED_MEDIA_FILE").map(PathBuf::from),
             user_id,
         })
     }
@@ -83,6 +87,7 @@ struct Outcome {
     room_id: String,
     recovery_key: String,
     messages: Vec<String>,
+    media_event_id: Option<String>,
 }
 
 async fn seed(config: &Config) -> Result<Outcome> {
@@ -144,6 +149,28 @@ async fn seed(config: &Config) -> Result<Outcome> {
     }
     tracing::info!(count = config.message_count, "sent encrypted messages");
 
+    // Send the attachment last so it remains in axon's bounded Sliding Sync
+    // timeline window. In an encrypted room matrix-sdk uploads ciphertext and
+    // puts the decryption metadata in the event's `content.file` object.
+    let media_event_id = if let Some(path) = &config.media_file {
+        let data = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading media fixture {}", path.display()))?;
+        let response = room
+            .send_attachment(
+                "media-verification.png",
+                &mime::IMAGE_PNG,
+                data,
+                AttachmentConfig::new(),
+            )
+            .await
+            .context("sending encrypted media attachment")?;
+        tracing::info!(event_id = %response.event_id, "sent encrypted media attachment");
+        Some(response.event_id.to_string())
+    } else {
+        None
+    };
+
     // Enable Secure Backup: creates the server-side key backup, uploads all
     // locally cached room keys, and mints the recovery key. No cross-signing
     // bootstrap and no UIA happen here, so this is fully headless.
@@ -166,5 +193,6 @@ async fn seed(config: &Config) -> Result<Outcome> {
         room_id,
         recovery_key,
         messages,
+        media_event_id,
     })
 }

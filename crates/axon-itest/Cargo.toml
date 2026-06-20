@@ -27,6 +27,7 @@ matrix-sdk = { workspace = true, features = [
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+mime = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

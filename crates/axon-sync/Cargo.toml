@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 axon-core  = { workspace = true }
+axon-media = { workspace = true }
 axon-store = { workspace = true }
 
 # matrix-sdk + matrix-sdk-ui must move together (version skew breaks the build).

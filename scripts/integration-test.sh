@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# End-to-end integration test for the re-decryption queue against a real
-# Synapse. It exercises the whole prize path with no manual steps:
+# End-to-end integration test for re-decryption and encrypted media proxying
+# against a real Synapse. It exercises the whole prize path with no manual steps:
 #
 #   1. Bring up Postgres + Synapse (the `integration` compose profile).
 #   2. Register a fresh, unique user and run the seeder ("device A"): it makes
-#      an encrypted room, sends messages, and mints a Secure Backup recovery key.
+#      an encrypted room, sends messages plus an image attachment, and mints a
+#      Secure Backup recovery key.
 #   3. Run axon as a fresh, unverified "device B" with NO recovery key — assert
 #      the messages land as UTDs (m.room.encrypted rows with content IS NULL).
 #   4. Restart axon WITH the recovery key — assert the rows flip to decrypted
 #      m.room.message with content populated (the re-decryption queue working).
+#   5. Fetch the attachment through axon's media route and compare the decrypted
+#      response byte-for-byte with the original image.
 #
 # Runs locally and in CI. Configuration via env vars (all have defaults):
 #
@@ -129,6 +132,8 @@ PASSWORD="pass-${SUFFIX}"
 # unverified. The same dir is reused on restart so the device persists.
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/axon-itest.XXXXXX")"
 AXON_PID=""
+MEDIA_FIXTURE="${RUN_DIR}/media-verification.png"
+DOWNLOADED_MEDIA="${RUN_DIR}/media-downloaded.png"
 
 cleanup() {
     local code=$?
@@ -145,10 +150,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A deterministic valid 1x1 PNG. Device A encrypts and uploads these bytes; the
+# final assertion proves axon's media route returns the exact plaintext again.
+python3 - "$MEDIA_FIXTURE" <<'PY'
+import base64
+import pathlib
+import sys
+
+png = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+pathlib.Path(sys.argv[1]).write_bytes(png)
+PY
+
 log "Registering seeding user ${USER_ID}"
 SYN="$(docker compose ps -q synapse)"
+# This command runs inside the Synapse container, so use its internal listener;
+# SYNAPSE_PORT is only the host-published port used by axon and the seeder.
 docker exec "$SYN" register_new_matrix_user \
-    -c /data/homeserver.yaml -u "$LOCALPART" -p "$PASSWORD" --no-admin "$HS_URL" \
+    -c /data/homeserver.yaml -u "$LOCALPART" -p "$PASSWORD" --no-admin http://localhost:8008 \
     >/dev/null 2>&1 \
     || die "user registration failed"
 info "Registered ${USER_ID}"
@@ -162,18 +182,24 @@ SEED_JSON="$(
     SEED_PASSWORD="$PASSWORD" \
     SEED_STORE_DIR="${RUN_DIR}/seed-store" \
     SEED_MESSAGE_COUNT="$MESSAGE_COUNT" \
+    SEED_MEDIA_FILE="$MEDIA_FIXTURE" \
     RUST_LOG="${RUST_LOG:-warn}" \
     "$SEED_BIN"
 )"
 [ -n "$SEED_JSON" ] || die "seeder produced no output"
 
 # Parse the seeder's JSON (python3 is present locally and on CI runners).
-read_json() { printf '%s' "$SEED_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin)['$1'])"; }
+read_json() {
+    printf '%s' "$SEED_JSON" \
+        | python3 -c "import sys,json; value=json.load(sys.stdin)['$1']; print('' if value is None else value)"
+}
 ROOM_ID="$(read_json room_id)"
 RECOVERY_KEY="$(read_json recovery_key)"
+MEDIA_EVENT_ID="$(read_json media_event_id)"
 [ -n "$ROOM_ID" ] || die "no room_id from seeder"
 [ -n "$RECOVERY_KEY" ] || die "no recovery_key from seeder"
-info "room=${ROOM_ID}  recovery_key=${RECOVERY_KEY:0:9}…  messages=${MESSAGE_COUNT}"
+[ -n "$MEDIA_EVENT_ID" ] || die "no media_event_id from seeder"
+info "room=${ROOM_ID}  recovery_key=${RECOVERY_KEY:0:9}…  messages=${MESSAGE_COUNT}  media=${MEDIA_EVENT_ID}"
 
 # --- helpers for running axon + polling the DB -------------------------------
 
@@ -188,6 +214,15 @@ decrypted_count() {
     psql_q "SELECT count(*) FROM events e JOIN accounts a USING (account_id)
             WHERE a.user_id = '${USER_ID}'
               AND e.event_type = 'm.room.message' AND e.content IS NOT NULL;"
+}
+# Whether the seeded attachment has decrypted content with an encrypted MXC
+# descriptor. This is the metadata the media route needs to decrypt the bytes.
+media_event_ready() {
+    psql_q "SELECT count(*) FROM events e JOIN accounts a USING (account_id)
+            WHERE a.user_id = '${USER_ID}'
+              AND e.event_id = '${MEDIA_EVENT_ID}'
+              AND e.event_type = 'm.room.message'
+              AND e.content->'file'->>'url' LIKE 'mxc://%';"
 }
 
 # run_axon [recovery_key] — start axon in the background against the local
@@ -262,6 +297,47 @@ run_axon "$RECOVERY_KEY"
 wait_until "rows back-filled to decrypted" -eq "$SEEN" decrypted_count
 # And no UTDs should remain.
 wait_until "UTDs drained to zero" -eq 0 utd_count
+wait_until "encrypted media metadata available" -eq 1 media_event_ready
+
+# --- phase 3: proxy download -> original plaintext bytes --------------------
+
+log "Phase 3: fetch encrypted attachment through axon's media proxy"
+ACCOUNT_ID="$(psql_q "SELECT account_id FROM accounts WHERE user_id = '${USER_ID}';")"
+MEDIA_MXC="$(
+    psql_q "SELECT e.content->'file'->>'url' FROM events e
+            JOIN accounts a USING (account_id)
+            WHERE a.user_id = '${USER_ID}' AND e.event_id = '${MEDIA_EVENT_ID}';"
+)"
+[ -n "$ACCOUNT_ID" ] || die "could not resolve axon account id"
+[ -n "$MEDIA_MXC" ] || die "could not resolve encrypted media MXC URL"
+
+MEDIA_PATH="${MEDIA_MXC#mxc://}"
+MEDIA_SERVER="${MEDIA_PATH%%/*}"
+MEDIA_ID="${MEDIA_PATH#*/}"
+[ "$MEDIA_PATH" != "$MEDIA_MXC" ] || die "invalid media MXC URL: ${MEDIA_MXC}"
+[ -n "$MEDIA_SERVER" ] && [ "$MEDIA_ID" != "$MEDIA_PATH" ] && [ -n "$MEDIA_ID" ] \
+    || die "invalid media MXC components: ${MEDIA_MXC}"
+
+# Mint a short-lived test token through the same out-of-band CLI path operators
+# use. Only the raw final line is captured; the secret is never logged.
+MEDIA_TOKEN="$(
+    (
+        cd "$RUN_DIR"
+        DATABASE_URL="$DATABASE_URL" "$AXON_BIN" token issue --label integration-media
+    ) | tail -n 1
+)"
+[ -n "$MEDIA_TOKEN" ] || die "could not issue client bearer token"
+
+curl --globoff -fsS -o "$DOWNLOADED_MEDIA" \
+    -H "Authorization: Bearer ${MEDIA_TOKEN}" \
+    "http://127.0.0.1:18080/v1/media/${ACCOUNT_ID}/${MEDIA_SERVER}/${MEDIA_ID}" \
+    || die "media proxy request failed"
+if ! cmp -s "$MEDIA_FIXTURE" "$DOWNLOADED_MEDIA"; then
+    info "expected bytes: $(wc -c < "$MEDIA_FIXTURE" | tr -d '[:space:]')"
+    info "received bytes: $(wc -c < "$DOWNLOADED_MEDIA" | tr -d '[:space:]')"
+    die "media proxy response did not match the original plaintext image"
+fi
+info "media proxy returned $(wc -c < "$DOWNLOADED_MEDIA" | tr -d '[:space:]') exact plaintext bytes"
 stop_axon
 
-log "PASS — re-decryption queue back-filled ${SEEN}/${SEEN} UTD(s) end to end"
+log "PASS — re-decrypted ${SEEN}/${SEEN} UTD(s) and verified encrypted media byte-for-byte"

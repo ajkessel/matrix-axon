@@ -111,6 +111,7 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::verify::get_flow,
         crate::routes::verify::confirm,
         crate::routes::verify::cancel,
+        crate::routes::media::get_media,
     ),
     components(schemas(
         crate::dto::AccountDto,
@@ -141,6 +142,7 @@ fn unauthorized_response() -> RefOr<Response> {
         (name = "events", description = "Individual events"),
         (name = "messages", description = "Sending, editing, redacting, and reacting"),
         (name = "verification", description = "Interactive SAS device verification"),
+        (name = "media", description = "Authenticated MXC media proxy"),
     ),
 )]
 pub struct ApiDoc;
