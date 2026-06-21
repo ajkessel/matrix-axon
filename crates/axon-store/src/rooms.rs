@@ -64,6 +64,14 @@ impl Store {
     /// the activity timestamp and the latest event id, and four correlated
     /// sub-selects pull the display fields from the `room_state` projection by
     /// its primary key (so they are single-row index lookups, not scans).
+    ///
+    /// Rooms the local user has left or been banned from are excluded: a
+    /// correlated `NOT EXISTS` drops any room whose current `m.room.member`
+    /// membership for `ac.user_id` is `leave` or `ban` (ADR 0037). The leave
+    /// event reaches `room_state` through ordinary sync, so no leave-specific
+    /// write path is needed. The predicate hides only on a definitive
+    /// leave/ban signal — a room with no membership row for the local user
+    /// still appears, so missing membership data never hides a joined room.
     pub async fn list_rooms(
         &self,
         account_id: Option<Uuid>,
@@ -93,6 +101,12 @@ impl Store {
                  GROUP BY account_id, room_id \
              ) a \
              JOIN accounts ac ON ac.account_id = a.account_id \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM room_state rs \
+                   WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
+                     AND rs.event_type = 'm.room.member' AND rs.state_key = ac.user_id \
+                     AND rs.content->>'membership' IN ('leave', 'ban') \
+             ) \
              ORDER BY a.last_activity_ts DESC, a.room_id",
         )
         .bind(account_id)

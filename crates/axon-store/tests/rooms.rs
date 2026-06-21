@@ -144,6 +144,77 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// Set the local user's `m.room.member` state in a room to `membership`
+/// (state_key = the account's own user id), as a leave/ban/join would.
+async fn set_membership(
+    store: &Store,
+    account_id: Uuid,
+    account_user_id: &str,
+    room_id: &str,
+    membership: &str,
+) {
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id,
+            event_type: "m.room.member",
+            state_key: account_user_id,
+            event_id: &format!("$mem-{}:localhost", Uuid::new_v4()),
+            sender: account_user_id,
+            origin_ts: 2_000,
+            content: Some(json!({ "membership": membership })),
+        })
+        .await
+        .expect("set membership");
+}
+
+/// `list_rooms` hides rooms the local user has left or been banned from, but
+/// keeps joined rooms and rooms with no membership row for the local user
+/// (ADR 0037). Membership is the local user's current `m.room.member` value.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_excludes_left_and_banned_rooms() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "left").await;
+
+    // Recover the account's own user id (test_account randomizes it) — it is the
+    // state_key of the local user's membership row.
+    let me = store.list_rooms(Some(account_id)).await.expect("list");
+    assert!(me.is_empty(), "no rooms yet");
+    let user_id: String =
+        sqlx_core::query_scalar::query_scalar("SELECT user_id FROM accounts WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_one(&pool)
+            .await
+            .expect("user id");
+
+    let joined = format!("!joined-{}:localhost", Uuid::new_v4());
+    let left = format!("!left-{}:localhost", Uuid::new_v4());
+    let banned = format!("!banned-{}:localhost", Uuid::new_v4());
+    let no_member = format!("!nomember-{}:localhost", Uuid::new_v4());
+
+    for room in [&joined, &left, &banned, &no_member] {
+        insert_message(&store, account_id, room, 1_000, "hi").await;
+    }
+    set_membership(&store, account_id, &user_id, &joined, "join").await;
+    set_membership(&store, account_id, &user_id, &left, "leave").await;
+    set_membership(&store, account_id, &user_id, &banned, "ban").await;
+    // `no_member` gets no membership row.
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    let ids: Vec<&str> = rooms.iter().map(|r| r.room_id.as_str()).collect();
+    assert!(ids.contains(&joined.as_str()), "joined room shown");
+    assert!(
+        ids.contains(&no_member.as_str()),
+        "missing membership row never hides a room"
+    );
+    assert!(!ids.contains(&left.as_str()), "left room hidden");
+    assert!(!ids.contains(&banned.as_str()), "banned room hidden");
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// `list_rooms` filters by account: a room under one account never leaks into
 /// another's list, and `None` returns both accounts' rooms.
 #[tokio::test]
