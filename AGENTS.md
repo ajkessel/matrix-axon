@@ -68,6 +68,15 @@ matrix-axon/
 - **Robustness at boundaries.** Every place axon crosses a network or process boundary — a client calling `/v1/`, axon-server calling a homeserver, the TUI calling axon — is a "what could go wrong?" checkpoint. Before merging code that crosses one, account for: (1) **Timeouts** — every outbound call gets one; never `await` a remote unbounded. (2) **Bounded resources** — a fixed pool (workers, connections, semaphore permits) must be paired with timeouts and/or cancellation, so one slow/hung peer can't permanently consume it. (3) **Hostile input** — validate size and shape *before* allocating from it; cap bodies/images/list lengths; never size a buffer or allocation directly from a number the peer controls. (4) **Concurrency** — name the shared mutable state and the lock/owner guarding it (the cold-connect gate vs. live-task severing in 7a is the model), and state which lost-update/reconnect race is closed and how. (5) **Partial failure** — one account/room/event failing is logged and skipped, never fatal to the loop (the established "best-effort, never fatal to sync" philosophy).
 - **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend, no OAuth server — see `docs/mvp/implementation.md` "What not to build" for the full list.
 - **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
+- **Version control:** some developers who contribute to this repo use [jj (Jujutsu)](https://github.com/jj-vcs/jj) in colocated mode alongside git (both `.jj/` and `.git/` are present). *If the developer has jj in their local environment*, prefer jj commands for committing and branching; git commands still work but are not the primary workflow. Key operations:
+  - Commit message: `jj describe -m "..."`  
+  - New commit on top of current: `jj new`  
+  - New commit off a specific base: `jj new <bookmark>@origin`  
+  - Switch working copy: `jj edit <change-id>`  
+  - Create/move a branch bookmark: `jj bookmark create <name> -r @` / `jj bookmark set <name> -r @`  
+  - Push: `jj git push --bookmark <name>`  
+  - Restack after base moves: `jj rebase -d <base-bookmark>` then re-push  
+  - PRs are still opened with `gh pr create --base <base> --head <branch>`; `gh`'s "uncommitted changes" warning in colocated mode can be ignored as long as the bookmark was pushed correctly.
 
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
