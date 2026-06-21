@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::api::RoomDto;
 use crate::command::{SlashCommand, SLASH_COMMANDS};
 
@@ -371,10 +373,36 @@ impl App {
         }
     }
 
+    /// Deduplicated view of visible rooms for completion: when the same Matrix
+    /// room appears under multiple accounts (one per `account_id`), keep only
+    /// the entry with the best display value (canonical alias > name > room_id).
+    /// This prevents the same room from showing up as both "#scratch:example.com"
+    /// and "scratch" because one account hasn't synced the alias state event yet.
+    fn visible_rooms_for_completion(&self) -> Vec<&RoomDto> {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        let mut result: Vec<&RoomDto> = Vec::new();
+        for index in self.visible_room_indices() {
+            let Some(room) = self.rooms.rooms.get(index) else {
+                continue;
+            };
+            match seen.get(room.room_id.as_str()).copied() {
+                None => {
+                    seen.insert(&room.room_id, result.len());
+                    result.push(room);
+                }
+                Some(idx) => {
+                    if result[idx].canonical_alias.is_none() && room.canonical_alias.is_some() {
+                        result[idx] = room;
+                    }
+                }
+            }
+        }
+        result
+    }
+
     fn room_cycle_candidates(&self, target: &str) -> Vec<(String, String, String)> {
-        self.visible_room_indices()
+        self.visible_rooms_for_completion()
             .into_iter()
-            .filter_map(|index| self.rooms.rooms.get(index))
             .filter(|room| room_matches_completion(room, target))
             .map(|room| {
                 let display = room_completion_value(room);
@@ -414,18 +442,16 @@ impl App {
     }
 
     fn room_completion_candidates(&self, target: &str) -> Vec<String> {
-        self.visible_room_indices()
+        self.visible_rooms_for_completion()
             .into_iter()
-            .filter_map(|index| self.rooms.rooms.get(index))
             .filter(|room| room_matches_completion(room, target))
             .map(room_completion_value)
             .collect()
     }
 
     fn room_prefix_candidates(&self, target: &str) -> Vec<String> {
-        self.visible_room_indices()
+        self.visible_rooms_for_completion()
             .into_iter()
-            .filter_map(|index| self.rooms.rooms.get(index))
             .filter_map(|room| room_matching_prefix_value(room, target))
             .collect()
     }

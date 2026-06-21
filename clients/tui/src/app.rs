@@ -3778,6 +3778,50 @@ mod tests {
         assert!(app.status.text(false).contains("[1/2]"));
     }
 
+    #[test]
+    fn room_completion_deduplicates_same_room_across_accounts() {
+        // Regression: the same Matrix room joined by two accounts appears twice
+        // in the room list (one per account_id). If one account hasn't synced the
+        // canonical_alias state event yet, the room shows up as both
+        // "#scratch:example.com" and "scratch", producing a spurious third match.
+        // visible_rooms_for_completion deduplicates by room_id, keeping the entry
+        // with a canonical alias.
+        let mut account_b_entry = room("!scratch:example.com", None, Some("scratch"));
+        account_b_entry.account_id = Uuid::from_u128(2);
+
+        let mut app = app_with_rooms(vec![
+            room(
+                "!scratch:example.com",
+                Some("#scratch:example.com"),
+                Some("scratch"),
+            ),
+            room(
+                "!scratch2:example.com",
+                Some("#scratch-2:example.com"),
+                Some("scratch-2"),
+            ),
+            account_b_entry,
+        ]);
+        app.input.buffer = "/room scratch".to_owned();
+
+        app.complete_room_input(false);
+
+        // Should see exactly 2 candidates, not 3.
+        let status = app.status.text(false);
+        assert!(
+            status.contains("#scratch:example.com"),
+            "expected alias in status: {status}"
+        );
+        assert!(
+            status.contains("#scratch-2:example.com"),
+            "expected alias-2 in status: {status}"
+        );
+        assert!(
+            !status.contains("completions: #scratch:example.com, #scratch-2:example.com, scratch"),
+            "spurious bare 'scratch' entry in status: {status}"
+        );
+    }
+
     #[tokio::test]
     async fn room_completion_enter_selects_after_prefix_expansion_then_cycling() {
         // Regression: partial_room_completions set during prefix expansion must be
