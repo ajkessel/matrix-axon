@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use crate::api::{EventDto, LiveFrame, RoomDto};
 use crate::config::{DisplayOptions, SenderNameStyle};
 
+use ratatui_image::Resize;
+
 use super::{
     collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
-    selected_message_target_index, App, ConnectionState, ImageThumbRows, LiveFrameAction, RoomKey,
-    Status,
+    selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
+    LiveFrameAction, MediaKey, RoomKey, Status, IMAGE_THUMB_ROWS,
 };
 
 impl App {
@@ -504,6 +506,29 @@ impl App {
 
         let sender_labels = self.sender_labels(events);
         let reactions = self.selected_reactions();
+        // Build per-image heights from the cache so nav lands on lines that
+        // match what draw() renders (draw() uses the same logic).  An empty map
+        // here would force every image to IMAGE_THUMB_ROWS=6, causing a desync
+        // whenever a shorter image has already been decoded.
+        let font_size = self.picker.font_size();
+        let image_thumb_rows: ImageThumbRows = events
+            .iter()
+            .filter_map(|event| {
+                let (account_id, mxc_url) = event.image_mxc()?;
+                let key = MediaKey::new(account_id, mxc_url.clone());
+                let thumb_h = if let Some(ImageState::Ready(img)) = self.image_cache.get(&key) {
+                    let nat = Resize::natural_size(img, font_size);
+                    (nat.height as usize).clamp(1, IMAGE_THUMB_ROWS)
+                } else {
+                    IMAGE_THUMB_ROWS
+                };
+                if thumb_h != IMAGE_THUMB_ROWS {
+                    Some(((account_id, mxc_url), thumb_h))
+                } else {
+                    None
+                }
+            })
+            .collect();
         message_layout(
             events,
             sender_labels.as_slice(),
@@ -512,7 +537,7 @@ impl App {
             self.messages.width,
             &reactions,
             &self.live.own_senders,
-            &ImageThumbRows::new(),
+            &image_thumb_rows,
         )
         .ranges
     }

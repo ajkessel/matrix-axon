@@ -513,6 +513,9 @@ impl RawConfig {
     fn to_toml(&self) -> String {
         let display_extra = {
             let mut s = String::new();
+            if let Some(v) = self.display.max_input_lines {
+                s.push_str(&format!("max_input_lines = {v}\n"));
+            }
             if let Some(w) = self.display.accounts_panel_width {
                 s.push_str(&format!("accounts_panel_width = {w}\n"));
             }
@@ -1347,6 +1350,8 @@ impl RawDisplayOptions {
         }
         if let Some(v) = partial.max_input_lines {
             self.max_input_lines = Some(v.clamp(1, 100));
+        } else {
+            missing = true;
         }
         if let Some(confirm_logout) = partial.confirm_logout {
             self.confirm_logout = confirm_logout;

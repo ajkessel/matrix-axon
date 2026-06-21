@@ -260,7 +260,6 @@ pub(crate) struct App {
     /// True while a login or logout request is awaiting its result, so the UI
     /// stays responsive but a second lifecycle verb can't race the first.
     pub(crate) lifecycle_busy: bool,
-    pub(crate) redraw_requested: bool,
     /// User-toggled hide for the accounts panel (independent of account count).
     pub(crate) accounts_panel_hidden: bool,
     /// User-toggled hide for the rooms panel.
@@ -288,6 +287,12 @@ pub(crate) struct App {
     /// Changes periodically while a Sixel preview is open inside tmux, forcing
     /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
     pub(crate) sixel_preview_generation: u64,
+    /// Set for one frame after the media-preview popup closes so `draw()` can
+    /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
+    /// are not erased by ratatui's cell-diff pass when the image disappears, so
+    /// without this explicit clear a ghost image lingers until something else
+    /// overwrites those cells.
+    pub(crate) clear_media_preview: bool,
 }
 
 #[derive(Default)]
@@ -416,7 +421,7 @@ impl App {
             proto_cache: HashMap::new(),
             proto_cache_order: VecDeque::new(),
             sixel_preview_generation: 0,
-            redraw_requested: false,
+            clear_media_preview: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
             config_path,
@@ -531,13 +536,7 @@ impl App {
                 true
             }
         };
-        if updated {
-            self.redraw_requested = true;
-        }
-    }
-
-    pub(crate) fn take_redraw_request(&mut self) -> bool {
-        std::mem::take(&mut self.redraw_requested)
+        let _ = updated;
     }
 
     pub(crate) fn take_edit_config_request(&mut self) -> bool {
@@ -559,7 +558,6 @@ impl App {
                 self.shortcuts = config.shortcuts;
                 self.colors = config.colors;
                 self.display = config.display;
-                self.redraw_requested = true;
                 self.status = Status::Info("config reloaded".to_owned());
             }
             Err(e) => self.status = Status::Info(format!("config reload failed: {e}")),
@@ -918,7 +916,6 @@ impl App {
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
             Command::Refresh => {
                 self.refresh_rooms().await;
-                self.redraw_requested = true;
             }
             Command::EditConfig => {
                 self.edit_config_requested = true;
@@ -2110,17 +2107,6 @@ mod tests {
             "select a room before using /whereami"
         );
         assert_eq!(app.mode, Mode::Compose);
-    }
-
-    #[tokio::test]
-    async fn refresh_requests_terminal_redraw_once() {
-        let mut app = app_with_rooms(Vec::new());
-
-        app.handle_command(Command::Refresh).await;
-
-        // /refresh both refreshes rooms (status reflects that) and queues a redraw
-        assert!(app.take_redraw_request());
-        assert!(!app.take_redraw_request());
     }
 
     #[tokio::test]

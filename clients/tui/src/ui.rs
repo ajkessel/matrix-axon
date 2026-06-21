@@ -15,11 +15,33 @@ use crate::app::{
     ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
     IMAGE_THUMB_ROWS,
 };
+use ratatui_image::picker::ProtocolType;
+
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
 use crate::wrap::{plain_rich_lines, wrap_rich_lines};
 
+/// Percentage of the screen (both axes) used for the media-preview popup.
+/// Kept as a single constant so `preview_target_size` (which determines the
+/// encoded image size) and `render_media_preview` (which draws the border)
+/// always agree — a mismatch would produce a popup whose border doesn't match
+/// the image it encloses.
+const PREVIEW_MAX_PCT: u16 = 88;
+
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    // On the frame immediately after the media-preview popup is closed, emit a
+    // targeted Clear over the region the popup occupied.  Sixel/iTerm2 pixels
+    // are not part of the ratatui cell model, so the cell-diff renderer cannot
+    // erase them; without this explicit clear a ghost image lingers until
+    // something else overwrites those cells.  Halfblocks are ordinary Unicode
+    // characters and are already handled by the normal diff pass.
+    if std::mem::take(&mut app.clear_media_preview)
+        && !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks)
+    {
+        let ghost_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, frame.area());
+        frame.render_widget(Clear, ghost_area);
+    }
+
     let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
         let inner_width = frame.area().width.saturating_sub(2) as usize;
         let content_len = 2 + app.input.buffer.chars().count();
@@ -477,16 +499,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Image::new(protocol), rect);
         }
     }
-    // Pre-warm the preview protocol for every image already loaded and visible.
-    // request_protocol is a no-op when the work is cached or in-flight, so this
-    // adds only a few HashMap lookups per frame. Encoding happens on the existing
-    // background worker pool and is bounded by MEDIA_WORKERS.
-    let preview_screen = frame.area();
-    let preview_font = font_size;
-    for (media, _) in &media_requests {
-        if let Some(ImageState::Ready(img)) = app.image_cache.get(media) {
-            if let Some(size) = preview_target_size(img, preview_font, preview_screen) {
-                app.request_protocol(media.clone(), size);
+    // Pre-warm the preview protocol, but only when the media-preview popup is
+    // open (or the selected image while in MessageList so opening is instant).
+    // Encoding every visible image every frame doubles proto_cache churn against
+    // the 32-entry limit and wastes worker bandwidth for a popup that is usually
+    // closed.
+    if app.mode == Mode::Popup(PopupKind::MediaPreview) {
+        let preview_screen = frame.area();
+        for (media, _) in &media_requests {
+            if let Some(ImageState::Ready(img)) = app.image_cache.get(media) {
+                if let Some(size) = preview_target_size(img, font_size, preview_screen) {
+                    app.request_protocol(media.clone(), size);
+                }
             }
         }
     }
@@ -795,7 +819,7 @@ fn preview_target_size(
     font_size: FontSize,
     screen: Rect,
 ) -> Option<Size> {
-    let max_area = centered_rect(88, 88, screen);
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
     // Subtract the 1-cell border on each side (same as Block::inner).
     let max_w = max_area.width.saturating_sub(2);
     let max_h = max_area.height.saturating_sub(2);
@@ -826,7 +850,7 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
         })
     });
 
-    let max_area = centered_rect(88, 88, screen);
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
 
     let Some((media, encrypted, filename, caption)) = selected else {
         let block = Block::default()
@@ -874,11 +898,9 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
     // protocol is ready — so the border never jumps when encoding finishes.
     let content_h = target_size.height.saturating_add(caption_h);
     let area = if target_size.width < max_inner.width || content_h < max_inner.height {
-        let popup_w = target_size.width + 2;
-        let popup_h = content_h + 2;
-        let x = screen.x + screen.width.saturating_sub(popup_w) / 2;
-        let y = screen.y + screen.height.saturating_sub(popup_h) / 2;
-        Rect::new(x, y, popup_w.min(screen.width), popup_h.min(screen.height))
+        // Add 1-cell border on each side and center with the same helper used
+        // everywhere else, avoiding independent centering arithmetic here.
+        centered_size(target_size.width + 2, content_h + 2, screen)
     } else {
         max_area
     };

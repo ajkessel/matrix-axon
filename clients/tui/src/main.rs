@@ -427,10 +427,6 @@ async fn run_app(
     let mut tick = time::interval(Duration::from_millis(100));
     let mut next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
     loop {
-        // The image protocols clear their own render areas (Sixel/iTerm2) or
-        // remove placements when their placeholders disappear (Kitty). A
-        // terminal-wide clear here causes visible flicker and is unnecessary.
-        let _ = app.take_redraw_request();
         terminal.draw(|frame| draw(frame, &mut app))?;
 
         tokio::select! {

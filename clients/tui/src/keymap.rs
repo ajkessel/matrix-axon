@@ -50,7 +50,6 @@ impl App {
             self.toggle_unread_filter();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
             self.refresh_rooms().await;
-            self.redraw_requested = true;
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
@@ -89,11 +88,15 @@ impl App {
 
     fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
         if self.shortcuts.clear_input.matches(key) {
-            self.mode = if kind == PopupKind::MediaPreview {
-                Mode::MessageList
+            if kind == PopupKind::MediaPreview {
+                self.mode = Mode::MessageList;
+                // Signal draw() to clear the former popup area.  Sixel/iTerm2
+                // pixels survive ratatui's cell-diff pass and leave a ghost
+                // image unless we explicitly clear the region on close.
+                self.clear_media_preview = true;
             } else {
-                Mode::Compose
-            };
+                self.mode = Mode::Compose;
+            }
             self.popup_scroll = 0;
             self.help_selection = 0;
             if kind == PopupKind::CommandResponse {
