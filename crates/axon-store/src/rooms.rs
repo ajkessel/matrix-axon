@@ -72,6 +72,10 @@ impl Store {
     /// write path is needed. The predicate hides only on a definitive
     /// leave/ban signal — a room with no membership row for the local user
     /// still appears, so missing membership data never hides a joined room.
+    ///
+    /// Tombstoned rooms (upgraded via `m.room.tombstone`) are also excluded:
+    /// the old room is superseded by its replacement and should not appear
+    /// alongside the new room in the list.
     pub async fn list_rooms(
         &self,
         account_id: Option<Uuid>,
@@ -106,6 +110,11 @@ impl Store {
                    WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
                      AND rs.event_type = 'm.room.member' AND rs.state_key = ac.user_id \
                      AND rs.content->>'membership' IN ('leave', 'ban') \
+             ) \
+             AND NOT EXISTS ( \
+                 SELECT 1 FROM room_state rs \
+                   WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
+                     AND rs.event_type = 'm.room.tombstone' AND rs.state_key = '' \
              ) \
              ORDER BY a.last_activity_ts DESC, a.room_id",
         )

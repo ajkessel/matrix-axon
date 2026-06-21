@@ -215,6 +215,47 @@ async fn list_rooms_excludes_left_and_banned_rooms() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// `list_rooms` hides tombstoned (upgraded) rooms. When a room has an
+/// `m.room.tombstone` state event it has been superseded by a replacement room
+/// and should not appear in the list alongside its successor.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_excludes_tombstoned_rooms() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "tomb").await;
+
+    let live = format!("!live-{}:localhost", Uuid::new_v4());
+    let tombstoned = format!("!tomb-{}:localhost", Uuid::new_v4());
+    let replacement = format!("!replacement-{}:localhost", Uuid::new_v4());
+
+    insert_message(&store, account_id, &live, 1_000, "hi").await;
+    insert_message(&store, account_id, &tombstoned, 1_000, "old").await;
+    insert_message(&store, account_id, &replacement, 2_000, "new").await;
+
+    // Mark `tombstoned` as upgraded — this is the state event Matrix sends when
+    // a room is replaced by a newer room.
+    set_state(
+        &store,
+        account_id,
+        &tombstoned,
+        "m.room.tombstone",
+        json!({ "body": "This room has been replaced", "replacement_room": replacement }),
+    )
+    .await;
+
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    let ids: Vec<&str> = rooms.iter().map(|r| r.room_id.as_str()).collect();
+    assert!(ids.contains(&live.as_str()), "live room shown");
+    assert!(ids.contains(&replacement.as_str()), "replacement room shown");
+    assert!(
+        !ids.contains(&tombstoned.as_str()),
+        "tombstoned room hidden"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// `list_rooms` filters by account: a room under one account never leaks into
 /// another's list, and `None` returns both accounts' rooms.
 #[tokio::test]
