@@ -1864,6 +1864,7 @@ mod tests {
             sender_name: SenderNameStyle::DisplayName,
             input_lines: 1,
             max_input_lines: None,
+            preview_warmup_count: 5,
             confirm_logout: true,
             search_wrap: true,
             accounts_panel_width: 25,

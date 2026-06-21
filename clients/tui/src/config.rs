@@ -141,6 +141,7 @@ show_state_events = false
 sender_name = "display_name"
 input_lines = 1
 max_input_lines = 10
+# preview_warmup_count = 5
 confirm_logout = true
 search_wrap = true
 
@@ -297,6 +298,7 @@ pub struct DisplayOptions {
     pub sender_name: SenderNameStyle,
     pub input_lines: u16,
     pub max_input_lines: Option<u16>,
+    pub preview_warmup_count: usize,
     pub confirm_logout: bool,
     pub search_wrap: bool,
     pub accounts_panel_width: u16,
@@ -447,6 +449,7 @@ impl RawConfig {
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
                 max_input_lines: Some(10),
+                preview_warmup_count: None,
                 confirm_logout: true,
                 search_wrap: true,
                 accounts_panel_width: None,
@@ -515,6 +518,9 @@ impl RawConfig {
             let mut s = String::new();
             if let Some(v) = self.display.max_input_lines {
                 s.push_str(&format!("max_input_lines = {v}\n"));
+            }
+            if let Some(v) = self.display.preview_warmup_count {
+                s.push_str(&format!("preview_warmup_count = {v}\n"));
             }
             if let Some(w) = self.display.accounts_panel_width {
                 s.push_str(&format!("accounts_panel_width = {w}\n"));
@@ -910,6 +916,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "sender_name"
                 | "input_lines"
                 | "max_input_lines"
+                | "preview_warmup_count"
                 | "confirm_logout"
                 | "search_wrap"
                 | "accounts_panel_width"
@@ -1316,6 +1323,7 @@ struct RawDisplayOptions {
     sender_name: String,
     input_lines: u16,
     max_input_lines: Option<u16>,
+    preview_warmup_count: Option<u8>,
     confirm_logout: bool,
     search_wrap: bool,
     accounts_panel_width: Option<u16>,
@@ -1353,6 +1361,11 @@ impl RawDisplayOptions {
         } else {
             missing = true;
         }
+        if let Some(v) = partial.preview_warmup_count {
+            self.preview_warmup_count = Some(v);
+        } else {
+            missing = true;
+        }
         if let Some(confirm_logout) = partial.confirm_logout {
             self.confirm_logout = confirm_logout;
         } else {
@@ -1379,6 +1392,7 @@ impl RawDisplayOptions {
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
             input_lines: self.input_lines.clamp(1, 10),
             max_input_lines: self.max_input_lines.map(|v| v.clamp(1, 100)),
+            preview_warmup_count: self.preview_warmup_count.unwrap_or(5) as usize,
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
             accounts_panel_width: self
@@ -1396,6 +1410,7 @@ struct PartialDisplayOptions {
     sender_name: Option<String>,
     input_lines: Option<u16>,
     max_input_lines: Option<u16>,
+    preview_warmup_count: Option<u8>,
     confirm_logout: Option<bool>,
     search_wrap: Option<bool>,
     accounts_panel_width: Option<u16>,

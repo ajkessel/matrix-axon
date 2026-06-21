@@ -499,14 +499,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Image::new(protocol), rect);
         }
     }
-    // Pre-warm the preview protocol, but only when the media-preview popup is
-    // open (or the selected image while in MessageList so opening is instant).
-    // Encoding every visible image every frame doubles proto_cache churn against
-    // the 32-entry limit and wastes worker bandwidth for a popup that is usually
-    // closed.
-    if app.mode == Mode::Popup(PopupKind::MediaPreview) {
+    // Pre-warm preview protocols for visible images so pressing 'v' shows the
+    // image immediately rather than waiting for encoding to complete.  We cap
+    // at `preview_warmup_count` (default 5) to bound proto_cache churn: warming
+    // every visible image on every 100 ms tick fills the 32-entry cache with
+    // Encoding entries and can starve thumbnail requests.
+    let warmup_limit = app.display.preview_warmup_count;
+    if warmup_limit > 0 {
         let preview_screen = frame.area();
-        for (media, _) in &media_requests {
+        for (media, _) in media_requests.iter().take(warmup_limit) {
             if let Some(ImageState::Ready(img)) = app.image_cache.get(media) {
                 if let Some(size) = preview_target_size(img, font_size, preview_screen) {
                     app.request_protocol(media.clone(), size);
