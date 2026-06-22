@@ -240,7 +240,7 @@ Post-MVP, roughly in priority order:
 5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it.
 6. **Per-room / per-language search analyzers.**
 7. **Spaces as first-class API resources.**
-8. **Native clients** (iOS first, then desktop) and a web client.
+8. **Native clients** (iOS first, then desktop) and a web client. See [ADR 0031](../adr/0031-client-strategy.md) for the client strategy.
 9. **Federation of agents v2.**
 
 (Threads moved *into* the MVP as part of relation aggregation; they are no longer a post-MVP track.)

@@ -18,9 +18,14 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Clients
 
-| Client | Description |
-| --- | --- |
-| [`axon-tui`](clients/tui/README.md) | Terminal-based client designed to support all functionality exposed by Axon. |
+| Client | Platform | Status |
+| --- | --- | --- |
+| [`axon-tui`](clients/tui/README.md) | Terminal | Active (MVP reference client) |
+| `axon-web` | Web browser + Windows/Linux desktop (Tauri) | Planned |
+| `axon-apple` | iOS + macOS (shared Swift Package) | Planned |
+| `axon-android` | Android | Planned |
+
+See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and sequencing.
 
 ## Developer quick-start
 
