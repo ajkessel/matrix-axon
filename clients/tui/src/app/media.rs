@@ -52,8 +52,47 @@ pub(crate) enum ImageState {
 
 pub(crate) enum ProtocolState {
     Encoding,
-    Ready(Protocol),
+    Ready(CachedProtocol),
     Failed(String),
+}
+
+pub(crate) struct CachedProtocol {
+    inline: Protocol,
+    sixel_preview_alternate: Option<Protocol>,
+}
+
+impl CachedProtocol {
+    fn new(protocol: Protocol) -> Self {
+        let Protocol::Sixel(sixel) = &protocol else {
+            return Self {
+                inline: protocol,
+                sixel_preview_alternate: None,
+            };
+        };
+
+        let mut primary = sixel.clone();
+        primary.data.push_str("\x1b[0m");
+        let mut alternate = sixel.clone();
+        alternate.data.push_str("\x1b[00m");
+        Self {
+            inline: Protocol::Sixel(primary),
+            sixel_preview_alternate: Some(Protocol::Sixel(alternate)),
+        }
+    }
+
+    pub(crate) fn inline(&self) -> &Protocol {
+        &self.inline
+    }
+
+    pub(crate) fn preview(&self, generation: u64) -> &Protocol {
+        if generation % 2 == 0 {
+            &self.inline
+        } else {
+            self.sixel_preview_alternate
+                .as_ref()
+                .unwrap_or(&self.inline)
+        }
+    }
 }
 
 pub(crate) enum MediaResult {
@@ -63,7 +102,7 @@ pub(crate) enum MediaResult {
     },
     Protocol {
         key: ProtocolKey,
-        outcome: Result<Protocol, String>,
+        outcome: Result<CachedProtocol, String>,
     },
 }
 
@@ -106,6 +145,7 @@ pub(crate) fn spawn_protocol_encode(
         let outcome = tokio::task::spawn_blocking(move || {
             picker
                 .new_protocol((*image).clone(), encode_key.size, Resize::Fit(None))
+                .map(CachedProtocol::new)
                 .map_err(|err| err.to_string())
         })
         .await

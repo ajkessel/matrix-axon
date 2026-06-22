@@ -35,3 +35,5 @@ ruma-html = "0.8"
 ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm"] }
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 kamadak-exif = "0.6"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+html-escape = "0.2"

@@ -1382,16 +1382,28 @@ impl RawDisplayOptions {
         if let Some(v) = partial.rooms_panel_width_adj {
             self.rooms_panel_width_adj = Some(v);
         }
+        if let Some(max_input_lines) = self.max_input_lines {
+            let clamped_input_lines = self.input_lines.min(max_input_lines);
+            if clamped_input_lines != self.input_lines {
+                self.input_lines = clamped_input_lines;
+                missing = true;
+            }
+        }
         missing
     }
 
     fn into_display_options(self) -> Result<DisplayOptions, ConfigError> {
+        let max_input_lines = self.max_input_lines.map(|v| v.clamp(1, 100));
+        let input_lines = self
+            .input_lines
+            .clamp(1, 10)
+            .min(max_input_lines.unwrap_or(u16::MAX));
         Ok(DisplayOptions {
             debug: self.debug,
             show_state_events: self.show_state_events,
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
-            input_lines: self.input_lines.clamp(1, 10),
-            max_input_lines: self.max_input_lines.map(|v| v.clamp(1, 100)),
+            input_lines,
+            max_input_lines,
             preview_warmup_count: self.preview_warmup_count.unwrap_or(5) as usize,
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
@@ -1749,6 +1761,28 @@ history_next = "ctrl-j"
         let config = TuiConfig::load_or_create_at(path.clone()).expect("reload saved config");
         assert_eq!(config.base_url.as_deref(), Some("https://axon.example.com"));
         assert_eq!(config.token.as_deref(), Some("secret-token"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_clamps_input_lines_to_max_input_lines() {
+        let path = env::temp_dir().join(format!(
+            "axon-tui-test-{}-input-line-bounds-config.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let original = DEFAULT_CONFIG
+            .replacen("input_lines = 1", "input_lines = 5", 1)
+            .replacen("max_input_lines = 10", "max_input_lines = 3", 1);
+        fs::write(&path, original).expect("write config");
+
+        let config = TuiConfig::load_or_create_at(path.clone()).expect("load config");
+
+        assert_eq!(config.display.input_lines, 3);
+        assert_eq!(config.display.max_input_lines, Some(3));
+        let repaired = fs::read_to_string(&path).expect("read repaired config");
+        assert!(repaired.contains("input_lines = 3"));
+        assert!(repaired.contains("max_input_lines = 3"));
         let _ = fs::remove_file(path);
     }
 

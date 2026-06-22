@@ -20,6 +20,10 @@ pub enum Command {
     Unreact,
     Reply,
     Thread,
+    /// Start an outgoing SAS verification against a pasted device ID (ADR 0028).
+    Verify(Option<String>),
+    /// Inspect the per-event verification bundle for an event ID (M7c).
+    Bundle(String),
     Help,
     Shortcuts,
     Refresh,
@@ -27,6 +31,17 @@ pub enum Command {
     EditConfig,
     Quit,
     Send(String),
+    /// /html <raw-html> — send HTML literally as formatted_body
+    SendHtml(String),
+    /// /literal <text> — send as plaintext, skip markdown auto-conversion
+    SendLiteral(String),
+    /// /rainbow <text> — send text with each character in a cycling rainbow color
+    Rainbow(String),
+    /// /spoiler [reason |] text — send text hidden behind a spoiler warning
+    Spoiler {
+        reason: Option<String>,
+        text: String,
+    },
     Invalid(String),
     ApiUnsupported(String),
     Unknown(String),
@@ -81,6 +96,8 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/unreact", false),
     SlashCommand::supported("/reply", false),
     SlashCommand::supported("/thread", false),
+    SlashCommand::supported("/verify", true),
+    SlashCommand::supported("/bundle", true),
     SlashCommand::supported("/help", false),
     SlashCommand::supported("/shortcuts", false),
     SlashCommand::supported("/refresh", false),
@@ -88,6 +105,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/saveconfig", false),
     SlashCommand::supported("/editconfig", false),
     SlashCommand::supported("/quit", false),
+    SlashCommand::supported("/html", true),
+    SlashCommand::supported("/literal", true),
+    SlashCommand::supported("/rainbow", true),
+    SlashCommand::supported("/spoiler", true),
     SlashCommand::api_unsupported("/join", true),
     SlashCommand::api_unsupported("/leave", false),
     SlashCommand::api_unsupported("/part", false),
@@ -103,6 +124,26 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "//<text>",
         insert_text: "//",
         description: "send a message beginning with a literal /",
+    },
+    HelpCommand {
+        label: "/html <html>",
+        insert_text: "/html ",
+        description: "send raw HTML as a formatted message (plain body is auto-stripped)",
+    },
+    HelpCommand {
+        label: "/literal <text>",
+        insert_text: "/literal ",
+        description: "send text as plaintext, skipping markdown auto-conversion",
+    },
+    HelpCommand {
+        label: "/rainbow <text>",
+        insert_text: "/rainbow ",
+        description: "send text with each character colored in cycling rainbow hues",
+    },
+    HelpCommand {
+        label: "/spoiler [reason |] <text>",
+        insert_text: "/spoiler ",
+        description: "send text as a spoiler; optional reason before \" | \" becomes the label",
     },
     HelpCommand {
         label: "/login [user] [password] [homeserver]",
@@ -174,6 +215,17 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/thread",
         description:
             "start a thread from the selected or most recent message (pending API support)",
+    },
+    HelpCommand {
+        label: "/verify <device_id>",
+        insert_text: "/verify ",
+        description:
+            "start emoji SAS verification of a device (incoming requests open automatically)",
+    },
+    HelpCommand {
+        label: "/bundle <event_id>",
+        insert_text: "/bundle ",
+        description: "show the sender-trust verification bundle for an event",
     },
     HelpCommand {
         label: "/help, /?",
@@ -288,12 +340,44 @@ pub fn parse(input: &str) -> Command {
         "unreact" => Command::Unreact,
         "reply" => Command::Reply,
         "thread" => Command::Thread,
+        "verify" => {
+            let mut tokens = arg.split_whitespace();
+            let device_id = tokens.next().map(str::to_owned);
+            if tokens.next().is_some() {
+                Command::Invalid("/verify takes at most one device id".to_owned())
+            } else {
+                Command::Verify(device_id)
+            }
+        }
+        "bundle" if !arg.is_empty() => Command::Bundle(arg.to_owned()),
+        "bundle" => Command::Invalid("/bundle requires an event id".to_owned()),
         "help" | "?" => Command::Help,
         "shortcuts" => Command::Shortcuts,
         "refresh" | "rooms" => Command::Refresh,
         "saveconfig" => Command::SaveConfig,
         "editconfig" => Command::EditConfig,
         "quit" | "q" => Command::Quit,
+        "html" if !arg.is_empty() => Command::SendHtml(arg.to_owned()),
+        "html" => Command::Invalid("/html requires HTML content to send".to_owned()),
+        "literal" if !arg.is_empty() => Command::SendLiteral(arg.to_owned()),
+        "literal" => Command::Invalid("/literal requires text to send".to_owned()),
+        "rainbow" if !arg.is_empty() => Command::Rainbow(arg.to_owned()),
+        "rainbow" => Command::Invalid("/rainbow requires text to send".to_owned()),
+        "spoiler" if !arg.is_empty() => {
+            if let Some((reason, text)) = arg.split_once(" | ") {
+                let reason = reason.trim();
+                Command::Spoiler {
+                    reason: (!reason.is_empty()).then(|| reason.to_owned()),
+                    text: text.to_owned(),
+                }
+            } else {
+                Command::Spoiler {
+                    reason: None,
+                    text: arg.to_owned(),
+                }
+            }
+        }
+        "spoiler" => Command::Invalid("/spoiler requires text to send".to_owned()),
         other => {
             let command_name = format!("/{other}");
             if SLASH_COMMANDS
@@ -405,6 +489,25 @@ mod tests {
             parse("/recover @me:example.com inline-key"),
             Command::Invalid(message) if message.contains("hidden prompt")
         ));
+    }
+
+    #[test]
+    fn parses_verify_forms() {
+        assert_eq!(parse("/verify"), Command::Verify(None));
+        assert_eq!(
+            parse("/verify ABCDEF"),
+            Command::Verify(Some("ABCDEF".to_owned()))
+        );
+        assert!(matches!(parse("/verify a b"), Command::Invalid(_)));
+    }
+
+    #[test]
+    fn parses_bundle_forms() {
+        assert_eq!(
+            parse("/bundle $event:localhost"),
+            Command::Bundle("$event:localhost".to_owned())
+        );
+        assert!(matches!(parse("/bundle"), Command::Invalid(_)));
     }
 
     #[test]

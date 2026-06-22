@@ -2,9 +2,12 @@ use ruma::OwnedUserId;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::api::{AccountDto, AccountState};
+use crate::api::{AccountDto, AccountState, FlowDto};
 
-use super::{AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status};
+use super::{
+    AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status, VerificationDirection,
+    VerificationFlow, VerificationStage,
+};
 
 pub(super) enum LogoutResolution {
     Match(AccountDto),
@@ -73,6 +76,42 @@ pub(crate) enum LifecycleOutcome {
         temp_id: String,
         result: Result<String, String>,
     },
+    /// Result of an outgoing `POST …/verify`: the new flow's id, or an error to
+    /// surface in the modal (ADR 0028).
+    VerifyStarted {
+        account_id: Uuid,
+        result: Result<String, String>,
+    },
+    /// Result of `POST …/verify/{flow_id}/confirm`. Errors (e.g. a 409 from a
+    /// concurrent logout) surface verbatim in the modal.
+    VerifyConfirmed {
+        account_id: Uuid,
+        flow_id: String,
+        result: Result<(), String>,
+    },
+    /// Result of `POST …/verify/{flow_id}/cancel`. Best-effort: errors are shown
+    /// only in the status line, since the modal is already closing.
+    VerifyCancelled { result: Result<(), String> },
+    /// Result of a read-on-reconnect `GET …/verify/{flow_id}` (ADR 0028 §3). A
+    /// 404 is an implicit server-side cancellation.
+    VerifyResynced {
+        account_id: Uuid,
+        flow_id: String,
+        result: Result<FlowDto, VerifyResyncError>,
+    },
+    /// Result of a `GET …/verify` issued on reconnect to discover a request that
+    /// arrived while disconnected (ADR 0028 §3). Errors are non-fatal.
+    VerifyDiscovered {
+        account_id: Uuid,
+        result: Result<Vec<FlowDto>, String>,
+    },
+}
+
+/// Failure modes of a verification resync. A 404 is treated as an implicit
+/// cancellation (ADR 0028 §3); other errors are transient and leave the modal up.
+pub(crate) enum VerifyResyncError {
+    NotFound,
+    Other(String),
 }
 
 impl App {
@@ -300,6 +339,204 @@ impl App {
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(LifecycleOutcome::Recover { user_id, result });
+        });
+    }
+
+    /// Resolve the account a verification flow should run against, mirroring the
+    /// send-side targeting: the active filter when set, otherwise the sole active
+    /// account — refusing when the filter is "all" with several active accounts
+    /// (ADR 0028 §1).
+    fn resolve_verification_account(&self) -> Result<Uuid, String> {
+        if let Some(id) = self.active_account_filter() {
+            return Ok(id);
+        }
+        let active = self.active_account_ids();
+        match active.len() {
+            0 => Err("no active account to verify".to_owned()),
+            1 => Ok(active[0]),
+            _ => Err(
+                "select an account first: the filter is \"all\" and several accounts are active"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    /// Start an outgoing SAS flow against a pasted device id (ADR 0028 §1).
+    /// Verification is deliberately *not* gated by `lifecycle_busy` (ADR 0028 §4).
+    pub(crate) fn start_verification(&mut self, device_id: Option<String>) {
+        let Some(device_id) = device_id.filter(|d| !d.trim().is_empty()) else {
+            self.status = Status::from(
+                "usage: /verify <device_id> (incoming requests open automatically)".to_owned(),
+            );
+            return;
+        };
+        let device_id = device_id.trim().to_owned();
+        let account_id = match self.resolve_verification_account() {
+            Ok(id) => id,
+            Err(message) => {
+                self.status = Status::from(message);
+                return;
+            }
+        };
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        self.verification = Some(VerificationFlow {
+            account_id,
+            device_id: device_id.clone(),
+            flow_id: None,
+            direction: VerificationDirection::Outgoing,
+            stage: VerificationStage::Starting,
+            emoji: None,
+            decimals: None,
+        });
+        self.mode = Mode::Verification;
+        self.status = Status::from(format!("starting verification of {device_id}…"));
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .start_verification(account_id, &device_id)
+                .await
+                .map(|resp| resp.flow_id)
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::VerifyStarted { account_id, result });
+        });
+    }
+
+    /// Auto-open the modal for a peer-initiated request (ADR 0028 §2). Ignores a
+    /// new request while a non-terminal flow is already on screen.
+    pub(crate) fn open_incoming_verification(
+        &mut self,
+        account_id: Uuid,
+        flow_id: String,
+        device_id: String,
+    ) {
+        if self
+            .verification
+            .as_ref()
+            .is_some_and(|flow| !flow.stage.is_terminal())
+        {
+            return;
+        }
+        self.verification = Some(VerificationFlow {
+            account_id,
+            device_id,
+            flow_id: Some(flow_id),
+            direction: VerificationDirection::Incoming,
+            stage: VerificationStage::Waiting,
+            emoji: None,
+            decimals: None,
+        });
+        self.mode = Mode::Verification;
+        self.status = Status::from("verification requested — compare the emoji".to_owned());
+    }
+
+    /// Confirm the SAS values match (the user pressed `y`).
+    pub(crate) fn confirm_active_verification(&mut self) {
+        let Some(flow) = self.verification.as_mut() else {
+            return;
+        };
+        let (Some(flow_id), account_id) = (flow.flow_id.clone(), flow.account_id) else {
+            return;
+        };
+        flow.stage = VerificationStage::Confirming;
+        self.status = Status::from("confirming verification…".to_owned());
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .confirm_verification(account_id, &flow_id)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::VerifyConfirmed {
+                account_id,
+                flow_id,
+                result,
+            });
+        });
+    }
+
+    /// Cancel the active flow (the user pressed `n`, or `Esc` on a live flow).
+    /// The modal transitions to a terminal state immediately; the cancel call is
+    /// best-effort.
+    pub(crate) fn cancel_active_verification(&mut self) {
+        let Some(flow) = self.verification.as_mut() else {
+            return;
+        };
+        let target = flow
+            .flow_id
+            .clone()
+            .map(|flow_id| (flow.account_id, flow_id));
+        flow.stage = VerificationStage::Ended("Verification cancelled".to_owned());
+        self.status = Status::from("verification cancelled".to_owned());
+        let (Some((account_id, flow_id)), Some(tx)) = (target, self.lifecycle_tx.clone()) else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .cancel_verification(account_id, &flow_id)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(LifecycleOutcome::VerifyCancelled { result });
+        });
+    }
+
+    /// On reconnect, discover a verification request that may have arrived while
+    /// disconnected (ADR 0028 §3). Only runs when no flow is already on screen
+    /// and a single account is unambiguously targetable.
+    pub(crate) fn discover_incoming_verification(&mut self) {
+        if self
+            .verification
+            .as_ref()
+            .is_some_and(|flow| !flow.stage.is_terminal())
+        {
+            return;
+        }
+        let Ok(account_id) = self.resolve_verification_account() else {
+            return;
+        };
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = client
+                .list_flows(account_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(LifecycleOutcome::VerifyDiscovered { account_id, result });
+        });
+    }
+
+    /// Re-read the active flow's state on WS reconnect (ADR 0028 §3).
+    pub(crate) fn resync_active_verification(&mut self) {
+        let Some(flow) = self.verification.as_ref() else {
+            return;
+        };
+        if flow.stage.is_terminal() {
+            return;
+        }
+        let (Some(flow_id), account_id) = (flow.flow_id.clone(), flow.account_id) else {
+            return;
+        };
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = match client.get_flow(account_id, &flow_id).await {
+                Ok(flow) => Ok(flow),
+                Err(err) if err.is_not_found() => Err(VerifyResyncError::NotFound),
+                Err(err) => Err(VerifyResyncError::Other(err.to_string())),
+            };
+            let _ = tx.send(LifecycleOutcome::VerifyResynced {
+                account_id,
+                flow_id,
+                result,
+            });
         });
     }
 
@@ -599,9 +836,127 @@ impl App {
                     self.status = Status::from(format!("delete failed for {user_id}: {error}"));
                 }
             },
+            LifecycleOutcome::VerifyStarted { account_id, result } => match result {
+                Ok(flow_id) => {
+                    if let Some(flow) = self.verification.as_mut() {
+                        if flow.account_id == account_id && flow.flow_id.is_none() {
+                            flow.flow_id = Some(flow_id);
+                            if flow.stage == VerificationStage::Starting {
+                                flow.stage = VerificationStage::Waiting;
+                            }
+                            self.status = Status::from(
+                                "verification started — waiting for emoji…".to_owned(),
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.end_active_verification(
+                        account_id,
+                        None,
+                        format!("verification failed: {error}"),
+                    );
+                }
+            },
+            LifecycleOutcome::VerifyConfirmed {
+                account_id,
+                flow_id,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.status =
+                        Status::from("verification confirmed — awaiting peer…".to_owned());
+                }
+                Err(error) => {
+                    self.end_active_verification(
+                        account_id,
+                        Some(&flow_id),
+                        format!("verification failed: {error}"),
+                    );
+                }
+            },
+            LifecycleOutcome::VerifyCancelled { result } => {
+                if let Err(error) = result {
+                    self.status = Status::from(format!("verification cancel failed: {error}"));
+                }
+            }
+            LifecycleOutcome::VerifyResynced {
+                account_id,
+                flow_id,
+                result,
+            } => match result {
+                Ok(flow_dto) => {
+                    if let Some(flow) = self.verification.as_mut() {
+                        if flow.matches(account_id, &flow_id) && !flow.stage.is_terminal() {
+                            flow.apply_flow(&flow_dto);
+                            let stage_label = format!("{:?}", flow_dto.stage).to_ascii_lowercase();
+                            self.status = Status::from(format!(
+                                "verification resync: server stage is {stage_label}"
+                            ));
+                        }
+                    }
+                }
+                Err(VerifyResyncError::NotFound) => {
+                    self.end_active_verification(
+                        account_id,
+                        Some(&flow_id),
+                        "Verification ended — the flow was cancelled by the server".to_owned(),
+                    );
+                }
+                Err(VerifyResyncError::Other(error)) => {
+                    self.status = Status::from(format!("verification resync failed: {error}"));
+                }
+            },
+            LifecycleOutcome::VerifyDiscovered { account_id, result } => {
+                if self
+                    .verification
+                    .as_ref()
+                    .is_some_and(|flow| !flow.stage.is_terminal())
+                {
+                    // A live frame opened a modal while the list was in flight.
+                } else if let Ok(flows) = result {
+                    if let Some(flow) = flows.into_iter().find(|flow| {
+                        !matches!(
+                            flow.stage,
+                            crate::api::FlowStage::Done | crate::api::FlowStage::Cancelled
+                        )
+                    }) {
+                        self.open_incoming_verification(
+                            account_id,
+                            flow.flow_id.clone(),
+                            flow.device_id.clone(),
+                        );
+                        if let Some(active) = self.verification.as_mut() {
+                            active.apply_flow(&flow);
+                        }
+                    }
+                }
+            }
             LifecycleOutcome::MessageSent { .. } => unreachable!(),
         }
         self.queue_completed_command_response();
+    }
+
+    /// Transition the active verification modal to a terminal error state and set
+    /// the status, but only when the open flow still matches the operation that
+    /// failed (guards against a stale outcome clobbering a newer flow).
+    fn end_active_verification(
+        &mut self,
+        account_id: Uuid,
+        flow_id: Option<&str>,
+        message: String,
+    ) {
+        let matches = self.verification.as_ref().is_some_and(|flow| {
+            flow.account_id == account_id
+                && flow_id.is_none_or(|id| flow.flow_id.as_deref() == Some(id))
+                && !flow.stage.is_terminal()
+        });
+        if matches {
+            if let Some(flow) = self.verification.as_mut() {
+                flow.stage = VerificationStage::Ended(message.clone());
+            }
+        }
+        self.status = Status::from(message);
     }
 
     fn reject_if_lifecycle_busy(&mut self) -> bool {

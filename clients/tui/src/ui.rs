@@ -2,18 +2,17 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
-use ratatui_image::protocol::Protocol;
 use ratatui_image::{FontSize, Image, Resize};
 
 use crate::api::RoomDto;
 use crate::app::{
     account_localpart, format_time, message_layout, AccountSelection, App, ImageState,
     ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
-    IMAGE_THUMB_ROWS,
+    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
@@ -496,7 +495,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         app.request_protocol(media.clone(), size);
         let protocol_key = ProtocolKey { media, size };
         if let Some(ProtocolState::Ready(protocol)) = app.proto_cache.get(&protocol_key) {
-            frame.render_widget(Image::new(protocol), rect);
+            frame.render_widget(Image::new(protocol.inline()), rect);
         }
     }
     // Pre-warm preview protocols for visible images so pressing 'v' shows the
@@ -515,6 +514,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
+
 
     let (command_line, command_title, mut cursor_col) = match &app.mode {
         Mode::Search(kind, q) => {
@@ -701,6 +701,24 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         ));
     } else {
         frame.render_widget(input, outer[1]);
+    }
+
+    if app.mode == Mode::Verification {
+        if let Some(flow) = app.verification.as_ref() {
+            let area = centered_rect(72, 80, frame.area());
+            frame.render_widget(Clear, area);
+            let (title, lines) = verification_popup_view(flow);
+            let popup = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .style(Style::default().bg(app.colors.popup_background))
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(app.colors.selected_room)),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(popup, area);
+        }
     }
 
     if let Mode::Popup(kind) = app.mode {
@@ -945,11 +963,9 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
         Some(ImageState::Ready(_)) => {
             match app.proto_cache.get(&protocol_key) {
                 Some(ProtocolState::Ready(protocol)) => {
-                    render_preview_protocol(
-                        frame,
-                        protocol,
+                    frame.render_widget(
+                        Image::new(protocol.preview(app.sixel_preview_generation)),
                         image_area,
-                        app.sixel_preview_generation,
                     );
                 }
                 Some(ProtocolState::Failed(error)) => {
@@ -974,28 +990,6 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
     }
 }
 
-fn render_preview_protocol(
-    frame: &mut Frame<'_>,
-    protocol: &Protocol,
-    area: Rect,
-    sixel_generation: u64,
-) {
-    if let Protocol::Sixel(sixel) = protocol {
-        let mut refreshed = sixel.clone();
-        // tmux forwards Sixel but does not retain it when the client display is
-        // refreshed. Vary a harmless trailing SGR sequence so ratatui observes
-        // a changed cell and retransmits the image instead of diffing it away.
-        refreshed.data.push_str(if sixel_generation % 2 == 0 {
-            "\x1b[0m"
-        } else {
-            "\x1b[00m"
-        });
-        frame.render_widget(Image::new(&Protocol::Sixel(refreshed)), area);
-    } else {
-        frame.render_widget(Image::new(protocol), area);
-    }
-}
-
 fn fit_preview_caption(target: Size, caption_h: u16, bounds: Rect) -> (Size, u16) {
     if caption_h == 0 || bounds.height == 0 {
         return (target, 0);
@@ -1010,7 +1004,6 @@ fn fit_preview_caption(target: Size, caption_h: u16, bounds: Rect) -> (Size, u16
         caption_h,
     )
 }
-
 fn mask_login_command(input: &str) -> String {
     let trimmed = input.trim_start();
     let leading_len = input.len() - trimmed.len();
@@ -1082,6 +1075,95 @@ fn centered_size(width: u16, height: u16, area: Rect) -> Rect {
         width,
         height,
     )
+}
+
+/// Build the title and body for the SAS verification modal (ADR 0028 §2): the
+/// seven emoji with descriptions, the decimal triple fallback, the current
+/// stage, and a `[y]es / [n]o · Esc` prompt — plus distinct terminal states.
+fn verification_popup_view(flow: &VerificationFlow) -> (&'static str, Vec<Line<'static>>) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let direction = match flow.direction {
+        VerificationDirection::Incoming => "Incoming verification request",
+        VerificationDirection::Outgoing => "Verifying device",
+    };
+    lines.push(Line::from(Span::styled(
+        format!("{direction}: {}", flow.device_id),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    if let Some(fid) = flow.flow_id.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("flow: {fid}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    match &flow.stage {
+        VerificationStage::Starting | VerificationStage::Waiting => {
+            lines.push(Line::from("Waiting for the other device…"));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "[r] resync from server  ·  [n]/Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        VerificationStage::Compare => {
+            lines.push(Line::from(
+                "Compare these emoji with the other device. Do they match?",
+            ));
+            lines.push(Line::from(""));
+            if let Some(emoji) = flow.emoji.as_ref() {
+                for pair in emoji {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {}  ", pair.symbol),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(pair.description.clone()),
+                    ]));
+                }
+            }
+            if let Some([a, b, c]) = flow.decimals {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  Decimal fallback: {a} - {b} - {c}"),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "[y]es, they match  /  [n]o  ·  Esc to cancel",
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        }
+        VerificationStage::Confirming => {
+            lines.push(Line::from(
+                "You confirmed. Waiting for the other device to confirm…",
+            ));
+        }
+        VerificationStage::Done => {
+            lines.push(Line::from(Span::styled(
+                "✓ Verification complete — the device is verified.",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Press Esc to close."));
+        }
+        VerificationStage::Ended(message) => {
+            lines.push(Line::from(Span::styled(
+                message.clone(),
+                Style::default().fg(Color::Red),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Press Esc to close."));
+        }
+    }
+
+    ("Device Verification", lines)
 }
 
 fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
@@ -1306,9 +1388,16 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
             } else {
                 account.user_id.clone()
             };
+            let device_str = account.device_id.as_deref().unwrap_or("unknown");
+            let verified_str = match account.verified {
+                Some(true) => "verified",
+                Some(false) => "unverified",
+                None => "verification unknown",
+            };
             lines.push(format!(
                 "  {marker} {identity}  ({state_label}, {rooms_for_account} rooms)",
             ));
+            lines.push(format!("      device: {device_str}  [{verified_str}]",));
         }
     }
 
@@ -1429,6 +1518,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         "".to_owned(),
         "Input:".to_owned(),
         kv(shortcuts.submit.label(), "submit / send"),
+        "  /html <html>          send raw HTML as a formatted message".to_owned(),
+        "  /literal <text>       send text as plaintext (skip markdown auto-convert)".to_owned(),
+        "  /rainbow <text>       send text with each character in a rainbow color".to_owned(),
+        "  /spoiler [reason |] <text>  send text as a spoiler (dimmed, labeled)".to_owned(),
         kv(
             shortcuts.clear_input.label(),
             "clear input / cancel / deselect",
@@ -1452,6 +1545,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             ),
             "select previous / next message",
         ),
+        "".to_owned(),
+        "Device verification modal (/verify, or auto-opens on a request):".to_owned(),
+        kv("y", "confirm the emoji match"),
+        kv("n", "reject (cancel the flow)"),
+        kv("r", "resync flow state from server (if emoji didn't appear)"),
+        kv("Esc", "cancel a live flow / dismiss when finished"),
     ]
 }
 
@@ -1781,6 +1880,7 @@ mod tests {
                 redacted: false,
                 redaction_event_id: None,
                 reactions: None,
+                sender_trust: None,
             }],
         );
 

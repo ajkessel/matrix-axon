@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, UNIX_EPOCH};
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use uuid::Uuid;
 
@@ -82,10 +82,12 @@ pub(crate) fn message_layout(
         } else {
             colors.message_sender
         };
+        let trust = trust_glyph(event.sender_trust.as_deref());
+        let glyph_cols = if trust.is_some() { 2 } else { 0 };
         let mut body_lines = message_body_lines(
             event,
             sender_label,
-            first_body_width(sender_label, event.origin_ts, width),
+            first_body_width(sender_label, event.origin_ts, width).saturating_sub(glyph_cols),
             continuation_body_width(width),
             colors,
         );
@@ -106,13 +108,19 @@ pub(crate) fn message_layout(
                 let mut spans = vec![
                     Span::styled(marker, time_style),
                     Span::styled(format!("{} ", format_time(event.origin_ts)), time_style),
-                    Span::styled(
-                        format!("{sender_label}: "),
-                        Style::default()
-                            .fg(sender_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
                 ];
+                if let Some((symbol, color)) = trust {
+                    spans.push(Span::styled(
+                        format!("{symbol} "),
+                        Style::default().fg(color),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("{sender_label}: "),
+                    Style::default()
+                        .fg(sender_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
                 spans.extend(body);
                 lines.push(Line::from(spans));
             } else {
@@ -149,6 +157,20 @@ fn first_body_width(sender_label: &str, origin_ts: i64, width: usize) -> usize {
     let prefix_width =
         2 + format_time(origin_ts).chars().count() + 1 + sender_label.chars().count() + 2;
     width.saturating_sub(prefix_width).max(1)
+}
+
+/// The sender-trust annotation for a message's first line (M7c / ADR 0031),
+/// keyed on the at-decrypt `sender_trust` verdict. A glyph is shown only for the
+/// states worth flagging; `unverified`, absent, and unrecognized verdicts render
+/// no glyph (the common, unencrypted-or-plain case). Each glyph occupies two
+/// columns (symbol + space), matching the width reserved in `message_layout`.
+pub(crate) fn trust_glyph(sender_trust: Option<&str>) -> Option<(&'static str, Color)> {
+    match sender_trust {
+        Some("verified") => Some(("✓", Color::Green)),
+        Some("verification_violation") => Some(("⚠", Color::Red)),
+        Some("unknown") => Some(("?", Color::DarkGray)),
+        _ => None,
+    }
 }
 
 pub(crate) fn display_body_with_sender(event: &EventDto, sender_label: &str) -> String {
@@ -191,4 +213,35 @@ fn message_body_lines(
 
 fn continuation_body_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_glyph_maps_known_verdicts() {
+        assert_eq!(trust_glyph(Some("verified")), Some(("✓", Color::Green)));
+        assert_eq!(
+            trust_glyph(Some("verification_violation")),
+            Some(("⚠", Color::Red))
+        );
+        assert_eq!(trust_glyph(Some("unknown")), Some(("?", Color::DarkGray)));
+    }
+
+    #[test]
+    fn trust_glyph_is_absent_for_unflagged_states() {
+        assert_eq!(trust_glyph(Some("unverified")), None);
+        assert_eq!(trust_glyph(None), None);
+        assert_eq!(trust_glyph(Some("something_new")), None);
+    }
+
+    #[test]
+    fn trust_glyph_reserves_two_columns_in_first_body_width() {
+        // The two columns reserved in message_layout for a glyph must come
+        // out of the body width so wrapping stays correct.
+        let full = first_body_width("@alice:localhost", 0, 80);
+        let glyph_cols = 2;
+        assert_eq!(full.saturating_sub(glyph_cols), full - 2);
+    }
 }

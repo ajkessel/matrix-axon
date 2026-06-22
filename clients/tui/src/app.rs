@@ -7,11 +7,15 @@ use uuid::Uuid;
 
 #[cfg(test)]
 use crate::api::LiveFrame;
-use crate::api::{AccountDto, AccountState, AxonClient, EventDto, RoomDto};
+use crate::api::{
+    AccountDto, AccountState, AxonClient, EmojiDto, EventDto, FlowDto, FlowStage, RoomDto,
+    VerificationFrameDto, VerificationFrameKind,
+};
 use crate::command::Command;
 #[cfg(test)]
 use crate::config::SenderNameStyle;
 use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
+use crate::html::{markdown_to_html_if_detected, rainbow_html, spoiler_html, strip_html_to_plain};
 #[cfg(test)]
 use ratatui::style::Modifier;
 use std::path::PathBuf;
@@ -76,6 +80,9 @@ pub(crate) enum Mode {
         choices: Vec<OwnReaction>,
         selected: usize,
     },
+    /// The SAS emoji verification modal (ADR 0028). Its own mode with literal
+    /// `y`/`n`/`Esc` keys; the live flow state lives in `App::verification`.
+    Verification,
     Popup(PopupKind),
 }
 
@@ -83,6 +90,148 @@ pub(crate) enum Mode {
 pub(crate) enum RecoveryOrigin {
     PostLogin,
     Command,
+}
+
+/// Which side started the SAS flow (ADR 0028 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationDirection {
+    /// Peer-initiated: surfaced via a `verification.requested` frame.
+    Incoming,
+    /// TUI-initiated via `/verify <device_id>`.
+    Outgoing,
+}
+
+/// The UI stage of the verification modal. Distinct from the server `FlowStage`
+/// because it also represents pre-start (`Starting`) and terminal-with-message
+/// (`Done`/`Ended`) display states.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerificationStage {
+    /// Outgoing start request dispatched; awaiting a `flow_id`.
+    Starting,
+    /// Flow open, SAS not yet available (server `requested`/`ready`).
+    Waiting,
+    /// SAS emoji available; awaiting the user's `y`/`n`.
+    Compare,
+    /// The user confirmed; awaiting the peer / `verification.done`.
+    Confirming,
+    /// Terminal success — awaiting `Esc` to dismiss.
+    Done,
+    /// Terminal cancel/error with a message — awaiting `Esc` to dismiss.
+    Ended(String),
+}
+
+impl VerificationStage {
+    /// Whether the flow has reached a terminal state the user must dismiss.
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Ended(_))
+    }
+}
+
+/// Live state for the verification modal. One flow at a time (the server only
+/// performs self-verification, so concurrent flows are not expected).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerificationFlow {
+    pub(crate) account_id: Uuid,
+    pub(crate) device_id: String,
+    /// `None` only between an outgoing start request and its `flow_id` response.
+    pub(crate) flow_id: Option<String>,
+    pub(crate) direction: VerificationDirection,
+    pub(crate) stage: VerificationStage,
+    pub(crate) emoji: Option<Vec<EmojiDto>>,
+    pub(crate) decimals: Option<[u16; 3]>,
+}
+
+impl VerificationFlow {
+    /// Whether this flow matches a frame/response for `account_id` + `flow_id`.
+    pub(crate) fn matches(&self, account_id: Uuid, flow_id: &str) -> bool {
+        self.account_id == account_id && self.flow_id.as_deref() == Some(flow_id)
+    }
+
+    /// Advance the UI stage from a server `FlowStage`, given whether SAS emoji
+    /// are present. Terminal states preserve any already-shown message.
+    fn stage_from(
+        stage: FlowStage,
+        has_emoji: bool,
+        cancel_reason: Option<&str>,
+    ) -> VerificationStage {
+        match stage {
+            FlowStage::Requested | FlowStage::Ready => VerificationStage::Waiting,
+            FlowStage::KeysExchanged => {
+                if has_emoji {
+                    VerificationStage::Compare
+                } else {
+                    VerificationStage::Waiting
+                }
+            }
+            FlowStage::Confirmed => VerificationStage::Confirming,
+            FlowStage::Done => VerificationStage::Done,
+            FlowStage::Cancelled => VerificationStage::Ended(format!(
+                "Verification cancelled{}",
+                cancel_reason.map(|r| format!(" — {r}")).unwrap_or_default()
+            )),
+        }
+    }
+
+    /// Merge an authoritative `FlowDto` (a read-on-reconnect resync or a list
+    /// entry) into the flow state.
+    pub(crate) fn apply_flow(&mut self, flow: &FlowDto) {
+        if flow.emoji.is_some() {
+            self.emoji = flow.emoji.clone();
+        }
+        if flow.decimals.is_some() {
+            self.decimals = flow.decimals;
+        }
+        // Don't regress out of a local Confirming state into Compare just
+        // because the server hasn't recorded our confirm yet.
+        let next = Self::stage_from(
+            flow.stage,
+            self.emoji.is_some(),
+            flow.cancel_reason.as_deref(),
+        );
+        if !(self.stage == VerificationStage::Confirming && next == VerificationStage::Compare) {
+            self.stage = next;
+        }
+    }
+
+    /// Merge a live `verification.*` frame into the flow state.
+    pub(crate) fn apply_frame(
+        &mut self,
+        kind: VerificationFrameKind,
+        payload: &VerificationFrameDto,
+    ) {
+        if self.flow_id.is_none() {
+            self.flow_id = Some(payload.flow_id.clone());
+        }
+        match kind {
+            VerificationFrameKind::Requested => {
+                if !self.stage.is_terminal() {
+                    self.stage = VerificationStage::Waiting;
+                }
+            }
+            VerificationFrameKind::Sas => {
+                if payload.emoji.is_some() {
+                    self.emoji = payload.emoji.clone();
+                }
+                if payload.decimals.is_some() {
+                    self.decimals = payload.decimals;
+                }
+                if self.stage != VerificationStage::Confirming {
+                    self.stage = VerificationStage::Compare;
+                }
+            }
+            VerificationFrameKind::Done => self.stage = VerificationStage::Done,
+            VerificationFrameKind::Cancelled => {
+                self.stage = VerificationStage::Ended(format!(
+                    "Verification cancelled{}",
+                    payload
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(" — {r}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +433,9 @@ pub(crate) struct App {
     /// Bounded cache of protocols encoded for a specific image and cell size.
     pub(crate) proto_cache: HashMap<ProtocolKey, ProtocolState>,
     proto_cache_order: VecDeque<ProtocolKey>,
+    /// The active SAS verification flow, when `Mode::Verification` is open. The
+    /// modal reads and mutates this; `None` whenever the modal is closed.
+    pub(crate) verification: Option<VerificationFlow>,
     /// Changes periodically while a Sixel preview is open inside tmux, forcing
     /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
     pub(crate) sixel_preview_generation: u64,
@@ -420,6 +572,7 @@ impl App {
             picker,
             proto_cache: HashMap::new(),
             proto_cache_order: VecDeque::new(),
+            verification: None,
             sixel_preview_generation: 0,
             clear_media_preview: false,
             accounts_panel_hidden: false,
@@ -581,6 +734,7 @@ impl App {
                     | Mode::Reacting { .. }
                     | Mode::Unreacting { .. }
                     | Mode::Search(..)
+                    | Mode::Verification
             )
     }
 
@@ -912,6 +1066,8 @@ impl App {
                 self.select_most_recent_message_if_needed();
                 self.start_thread_from_selected_message();
             }
+            Command::Verify(device_id) => self.start_verification(device_id),
+            Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
             Command::Refresh => {
@@ -935,7 +1091,35 @@ impl App {
                 }
             }
             Command::Quit => self.should_quit = true,
-            Command::Send(body) => self.send_message_to_room(&body),
+            Command::Send(body) => {
+                let formatted = markdown_to_html_if_detected(&body)
+                    .map(|html| ("org.matrix.custom.html".to_owned(), html));
+                self.send_message_to_room(&body, formatted);
+            }
+            Command::SendHtml(html) => {
+                let plain = strip_html_to_plain(&html);
+                let plain = if plain.is_empty() {
+                    html.clone()
+                } else {
+                    plain
+                };
+                self.send_message_to_room(
+                    &plain,
+                    Some(("org.matrix.custom.html".to_owned(), html)),
+                );
+            }
+            Command::SendLiteral(body) => self.send_message_to_room(&body, None),
+            Command::Rainbow(text) => {
+                let html = rainbow_html(&text);
+                self.send_message_to_room(&text, Some(("org.matrix.custom.html".to_owned(), html)));
+            }
+            Command::Spoiler { reason, text } => {
+                let (html, plain) = spoiler_html(reason.as_deref(), &text);
+                self.send_message_to_room(
+                    &plain,
+                    Some(("org.matrix.custom.html".to_owned(), html)),
+                );
+            }
             Command::Invalid(message)
             | Command::ApiUnsupported(message)
             | Command::Unknown(message) => {
@@ -953,6 +1137,29 @@ impl App {
         self.mode = Mode::Popup(kind);
     }
 
+    /// Fetch and display the per-event verification bundle (M7c / ADR 0031). The
+    /// pretty-printed JSON is surfaced through the standard command-response path,
+    /// which promotes it to a scrollable popup when it overflows the entry box.
+    pub(crate) async fn show_verification_bundle(&mut self, event_id: &str) {
+        let Some(room) = self.selected_room() else {
+            self.status = Status::from("select a room before using /bundle".to_owned());
+            return;
+        };
+        let account_id = room.account_id;
+        match self
+            .client
+            .get_verification_bundle(account_id, event_id)
+            .await
+        {
+            Ok(bundle) => {
+                let text =
+                    serde_json::to_string_pretty(&bundle).unwrap_or_else(|_| bundle.to_string());
+                self.status = Status::Info(format!("verification bundle for {event_id}:\n{text}"));
+            }
+            Err(err) => self.status = Status::Info(format!("bundle read failed: {err}")),
+        }
+    }
+
     pub(crate) fn open_selected_media_preview(&mut self) {
         let Some(event) = self.selected_message_event() else {
             self.status = Status::Info("select an image message first".to_owned());
@@ -966,6 +1173,7 @@ impl App {
         self.request_image(account_id, mxc_url, encrypted);
         self.open_popup(PopupKind::MediaPreview);
     }
+
 
     fn show_whereami(&mut self) {
         if self.selected_room().is_none() {
@@ -1080,7 +1288,7 @@ impl App {
         };
     }
 
-    fn send_message_to_room(&mut self, body: &str) {
+    fn send_message_to_room(&mut self, body: &str, formatted: Option<(String, String)>) {
         let Some(room) = self.selected_room().cloned() else {
             self.status = Status::from("select a room before sending".to_owned());
             return;
@@ -1114,6 +1322,14 @@ impl App {
             account_id: room.account_id,
             room_id: room.room_id.clone(),
         };
+        let echo_content = formatted.as_ref().map(|(fmt, fb)| {
+            serde_json::json!({
+                "msgtype": "m.text",
+                "body": body,
+                "format": fmt,
+                "formatted_body": fb,
+            })
+        });
         let echo = EventDto {
             account_id: room.account_id,
             event_id: temp_id.clone(),
@@ -1122,12 +1338,13 @@ impl App {
             state_key: None,
             origin_ts: now_ms,
             event_type: "m.room.message".to_owned(),
-            content: None,
+            content: echo_content,
             body: Some(body.to_owned()),
             relates_to: None,
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            sender_trust: None,
         };
         self.messages.scroll = usize::MAX;
         // Clear selection so the next message-targeted command auto-selects
@@ -1142,8 +1359,11 @@ impl App {
         let client = self.client.clone();
         let body = body.to_owned();
         tokio::spawn(async move {
+            let fmt_refs = formatted
+                .as_ref()
+                .map(|(fmt, fb)| (fmt.as_str(), fb.as_str()));
             let result = client
-                .send_message(room.account_id, &room.room_id, &body)
+                .send_message(room.account_id, &room.room_id, &body, fmt_refs)
                 .await
                 .map(|r| r.event_id)
                 .map_err(|e| e.to_string());
@@ -1162,7 +1382,7 @@ impl App {
         };
         match self
             .client
-            .edit_message(room.account_id, &room.room_id, event_id, body)
+            .edit_message(room.account_id, &room.room_id, event_id, body, None)
             .await
         {
             Ok(result) => {
@@ -1357,7 +1577,7 @@ pub(super) fn apply_exif_orientation(
 
 /// Identify an image format from raw magic bytes without relying on the
 /// compiled-in feature set of the `image` crate. Returns a short description
-/// including a hex dump of the first bytes for truly unrecognised content.
+/// including a hex dump of the first bytes for truly unrecognized content.
 pub(super) fn sniff_format(bytes: &[u8]) -> String {
     if bytes.starts_with(b"\xFF\xD8\xFF") {
         return "JPEG".into();
@@ -1392,7 +1612,7 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
     if bytes.starts_with(b"\x00\x00\x01\x00") {
         return "ICO".into();
     }
-    // Not a recognised image format — could be a JSON/HTML error body served
+    // Not a recognized image format — could be a JSON/HTML error body served
     // with a 2xx status. Show the first bytes so the cause is obvious.
     let prefix: String = bytes
         .iter()
@@ -1414,13 +1634,93 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
     format!("unknown — first bytes: {prefix}  ({printable})")
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{AccountDto, AccountState};
+    use crate::api::{AccountDto, AccountState, EmojiDto, VerificationFrameDto};
     use crate::command::HELP_COMMANDS;
     use crate::ui::{entry_status_text, popup_shortcuts_lines, popup_status_lines};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn outgoing_flow() -> VerificationFlow {
+        VerificationFlow {
+            account_id: Uuid::nil(),
+            device_id: "DEV".to_owned(),
+            flow_id: Some("txn1".to_owned()),
+            direction: VerificationDirection::Outgoing,
+            stage: VerificationStage::Waiting,
+            emoji: None,
+            decimals: None,
+        }
+    }
+
+    fn sas_frame() -> VerificationFrameDto {
+        VerificationFrameDto {
+            flow_id: "txn1".to_owned(),
+            device_id: "DEV".to_owned(),
+            emoji: Some(vec![EmojiDto {
+                symbol: "🐶".to_owned(),
+                description: "Dog".to_owned(),
+            }]),
+            decimals: Some([1, 2, 3]),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn verification_sas_frame_moves_to_compare() {
+        let mut flow = outgoing_flow();
+        flow.apply_frame(VerificationFrameKind::Sas, &sas_frame());
+        assert_eq!(flow.stage, VerificationStage::Compare);
+        assert_eq!(flow.decimals, Some([1, 2, 3]));
+        assert_eq!(flow.emoji.as_ref().unwrap()[0].symbol, "🐶");
+    }
+
+    #[test]
+    fn verification_done_and_cancel_are_terminal() {
+        let mut flow = outgoing_flow();
+        flow.apply_frame(VerificationFrameKind::Done, &sas_frame());
+        assert_eq!(flow.stage, VerificationStage::Done);
+        assert!(flow.stage.is_terminal());
+
+        let mut flow = outgoing_flow();
+        let cancel = VerificationFrameDto {
+            reason: Some("user".to_owned()),
+            ..sas_frame()
+        };
+        flow.apply_frame(VerificationFrameKind::Cancelled, &cancel);
+        assert!(matches!(flow.stage, VerificationStage::Ended(_)));
+    }
+
+    #[test]
+    fn verification_confirming_not_regressed_by_late_sas() {
+        // After the user confirms, a trailing SAS frame must not pull the modal
+        // back to the compare prompt.
+        let mut flow = outgoing_flow();
+        flow.stage = VerificationStage::Confirming;
+        flow.apply_frame(VerificationFrameKind::Sas, &sas_frame());
+        assert_eq!(flow.stage, VerificationStage::Confirming);
+    }
+
+    #[test]
+    fn verification_apply_flow_maps_server_stage() {
+        let mut flow = outgoing_flow();
+        flow.apply_flow(&FlowDto {
+            flow_id: "txn1".to_owned(),
+            device_id: "DEV".to_owned(),
+            stage: FlowStage::KeysExchanged,
+            emoji: Some(vec![EmojiDto {
+                symbol: "🐱".to_owned(),
+                description: "Cat".to_owned(),
+            }]),
+            decimals: Some([4, 5, 6]),
+            cancel_reason: None,
+        });
+        assert_eq!(flow.stage, VerificationStage::Compare);
+        assert!(flow.matches(Uuid::nil(), "txn1"));
+        assert!(!flow.matches(Uuid::nil(), "other"));
+    }
 
     fn room(room_id: &str, alias: Option<&str>, name: Option<&str>) -> RoomDto {
         RoomDto {
@@ -1466,6 +1766,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            sender_trust: None,
         }
     }
 
@@ -1529,6 +1830,7 @@ mod tests {
             account_id,
             user_id: user_id.to_owned(),
             state,
+            device_id: None,
             verified: Some(false),
         }
     }
@@ -1635,12 +1937,14 @@ mod tests {
                 account_id: active_id,
                 user_id: "@alice:example.com".to_owned(),
                 state: AccountState::Active,
+                device_id: None,
                 verified: Some(false),
             },
             AccountDto {
                 account_id: logged_out_id,
                 user_id: "@bob:example.com".to_owned(),
                 state: AccountState::Deactivated,
+                device_id: None,
                 verified: Some(false),
             },
         ]);
@@ -1773,6 +2077,59 @@ mod tests {
                 })
                 .copied(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn live_formatted_edit_replaces_rendered_content() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let mut original = event_with_id(
+            "$original:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({
+                "msgtype": "m.text",
+                "body": "hello",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "<em>hello</em>"
+            }),
+        );
+        original.room_id = room.room_id.clone();
+        app.messages
+            .events
+            .insert(RoomKey::from(&room), vec![original]);
+
+        let mut edit = event_with_id(
+            "$edit:example.com",
+            "m.room.message",
+            Some("* hello world"),
+            serde_json::json!({
+                "msgtype": "m.text",
+                "body": "* hello world",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "hello world",
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": "<strong>hello world</strong>"
+                }
+            }),
+        );
+        edit.room_id = room.room_id.clone();
+        edit.relates_to = Some(serde_json::json!({
+            "rel_type": "m.replace",
+            "event_id": "$original:example.com"
+        }));
+
+        let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(edit)));
+
+        assert_eq!(action, LiveFrameAction::None);
+        let updated = &app.messages.events[&RoomKey::from(&room)][0];
+        assert_eq!(updated.body.as_deref(), Some("hello world"));
+        assert_eq!(
+            updated.formatted_body(),
+            Some("<strong>hello world</strong>")
         );
     }
 

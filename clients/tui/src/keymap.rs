@@ -2,7 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::api::AccountDto;
 use crate::app::emoji_matches;
-use crate::app::{cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind, Status};
+use crate::app::{
+    cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind, Status, VerificationStage,
+};
 use crate::command;
 use crate::command::HELP_COMMANDS;
 
@@ -80,10 +82,53 @@ impl App {
                     self.handle_unreacting_key(key, target_event_id, choices, selected)
                         .await
                 }
+                Mode::Verification => self.handle_verification_key(key),
                 Mode::Popup(kind) => self.handle_popup_key(key, kind),
             }
         }
         self.should_quit
+    }
+
+    /// Key handling for the SAS verification modal (ADR 0028 §2). Literal
+    /// `y`/`n`/`Esc`, like the logout confirmation — no configurable shortcut.
+    /// `y` only confirms once the SAS emoji are on screen; `n`/`Esc` cancel a
+    /// live flow; once terminal, any of `Esc`/`Enter`/`q` dismiss the modal.
+    fn handle_verification_key(&mut self, key: KeyEvent) {
+        let Some(flow) = self.verification.as_ref() else {
+            self.mode = Mode::Compose;
+            return;
+        };
+        if flow.stage.is_terminal() {
+            if self.shortcuts.clear_input.matches(key)
+                || matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q')
+                )
+            {
+                self.close_verification();
+            }
+            return;
+        }
+        let can_confirm = flow.stage == VerificationStage::Compare;
+        if can_confirm && matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.confirm_active_verification();
+        } else if matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
+            || self.shortcuts.clear_input.matches(key)
+        {
+            self.cancel_active_verification();
+        } else if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            // Manual resync: re-read the authoritative flow state from the server.
+            // Useful when the WS sas frame may have been missed or dropped.
+            self.resync_active_verification();
+            self.status = Status::from("verification: resyncing with server…".to_owned());
+        }
+    }
+
+    /// Close the verification modal and return to compose.
+    fn close_verification(&mut self) {
+        self.verification = None;
+        self.mode = Mode::Compose;
+        self.status = Status::Info(String::new());
     }
 
     fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {

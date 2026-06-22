@@ -159,6 +159,7 @@ impl AxonClient {
         account_id: Uuid,
         room_id: &str,
         body: &str,
+        formatted: Option<(&str, &str)>,
     ) -> Result<SendResultDto, ApiError> {
         let request = self.http.post(format!(
             "{}/v1/accounts/{}/rooms/{}/send",
@@ -166,7 +167,12 @@ impl AxonClient {
             account_id,
             path_segment(room_id)
         ));
-        let request = message_mutation(request).json(&serde_json::json!({ "body": body }));
+        let mut payload = serde_json::json!({ "body": body });
+        if let Some((fmt, fb)) = formatted {
+            payload["format"] = serde_json::json!(fmt);
+            payload["formatted_body"] = serde_json::json!(fb);
+        }
+        let request = message_mutation(request).json(&payload);
         self.send(request).await
     }
 
@@ -176,6 +182,7 @@ impl AxonClient {
         room_id: &str,
         event_id: &str,
         body: &str,
+        formatted: Option<(&str, &str)>,
     ) -> Result<SendResultDto, ApiError> {
         let request = self.http.put(format!(
             "{}/v1/accounts/{}/rooms/{}/events/{}",
@@ -184,7 +191,12 @@ impl AxonClient {
             path_segment(room_id),
             path_segment(event_id)
         ));
-        let request = message_mutation(request).json(&serde_json::json!({ "body": body }));
+        let mut payload = serde_json::json!({ "body": body });
+        if let Some((fmt, fb)) = formatted {
+            payload["format"] = serde_json::json!(fmt);
+            payload["formatted_body"] = serde_json::json!(fb);
+        }
+        let request = message_mutation(request).json(&payload);
         self.send(request).await
     }
 
@@ -285,6 +297,88 @@ impl AxonClient {
     pub async fn get_event(&self, account_id: Uuid, event_id: &str) -> Result<EventDto, ApiError> {
         let request = self.http.get(format!(
             "{}/v1/accounts/{}/events/{}",
+            self.base_url,
+            account_id,
+            path_segment(event_id)
+        ));
+        self.send(read_request(request)).await
+    }
+
+    /// Start an outgoing SAS flow against `device_id` (ADR 0028 §1). The returned
+    /// `flow_id` is stable for the flow's lifetime.
+    pub async fn start_verification(
+        &self,
+        account_id: Uuid,
+        device_id: &str,
+    ) -> Result<StartVerifyResponse, ApiError> {
+        let request = self
+            .http
+            .post(format!("{}/v1/accounts/{account_id}/verify", self.base_url))
+            .json(&serde_json::json!({ "device_id": device_id }));
+        self.send(lifecycle(request)).await
+    }
+
+    /// List the account's active/recent verification flows. Used on reconnect to
+    /// discover a request that arrived while disconnected (ADR 0028 §3).
+    pub async fn list_flows(&self, account_id: Uuid) -> Result<Vec<FlowDto>, ApiError> {
+        let request = self
+            .http
+            .get(format!("{}/v1/accounts/{account_id}/verify", self.base_url));
+        self.send(read_request(request)).await
+    }
+
+    /// Re-read one flow's state. A 404 (see [`ApiError::is_not_found`]) means the
+    /// server has no record of the flow — treated as an implicit cancellation by
+    /// the caller (ADR 0028 §3).
+    pub async fn get_flow(&self, account_id: Uuid, flow_id: &str) -> Result<FlowDto, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/verify/{}",
+            self.base_url,
+            account_id,
+            path_segment(flow_id)
+        ));
+        self.send(read_request(request)).await
+    }
+
+    /// Confirm the SAS values match. Idempotent server-side.
+    pub async fn confirm_verification(
+        &self,
+        account_id: Uuid,
+        flow_id: &str,
+    ) -> Result<(), ApiError> {
+        let request = self.http.post(format!(
+            "{}/v1/accounts/{}/verify/{}/confirm",
+            self.base_url,
+            account_id,
+            path_segment(flow_id)
+        ));
+        self.send_no_body(lifecycle(request)).await
+    }
+
+    /// Cancel the flow. Idempotent server-side (safe on already-terminal flows).
+    pub async fn cancel_verification(
+        &self,
+        account_id: Uuid,
+        flow_id: &str,
+    ) -> Result<(), ApiError> {
+        let request = self.http.post(format!(
+            "{}/v1/accounts/{}/verify/{}/cancel",
+            self.base_url,
+            account_id,
+            path_segment(flow_id)
+        ));
+        self.send_no_body(lifecycle(request)).await
+    }
+
+    /// Fetch the per-event verification bundle (M7c / ADR 0031): the at-decrypt
+    /// snapshot plus live cross-signing evidence. Returned raw for display.
+    pub async fn get_verification_bundle(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Value, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/events/{}/verification",
             self.base_url,
             account_id,
             path_segment(event_id)
@@ -418,29 +512,68 @@ where
 {
     while let Some(frame) = socket.next().await {
         match frame {
-            Ok(Message::Text(text)) => match serde_json::from_str::<WsEnvelope<EventDto>>(&text) {
-                Ok(envelope)
-                    if envelope.kind == "timeline.event"
-                        && envelope.account_id == envelope.payload.account_id =>
-                {
-                    let _ = tx.send(LiveFrame::Timeline(Box::new(envelope.payload)));
+            Ok(Message::Text(text)) => {
+                if let Some(frame) = decode_ws_frame(&text) {
+                    let _ = tx.send(frame);
                 }
-                Ok(envelope) if envelope.kind == "timeline.event" => {
-                    let _ = tx.send(LiveFrame::ProtocolError(
-                        "live frame account_id did not match payload".to_owned(),
-                    ));
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    let _ = tx.send(LiveFrame::ProtocolError(err.to_string()));
-                }
-            },
+            }
             Ok(Message::Close(_)) => return "websocket closed".to_owned(),
             Ok(_) => {}
             Err(err) => return err.to_string(),
         }
     }
     "websocket closed".to_owned()
+}
+
+/// Decode a single `/v1/ws` text frame into the [`LiveFrame`] to forward, or
+/// `None` for a frame kind the client does not consume (forward-compatibility:
+/// an unknown `type` is ignored, never an error). Malformed JSON or a payload
+/// that does not match its declared `type` becomes a [`LiveFrame::ProtocolError`]
+/// so the failure is visible rather than silent.
+fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
+    let envelope: WsEnvelope<Value> = match serde_json::from_str(text) {
+        Ok(envelope) => envelope,
+        Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+    };
+    let kind = match VerificationFrameKind::from_type(&envelope.kind) {
+        Some(kind) => {
+            let payload: VerificationFrameDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            return Some(LiveFrame::Verification(VerificationFrame {
+                account_id: envelope.account_id,
+                kind,
+                payload,
+            }));
+        }
+        None => envelope.kind.as_str(),
+    };
+    match kind {
+        "timeline.event" => {
+            let event: EventDto = match serde_json::from_value(envelope.payload) {
+                Ok(event) => event,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            if envelope.account_id != event.account_id {
+                return Some(LiveFrame::ProtocolError(
+                    "live frame account_id did not match payload".to_owned(),
+                ));
+            }
+            Some(LiveFrame::Timeline(Box::new(event)))
+        }
+        "sender_trust.violation" => {
+            let payload: SenderTrustViolationDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::SenderTrustViolation {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn next_live_reconnect_backoff(current: Duration) -> Duration {
@@ -450,10 +583,76 @@ fn next_live_reconnect_backoff(current: Duration) -> Duration {
 #[derive(Debug)]
 pub enum LiveFrame {
     Connected,
-    Reconnecting { reason: String, delay: Duration },
+    Reconnecting {
+        reason: String,
+        delay: Duration,
+    },
     Disconnected(String),
     ProtocolError(String),
     Timeline(Box<EventDto>),
+    /// A `verification.*` SAS frame (ADR 0027/0028). The lossy broadcast bus may
+    /// drop frames, so the client treats these as hints and re-reads
+    /// `GET …/verify/{flow_id}` on reconnect (ADR 0028 §3).
+    Verification(VerificationFrame),
+    /// A `sender_trust.violation` overlay frame (ADR 0031 / M7c).
+    SenderTrustViolation {
+        account_id: Uuid,
+        payload: SenderTrustViolationDto,
+    },
+}
+
+/// Which `verification.*` frame this is. Mirrors the server's frame-kind tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationFrameKind {
+    Requested,
+    Sas,
+    Done,
+    Cancelled,
+}
+
+impl VerificationFrameKind {
+    /// Map a `/v1/ws` envelope `type` tag to its kind, or `None` if the tag is
+    /// not a verification frame.
+    fn from_type(kind: &str) -> Option<Self> {
+        match kind {
+            "verification.requested" => Some(Self::Requested),
+            "verification.sas" => Some(Self::Sas),
+            "verification.done" => Some(Self::Done),
+            "verification.cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded `verification.*` frame: its kind plus the wire payload.
+#[derive(Debug, Clone)]
+pub struct VerificationFrame {
+    pub account_id: Uuid,
+    pub kind: VerificationFrameKind,
+    pub payload: VerificationFrameDto,
+}
+
+/// The wire payload shared by all `verification.*` frames. Fields that don't
+/// apply to a given stage are omitted by the server: `emoji`/`decimals` only on
+/// `verification.sas`, `reason` only on `verification.cancelled`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct VerificationFrameDto {
+    pub flow_id: String,
+    pub device_id: String,
+    #[serde(default)]
+    pub emoji: Option<Vec<EmojiDto>>,
+    #[serde(default)]
+    pub decimals: Option<[u16; 3]>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The wire payload for a `sender_trust.violation` frame.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SenderTrustViolationDto {
+    pub user_id: String,
+    #[serde(default)]
+    pub verification_violation: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,11 +676,54 @@ pub struct SendResultDto {
     pub event_id: String,
 }
 
+/// Response from `POST …/verify`: the transaction id for the new flow.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartVerifyResponse {
+    pub flow_id: String,
+}
+
+/// A replayable SAS verification flow as returned by `GET …/verify` and
+/// `GET …/verify/{flow_id}`. Mirrors the server's `FlowDto`
+/// (`crates/axon-api/src/dto.rs`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct FlowDto {
+    pub flow_id: String,
+    pub device_id: String,
+    pub stage: FlowStage,
+    #[serde(default)]
+    pub emoji: Option<Vec<EmojiDto>>,
+    #[serde(default)]
+    pub decimals: Option<[u16; 3]>,
+    #[serde(default)]
+    pub cancel_reason: Option<String>,
+}
+
+/// The lifecycle stage of a verification flow (server `FlowStageDto`).
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowStage {
+    Requested,
+    Ready,
+    KeysExchanged,
+    Confirmed,
+    Done,
+    Cancelled,
+}
+
+/// One SAS emoji: the symbol and its short English description.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EmojiDto {
+    pub symbol: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AccountDto {
     pub account_id: Uuid,
     pub user_id: String,
     pub state: AccountState,
+    #[serde(default)]
+    pub device_id: Option<String>,
     #[serde(default)]
     pub verified: Option<bool>,
 }
@@ -559,6 +801,11 @@ pub struct ReactionTally {
     // out here — serde ignores the extra key.
     #[serde(default)]
     pub my_event_ids: Vec<String>,
+    /// Sender-device trust snapshot at decrypt time (M7c / ADR 0031): one of
+    /// `verified`, `unverified`, `unknown`, `verification_violation`. `None` for
+    /// unencrypted events or rows with no recorded verdict.
+    #[serde(default)]
+    pub sender_trust: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -724,19 +971,15 @@ impl EventDto {
             .flatten()
     }
 
-    pub fn edit_relation(&self) -> Option<(&str, &str)> {
+    pub fn edit_relation(&self) -> Option<(&str, &str, &Value)> {
         let relates_to = self.relates_to.as_ref()?;
         if relates_to.get("rel_type")?.as_str()? != "m.replace" {
             return None;
         }
         let target = relates_to.get("event_id")?.as_str()?;
-        let new_body = self
-            .content
-            .as_ref()
-            .and_then(|c| c.get("m.new_content"))
-            .and_then(|nc| nc.get("body"))
-            .and_then(|b| b.as_str())?;
-        Some((target, new_body))
+        let new_content = self.content.as_ref()?.get("m.new_content")?;
+        let new_body = new_content.get("body")?.as_str()?;
+        Some((target, new_body, new_content))
     }
 
     pub fn state_key(&self) -> Option<&str> {
@@ -775,6 +1018,14 @@ pub enum ApiError {
     UnsupportedScheme(String),
     #[error("HTTP {status}: {message}")]
     Status { status: StatusCode, message: String },
+}
+
+impl ApiError {
+    /// `true` when this is an HTTP 404. Used to detect a verification flow the
+    /// server no longer has a record of (ADR 0028 §3).
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, ApiError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
 }
 
 impl From<reqwest::Error> for ApiError {
@@ -916,6 +1167,44 @@ mod tests {
     }
 
     #[test]
+    fn edit_relation_preserves_formatted_new_content() {
+        let event: EventDto = serde_json::from_value(serde_json::json!({
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "event_id": "$edit:localhost",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "origin_ts": 1234,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "* hello",
+                "m.new_content": {
+                    "msgtype": "m.text",
+                    "body": "hello",
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": "<strong>hello</strong>"
+                }
+            },
+            "body": "* hello",
+            "relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$original:localhost"
+            },
+            "redacted": false,
+            "redaction_event_id": null
+        }))
+        .expect("valid event");
+
+        let (target, body, new_content) = event.edit_relation().expect("edit relation");
+        assert_eq!(target, "$original:localhost");
+        assert_eq!(body, "hello");
+        assert_eq!(
+            new_content.get("formatted_body").and_then(Value::as_str),
+            Some("<strong>hello</strong>")
+        );
+    }
+
+    #[test]
     fn image_accessors_share_encrypted_media_metadata() {
         let event: EventDto = serde_json::from_value(serde_json::json!({
             "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -974,6 +1263,137 @@ mod tests {
         assert_eq!(frame.kind, "timeline.event");
         assert_eq!(frame.payload.room_id, "!room:localhost");
         assert_eq!(frame.payload.state_key(), Some("@alice:localhost"));
+    }
+
+    #[test]
+    fn demux_routes_timeline_frame() {
+        let body = r#"{
+            "type": "timeline.event",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "event_id": "$e:localhost", "room_id": "!r:localhost",
+                "sender": "@a:localhost", "origin_ts": 1, "type": "m.room.message",
+                "content": null, "body": "hi", "relates_to": null,
+                "redacted": false, "redaction_event_id": null
+            }
+        }"#;
+        assert!(matches!(
+            decode_ws_frame(body),
+            Some(LiveFrame::Timeline(_))
+        ));
+    }
+
+    #[test]
+    fn demux_timeline_account_mismatch_is_protocol_error() {
+        let body = r#"{
+            "type": "timeline.event",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "account_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "event_id": "$e:localhost", "room_id": "!r:localhost",
+                "sender": "@a:localhost", "origin_ts": 1, "type": "m.room.message",
+                "content": null, "body": "hi", "relates_to": null,
+                "redacted": false, "redaction_event_id": null
+            }
+        }"#;
+        assert!(matches!(
+            decode_ws_frame(body),
+            Some(LiveFrame::ProtocolError(_))
+        ));
+    }
+
+    #[test]
+    fn demux_routes_verification_sas_frame() {
+        let body = r#"{
+            "type": "verification.sas",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "flow_id": "txn1", "device_id": "DEV",
+                "emoji": [{"symbol": "🐶", "description": "Dog"}],
+                "decimals": [1, 2, 3]
+            }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::Verification(frame)) => {
+                assert_eq!(frame.kind, VerificationFrameKind::Sas);
+                assert_eq!(frame.payload.flow_id, "txn1");
+                assert_eq!(frame.payload.decimals, Some([1, 2, 3]));
+                assert_eq!(frame.payload.emoji.unwrap()[0].symbol, "🐶");
+            }
+            other => panic!("expected verification frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_routes_verification_cancelled_frame() {
+        let body = r#"{
+            "type": "verification.cancelled",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": { "flow_id": "txn1", "device_id": "DEV", "reason": "user" }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::Verification(frame)) => {
+                assert_eq!(frame.kind, VerificationFrameKind::Cancelled);
+                assert_eq!(frame.payload.reason.as_deref(), Some("user"));
+            }
+            other => panic!("expected cancelled frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_routes_sender_trust_violation_frame() {
+        let body = r#"{
+            "type": "sender_trust.violation",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": { "user_id": "@mallory:localhost", "verification_violation": true }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::SenderTrustViolation { payload, .. }) => {
+                assert_eq!(payload.user_id, "@mallory:localhost");
+                assert!(payload.verification_violation);
+            }
+            other => panic!("expected trust violation frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_ignores_unknown_frame_kind() {
+        let body = r#"{
+            "type": "future.frame",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {}
+        }"#;
+        assert!(decode_ws_frame(body).is_none());
+    }
+
+    #[test]
+    fn deserializes_flow_dto_with_snake_case_stage() {
+        let body = r#"{
+            "data": {
+                "flow_id": "txn1", "device_id": "DEV",
+                "stage": "keys_exchanged",
+                "emoji": [{"symbol": "🐱", "description": "Cat"}],
+                "decimals": [4, 5, 6], "cancel_reason": null
+            }
+        }"#;
+        let response: ApiResponse<FlowDto> = serde_json::from_str(body).unwrap();
+        assert_eq!(response.data.stage, FlowStage::KeysExchanged);
+        assert_eq!(response.data.decimals, Some([4, 5, 6]));
+    }
+
+    #[test]
+    fn not_found_is_detected() {
+        let err = ApiError::Status {
+            status: StatusCode::NOT_FOUND,
+            message: "gone".to_owned(),
+        };
+        assert!(err.is_not_found());
+        let other = ApiError::Status {
+            status: StatusCode::CONFLICT,
+            message: "x".to_owned(),
+        };
+        assert!(!other.is_not_found());
     }
 
     #[test]
@@ -1069,5 +1489,6 @@ mod tests {
         let response: ApiResponse<AccountDto> = serde_json::from_str(body).unwrap();
         assert_eq!(response.data.user_id, "@alice:example.com");
         assert_eq!(response.data.state, AccountState::Active);
+        assert_eq!(response.data.device_id.as_deref(), Some("DEVICE"));
     }
 }

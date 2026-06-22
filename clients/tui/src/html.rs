@@ -1,3 +1,4 @@
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ruma_html::{sanitize_html, Html, HtmlSanitizerMode, NodeData, RemoveReplyFallback};
@@ -13,6 +14,119 @@ use crate::wrap::{
 struct HtmlContext {
     style: Style,
     preserve_whitespace: bool,
+}
+
+/// Converts `text` to HTML if it contains markdown formatting. Returns `None`
+/// if the text is plain prose (only paragraphs, text, and line breaks).
+pub(crate) fn markdown_to_html_if_detected(text: &str) -> Option<String> {
+    let parser = Parser::new_ext(text, Options::all());
+    let mut has_formatting = false;
+    let events: Vec<_> = parser
+        .inspect(|event| {
+            if !matches!(
+                event,
+                Event::Start(Tag::Paragraph)
+                    | Event::End(TagEnd::Paragraph)
+                    | Event::Text(_)
+                    | Event::SoftBreak
+                    | Event::HardBreak
+            ) {
+                has_formatting = true;
+            }
+        })
+        .collect();
+    if !has_formatting {
+        return None;
+    }
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events.into_iter());
+    Some(html)
+}
+
+/// Strips HTML tags from `html`, returning the plain-text content.
+/// Used to generate the required `body` fallback when sending `/html`.
+pub(crate) fn strip_html_to_plain(html: &str) -> String {
+    let sanitized = sanitize_html(html, HtmlSanitizerMode::Strict, RemoveReplyFallback::No);
+    let doc = Html::parse(&sanitized);
+    let mut text = String::new();
+    for child in doc.children() {
+        collect_plain_text(&child, &mut text);
+    }
+    text.trim().to_owned()
+}
+
+fn collect_plain_text(node: &ruma_html::NodeRef, text: &mut String) {
+    match node.data() {
+        NodeData::Text(t) => text.push_str(t.borrow().as_ref()),
+        NodeData::Element(_) => {
+            for child in node.children() {
+                collect_plain_text(&child, text);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Wraps `text` in a `<span data-mx-spoiler>` element.
+/// `reason` is the optional content-warning label (the `data-mx-spoiler` attribute value).
+/// The plain-text body uses the convention `<reason>: <text> (Spoiler)`.
+pub(crate) fn spoiler_html(reason: Option<&str>, text: &str) -> (String, String) {
+    let escaped = html_escape(text);
+    let html = match reason {
+        Some(r) => format!(
+            "<span data-mx-spoiler=\"{}\">{escaped}</span>",
+            html_escape(r)
+        ),
+        None => format!("<span data-mx-spoiler>{escaped}</span>"),
+    };
+    let plain = match reason {
+        Some(r) => format!("{r}: {text} (Spoiler)"),
+        None => format!("{text} (Spoiler)"),
+    };
+    (html, plain)
+}
+
+fn html_escape(s: &str) -> String {
+    html_escape::encode_double_quoted_attribute(s).into_owned()
+}
+
+/// Wraps each character of `text` in a `<font color>` tag cycling through
+/// rainbow hues. The Matrix sanitizer converts `<font color>` → `<span data-mx-color>`.
+pub(crate) fn rainbow_html(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return String::new();
+    }
+    let mut html = String::new();
+    for (i, ch) in chars.iter().enumerate() {
+        let hue = (i as f32 / n as f32) * 360.0;
+        let (r, g, b) = hsl_to_rgb(hue, 1.0, 0.5);
+        let escaped = html_escape(&ch.to_string());
+        html.push_str(&format!(
+            "<font color=\"#{r:02x}{g:02x}{b:02x}\">{escaped}</font>"
+        ));
+    }
+    html
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r1, g1, b1) = match h as u16 / 60 {
+        0 => (c, x, 0.0_f32),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
 }
 
 pub(crate) fn formatted_message_body_lines(
@@ -138,12 +252,66 @@ fn render_html_node(
                     render_children_with_style(node, lines, context, colors);
                     push_rich_line_break_if_needed(lines);
                 }
+                "span" => {
+                    let mut style = context.style;
+                    if let Some(color) = span_fg_color(element) {
+                        style = style.fg(color);
+                    }
+                    if let Some(label) = span_spoiler_label(element) {
+                        style = style.add_modifier(Modifier::DIM);
+                        push_rich_span(
+                            lines,
+                            RichSpan::new(label, style.add_modifier(Modifier::BOLD)),
+                        );
+                    }
+                    render_children_with_style(
+                        node,
+                        lines,
+                        HtmlContext { style, ..context },
+                        colors,
+                    );
+                }
                 _ => render_children_with_style(node, lines, context, colors),
             }
         }
         _ => {}
     }
 }
+
+/// Returns the spoiler prefix label if the element has `data-mx-spoiler`.
+/// Yields `"[reason] "` when a reason is set, `"[spoiler] "` otherwise.
+fn span_spoiler_label(element: &ruma_html::ElementData) -> Option<String> {
+    let attrs = element.attrs.borrow();
+    let attr = attrs
+        .iter()
+        .find(|a| a.name.ns.as_ref().is_empty() && a.name.local.as_ref() == "data-mx-spoiler")?;
+    let reason = attr.value.trim();
+    Some(if reason.is_empty() {
+        "[spoiler] ".to_owned()
+    } else {
+        format!("[{reason}] ")
+    })
+}
+
+fn span_fg_color(element: &ruma_html::ElementData) -> Option<ratatui::style::Color> {
+    let attrs = element.attrs.borrow();
+    let value = attrs.iter().find(|attr| {
+        attr.name.ns.as_ref().is_empty() && attr.name.local.as_ref() == "data-mx-color"
+    })?;
+    parse_hex_color(value.value.trim())
+}
+
+fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(ratatui::style::Color::Rgb(r, g, b))
+}
+
 fn remove_dangerous_html_blocks(html: &str) -> String {
     let mut remaining = html;
     let mut output = String::new();
@@ -327,10 +495,94 @@ fn push_html_text(lines: &mut Vec<Vec<RichSpan>>, text: &str, style: Style, pres
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
     use crate::config::TuiConfig;
+
+    #[test]
+    fn rainbow_html_wraps_each_char_with_font_color() {
+        let html = rainbow_html("hi");
+        assert!(html.starts_with("<font color=\"#"));
+        assert_eq!(html.matches("<font color=").count(), 2);
+        assert!(html.contains(">h<") || html.contains(">h</"));
+        assert!(html.contains(">i<") || html.contains(">i</"));
+    }
+
+    #[test]
+    fn rainbow_html_escapes_special_chars() {
+        let html = rainbow_html("<&>");
+        assert!(html.contains("&lt;"), "should escape <");
+        assert!(html.contains("&amp;"), "should escape &");
+        assert!(html.contains("&gt;"), "should escape >");
+        assert!(
+            !html.contains("\"<\""),
+            "raw < should not appear as content"
+        );
+    }
+
+    #[test]
+    fn rainbow_html_renders_with_color_in_tui() {
+        let colors = TuiConfig::test_default().colors;
+        let html = rainbow_html("hi");
+        let lines = formatted_message_body_lines(&html, 80, 80, &colors)
+            .expect("rainbow html should render");
+        assert!(lines[0]
+            .iter()
+            .any(|span| matches!(span.style.fg, Some(Color::Rgb(_, _, _)))));
+    }
+
+    #[test]
+    fn parse_hex_color_parses_valid_and_rejects_invalid() {
+        assert_eq!(parse_hex_color("#ff0000"), Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("00ff00"), Some(Color::Rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("#xyz"), None);
+        assert_eq!(parse_hex_color("#fff"), None);
+    }
+
+    #[test]
+    fn spoiler_html_without_reason() {
+        let (html, plain) = spoiler_html(None, "big reveal");
+        assert_eq!(html, "<span data-mx-spoiler>big reveal</span>");
+        assert_eq!(plain, "big reveal (Spoiler)");
+    }
+
+    #[test]
+    fn spoiler_html_with_reason() {
+        let (html, plain) = spoiler_html(Some("CW: ending"), "he dies");
+        assert_eq!(html, "<span data-mx-spoiler=\"CW: ending\">he dies</span>");
+        assert_eq!(plain, "CW: ending: he dies (Spoiler)");
+    }
+
+    #[test]
+    fn spoiler_html_escapes_content_and_reason() {
+        let (html, _) = spoiler_html(Some("a & b"), "<secret>");
+        assert!(html.contains("a &amp; b"));
+        assert!(html.contains("&lt;secret&gt;"));
+    }
+
+    #[test]
+    fn spoiler_renders_dimmed_with_label_in_tui() {
+        let colors = TuiConfig::test_default().colors;
+        let (html, _) = spoiler_html(None, "hidden");
+        let lines = formatted_message_body_lines(&html, 80, 80, &colors)
+            .expect("spoiler html should render");
+        let flat: Vec<_> = lines.into_iter().flatten().collect();
+        assert!(flat.iter().any(|s| s.content.contains("[spoiler]")));
+        assert!(flat
+            .iter()
+            .any(|s| s.style.add_modifier.contains(Modifier::DIM)));
+    }
+
+    #[test]
+    fn spoiler_renders_reason_label_in_tui() {
+        let colors = TuiConfig::test_default().colors;
+        let (html, _) = spoiler_html(Some("CW: ending"), "he dies");
+        let lines = formatted_message_body_lines(&html, 80, 80, &colors)
+            .expect("spoiler html should render");
+        let flat: Vec<_> = lines.into_iter().flatten().collect();
+        assert!(flat.iter().any(|s| s.content.contains("[CW: ending]")));
+    }
 
     #[test]
     fn formatted_html_renders_supported_inline_styles() {

@@ -415,17 +415,18 @@ fn apply_edits(events: &mut Vec<EventDto>) {
     // Collect all edit relations, tracking whether each target is present on
     // this page. An edit whose target lives on an older (not-yet-loaded) page
     // must NOT be removed: suppressing it would make the edit invisible.
-    let edits: Vec<(String, String)> = events
+    let edits: Vec<(String, String, serde_json::Value)> = events
         .iter()
         .filter_map(|event| {
-            let (target, body) = event.edit_relation()?;
-            Some((target.to_owned(), body.to_owned()))
+            let (target, body, content) = event.edit_relation()?;
+            Some((target.to_owned(), body.to_owned(), content.clone()))
         })
         .collect();
     let mut applied: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (target_id, new_body) in &edits {
+    for (target_id, new_body, new_content) in &edits {
         if let Some(event) = events.iter_mut().find(|event| &event.event_id == target_id) {
             event.body = Some(new_body.clone());
+            event.content = Some(new_content.clone());
             applied.insert(target_id.clone());
         }
     }
@@ -433,7 +434,7 @@ fn apply_edits(events: &mut Vec<EventDto>) {
     events.retain(|event| {
         event
             .edit_relation()
-            .is_none_or(|(target, _)| !applied.contains(target))
+            .is_none_or(|(target, _, _)| !applied.contains(target))
     });
 }
 
@@ -461,6 +462,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            sender_trust: None,
         }
     }
 
@@ -484,6 +486,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            sender_trust: None,
         }
     }
 
@@ -496,6 +499,39 @@ mod tests {
             events[0].body.as_deref(),
             Some("hello world"),
             "original body should be replaced with new content"
+        );
+    }
+
+    #[test]
+    fn apply_edits_replaces_formatted_content() {
+        let mut original = msg("$orig", "hello");
+        original.content = Some(json!({
+            "msgtype": "m.text",
+            "body": "hello",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<em>hello</em>",
+        }));
+        let mut formatted_edit = edit("$edit", "$orig", "hello world");
+        formatted_edit.content = Some(json!({
+            "msgtype": "m.text",
+            "body": "* hello world",
+            "m.new_content": {
+                "msgtype": "m.text",
+                "body": "hello world",
+                "format": "org.matrix.custom.html",
+                "formatted_body": "<strong>hello world</strong>",
+            },
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$orig"},
+        }));
+        let mut events = vec![original, formatted_edit];
+
+        apply_edits(&mut events);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].body.as_deref(), Some("hello world"));
+        assert_eq!(
+            events[0].formatted_body(),
+            Some("<strong>hello world</strong>")
         );
     }
 
@@ -546,6 +582,7 @@ mod tests {
             redacted: false,
             redaction_event_id: None,
             reactions: None,
+            sender_trust: None,
         };
         // relates_to is set but content has no m.new_content → None
         assert!(event.edit_relation().is_none());

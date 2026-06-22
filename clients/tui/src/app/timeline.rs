@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use crate::api::{EventDto, LiveFrame, RoomDto};
+use uuid::Uuid;
+
+use crate::api::{
+    EventDto, LiveFrame, RoomDto, SenderTrustViolationDto, VerificationFrame, VerificationFrameKind,
+};
 use crate::config::{DisplayOptions, SenderNameStyle};
 
 use ratatui_image::Resize;
@@ -19,6 +23,12 @@ impl App {
                 if !self.is_mid_command() {
                     self.status = Status::Debug("live WebSocket connected".to_owned());
                 }
+                // Read-on-reconnect: the lossy bus may have dropped frames while
+                // we were down, so re-read any active flow's authoritative state
+                // and discover a request that arrived while we were down
+                // (ADR 0028 §3).
+                self.resync_active_verification();
+                self.discover_incoming_verification();
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
@@ -43,13 +53,89 @@ impl App {
             }
             LiveFrame::ProtocolError(err) => {
                 self.connection_state = ConnectionState::ProtocolError(err.clone());
-                if !self.is_mid_command() {
-                    self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
-                }
+                // Always surface parse failures — a malformed frame is a server/wire
+                // bug that must not be silently hidden even during modal interactions.
+                self.status = Status::Debug(format!("ignored malformed live frame: {err}"));
                 LiveFrameAction::None
             }
             LiveFrame::Timeline(event) => self.append_live_event(*event),
+            LiveFrame::Verification(frame) => self.handle_verification_frame(frame),
+            LiveFrame::SenderTrustViolation {
+                account_id,
+                payload,
+            } => self.handle_sender_trust_violation(account_id, payload),
         }
+    }
+
+    /// Apply a live `verification.*` frame to the modal. A `requested` frame for
+    /// an untracked flow auto-opens the modal (ADR 0028 §2); other frames update
+    /// the flow on screen when they match it.
+    fn handle_verification_frame(&mut self, frame: VerificationFrame) -> LiveFrameAction {
+        let VerificationFrame {
+            account_id,
+            kind,
+            payload,
+        } = frame;
+        match kind {
+            VerificationFrameKind::Requested => {
+                let tracked = self
+                    .verification
+                    .as_ref()
+                    .is_some_and(|flow| flow.matches(account_id, &payload.flow_id));
+                if tracked {
+                    if let Some(flow) = self.verification.as_mut() {
+                        flow.apply_frame(kind, &payload);
+                    }
+                } else {
+                    self.open_incoming_verification(
+                        account_id,
+                        payload.flow_id.clone(),
+                        payload.device_id.clone(),
+                    );
+                }
+            }
+            _ => {
+                // Accept the frame for the tracked flow — or adopt the flow_id of
+                // an outgoing flow whose `POST …/verify` response is still in
+                // flight (matched on account + device).
+                let applies = self.verification.as_ref().is_some_and(|flow| {
+                    flow.account_id == account_id
+                        && (flow.flow_id.as_deref() == Some(payload.flow_id.as_str())
+                            || (flow.flow_id.is_none() && flow.device_id == payload.device_id))
+                });
+                if applies {
+                    if let Some(flow) = self.verification.as_mut() {
+                        flow.apply_frame(kind, &payload);
+                    }
+                    if kind == VerificationFrameKind::Done {
+                        self.status =
+                            Status::from("verification complete — device verified".to_owned());
+                        // The at-decrypt trust snapshots don't change live, but a
+                        // refresh re-reads any rows re-decrypted post-verification.
+                        return LiveFrameAction::RefreshRooms;
+                    }
+                }
+            }
+        }
+        LiveFrameAction::None
+    }
+
+    /// Surface a `sender_trust.violation` overlay frame (ADR 0031): a visible
+    /// alert plus a room refresh to re-read the affected sender's events.
+    fn handle_sender_trust_violation(
+        &mut self,
+        _account_id: Uuid,
+        payload: SenderTrustViolationDto,
+    ) -> LiveFrameAction {
+        if payload.verification_violation {
+            self.status = Status::from(format!(
+                "⚠ sender-trust violation: {} identity changed since it was verified",
+                payload.user_id
+            ));
+        } else {
+            self.status = Status::from(format!("sender-trust changed for {}", payload.user_id));
+        }
+        LiveFrameAction::RefreshRooms
     }
 
     fn append_live_event(&mut self, event: EventDto) -> LiveFrameAction {
@@ -57,10 +143,11 @@ impl App {
             account_id: event.account_id,
             room_id: event.room_id.clone(),
         };
-        if let Some((target_id, new_body)) = event.edit_relation() {
+        if let Some((target_id, new_body, new_content)) = event.edit_relation() {
             if let Some(events) = self.messages.events.get_mut(&key) {
                 if let Some(target) = events.iter_mut().find(|item| item.event_id == target_id) {
                     target.body = Some(new_body.to_owned());
+                    target.content = Some(new_content.clone());
                 }
             }
             return LiveFrameAction::None;
