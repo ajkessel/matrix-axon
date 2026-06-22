@@ -26,6 +26,10 @@ const MESSAGE_MUTATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Recovery imports the megolm key backup and cross-signing keys, which can
 /// legitimately exceed 60 s on a real account.
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Media downloads run on a shared worker pool, so a stalled response must not
+/// hold one of those workers forever.
+const MEDIA_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -223,6 +227,61 @@ impl AxonClient {
         self.send(request).await
     }
 
+    /// Download media identified by an `mxc://` URI, routed through the Axon
+    /// server's authenticated media proxy. The server name and media ID are
+    /// extracted from the URI and placed in the path. Responses larger than
+    /// 20 MiB are refused so one event cannot exhaust the TUI's memory.
+    pub async fn get_media(&self, account_id: Uuid, mxc_url: &str) -> Result<Vec<u8>, ApiError> {
+        let rest = mxc_url
+            .strip_prefix("mxc://")
+            .ok_or_else(|| ApiError::Url("not an mxc:// URI".to_owned()))?;
+        let (server, media_id) = rest
+            .split_once('/')
+            .ok_or_else(|| ApiError::Url("malformed mxc:// URI".to_owned()))?;
+        if server.is_empty() || media_id.is_empty() {
+            return Err(ApiError::Url("malformed mxc:// URI".to_owned()));
+        }
+        let request = media_request(self.http.get(format!(
+            "{}/v1/media/{}/{}/{}",
+            self.base_url,
+            account_id,
+            path_segment(server),
+            path_segment(media_id),
+        )));
+        let response = request.send().await?;
+        let status = response.status();
+        if status.is_success() {
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_MEDIA_BYTES as u64)
+            {
+                return Err(ApiError::Url(format!(
+                    "media exceeds {} MiB limit",
+                    MAX_MEDIA_BYTES / 1024 / 1024
+                )));
+            }
+            let mut bytes = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                if bytes.len().saturating_add(chunk.len()) > MAX_MEDIA_BYTES {
+                    return Err(ApiError::Url(format!(
+                        "media exceeds {} MiB limit",
+                        MAX_MEDIA_BYTES / 1024 / 1024
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        } else {
+            let text = response.text().await?;
+            Err(ApiError::Status {
+                status,
+                message: text,
+            })
+        }
+    }
+
     pub async fn get_event(&self, account_id: Uuid, event_id: &str) -> Result<EventDto, ApiError> {
         let request = self.http.get(format!(
             "{}/v1/accounts/{}/events/{}",
@@ -292,6 +351,10 @@ fn lifecycle(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 
 fn message_mutation(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request.timeout(MESSAGE_MUTATION_TIMEOUT)
+}
+
+fn media_request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.timeout(MEDIA_TIMEOUT)
 }
 
 pub(crate) fn bearer_value_str(token: &str) -> String {
@@ -498,6 +561,23 @@ pub struct ReactionTally {
     pub my_event_ids: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum MediaKind {
+    Image,
+    File,
+    Audio,
+    Video,
+    Sticker,
+}
+
+struct ParsedMedia<'a> {
+    kind: MediaKind,
+    url: Option<&'a str>,
+    filename: &'a str,
+    caption: Option<&'a str>,
+    encrypted: bool,
+}
+
 impl EventDto {
     pub fn display_body(&self) -> String {
         if self.redacted {
@@ -512,6 +592,11 @@ impl EventDto {
                 _ => format!("{} membership changed: {membership}", self.sender),
             };
         }
+        // Describe media messages by type + filename instead of falling through
+        // to the raw event-type label.
+        if let Some(label) = self.media_label() {
+            return label;
+        }
         if let Some(body) = &self.body {
             return body.clone();
         }
@@ -519,6 +604,94 @@ impl EventDto {
             return "[unable to decrypt]".to_owned();
         }
         format!("[{}]", self.event_type)
+    }
+
+    /// A human-readable label for media message types (`m.image`, `m.file`,
+    /// `m.audio`, `m.video`, `m.sticker`). Returns `None` for text messages
+    /// and non-message events.
+    fn media_label(&self) -> Option<String> {
+        let media = self.parsed_media()?;
+        let kind = match media.kind {
+            MediaKind::Image => "image",
+            MediaKind::File => "file",
+            MediaKind::Audio => "audio",
+            MediaKind::Video => "video",
+            MediaKind::Sticker => "sticker",
+        };
+        let suffix = media
+            .caption
+            .map(|caption| format!("\n{caption}"))
+            .unwrap_or_default();
+        Some(format!("[{kind}: {}]{suffix}", media.filename))
+    }
+
+    /// Returns `true` when this image/sticker event uses encrypted media
+    /// (`content.file.url`) rather than a plain `content.url`. The Axon media
+    /// proxy attempts server-side decryption, but may not have the key for
+    /// older messages — in that case it returns raw ciphertext.
+    pub fn image_is_encrypted(&self) -> bool {
+        self.image_media().is_some_and(|media| media.encrypted)
+    }
+
+    /// Extract the `mxc://` URI and account from an image or sticker event.
+    /// Returns `(account_id, mxc_url)` when the event carries a downloadable
+    /// image, `None` otherwise.
+    pub fn image_mxc(&self) -> Option<(Uuid, String)> {
+        let media = self.image_media()?;
+        Some((self.account_id, media.url?.to_owned()))
+    }
+
+    /// Returns the filename for an image/sticker event (the `filename` field if
+    /// present, otherwise `body`). Returns `None` for non-image events.
+    pub fn image_filename(&self) -> Option<String> {
+        Some(self.image_media()?.filename.to_owned())
+    }
+
+    /// Returns the user-authored caption for an image/sticker event — present
+    /// only when `filename` and `body` are both set and differ. Returns `None`
+    /// for non-image events or images without a caption.
+    pub fn image_caption(&self) -> Option<String> {
+        self.image_media()?.caption.map(str::to_owned)
+    }
+
+    fn parsed_media(&self) -> Option<ParsedMedia<'_>> {
+        let content = self.content.as_ref()?;
+        let kind = match content.get("msgtype").and_then(|value| value.as_str()) {
+            Some("m.image") => MediaKind::Image,
+            Some("m.file") => MediaKind::File,
+            Some("m.audio") => MediaKind::Audio,
+            Some("m.video") => MediaKind::Video,
+            _ if self.event_type == "m.sticker" => MediaKind::Sticker,
+            _ => return None,
+        };
+        let explicit_filename = content.get("filename").and_then(|value| value.as_str());
+        let body = content.get("body").and_then(|value| value.as_str());
+        let filename = explicit_filename.or(body).unwrap_or("media");
+        let caption = explicit_filename.and_then(|_| body.filter(|body| *body != filename));
+        let plain_url = content.get("url").and_then(|value| value.as_str());
+        let encrypted_url = content
+            .get("file")
+            .and_then(|file| file.get("url"))
+            .and_then(|value| value.as_str());
+        let url = plain_url.or(encrypted_url);
+        Some(ParsedMedia {
+            kind,
+            url,
+            filename,
+            caption,
+            encrypted: plain_url.is_none() && encrypted_url.is_some(),
+        })
+    }
+
+    fn image_media(&self) -> Option<ParsedMedia<'_>> {
+        let media = self.parsed_media()?;
+        if !matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
+            return None;
+        }
+        if !media.url.is_some_and(|url| url.starts_with("mxc://")) {
+            return None;
+        }
+        Some(media)
     }
 
     pub fn formatted_body(&self) -> Option<&str> {
@@ -743,6 +916,41 @@ mod tests {
     }
 
     #[test]
+    fn image_accessors_share_encrypted_media_metadata() {
+        let event: EventDto = serde_json::from_value(serde_json::json!({
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "event_id": "$event:localhost",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "origin_ts": 1234,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.image",
+                "body": "A caption",
+                "filename": "photo.jpg",
+                "file": { "url": "mxc://localhost/photo" }
+            },
+            "body": "A caption",
+            "relates_to": null,
+            "redacted": false,
+            "redaction_event_id": null
+        }))
+        .unwrap();
+
+        assert_eq!(
+            event.image_mxc(),
+            Some((
+                Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+                "mxc://localhost/photo".to_owned()
+            ))
+        );
+        assert!(event.image_is_encrypted());
+        assert_eq!(event.image_filename().as_deref(), Some("photo.jpg"));
+        assert_eq!(event.image_caption().as_deref(), Some("A caption"));
+        assert_eq!(event.display_body(), "[image: photo.jpg]\nA caption");
+    }
+
+    #[test]
     fn deserializes_websocket_frame() {
         let body = r#"{
             "type": "timeline.event",
@@ -800,6 +1008,13 @@ mod tests {
         let lc = lifecycle(client.http.post("http://127.0.0.1:8080/v1/accounts/login"))
             .build()
             .unwrap();
+        let media = media_request(
+            client
+                .http
+                .get("http://127.0.0.1:8080/v1/media/id/server/media"),
+        )
+        .build()
+        .unwrap();
 
         assert_eq!(read.timeout(), Some(&HTTP_REQUEST_TIMEOUT));
         assert_eq!(mutation.timeout(), Some(&MESSAGE_MUTATION_TIMEOUT));
@@ -807,6 +1022,11 @@ mod tests {
             lc.timeout(),
             Some(&LIFECYCLE_TIMEOUT),
             "lifecycle ops need a generous timeout to survive megolm key import"
+        );
+        assert_eq!(
+            media.timeout(),
+            Some(&MEDIA_TIMEOUT),
+            "stalled media responses must release the bounded worker pool"
         );
     }
 
@@ -816,6 +1036,20 @@ mod tests {
             path_segment("$event:local/host").to_string(),
             "%24event%3Alocal%2Fhost"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_mxc_server_or_media_id() {
+        let client = AxonClient::new("http://127.0.0.1:8080".to_owned(), None);
+
+        assert!(matches!(
+            client.get_media(Uuid::nil(), "mxc:///media").await,
+            Err(ApiError::Url(_))
+        ));
+        assert!(matches!(
+            client.get_media(Uuid::nil(), "mxc://server/").await,
+            Err(ApiError::Url(_))
+        ));
     }
 
     #[test]

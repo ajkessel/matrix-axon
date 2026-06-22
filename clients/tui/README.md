@@ -40,6 +40,7 @@ loopback default.
 - Multi-account panel and account filtering, with keyboard navigation and search across Accounts, Rooms, and Messages.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
+- Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
 
 ## Not Yet Implemented
 
@@ -122,6 +123,7 @@ When focus is on the **Room List** or **Message List**, the focused pane border 
 | `/` | Start a search; type a query and press `Enter`. |
 | `n` | Next search match (no wrap). |
 | `N` | Previous search match (no wrap). |
+| `v` | In Message List, open a larger preview of the selected image message. |
 | `Enter` or `Esc` | Return focus to Input. |
 
 When focus is on the **Input** pane:
@@ -179,6 +181,7 @@ cursor_left = "left"
 cursor_right = "right"
 edit_previous = "up"
 edit_next = "down"
+media_preview = "v"
 message_down = "ctrl-j"
 message_up = "ctrl-k"
 message_page_up = "pageup"
@@ -287,6 +290,51 @@ next launch.
 Whenever axon-tui rewrites the config, it preserves supported settings and
 comments. Unsupported options are retained as commented-out lines with an
 explanatory comment immediately above them instead of being deleted.
+
+## Media
+
+Image messages and stickers reserve a fixed six-row thumbnail card below their
+caption. The TUI renders a thumbnail only when that complete card is visible,
+so terminal graphics cannot overlap adjacent message text while scrolling.
+With Message List focused, select an image and press `v` (configurable as
+`shortcuts.media_preview`) to open a larger popup preview.
+
+Media is requested from Axon's account-scoped `/v1/media` proxy only when it is
+visible or explicitly previewed. Downloads, image decoding, EXIF orientation,
+resizing, and terminal-protocol encoding run as bounded background work so room
+navigation and input remain responsive. Decoded images are dimension-checked
+and downscaled before caching. The client keeps at most 16 decoded images and
+32 encoded terminal images, runs at most four media workers, and rejects media
+responses larger than 20 MiB. Kitty and iTerm2 are selected from safe terminal
+environment hints; half-block rendering is the portable fallback. Set
+`AXON_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks` to override
+detection without running a terminal capability query.
+
+### Sixel inside tmux
+
+Sixel works through tmux passthrough, but tmux does not retain Sixel graphics as
+part of its pane contents. A tmux client refresh can therefore erase an image
+even though axon-tui's text-cell buffer has not changed. While an image preview
+is open, axon-tui retransmits it every five seconds inside tmux. This keeps the
+preview visible, but the retransmission may cause a brief flicker.
+
+Possible workarounds:
+
+- Use halfblocks inside tmux for the most reliable, flicker-free rendering:
+  `AXON_IMAGE_PROTOCOL=halfblocks axon-tui`.
+- If tmux's status refresh is triggering the disappearance, disable its periodic
+  update with `tmux set -g status-interval 0`. This affects the whole tmux
+  server; set a nonzero interval later to restore automatic status updates.
+- If automatic cell-size detection is unavailable or inaccurate, set the
+  terminal's character-cell size explicitly, for example
+  `AXON_FONT_SIZE=9x18 axon-tui`. The format is width-by-height in pixels.
+- Set `AXON_NO_IMAGE_QUERY=1` to disable startup terminal queries. Unless an
+  explicit protocol and usable font size are supplied, this falls back to
+  halfblocks.
+
+Windows Terminal supports the cell-size query used by axon-tui. In tmux, the
+query and Sixel output require `allow-passthrough`; axon-tui enables it for the
+current pane at startup.
 
 ## Formatted Messages
 

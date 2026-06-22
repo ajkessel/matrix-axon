@@ -6,7 +6,7 @@
 
 - Slash commands and keyboard shortcuts should reflect the Axon API surface. Unsupported Matrix actions should report that the current Axon API does not support them yet.
 - The client reads accounts, rooms, and timeline history over HTTP, live events over `/v1/ws`, and sends lifecycle and message mutations over HTTP.
-- Preserve the future path for reply threading, search, scrolling back, and terminal media rendering, but do not add server-side assumptions before endpoints exist.
+- Preserve the future path for reply threading, search, and scrolling back, but do not add server-side assumptions before endpoints exist.
 
 ## Terminal UX
 
@@ -21,6 +21,15 @@
 - `/whereami` shows the current room summary from Axon and any members learned from loaded timeline membership events. Do not present that derived member list as complete until Axon exposes a room-info or room-state API with full aliases, members, power levels, encryption, and access settings.
 - `/status` uses the cached `GET /v1/accounts` response and lists every client-visible account as `logged in` (`active`) or `logged out` (`deactivated`). Keep the account panel and `/account` navigation active-only.
 - Room switching should remain forgiving within the active account filter: visible-list number, room id, canonical alias, display name, and shortened Matrix alias forms should continue to work.
+
+## Media
+
+- Fetch media only through Axon's account-scoped `/v1/media` proxy. Cache keys must include `account_id`; an `mxc://` URL alone is not an Axon resource identity.
+- Keep media work demand-driven and bounded. Request only visible thumbnails or an explicitly opened preview, cap response size, bound decoded-image and encoded-protocol caches, and limit concurrent workers.
+- Never download, decode, apply EXIF orientation, resize, or encode a terminal image on the input or draw loop. Those operations belong in background work, and late results for evicted entries must be discarded.
+- Do not probe terminal image capabilities by reading stdin before launch; unsupported terminals can leave a detached reader that steals keystrokes. Use safe environment hints, an explicit `AXON_IMAGE_PROTOCOL` override, and halfblocks as the fallback.
+- Inline images own fixed rows in the message flow. Render a terminal graphic only when its complete reserved region is visible so scrolling cannot place it over neighboring text.
+- Keep the larger image view explicit and modal rather than automatically changing the message-pane layout when selection moves.
 
 ## Rendering robustness
 

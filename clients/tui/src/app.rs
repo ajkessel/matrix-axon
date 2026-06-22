@@ -1,5 +1,8 @@
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use ratatui::layout::Size;
+use ratatui_image::picker::Picker;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -15,6 +18,11 @@ use std::path::PathBuf;
 mod completion;
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleOutcome;
+pub(crate) mod media;
+pub(crate) use media::{
+    ImageState, MediaKey, MediaResult, ProtocolKey, ProtocolState, IMAGE_CACHE_LIMIT,
+    MEDIA_WORKERS, PROTOCOL_CACHE_LIMIT,
+};
 mod reactions;
 mod render;
 mod rooms;
@@ -22,8 +30,8 @@ mod timeline;
 
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
-    display_body_with_sender, format_time, message_display_lines, message_index_at_line,
-    message_line_ranges,
+    display_body_with_sender, format_time, message_index_at_line, message_layout, ImageThumbRows,
+    IMAGE_THUMB_ROWS,
 };
 pub(crate) use rooms::account_localpart;
 #[cfg(test)]
@@ -121,6 +129,7 @@ pub(crate) enum PopupKind {
     RoomInfo,
     Status,
     CommandResponse,
+    MediaPreview,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -251,7 +260,6 @@ pub(crate) struct App {
     /// True while a login or logout request is awaiting its result, so the UI
     /// stays responsive but a second lifecycle verb can't race the first.
     pub(crate) lifecycle_busy: bool,
-    pub(crate) redraw_requested: bool,
     /// User-toggled hide for the accounts panel (independent of account count).
     pub(crate) accounts_panel_hidden: bool,
     /// User-toggled hide for the rooms panel.
@@ -262,6 +270,29 @@ pub(crate) struct App {
     pub(crate) edit_config_requested: bool,
     /// When true, the room list shows only rooms with unread messages.
     pub(crate) unread_filter: bool,
+    /// In-flight and decoded images, account-scoped and bounded by LRU order.
+    pub(crate) image_cache: HashMap<MediaKey, ImageState>,
+    image_cache_order: VecDeque<MediaKey>,
+    /// Sender end of the channel the main loop listens on for completed media
+    /// work. `None` until `set_media_sender` is called (unit tests may
+    /// omit it).
+    pub(crate) media_tx: Option<mpsc::Sender<MediaResult>>,
+    media_workers: Arc<Semaphore>,
+    /// Terminal image protocol picker, detected before raw mode with halfblocks
+    /// as the universal fallback.
+    pub(crate) picker: Picker,
+    /// Bounded cache of protocols encoded for a specific image and cell size.
+    pub(crate) proto_cache: HashMap<ProtocolKey, ProtocolState>,
+    proto_cache_order: VecDeque<ProtocolKey>,
+    /// Changes periodically while a Sixel preview is open inside tmux, forcing
+    /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
+    pub(crate) sixel_preview_generation: u64,
+    /// Set for one frame after the media-preview popup closes so `draw()` can
+    /// issue a targeted Clear over the former popup area.  Sixel/iTerm2 pixels
+    /// are not erased by ratatui's cell-diff pass when the image disappears, so
+    /// without this explicit clear a ghost image lingers until something else
+    /// overwrites those cells.
+    pub(crate) clear_media_preview: bool,
 }
 
 #[derive(Default)]
@@ -309,6 +340,8 @@ pub(crate) struct MessagePane {
     pub(crate) scroll: usize,
     pub(crate) page_size: usize,
     pub(crate) width: usize,
+    pub(crate) line_ranges: Vec<std::ops::Range<usize>>,
+    pub(crate) layout_event_ids: Vec<String>,
 }
 
 impl Default for MessagePane {
@@ -319,6 +352,8 @@ impl Default for MessagePane {
             scroll: usize::MAX,
             page_size: 1,
             width: 80,
+            line_ranges: Vec::new(),
+            layout_event_ids: Vec::new(),
         }
     }
 }
@@ -344,7 +379,12 @@ pub(crate) struct LiveState {
 }
 
 impl App {
-    pub(crate) fn new(client: AxonClient, account_filter: Option<Uuid>, config: TuiConfig) -> Self {
+    pub(crate) fn new(
+        client: AxonClient,
+        account_filter: Option<Uuid>,
+        config: TuiConfig,
+        picker: Picker,
+    ) -> Self {
         let config_status = if config.created_default {
             format!("created default config at {}", config.path.display())
         } else {
@@ -373,7 +413,15 @@ impl App {
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
-            redraw_requested: false,
+            image_cache: HashMap::new(),
+            image_cache_order: VecDeque::new(),
+            media_tx: None,
+            media_workers: Arc::new(Semaphore::new(MEDIA_WORKERS)),
+            picker,
+            proto_cache: HashMap::new(),
+            proto_cache_order: VecDeque::new(),
+            sixel_preview_generation: 0,
+            clear_media_preview: false,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
             config_path,
@@ -387,8 +435,108 @@ impl App {
         self.lifecycle_tx = Some(tx);
     }
 
-    pub(crate) fn take_redraw_request(&mut self) -> bool {
-        std::mem::take(&mut self.redraw_requested)
+    /// Wire up the channel the main loop drains for completed image downloads.
+    pub(crate) fn set_media_sender(&mut self, tx: mpsc::Sender<MediaResult>) {
+        self.media_tx = Some(tx);
+    }
+
+    /// Request a background download of `mxc_url` if it is not already cached
+    /// or in flight. Does nothing if the image channel has not been wired up.
+    pub(crate) fn request_image(&mut self, account_id: Uuid, mxc_url: String, is_encrypted: bool) {
+        let key = MediaKey::new(account_id, mxc_url);
+        if self.image_cache.contains_key(&key) {
+            touch_lru(&mut self.image_cache_order, &key);
+            return;
+        }
+        let Some(tx) = self.media_tx.clone() else {
+            return;
+        };
+        if !evict_lru_where(
+            &mut self.image_cache,
+            &mut self.image_cache_order,
+            IMAGE_CACHE_LIMIT,
+            |state| !matches!(state, ImageState::Fetching),
+        ) {
+            return;
+        }
+        self.image_cache.insert(key.clone(), ImageState::Fetching);
+        touch_lru(&mut self.image_cache_order, &key);
+        media::spawn_image_fetch(
+            self.client.clone(),
+            key,
+            is_encrypted,
+            self.media_workers.clone(),
+            tx,
+        );
+    }
+
+    pub(crate) fn request_protocol(&mut self, key: MediaKey, size: Size) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let protocol_key = ProtocolKey {
+            media: key.clone(),
+            size,
+        };
+        if self.proto_cache.contains_key(&protocol_key) {
+            touch_lru(&mut self.proto_cache_order, &protocol_key);
+            return;
+        }
+        let Some(ImageState::Ready(image)) = self.image_cache.get(&key) else {
+            return;
+        };
+        let Some(tx) = self.media_tx.clone() else {
+            return;
+        };
+        let image = Arc::clone(image);
+        if !evict_lru_where(
+            &mut self.proto_cache,
+            &mut self.proto_cache_order,
+            PROTOCOL_CACHE_LIMIT,
+            |state| !matches!(state, ProtocolState::Encoding),
+        ) {
+            return;
+        }
+        self.proto_cache
+            .insert(protocol_key.clone(), ProtocolState::Encoding);
+        touch_lru(&mut self.proto_cache_order, &protocol_key);
+        media::spawn_protocol_encode(
+            self.picker.clone(),
+            image,
+            protocol_key,
+            self.media_workers.clone(),
+            tx,
+        );
+    }
+
+    pub(crate) fn handle_media_result(&mut self, result: MediaResult) {
+        let updated = match result {
+            MediaResult::Image { key, outcome } => {
+                if !matches!(self.image_cache.get(&key), Some(ImageState::Fetching)) {
+                    return;
+                }
+                let state = match outcome {
+                    Ok(image) => ImageState::Ready(image),
+                    Err(error) => ImageState::Failed(error),
+                };
+                self.image_cache.insert(key.clone(), state);
+                touch_lru(&mut self.image_cache_order, &key);
+                true
+            }
+            MediaResult::Protocol { key, outcome } => {
+                if !matches!(self.proto_cache.get(&key), Some(ProtocolState::Encoding)) {
+                    return;
+                }
+                let state = match outcome {
+                    Ok(protocol) => ProtocolState::Ready(protocol),
+                    Err(error) => ProtocolState::Failed(error),
+                };
+                self.proto_cache.insert(key.clone(), state);
+                touch_lru(&mut self.proto_cache_order, &key);
+                true
+            }
+        };
+        let _ = updated;
     }
 
     pub(crate) fn take_edit_config_request(&mut self) -> bool {
@@ -410,7 +558,6 @@ impl App {
                 self.shortcuts = config.shortcuts;
                 self.colors = config.colors;
                 self.display = config.display;
-                self.redraw_requested = true;
                 self.status = Status::Info("config reloaded".to_owned());
             }
             Err(e) => self.status = Status::Info(format!("config reload failed: {e}")),
@@ -643,6 +790,33 @@ impl App {
             .unwrap_or(0);
     }
 
+    pub(crate) fn delete_word_back(&mut self) {
+        self.input.react_command_completion = None;
+        self.input.partial_room_completions = None;
+        self.input.room_command_completion = None;
+        self.input.logout_command_completion = None;
+        self.input.recover_command_completion = None;
+        self.input.delete_command_completion = None;
+        self.input.account_command_completion = None;
+        if self.input.cursor == 0 {
+            return;
+        }
+        let s = &self.input.buffer[..self.input.cursor];
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        let mut i = chars.len();
+        while i > 0 && chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].1.is_whitespace() {
+            i -= 1;
+        }
+        let new_cursor = chars.get(i).map(|(idx, _)| *idx).unwrap_or(0);
+        self.input
+            .buffer
+            .replace_range(new_cursor..self.input.cursor, "");
+        self.input.cursor = new_cursor;
+    }
+
     pub(crate) fn move_cursor_word_left(&mut self) {
         let s = &self.input.buffer[..self.input.cursor];
         let chars: Vec<(usize, char)> = s.char_indices().collect();
@@ -668,86 +842,6 @@ impl App {
         }
         let advance = chars.get(i).map(|(idx, _)| *idx).unwrap_or(s.len());
         self.input.cursor += advance;
-    }
-
-    pub(crate) fn edit_previous(&mut self) {
-        let (target, event_id, body) = {
-            let events = self.selected_events();
-            if events.is_empty() {
-                return;
-            }
-            let current_pos = self
-                .messages
-                .selection
-                .as_deref()
-                .and_then(|id| events.iter().position(|e| e.event_id == id));
-            let target = match current_pos {
-                None => events.len() - 1,
-                Some(0) => return,
-                Some(pos) => pos - 1,
-            };
-            (
-                target,
-                events[target].event_id.clone(),
-                events[target].display_body(),
-            )
-        };
-        self.messages.selection = Some(event_id.clone());
-        self.input.buffer = body;
-        self.move_cursor_to_end();
-        self.mode = Mode::Editing {
-            event_id: event_id.clone(),
-        };
-        self.status = Status::EventAction {
-            debug: format!("editing {} - Esc to cancel", event_id),
-            redacted: "editing message - Esc to cancel",
-        };
-        self.ensure_message_index_visible(target);
-    }
-
-    pub(crate) fn edit_next(&mut self) {
-        let result = {
-            let events = self.selected_events();
-            let current_pos = self
-                .messages
-                .selection
-                .as_deref()
-                .and_then(|id| events.iter().position(|e| e.event_id == id));
-            let Some(pos) = current_pos else {
-                return;
-            };
-            if pos + 1 >= events.len() {
-                None
-            } else {
-                let target = pos + 1;
-                Some((
-                    target,
-                    events[target].event_id.clone(),
-                    events[target].display_body(),
-                ))
-            }
-        };
-        match result {
-            None => {
-                self.input.buffer.clear();
-                self.input.cursor = 0;
-                self.messages.selection = None;
-                self.mode = Mode::Compose;
-            }
-            Some((target, event_id, body)) => {
-                self.messages.selection = Some(event_id.clone());
-                self.input.buffer = body;
-                self.move_cursor_to_end();
-                self.mode = Mode::Editing {
-                    event_id: event_id.clone(),
-                };
-                self.status = Status::EventAction {
-                    debug: format!("editing {} - Esc to cancel", event_id),
-                    redacted: "editing message - Esc to cancel",
-                };
-                self.ensure_message_index_visible(target);
-            }
-        }
     }
 
     pub(crate) async fn handle_command(&mut self, command: Command) {
@@ -822,7 +916,6 @@ impl App {
             Command::Shortcuts => self.open_popup(PopupKind::Shortcuts),
             Command::Refresh => {
                 self.refresh_rooms().await;
-                self.redraw_requested = true;
             }
             Command::EditConfig => {
                 self.edit_config_requested = true;
@@ -858,6 +951,20 @@ impl App {
             self.help_selection = 0;
         }
         self.mode = Mode::Popup(kind);
+    }
+
+    pub(crate) fn open_selected_media_preview(&mut self) {
+        let Some(event) = self.selected_message_event() else {
+            self.status = Status::Info("select an image message first".to_owned());
+            return;
+        };
+        let Some((account_id, mxc_url)) = event.image_mxc() else {
+            self.status = Status::Info("selected message has no image".to_owned());
+            return;
+        };
+        let encrypted = event.image_is_encrypted();
+        self.request_image(account_id, mxc_url, encrypted);
+        self.open_popup(PopupKind::MediaPreview);
     }
 
     fn show_whereami(&mut self) {
@@ -1185,6 +1292,128 @@ pub(crate) fn match_status(match_num: usize, total: usize) -> Status {
     Status::from(format!("match {} of {}", match_num, total))
 }
 
+fn touch_lru<K: Clone + Eq>(order: &mut VecDeque<K>, key: &K) {
+    if let Some(index) = order.iter().position(|candidate| candidate == key) {
+        order.remove(index);
+    }
+    order.push_back(key.clone());
+}
+
+fn evict_lru_where<K, V>(
+    cache: &mut HashMap<K, V>,
+    order: &mut VecDeque<K>,
+    limit: usize,
+    can_evict: impl Fn(&V) -> bool,
+) -> bool
+where
+    K: Clone + Eq + std::hash::Hash,
+{
+    if cache.len() < limit {
+        return true;
+    }
+    let Some(index) = order
+        .iter()
+        .position(|key| cache.get(key).is_some_and(&can_evict))
+    else {
+        return false;
+    };
+    let Some(oldest) = order.remove(index) else {
+        return false;
+    };
+    cache.remove(&oldest);
+    true
+}
+
+/// Apply the EXIF orientation tag to `img` so it displays upright, matching
+/// what other Matrix clients show. `load_from_memory` decodes raw pixels but
+/// ignores EXIF, so without this correction rotated JPEGs appear sideways.
+/// Returns `img` unchanged if EXIF is absent, unreadable, or already upright.
+pub(super) fn apply_exif_orientation(
+    img: image::DynamicImage,
+    bytes: &[u8],
+) -> image::DynamicImage {
+    use std::io::Cursor;
+    let orientation = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()
+        .and_then(|exif| {
+            exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+                .and_then(|f| f.value.get_uint(0))
+        })
+        .unwrap_or(1);
+
+    // EXIF orientation values 1–8; 1 = already upright.
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// Identify an image format from raw magic bytes without relying on the
+/// compiled-in feature set of the `image` crate. Returns a short description
+/// including a hex dump of the first bytes for truly unrecognised content.
+pub(super) fn sniff_format(bytes: &[u8]) -> String {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        return "JPEG".into();
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return "PNG".into();
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return "GIF".into();
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return "WebP".into();
+    }
+    if bytes.starts_with(b"BM") {
+        return "BMP".into();
+    }
+    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+        return "TIFF".into();
+    }
+    // ISO Base Media File Format container: AVIF, HEIC, HEIF, MP4, …
+    if bytes.get(4..8) == Some(b"ftyp") {
+        return match bytes.get(8..12) {
+            Some(b"avif") | Some(b"avis") => "AVIF".into(),
+            Some(b"heic") | Some(b"heis") | Some(b"heim") | Some(b"heix") => "HEIC".into(),
+            Some(b"mif1") | Some(b"msf1") => "HEIF".into(),
+            _ => "ISO BMFF (AVIF/HEIC/MP4/…)".into(),
+        };
+    }
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") || bytes.starts_with(b"<SVG") {
+        return "SVG (not supported)".into();
+    }
+    if bytes.starts_with(b"\x00\x00\x01\x00") {
+        return "ICO".into();
+    }
+    // Not a recognised image format — could be a JSON/HTML error body served
+    // with a 2xx status. Show the first bytes so the cause is obvious.
+    let prefix: String = bytes
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let printable: String = bytes
+        .iter()
+        .take(16)
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+    format!("unknown — first bytes: {prefix}  ({printable})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,6 +1512,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
         app.rooms.rooms = rooms;
         app.show_input_help = false;
@@ -1301,6 +1531,35 @@ mod tests {
             state,
             verified: Some(false),
         }
+    }
+
+    #[test]
+    fn media_cache_keys_are_account_scoped() {
+        let url = "mxc://example.com/media".to_owned();
+
+        assert_ne!(
+            MediaKey::new(Uuid::from_u128(1), url.clone()),
+            MediaKey::new(Uuid::from_u128(2), url)
+        );
+    }
+
+    #[test]
+    fn bounded_cache_never_evicts_in_flight_work() {
+        let mut cache = HashMap::from([("ready".to_owned(), false), ("fetching".to_owned(), true)]);
+        let mut order = VecDeque::from(["ready".to_owned(), "fetching".to_owned()]);
+
+        assert!(evict_lru_where(&mut cache, &mut order, 2, |in_flight| {
+            !*in_flight
+        }));
+        assert!(!cache.contains_key("ready"));
+        assert!(cache.contains_key("fetching"));
+
+        cache.insert("encoding".to_owned(), true);
+        order.push_back("encoding".to_owned());
+        assert!(!evict_lru_where(&mut cache, &mut order, 2, |in_flight| {
+            !*in_flight
+        }));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
@@ -1332,6 +1591,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             Some(filter_id),
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.set_accounts(vec![
@@ -1623,6 +1883,8 @@ mod tests {
             show_state_events: false,
             sender_name: SenderNameStyle::DisplayName,
             input_lines: 1,
+            max_input_lines: None,
+            preview_warmup_count: 5,
             confirm_logout: true,
             search_wrap: true,
             accounts_panel_width: 25,
@@ -1762,7 +2024,7 @@ mod tests {
         };
         let sender_labels = vec!["@me:example.com".to_owned()];
         let own_senders = HashMap::from([(account_id, "@me:example.com".to_owned())]);
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -1770,7 +2032,9 @@ mod tests {
             80,
             &HashMap::new(),
             &own_senders,
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         assert_eq!(lines[0].spans[2].style.fg, Some(colors.own_message_sender));
     }
@@ -1867,17 +2131,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_requests_terminal_redraw_once() {
-        let mut app = app_with_rooms(Vec::new());
-
-        app.handle_command(Command::Refresh).await;
-
-        // /refresh both refreshes rooms (status reflects that) and queues a redraw
-        assert!(app.take_redraw_request());
-        assert!(!app.take_redraw_request());
-    }
-
-    #[tokio::test]
     async fn unsupported_and_unknown_commands_report_distinct_statuses() {
         let mut app = app_with_rooms(Vec::new());
 
@@ -1926,7 +2179,7 @@ mod tests {
             )
         };
         let sender_labels = vec!["@alice:example.com".to_owned()];
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -1934,7 +2187,9 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         assert!(lines[0].spans.iter().any(|span| {
             span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
@@ -1968,7 +2223,7 @@ mod tests {
             )
         };
         let sender_labels = vec!["@alice:example.com".to_owned()];
-        let lines = message_display_lines(
+        let lines = message_layout(
             &[&event],
             sender_labels.as_slice(),
             None,
@@ -1976,7 +2231,9 @@ mod tests {
             80,
             &HashMap::new(),
             &HashMap::new(),
-        );
+            &ImageThumbRows::new(),
+        )
+        .lines;
 
         let text = lines[0]
             .spans
@@ -1985,6 +2242,81 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("fallback"));
         assert!(!text.contains("alert"));
+    }
+
+    #[test]
+    fn image_layout_counts_caption_and_cached_thumbnail_rows_once() {
+        let colors = TuiConfig::test_default().colors;
+        let event = event_with_id(
+            "$image:example.com",
+            "m.room.message",
+            Some("caption"),
+            serde_json::json!({
+                "msgtype": "m.image",
+                "body": "caption",
+                "filename": "photo.jpg",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let key = (event.account_id, "mxc://example.com/photo".to_owned());
+        let layout = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            None,
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(key.clone(), 2)]),
+        );
+
+        assert_eq!(layout.image_body_rows.get(&key), Some(&2));
+        assert_eq!(layout.ranges, vec![0..4]);
+        assert_eq!(layout.lines.len(), 4);
+    }
+
+    #[test]
+    fn message_navigation_uses_rendered_image_ranges() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.page_size = 3;
+        app.messages.scroll = 0;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                event_with_id(
+                    "$image:example.com",
+                    "m.room.message",
+                    Some("caption"),
+                    serde_json::json!({
+                        "msgtype": "m.image",
+                        "body": "caption",
+                        "filename": "photo.jpg",
+                        "url": "mxc://example.com/photo"
+                    }),
+                ),
+                event_with_id(
+                    "$next:example.com",
+                    "m.room.message",
+                    Some("next"),
+                    serde_json::json!({ "msgtype": "m.text", "body": "next" }),
+                ),
+            ],
+        );
+        app.set_message_layout(
+            vec![
+                "$image:example.com".to_owned(),
+                "$next:example.com".to_owned(),
+            ],
+            vec![0..4, 4..5],
+        );
+
+        app.messages.selection = Some("$next:example.com".to_owned());
+        app.ensure_message_index_visible(1);
+
+        assert_eq!(app.messages.scroll, 2);
     }
 
     #[test]
@@ -2406,7 +2738,7 @@ mod tests {
             ],
         );
 
-        // Up from no selection: jump to the last message and enter MessageList mode
+        // Up from no selection: select the last message; switches to MessageList, input untouched
         app.handle_key(KeyEvent::from(KeyCode::Up)).await;
         assert_eq!(app.input.buffer, "");
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));
@@ -2442,6 +2774,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_preview_hotkey_opens_popup_for_selected_image() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.selection = Some("$image:example.com".to_owned());
+        app.mode = Mode::MessageList;
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$image:example.com",
+                "m.room.message",
+                Some("photo.jpg"),
+                serde_json::json!({
+                    "msgtype": "m.image",
+                    "body": "photo.jpg",
+                    "url": "mxc://example.com/photo"
+                }),
+            )],
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v'))).await;
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::MediaPreview));
+    }
+
+    #[tokio::test]
     async fn global_message_navigation_abandons_edit_mode() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
@@ -2469,7 +2827,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
             .await;
 
-        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.mode, Mode::MessageList);
         assert_eq!(app.input.buffer, "");
         assert_eq!(app.input.cursor, 0);
         assert_eq!(app.selected_message_id(), Some("$two:example.com"));
@@ -3631,8 +3989,7 @@ mod tests {
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("PageUp"));
         assert!(text.contains("PageDown"));
-        assert!(text.contains("select previous message"));
-        assert!(text.contains("select next message"));
+        assert!(text.contains("select previous / next message"));
     }
 
     #[test]
@@ -3641,6 +3998,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         assert!(app.show_input_help);
@@ -3653,6 +4011,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.handle_key(KeyEvent::from(KeyCode::Char('/'))).await;
@@ -3667,6 +4026,7 @@ mod tests {
             AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            Picker::halfblocks(),
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))

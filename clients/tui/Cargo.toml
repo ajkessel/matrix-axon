@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 futures-util = { workspace = true, features = ["sink", "std"] }
-reqwest = { workspace = true, features = ["json", "query", "rustls"] }
+reqwest = { workspace = true, features = ["json", "query", "rustls", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -25,6 +25,13 @@ uuid = { workspace = true, features = ["serde"] }
 zeroize = "1"
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+libc = "0.2"
 emojis = "0.8"
 ruma = "0.16"
 ruma-html = "0.8"
+# chafa-dyn (the default) requires libchafa via pkg-config — disable it so the
+# build works without that system dependency. crossterm gives the protocol
+# implementations for Kitty, Sixel, iTerm2, and halfblocks (the safe fallback).
+ratatui-image = { version = "11.0.4", default-features = false, features = ["crossterm"] }
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+kamadak-exif = "0.6"

@@ -38,12 +38,13 @@ cursor_start = "ctrl-a"
 cursor_end = "ctrl-e"
 cursor_left = "left"
 cursor_right = "right"
-edit_previous = "up"
-edit_next = "down"
 message_down = "ctrl-j"
 message_up = "ctrl-k"
 message_page_up = "pageup"
 message_page_down = "pagedown"
+edit_previous = "up"
+edit_next = "down"
+media_preview = "v"
 reply = "r"
 thread = "t"
 edit_message = "e"
@@ -139,6 +140,8 @@ debug = false
 show_state_events = false
 sender_name = "display_name"
 input_lines = 1
+max_input_lines = 10
+# preview_warmup_count = 5
 confirm_logout = true
 search_wrap = true
 
@@ -246,12 +249,13 @@ pub struct Shortcuts {
     pub cursor_end: KeyBinding,
     pub cursor_left: KeyBinding,
     pub cursor_right: KeyBinding,
-    pub edit_previous: KeyBinding,
-    pub edit_next: KeyBinding,
     pub message_down: KeyBinding,
     pub message_up: KeyBinding,
     pub message_page_up: KeyBinding,
     pub message_page_down: KeyBinding,
+    pub edit_previous: KeyBinding,
+    pub edit_next: KeyBinding,
+    pub media_preview: KeyBinding,
     pub reply: KeyBinding,
     pub thread: KeyBinding,
     pub edit_message: KeyBinding,
@@ -293,6 +297,8 @@ pub struct DisplayOptions {
     pub show_state_events: bool,
     pub sender_name: SenderNameStyle,
     pub input_lines: u16,
+    pub max_input_lines: Option<u16>,
+    pub preview_warmup_count: usize,
     pub confirm_logout: bool,
     pub search_wrap: bool,
     pub accounts_panel_width: u16,
@@ -397,12 +403,13 @@ impl RawConfig {
                 cursor_end: "ctrl-e".to_owned(),
                 cursor_left: "left".to_owned(),
                 cursor_right: "right".to_owned(),
-                edit_previous: "up".to_owned(),
-                edit_next: "down".to_owned(),
                 message_down: "ctrl-j".to_owned(),
                 message_up: "ctrl-k".to_owned(),
                 message_page_up: "pageup".to_owned(),
                 message_page_down: "pagedown".to_owned(),
+                edit_previous: "up".to_owned(),
+                edit_next: "down".to_owned(),
+                media_preview: "v".to_owned(),
                 reply: "r".to_owned(),
                 thread: "t".to_owned(),
                 edit_message: "e".to_owned(),
@@ -441,6 +448,8 @@ impl RawConfig {
                 show_state_events: false,
                 sender_name: SenderNameStyle::DisplayName.as_str().to_owned(),
                 input_lines: 1,
+                max_input_lines: Some(10),
+                preview_warmup_count: None,
                 confirm_logout: true,
                 search_wrap: true,
                 accounts_panel_width: None,
@@ -507,6 +516,12 @@ impl RawConfig {
     fn to_toml(&self) -> String {
         let display_extra = {
             let mut s = String::new();
+            if let Some(v) = self.display.max_input_lines {
+                s.push_str(&format!("max_input_lines = {v}\n"));
+            }
+            if let Some(v) = self.display.preview_warmup_count {
+                s.push_str(&format!("preview_warmup_count = {v}\n"));
+            }
             if let Some(w) = self.display.accounts_panel_width {
                 s.push_str(&format!("accounts_panel_width = {w}\n"));
             }
@@ -573,12 +588,13 @@ cursor_start = "{cursor_start}"
 cursor_end = "{cursor_end}"
 cursor_left = "{cursor_left}"
 cursor_right = "{cursor_right}"
-edit_previous = "{edit_previous}"
-edit_next = "{edit_next}"
 message_down = "{message_down}"
 message_up = "{message_up}"
 message_page_up = "{message_page_up}"
 message_page_down = "{message_page_down}"
+edit_previous = "{edit_previous}"
+edit_next = "{edit_next}"
+media_preview = "{media_preview}"
 reply = "{reply}"
 thread = "{thread}"
 edit_message = "{edit_message}"
@@ -689,12 +705,13 @@ search_wrap = {search_wrap}
             cursor_end = self.shortcuts.cursor_end,
             cursor_left = self.shortcuts.cursor_left,
             cursor_right = self.shortcuts.cursor_right,
-            edit_previous = self.shortcuts.edit_previous,
-            edit_next = self.shortcuts.edit_next,
             message_down = self.shortcuts.message_down,
             message_up = self.shortcuts.message_up,
             message_page_up = self.shortcuts.message_page_up,
             message_page_down = self.shortcuts.message_page_down,
+            edit_previous = self.shortcuts.edit_previous,
+            edit_next = self.shortcuts.edit_next,
+            media_preview = self.shortcuts.media_preview,
             reply = self.shortcuts.reply,
             thread = self.shortcuts.thread,
             edit_message = self.shortcuts.edit_message,
@@ -853,6 +870,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "cursor_right"
                 | "edit_previous"
                 | "edit_next"
+                | "media_preview"
                 | "message_down"
                 | "message_up"
                 | "message_page_up"
@@ -897,6 +915,8 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "show_state_events"
                 | "sender_name"
                 | "input_lines"
+                | "max_input_lines"
+                | "preview_warmup_count"
                 | "confirm_logout"
                 | "search_wrap"
                 | "accounts_panel_width"
@@ -936,12 +956,13 @@ struct RawShortcuts {
     cursor_end: String,
     cursor_left: String,
     cursor_right: String,
-    edit_previous: String,
-    edit_next: String,
     message_down: String,
     message_up: String,
     message_page_up: String,
     message_page_down: String,
+    edit_previous: String,
+    edit_next: String,
+    media_preview: String,
     reply: String,
     thread: String,
     edit_message: String,
@@ -982,6 +1003,7 @@ impl RawShortcuts {
         assign_or_flag(&mut self.cursor_right, partial.cursor_right, &mut missing);
         assign_or_flag(&mut self.edit_previous, partial.edit_previous, &mut missing);
         assign_or_flag(&mut self.edit_next, partial.edit_next, &mut missing);
+        assign_or_flag(&mut self.media_preview, partial.media_preview, &mut missing);
         assign_or_flag(&mut self.message_down, partial.message_down, &mut missing);
         assign_or_flag(&mut self.message_up, partial.message_up, &mut missing);
         assign_or_flag(
@@ -1048,8 +1070,6 @@ impl RawShortcuts {
             cursor_end: parse_key_binding("shortcuts.cursor_end", &self.cursor_end)?,
             cursor_left: parse_key_binding("shortcuts.cursor_left", &self.cursor_left)?,
             cursor_right: parse_key_binding("shortcuts.cursor_right", &self.cursor_right)?,
-            edit_previous: parse_key_binding("shortcuts.edit_previous", &self.edit_previous)?,
-            edit_next: parse_key_binding("shortcuts.edit_next", &self.edit_next)?,
             message_down: parse_key_binding("shortcuts.message_down", &self.message_down)?,
             message_up: parse_key_binding("shortcuts.message_up", &self.message_up)?,
             message_page_up: parse_key_binding("shortcuts.message_page_up", &self.message_page_up)?,
@@ -1057,6 +1077,9 @@ impl RawShortcuts {
                 "shortcuts.message_page_down",
                 &self.message_page_down,
             )?,
+            edit_previous: parse_key_binding("shortcuts.edit_previous", &self.edit_previous)?,
+            edit_next: parse_key_binding("shortcuts.edit_next", &self.edit_next)?,
+            media_preview: parse_key_binding("shortcuts.media_preview", &self.media_preview)?,
             reply: parse_key_binding("shortcuts.reply", &self.reply)?,
             thread: parse_key_binding("shortcuts.thread", &self.thread)?,
             edit_message: parse_key_binding("shortcuts.edit_message", &self.edit_message)?,
@@ -1098,14 +1121,15 @@ struct PartialRawShortcuts {
     cursor_end: Option<String>,
     cursor_left: Option<String>,
     cursor_right: Option<String>,
-    #[serde(alias = "history_previous")]
-    edit_previous: Option<String>,
-    #[serde(alias = "history_next")]
-    edit_next: Option<String>,
     message_down: Option<String>,
     message_up: Option<String>,
     message_page_up: Option<String>,
     message_page_down: Option<String>,
+    #[serde(alias = "history_previous")]
+    edit_previous: Option<String>,
+    #[serde(alias = "history_next")]
+    edit_next: Option<String>,
+    media_preview: Option<String>,
     reply: Option<String>,
     thread: Option<String>,
     edit_message: Option<String>,
@@ -1298,6 +1322,8 @@ struct RawDisplayOptions {
     show_state_events: bool,
     sender_name: String,
     input_lines: u16,
+    max_input_lines: Option<u16>,
+    preview_warmup_count: Option<u8>,
     confirm_logout: bool,
     search_wrap: bool,
     accounts_panel_width: Option<u16>,
@@ -1330,6 +1356,16 @@ impl RawDisplayOptions {
         } else {
             missing = true;
         }
+        if let Some(v) = partial.max_input_lines {
+            self.max_input_lines = Some(v.clamp(1, 100));
+        } else {
+            missing = true;
+        }
+        if let Some(v) = partial.preview_warmup_count {
+            self.preview_warmup_count = Some(v);
+        } else {
+            missing = true;
+        }
         if let Some(confirm_logout) = partial.confirm_logout {
             self.confirm_logout = confirm_logout;
         } else {
@@ -1355,6 +1391,8 @@ impl RawDisplayOptions {
             show_state_events: self.show_state_events,
             sender_name: parse_sender_name_style("display.sender_name", &self.sender_name)?,
             input_lines: self.input_lines.clamp(1, 10),
+            max_input_lines: self.max_input_lines.map(|v| v.clamp(1, 100)),
+            preview_warmup_count: self.preview_warmup_count.unwrap_or(5) as usize,
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
             accounts_panel_width: self
@@ -1371,6 +1409,8 @@ struct PartialDisplayOptions {
     show_state_events: Option<bool>,
     sender_name: Option<String>,
     input_lines: Option<u16>,
+    max_input_lines: Option<u16>,
+    preview_warmup_count: Option<u8>,
     confirm_logout: Option<bool>,
     search_wrap: Option<bool>,
     accounts_panel_width: Option<u16>,
@@ -1541,6 +1581,34 @@ mod tests {
         assert!(shortcuts
             .next_room
             .matches(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)));
+        assert!(shortcuts.edit_previous.matches(KeyEvent::from(KeyCode::Up)));
+        assert!(shortcuts.edit_next.matches(KeyEvent::from(KeyCode::Down)));
+        assert!(shortcuts
+            .media_preview
+            .matches(KeyEvent::from(KeyCode::Char('v'))));
+    }
+
+    #[test]
+    fn parses_custom_edit_navigation_and_media_preview_shortcuts() {
+        let raw = RawConfig::load_with_defaults(
+            r#"[shortcuts]
+edit_previous = "ctrl-b"
+edit_next = "ctrl-f"
+media_preview = "i"
+"#,
+        )
+        .expect("custom config parses");
+        let shortcuts = raw.0.shortcuts.into_shortcuts().expect("shortcuts");
+
+        assert!(shortcuts
+            .edit_previous
+            .matches(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)));
+        assert!(shortcuts
+            .edit_next
+            .matches(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+        assert!(shortcuts
+            .media_preview
+            .matches(KeyEvent::from(KeyCode::Char('i'))));
     }
 
     #[test]
@@ -1585,9 +1653,11 @@ bearer_token = "secret-token"
             .matches(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
         let repaired = fs::read_to_string(&path).expect("read repaired config");
         assert!(repaired.contains("cursor_start = \"ctrl-a\""));
-        assert!(repaired.contains("edit_next = \"down\""));
         assert!(repaired.contains("message_down = \"ctrl-j\""));
         assert!(repaired.contains("message_page_up = \"pageup\""));
+        assert!(repaired.contains("edit_previous = \"up\""));
+        assert!(repaired.contains("edit_next = \"down\""));
+        assert!(repaired.contains("media_preview = \"v\""));
         assert!(repaired.contains("thread = \"t\""));
         assert!(repaired.contains("unreact_message = \"shift-u\""));
         assert!(repaired.contains("focus_next = \"f6\""));

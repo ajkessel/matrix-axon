@@ -3,9 +3,12 @@ use std::collections::HashMap;
 use crate::api::{EventDto, LiveFrame, RoomDto};
 use crate::config::{DisplayOptions, SenderNameStyle};
 
+use ratatui_image::Resize;
+
 use super::{
-    collect_reactions, match_status, message_index_at_line, message_line_ranges, next_match_index,
-    selected_message_target_index, App, ConnectionState, LiveFrameAction, RoomKey, Status,
+    collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
+    selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
+    LiveFrameAction, MediaKey, RoomKey, Status, IMAGE_THUMB_ROWS,
 };
 
 impl App {
@@ -191,40 +194,26 @@ impl App {
         self.messages.selection.as_deref()
     }
 
-    pub(super) fn selected_message_event(&self) -> Option<&EventDto> {
+    fn selection_status(&self, index: usize, count: usize) -> String {
+        let mut s = format!("selected message {} of {}", index + 1, count);
+        if self
+            .selected_message_event()
+            .and_then(|e| e.image_mxc())
+            .is_some()
+        {
+            s.push_str(&format!(
+                "  [{}: preview image]",
+                self.shortcuts.media_preview.label()
+            ));
+        }
+        s
+    }
+
+    pub(crate) fn selected_message_event(&self) -> Option<&EventDto> {
         let selected_message = self.messages.selection.as_deref()?;
         self.selected_events()
             .into_iter()
             .find(|event| event.event_id == selected_message)
-    }
-
-    pub(crate) fn select_first_message(&mut self) {
-        let events = self.selected_events();
-        if events.is_empty() {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        }
-        let count = events.len();
-        let event_id = events[0].event_id.clone();
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(0);
-        self.status = Status::from(format!("selected message 1 of {count}"));
-    }
-
-    pub(crate) fn select_last_message(&mut self) {
-        let events = self.selected_events();
-        if events.is_empty() {
-            self.messages.selection = None;
-            self.status = Status::from("no displayed messages".to_owned());
-            return;
-        }
-        let count = events.len();
-        let last = count - 1;
-        let event_id = events[last].event_id.clone();
-        self.messages.selection = Some(event_id);
-        self.ensure_message_index_visible(last);
-        self.status = Status::from(format!("selected message {count} of {count}"));
     }
 
     pub(crate) fn move_selected_message(&mut self, offset: isize) {
@@ -247,7 +236,36 @@ impl App {
         };
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
+        self.status = Status::from(self.selection_status(next, event_count));
+    }
+
+    pub(crate) fn jump_to_first_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let event_id = events[0].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(0);
+        self.status = Status::from(format!("selected message 1 of {}", count));
+    }
+
+    pub(crate) fn jump_to_last_message(&mut self) {
+        let events = self.selected_events();
+        if events.is_empty() {
+            self.messages.selection = None;
+            self.status = Status::from("no displayed messages".to_owned());
+            return;
+        }
+        let count = events.len();
+        let last = count - 1;
+        let event_id = events[last].event_id.clone();
+        self.messages.selection = Some(event_id);
+        self.ensure_message_index_visible(last);
+        self.status = Status::from(format!("selected message {} of {}", count, count));
     }
 
     pub(crate) fn page_selected_message(&mut self, direction: isize) {
@@ -257,15 +275,7 @@ impl App {
             if events.is_empty() {
                 None
             } else {
-                let sender_labels = self.sender_labels(events.as_slice());
-                let reactions = self.selected_reactions();
-                let ranges = message_line_ranges(
-                    events.as_slice(),
-                    sender_labels.as_slice(),
-                    self.messages.width,
-                    &reactions,
-                    &self.colors,
-                );
+                let ranges = self.selected_message_ranges(events.as_slice());
                 let total_lines = ranges
                     .last()
                     .map(|range| range.end)
@@ -307,20 +317,12 @@ impl App {
         };
         self.messages.selection = Some(event_id);
         self.ensure_message_index_visible(next);
-        self.status = Status::from(format!("selected message {} of {}", next + 1, event_count));
+        self.status = Status::from(self.selection_status(next, event_count));
     }
 
-    pub(super) fn ensure_message_index_visible(&mut self, index: usize) {
+    pub(crate) fn ensure_message_index_visible(&mut self, index: usize) {
         let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
-        let reactions = self.selected_reactions();
-        let ranges = message_line_ranges(
-            events.as_slice(),
-            sender_labels.as_slice(),
-            self.messages.width,
-            &reactions,
-            &self.colors,
-        );
+        let ranges = self.selected_message_ranges(events.as_slice());
         let Some(range) = ranges.get(index) else {
             return;
         };
@@ -479,18 +481,65 @@ impl App {
 
     fn selected_display_line_count(&self) -> usize {
         let events = self.selected_events();
-        let sender_labels = self.sender_labels(events.as_slice());
+        self.selected_message_ranges(events.as_slice())
+            .last()
+            .map(|range| range.end)
+            .unwrap_or_default()
+    }
+
+    fn selected_message_ranges(
+        &self,
+        events: &[&crate::api::EventDto],
+    ) -> Vec<std::ops::Range<usize>> {
+        let current_event_ids = events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>();
+        if current_event_ids.iter().copied().eq(self
+            .messages
+            .layout_event_ids
+            .iter()
+            .map(String::as_str))
+        {
+            return self.messages.line_ranges.clone();
+        }
+
+        let sender_labels = self.sender_labels(events);
         let reactions = self.selected_reactions();
-        message_line_ranges(
-            events.as_slice(),
+        // Build per-image heights from the cache so nav lands on lines that
+        // match what draw() renders (draw() uses the same logic).  An empty map
+        // here would force every image to IMAGE_THUMB_ROWS=6, causing a desync
+        // whenever a shorter image has already been decoded.
+        let font_size = self.picker.font_size();
+        let image_thumb_rows: ImageThumbRows = events
+            .iter()
+            .filter_map(|event| {
+                let (account_id, mxc_url) = event.image_mxc()?;
+                let key = MediaKey::new(account_id, mxc_url.clone());
+                let thumb_h = if let Some(ImageState::Ready(img)) = self.image_cache.get(&key) {
+                    let nat = Resize::natural_size(img, font_size);
+                    (nat.height as usize).clamp(1, IMAGE_THUMB_ROWS)
+                } else {
+                    IMAGE_THUMB_ROWS
+                };
+                if thumb_h != IMAGE_THUMB_ROWS {
+                    Some(((account_id, mxc_url), thumb_h))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        message_layout(
+            events,
             sender_labels.as_slice(),
+            self.messages.selection.as_deref(),
+            &self.colors,
             self.messages.width,
             &reactions,
-            &self.colors,
+            &self.live.own_senders,
+            &image_thumb_rows,
         )
-        .last()
-        .map(|range| range.end)
-        .unwrap_or_default()
+        .ranges
     }
 
     pub(crate) fn sender_labels(&self, events: &[&EventDto]) -> Vec<String> {
@@ -503,13 +552,22 @@ impl App {
     pub(crate) fn set_message_viewport(&mut self, page_size: usize, width: usize) {
         self.messages.page_size = page_size.max(1);
         self.messages.width = width.max(1);
-        let line_count = self.selected_display_line_count();
+    }
+
+    pub(crate) fn set_message_layout(
+        &mut self,
+        event_ids: Vec<String>,
+        ranges: Vec<std::ops::Range<usize>>,
+    ) {
+        let line_count = ranges.last().map(|range| range.end).unwrap_or_default();
         let max_scroll = line_count.saturating_sub(self.messages.page_size);
         self.messages.scroll = if self.messages.scroll == usize::MAX {
             max_scroll
         } else {
             self.messages.scroll.min(max_scroll)
         };
+        self.messages.layout_event_ids = event_ids;
+        self.messages.line_ranges = ranges;
     }
 }
 

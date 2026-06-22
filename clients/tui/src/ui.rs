@@ -1,21 +1,60 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
+use ratatui_image::protocol::Protocol;
+use ratatui_image::{FontSize, Image, Resize};
 
 use crate::api::RoomDto;
 use crate::app::{
-    account_localpart, format_time, message_display_lines, AccountSelection, App, Mode, PopupKind,
-    RoomKey, SearchKind,
+    account_localpart, format_time, message_layout, AccountSelection, App, ImageState,
+    ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
+    IMAGE_THUMB_ROWS,
 };
+use ratatui_image::picker::ProtocolType;
+
 use crate::command::HELP_COMMANDS;
 use crate::config::Shortcuts;
+use crate::wrap::{plain_rich_lines, wrap_rich_lines};
+
+/// Percentage of the screen (both axes) used for the media-preview popup.
+/// Kept as a single constant so `preview_target_size` (which determines the
+/// encoded image size) and `render_media_preview` (which draws the border)
+/// always agree — a mismatch would produce a popup whose border doesn't match
+/// the image it encloses.
+const PREVIEW_MAX_PCT: u16 = 88;
 
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
-    let input_box_height = app.display.input_lines + 2; // content lines + top/bottom borders
+    // On the frame immediately after the media-preview popup is closed, emit a
+    // targeted Clear over the region the popup occupied.  Sixel/iTerm2 pixels
+    // are not part of the ratatui cell model, so the cell-diff renderer cannot
+    // erase them; without this explicit clear a ghost image lingers until
+    // something else overwrites those cells.  Halfblocks are ordinary Unicode
+    // characters and are already handled by the normal diff pass.
+    if std::mem::take(&mut app.clear_media_preview)
+        && !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks)
+    {
+        let ghost_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, frame.area());
+        frame.render_widget(Clear, ghost_area);
+    }
+
+    let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
+        let inner_width = frame.area().width.saturating_sub(2) as usize;
+        let content_len = 2 + app.input.buffer.chars().count();
+        let actual_lines = if inner_width > 0 {
+            content_len.div_ceil(inner_width).max(1) as u16
+        } else {
+            1
+        };
+        actual_lines.clamp(app.display.input_lines, max_lines)
+    } else {
+        app.display.input_lines
+    };
+    let input_box_height = effective_input_lines + 2; // content lines + top/bottom borders
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(input_box_height)])
@@ -323,7 +362,28 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .map(|event| app.sender_label(event))
         .collect::<Vec<_>>();
     let reactions = app.selected_reactions();
-    let message_rows = message_display_lines(
+    // Build thumbnail heights from the cache. The shared message layout adds
+    // each image's wrapped label/caption rows and computes all line ranges once.
+    let font_size = app.picker.font_size();
+    let image_thumb_rows: ImageThumbRows = selected_events
+        .iter()
+        .filter_map(|event| {
+            let (account_id, mxc_url) = event.image_mxc()?;
+            let key = MediaKey::new(account_id, mxc_url.clone());
+            let thumb_h = if let Some(ImageState::Ready(img)) = app.image_cache.get(&key) {
+                let nat = Resize::natural_size(img, font_size);
+                (nat.height as usize).clamp(1, IMAGE_THUMB_ROWS)
+            } else {
+                IMAGE_THUMB_ROWS
+            };
+            if thumb_h != IMAGE_THUMB_ROWS {
+                Some(((account_id, mxc_url), thumb_h))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let layout = message_layout(
         selected_events.as_slice(),
         sender_labels.as_slice(),
         app.selected_message_id(),
@@ -331,12 +391,25 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         message_width,
         &reactions,
         &app.live.own_senders,
+        &image_thumb_rows,
     );
-    let message_scroll = app.messages.scroll.min(message_rows.len());
-    let message_lines = message_rows
-        .into_iter()
+    let total_lines = layout
+        .ranges
+        .last()
+        .map(|range| range.end)
+        .unwrap_or_default();
+    let max_scroll = total_lines.saturating_sub(message_page_size);
+    let message_scroll = if app.messages.scroll == usize::MAX {
+        max_scroll
+    } else {
+        app.messages.scroll.min(max_scroll)
+    };
+    let message_lines = layout
+        .lines
+        .iter()
         .skip(message_scroll)
         .take(message_page_size)
+        .cloned()
         .collect::<Vec<_>>();
     let title = app
         .selected_room()
@@ -372,6 +445,76 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .border_style(messages_border),
     );
     frame.render_widget(messages, messages_area);
+
+    // Media cards keep their caption on the normal message row and reserve six
+    // rows immediately below it for the thumbnail. A graphic is rendered only
+    // when that complete reserved region is visible; partial scrolling therefore
+    // cannot paint outside the message's rows or cover adjacent text.
+    let (media_requests, thumb_specs) = {
+        let visible_end = message_scroll.saturating_add(message_page_size);
+        let mut requests = Vec::new();
+        let specs: Vec<(Rect, Size, MediaKey)> = selected_events
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, event)| {
+                let (account_id, mxc_url) = event.image_mxc()?;
+                let range = &layout.ranges[idx];
+                if range.end <= message_scroll || range.start >= visible_end {
+                    return None;
+                }
+                let media = MediaKey::new(account_id, mxc_url.clone());
+                requests.push((media.clone(), event.image_is_encrypted()));
+                let image_key = (account_id, mxc_url);
+                let body_rows = layout.image_body_rows.get(&image_key).copied().unwrap_or(1);
+                let thumb_h = image_thumb_rows
+                    .get(&image_key)
+                    .copied()
+                    .unwrap_or(IMAGE_THUMB_ROWS);
+                let (rect, size) = image_thumbnail_spec(
+                    messages_area,
+                    message_width,
+                    range,
+                    message_scroll,
+                    message_page_size,
+                    thumb_h,
+                    body_rows,
+                )?;
+                Some((rect, size, media))
+            })
+            .collect();
+        (requests, specs)
+    };
+    let layout_event_ids = selected_events
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
+    app.set_message_layout(layout_event_ids, layout.ranges);
+    for (key, encrypted) in &media_requests {
+        app.request_image(key.account_id, key.mxc_url.clone(), *encrypted);
+    }
+    for (rect, size, media) in thumb_specs {
+        app.request_protocol(media.clone(), size);
+        let protocol_key = ProtocolKey { media, size };
+        if let Some(ProtocolState::Ready(protocol)) = app.proto_cache.get(&protocol_key) {
+            frame.render_widget(Image::new(protocol), rect);
+        }
+    }
+    // Pre-warm preview protocols for visible images so pressing 'v' shows the
+    // image immediately rather than waiting for encoding to complete.  We cap
+    // at `preview_warmup_count` (default 5) to bound proto_cache churn: warming
+    // every visible image on every 100 ms tick fills the 32-entry cache with
+    // Encoding entries and can starve thumbnail requests.
+    let warmup_limit = app.display.preview_warmup_count;
+    if warmup_limit > 0 {
+        let preview_screen = frame.area();
+        for (media, _) in media_requests.iter().take(warmup_limit) {
+            if let Some(ImageState::Ready(img)) = app.image_cache.get(media) {
+                if let Some(size) = preview_target_size(img, font_size, preview_screen) {
+                    app.request_protocol(media.clone(), size);
+                }
+            }
+        }
+    }
 
     let (command_line, command_title, mut cursor_col) = match &app.mode {
         Mode::Search(kind, q) => {
@@ -534,9 +677,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
-    frame.render_widget(input, outer[1]);
     if let Some(col) = cursor_col {
-        // col = prefix_len + chars_before_cursor; compute visual row/col for wrapping
         let inner_width = outer[1].width.saturating_sub(2) as usize;
         let (vis_row, vis_col) = if inner_width > 0 && col as usize > inner_width {
             let overflow = col as usize - inner_width;
@@ -544,19 +685,36 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             (0, col as usize)
         };
+        let scroll_row = if vis_row >= effective_input_lines as usize {
+            (vis_row + 1 - effective_input_lines as usize) as u16
+        } else {
+            0
+        };
+        let input = input.scroll((scroll_row, 0));
+        frame.render_widget(input, outer[1]);
         frame.set_cursor_position((
             outer[1].x.saturating_add(1).saturating_add(vis_col as u16),
-            outer[1].y.saturating_add(1).saturating_add(vis_row as u16),
+            outer[1]
+                .y
+                .saturating_add(1)
+                .saturating_add((vis_row as u16).saturating_sub(scroll_row)),
         ));
+    } else {
+        frame.render_widget(input, outer[1]);
     }
 
     if let Mode::Popup(kind) = app.mode {
         let command_response = app.pending_command_response.as_deref().unwrap_or_default();
-        let area = if kind == PopupKind::CommandResponse {
-            command_response_popup_area(command_response, frame.area())
-        } else {
-            centered_rect(72, 80, frame.area())
+        let area = match kind {
+            PopupKind::CommandResponse => {
+                command_response_popup_area(command_response, frame.area())
+            }
+            _ => centered_rect(72, 80, frame.area()),
         };
+        if kind == PopupKind::MediaPreview {
+            render_media_preview(frame, app, frame.area());
+            return;
+        }
         frame.render_widget(Clear, area);
         let page_size = usize::from(area.height.saturating_sub(2)).max(1);
         let (popup_title, lines) = match kind {
@@ -600,6 +758,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     .map(Line::from)
                     .collect(),
             ),
+            PopupKind::MediaPreview => unreachable!("media preview handled above"),
         };
         let max_scroll = lines.len().saturating_sub(page_size);
         app.popup_scroll = app.popup_scroll.min(max_scroll);
@@ -619,6 +778,237 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .wrap(Wrap { trim: false });
         frame.render_widget(popup, area);
     }
+}
+
+fn image_thumbnail_spec(
+    messages_area: Rect,
+    message_width: usize,
+    message_range: &Range<usize>,
+    scroll: usize,
+    page_size: usize,
+    thumb_h: usize,
+    body_rows: usize,
+) -> Option<(Rect, Size)> {
+    let visible_end = scroll.saturating_add(page_size);
+    let thumb_start = message_range.start.saturating_add(body_rows);
+    let thumb_end = thumb_start.saturating_add(thumb_h);
+    if thumb_start < scroll || thumb_end > visible_end {
+        return None;
+    }
+    let body_w = (message_width as u16).saturating_sub(2);
+    if body_w < 4 {
+        return None;
+    }
+    let size = Size::new(body_w, thumb_h as u16);
+    let rect = Rect::new(
+        messages_area.x.saturating_add(3),
+        messages_area
+            .y
+            .saturating_add(1)
+            .saturating_add((thumb_start - scroll) as u16),
+        body_w,
+        thumb_h as u16,
+    );
+    Some((rect, size))
+}
+
+/// Compute the cell dimensions at which an image should be encoded for the
+/// media-preview popup on a screen of the given size.  Returns `None` when the
+/// image has zero natural dimensions (shouldn't happen for a valid decode).
+fn preview_target_size(
+    img: &image::DynamicImage,
+    font_size: FontSize,
+    screen: Rect,
+) -> Option<Size> {
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+    // Subtract the 1-cell border on each side (same as Block::inner).
+    let max_w = max_area.width.saturating_sub(2);
+    let max_h = max_area.height.saturating_sub(2);
+    let nat = Resize::natural_size(img, font_size);
+    if nat.width == 0 || nat.height == 0 {
+        return None;
+    }
+    let scale = (max_w as f32 / nat.width as f32)
+        .min(max_h as f32 / nat.height as f32)
+        .min(1.0);
+    Some(Size::new(
+        ((nat.width as f32 * scale) as u16).max(1),
+        ((nat.height as f32 * scale) as u16).max(1),
+    ))
+}
+
+fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
+    let border_style = Style::default().fg(app.colors.selected_room);
+
+    let selected = app.selected_message_event().and_then(|event| {
+        event.image_mxc().map(|(account_id, mxc_url)| {
+            (
+                MediaKey::new(account_id, mxc_url),
+                event.image_is_encrypted(),
+                event.image_filename(),
+                event.image_caption(),
+            )
+        })
+    });
+
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+
+    let Some((media, encrypted, filename, caption)) = selected else {
+        let block = Block::default()
+            .title("Image Preview  (Esc to close)")
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let inner = block.inner(max_area);
+        frame.render_widget(Clear, max_area);
+        frame.render_widget(block, max_area);
+        frame.render_widget(Paragraph::new("Selected message has no image."), inner);
+        return;
+    };
+
+    let title = filename
+        .as_deref()
+        .map(|n| format!("{n}  (Esc to close)"))
+        .unwrap_or_else(|| "Image Preview  (Esc to close)".to_owned());
+
+    app.request_image(media.account_id, media.mxc_url.clone(), encrypted);
+
+    let font_size = app.picker.font_size();
+    let max_block = Block::default()
+        .title(title.as_str())
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let max_inner = max_block.inner(max_area);
+
+    let target_size = match app.image_cache.get(&media) {
+        Some(ImageState::Ready(img)) => preview_target_size(img, font_size, screen)
+            .unwrap_or_else(|| Size::new(max_inner.width, max_inner.height)),
+        _ => Size::new(max_inner.width, max_inner.height),
+    };
+
+    // Reserve lines below the image for the caption text.
+    let caption_h = caption
+        .as_deref()
+        .map(|c| {
+            let w = (target_size.width as usize).max(1);
+            wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
+        })
+        .unwrap_or(0);
+    let (target_size, caption_h) = fit_preview_caption(target_size, caption_h, max_inner);
+
+    // Compute the popup area from target_size now — before we know whether the
+    // protocol is ready — so the border never jumps when encoding finishes.
+    let content_h = target_size.height.saturating_add(caption_h);
+    let area = if target_size.width < max_inner.width || content_h < max_inner.height {
+        // Add 1-cell border on each side and center with the same helper used
+        // everywhere else, avoiding independent centering arithmetic here.
+        centered_size(target_size.width + 2, content_h + 2, screen)
+    } else {
+        max_area
+    };
+    let block = Block::default()
+        .title(title.as_str())
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    // Split inner into image area (top) and caption area (bottom).
+    let image_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        target_size.height.min(inner.height),
+    );
+    let caption_area = (caption_h > 0 && inner.height > target_size.height).then(|| {
+        Rect::new(
+            inner.x,
+            inner.y + target_size.height,
+            inner.width,
+            caption_h.min(inner.height - target_size.height),
+        )
+    });
+
+    let protocol_key = ProtocolKey {
+        media: media.clone(),
+        size: target_size,
+    };
+    app.request_protocol(media.clone(), target_size);
+
+    match app.image_cache.get(&media) {
+        Some(ImageState::Failed(error)) => {
+            frame.render_widget(
+                Paragraph::new(format!("Image unavailable: {error}")).wrap(Wrap { trim: false }),
+                inner,
+            );
+        }
+        Some(ImageState::Ready(_)) => {
+            match app.proto_cache.get(&protocol_key) {
+                Some(ProtocolState::Ready(protocol)) => {
+                    render_preview_protocol(
+                        frame,
+                        protocol,
+                        image_area,
+                        app.sixel_preview_generation,
+                    );
+                }
+                Some(ProtocolState::Failed(error)) => {
+                    frame.render_widget(
+                        Paragraph::new(format!("Unable to render image: {error}"))
+                            .wrap(Wrap { trim: false }),
+                        image_area,
+                    );
+                }
+                _ => frame.render_widget(Paragraph::new("Preparing image..."), image_area),
+            }
+            if let (Some(cap), Some(crect)) = (caption.as_deref(), caption_area) {
+                frame.render_widget(
+                    Paragraph::new(cap.to_owned())
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .wrap(Wrap { trim: false }),
+                    crect,
+                );
+            }
+        }
+        _ => frame.render_widget(Paragraph::new("Loading image..."), inner),
+    }
+}
+
+fn render_preview_protocol(
+    frame: &mut Frame<'_>,
+    protocol: &Protocol,
+    area: Rect,
+    sixel_generation: u64,
+) {
+    if let Protocol::Sixel(sixel) = protocol {
+        let mut refreshed = sixel.clone();
+        // tmux forwards Sixel but does not retain it when the client display is
+        // refreshed. Vary a harmless trailing SGR sequence so ratatui observes
+        // a changed cell and retransmits the image instead of diffing it away.
+        refreshed.data.push_str(if sixel_generation % 2 == 0 {
+            "\x1b[0m"
+        } else {
+            "\x1b[00m"
+        });
+        frame.render_widget(Image::new(&Protocol::Sixel(refreshed)), area);
+    } else {
+        frame.render_widget(Image::new(protocol), area);
+    }
+}
+
+fn fit_preview_caption(target: Size, caption_h: u16, bounds: Rect) -> (Size, u16) {
+    if caption_h == 0 || bounds.height == 0 {
+        return (target, 0);
+    }
+    let caption_h = caption_h.min(bounds.height.saturating_sub(1));
+    let image_h = target
+        .height
+        .min(bounds.height.saturating_sub(caption_h))
+        .max(1);
+    (
+        Size::new(target.width.min(bounds.width), image_h),
+        caption_h,
+    )
 }
 
 fn mask_login_command(input: &str) -> String {
@@ -862,10 +1252,23 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         env!("GIT_HASH"),
     );
 
+    let graphics_line = {
+        use ratatui_image::picker::ProtocolType;
+        let protocol = match app.picker.protocol_type() {
+            ProtocolType::Halfblocks => "halfblocks",
+            ProtocolType::Sixel => "sixel",
+            ProtocolType::Kitty => "kitty",
+            ProtocolType::Iterm2 => "iterm2",
+        };
+        let FontSize { width, height } = app.picker.font_size();
+        format!("Terminal graphics: {protocol}  (cell {width}x{height}px)")
+    };
+
     let mut lines = vec![
         format!("Axon server: {}", app.client.base_url()),
         auth_line,
         version,
+        graphics_line,
         conn_line,
         "".to_owned(),
         format!("Rooms loaded: {}", app.rooms.rooms.len()),
@@ -922,6 +1325,19 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
     fn kv(key: impl std::fmt::Display, desc: &str) -> String {
         format!("  {:<22}  {}", key, desc)
     }
+    fn kv2(
+        key1: impl std::fmt::Display,
+        key2: impl std::fmt::Display,
+        desc1: &str,
+        desc2: &str,
+    ) -> String {
+        format!(
+            "  {:<22}  {} / {}",
+            format!("{} / {}", key1, key2),
+            desc1,
+            desc2
+        )
+    }
     vec![
         "Focus:".to_owned(),
         kv(
@@ -934,18 +1350,24 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         // ),
         "".to_owned(),
         "Always active:".to_owned(),
-        kv(shortcuts.next_room.label(), "next room"),
-        kv(shortcuts.previous_room.label(), "previous room"),
-        kv(
-            shortcuts.next_account.label(),
-            "next account (when 2+ accounts logged in)",
+        kv2(
+            shortcuts.next_room.label(),
+            shortcuts.previous_room.label(),
+            "next",
+            "previous room",
         ),
-        kv(
+        kv2(
+            shortcuts.next_account.label(),
             shortcuts.previous_account.label(),
+            "next",
             "previous account (when 2+ accounts logged in)",
         ),
-        kv(shortcuts.message_down.label(), "next message"),
-        kv(shortcuts.message_up.label(), "previous message"),
+        kv2(
+            shortcuts.message_down.label(),
+            shortcuts.message_up.label(),
+            "next",
+            "previous message",
+        ),
         kv(shortcuts.quit.label(), "quit"),
         kv(
             shortcuts.toggle_accounts_panel.label(),
@@ -974,17 +1396,18 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             "add / remove a line from the message entry pane (Input focus)",
         ),
         "".to_owned(),
-        "Room list / Message list focus (Up/Down/PageUp/PageDown navigate):".to_owned(),
-        kv(shortcuts.find.label(), "find (search) in focused list"),
-        kv("n", "next search match (no wrap)"),
-        kv("N", "previous search match (no wrap)"),
-        kv("/", "start /command (returns to Input)"),
-        // kv(shortcuts.message_page_up.label(), "page up"),
-        // kv(shortcuts.message_page_down.label(), "page down"),
-        //kv(
-        //    format!("Enter or {}", shortcuts.clear_input.label()),
-        //    "return to Input",
-        //),
+        "Account list / Room list / Message list focus (Up/Down/PageUp/PageDown/Home/End navigate):".to_owned(),
+        "  /            start search".to_owned(),
+        "  n            next search match (no wrap)".to_owned(),
+        "  N            previous search match (no wrap)".to_owned(),
+        format!("  {}   page up", shortcuts.message_page_up.label()),
+        format!("  {}   page down", shortcuts.message_page_down.label()),
+        "  Home         jump to first (room list: first room; message list: oldest loaded message; account list: All)".to_owned(),
+        "  End          jump to last (room list: last room; message list: most recent message; account list: last account)".to_owned(),
+        format!(
+            "  Enter or {}   return to Input",
+            shortcuts.clear_input.label()
+        ),
         "".to_owned(),
         "Message actions (select a message first with Ctrl-J/K or arrow keys):".to_owned(),
         kv(shortcuts.edit_message.label(), "edit message"),
@@ -996,6 +1419,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         kv(
             shortcuts.unreact_message.label(),
             "withdraw one of your reactions",
+        ),
+        kv(
+            shortcuts.media_preview.label(),
+            "open selected image preview",
         ),
         kv(shortcuts.reply.label(), "reply (pending API support)"),
         kv(shortcuts.thread.label(), "thread (pending API support)"),
@@ -1018,12 +1445,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
         //kv(shortcuts.cursor_left.label(), "cursor left"),
         //kv(shortcuts.cursor_right.label(), "cursor right"),
         kv(
-            shortcuts.edit_previous.label(),
-            "select previous message in timeline",
-        ),
-        kv(
-            shortcuts.edit_next.label(),
-            "select next message in timeline",
+            format!(
+                "{} / {}",
+                shortcuts.edit_previous.label(),
+                shortcuts.edit_next.label()
+            ),
+            "select previous / next message",
         ),
     ]
 }
@@ -1146,6 +1573,44 @@ mod tests {
         assert!(text.contains("edit message"));
         assert!(text.contains("react to message"));
         assert!(text.contains("withdraw one of your reactions"));
+        assert!(text.contains("open selected image preview"));
+        assert!(text.contains("Up / Down"));
+        assert!(text.contains("select previous / next message"));
+    }
+
+    #[test]
+    fn thumbnail_geometry_requires_the_full_reserved_region() {
+        let area = Rect::new(10, 5, 50, 12);
+        let range = 2..9;
+
+        let (rect, size) =
+            image_thumbnail_spec(area, 48, &range, 0, 10, 6, 1).expect("fully visible thumbnail");
+
+        assert_eq!(rect, Rect::new(13, 9, 46, 6));
+        assert_eq!(size, Size::new(46, 6));
+        assert!(image_thumbnail_spec(area, 48, &range, 4, 10, 6, 1).is_none());
+        assert!(image_thumbnail_spec(area, 48, &range, 0, 8, 6, 1).is_none());
+    }
+
+    #[test]
+    fn preview_reserves_height_for_caption() {
+        let bounds = Rect::new(0, 0, 80, 20);
+        let (image, caption_h) = fit_preview_caption(Size::new(80, 20), 3, bounds);
+
+        assert_eq!(image, Size::new(80, 17));
+        assert_eq!(caption_h, 3);
+    }
+
+    #[test]
+    fn thumbnail_geometry_is_independent_of_sender_label_width() {
+        let area = Rect::new(0, 0, 30, 10);
+        let range = 0..7;
+
+        let (rect, _) =
+            image_thumbnail_spec(area, 28, &range, 0, 8, 6, 1).expect("visible thumbnail");
+
+        assert_eq!(rect.x, 3);
+        assert_eq!(rect.width, 26);
     }
 
     #[test]
@@ -1165,6 +1630,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         let response =
             "This command response is long enough to wrap beyond the one-line entry box.";
@@ -1187,6 +1653,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         app.show_input_help = false;
         app.status = Status::Info("done".to_owned());
@@ -1207,6 +1674,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         app.show_input_help = false;
         app.input.buffer = "/recover alice".to_owned();
@@ -1279,6 +1747,7 @@ mod tests {
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
             None,
             TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
         );
         let room = RoomDto {
             account_id: Uuid::nil(),

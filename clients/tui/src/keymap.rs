@@ -33,15 +33,15 @@ impl App {
             self.cycle_account(-1);
             self.load_selected_timeline().await;
         } else if self.shortcuts.message_down.matches(key) {
-            // Ctrl+J always navigates messages regardless of focus
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.message_up.matches(key) {
-            // Ctrl+K always navigates messages regardless of focus
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(-1);
+            self.mode = Mode::MessageList;
         } else if self.shortcuts.toggle_accounts_panel.matches(key) && !self.is_mid_command() {
             self.toggle_accounts_panel();
         } else if self.shortcuts.toggle_rooms_panel.matches(key) && !self.is_mid_command() {
@@ -50,7 +50,6 @@ impl App {
             self.toggle_unread_filter();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
             self.refresh_rooms().await;
-            self.redraw_requested = true;
         } else {
             match self.mode.clone() {
                 Mode::Compose => self.handle_compose_key(key).await,
@@ -89,7 +88,15 @@ impl App {
 
     fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
         if self.shortcuts.clear_input.matches(key) {
-            self.mode = Mode::Compose;
+            if kind == PopupKind::MediaPreview {
+                self.mode = Mode::MessageList;
+                // Signal draw() to clear the former popup area.  Sixel/iTerm2
+                // pixels survive ratatui's cell-diff pass and leave a ghost
+                // image unless we explicitly clear the region on close.
+                self.clear_media_preview = true;
+            } else {
+                self.mode = Mode::Compose;
+            }
             self.popup_scroll = 0;
             self.help_selection = 0;
             if kind == PopupKind::CommandResponse {
@@ -234,10 +241,10 @@ impl App {
     }
 
     async fn handle_message_list_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Up {
+        if key.code == KeyCode::Up || self.shortcuts.message_up.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(-1);
-        } else if key.code == KeyCode::Down {
+        } else if key.code == KeyCode::Down || self.shortcuts.message_down.matches(key) {
             self.dismiss_input_help();
             self.move_selected_message(1);
         } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
@@ -248,10 +255,10 @@ impl App {
             self.page_selected_message(1);
         } else if key.code == KeyCode::Home {
             self.dismiss_input_help();
-            self.select_first_message();
+            self.jump_to_first_message();
         } else if key.code == KeyCode::End {
             self.dismiss_input_help();
-            self.select_last_message();
+            self.jump_to_last_message();
         } else if self.shortcuts.find.matches(key) {
             self.mode = Mode::Search(SearchKind::Messages, String::new());
         } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
@@ -284,6 +291,9 @@ impl App {
         } else if self.shortcuts.unreact_message.matches(key) {
             self.dismiss_input_help();
             self.start_unreact_from_selected_message().await;
+        } else if self.shortcuts.media_preview.matches(key) {
+            self.dismiss_input_help();
+            self.open_selected_media_preview();
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_search_status();
             self.mode = Mode::Compose;
@@ -309,9 +319,15 @@ impl App {
         } else if self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(-1);
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.message_page_down.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(1);
+            if self.messages.selection.is_some() {
+                self.mode = Mode::MessageList;
+            }
         } else if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
             if let Some(completions) = self.input.partial_room_completions.as_ref() {
@@ -456,12 +472,6 @@ impl App {
             self.send_edit(&event_id, &input).await;
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_input_and_selection();
-        } else if self.shortcuts.edit_previous.matches(key) {
-            self.dismiss_input_help();
-            self.edit_previous();
-        } else if self.shortcuts.edit_next.matches(key) {
-            self.dismiss_input_help();
-            self.edit_next();
         } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
             self.clear_input_buffer();
         } else if let KeyCode::Char(ch) = key.code {
@@ -569,6 +579,11 @@ impl App {
         } else if self.shortcuts.cursor_right.matches(key) {
             self.dismiss_input_help();
             self.move_cursor_right();
+        } else if key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('w') | KeyCode::Backspace)
+        {
+            self.dismiss_input_help();
+            self.delete_word_back();
         } else if self.shortcuts.backspace.matches(key) {
             self.dismiss_input_help();
             self.backspace();
@@ -673,14 +688,22 @@ impl App {
             };
             self.sync_room_selection_to_account_filter();
             self.load_selected_timeline().await;
+        } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
+            let page = self.accounts.page_size.max(1) as isize;
+            self.cycle_account(-page);
+            self.load_selected_timeline().await;
+        } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
+            let page = self.accounts.page_size.max(1) as isize;
+            self.cycle_account(page);
+            self.load_selected_timeline().await;
         } else if key.code == KeyCode::Home {
             self.accounts.selected = AccountSelection::All;
             self.sync_room_selection_to_account_filter();
             self.load_selected_timeline().await;
         } else if key.code == KeyCode::End {
-            if !self.accounts.accounts.is_empty() {
-                self.accounts.selected =
-                    AccountSelection::Account(self.accounts.accounts.len() - 1);
+            let n = self.accounts.accounts.len();
+            if n > 0 {
+                self.accounts.selected = AccountSelection::Account(n - 1);
                 self.sync_room_selection_to_account_filter();
                 self.load_selected_timeline().await;
             }
