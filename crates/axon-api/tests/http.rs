@@ -126,6 +126,83 @@ async fn insert_message(
     event_id
 }
 
+/// Insert an event carrying an explicit `relates_to` (and sender) — the shape the
+/// M8 aggregation reads resolve over. The text body, if present, is lifted into
+/// `decrypted_body_text` like the live ingestion path. Returns its event_id.
+#[allow(clippy::too_many_arguments)]
+async fn insert_relation(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    sender: &str,
+    ts: i64,
+    event_type: &str,
+    content: Value,
+    relates_to: Value,
+) -> String {
+    let event_id = format!("$rel-{}:localhost", Uuid::new_v4());
+    let body = content
+        .get("body")
+        .and_then(|b| b.as_str())
+        .map(str::to_owned);
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender,
+            origin_ts: ts,
+            event_type,
+            content: Some(content.clone()),
+            raw_event: json!({ "type": event_type, "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: Some(relates_to),
+            decrypted_body_text: body.as_deref(),
+        })
+        .await
+        .expect("insert relation");
+    event_id
+}
+
+/// Redact `target` with an `m.room.redaction` event.
+async fn insert_redaction(store: &Store, account_id: Uuid, room_id: &str, ts: i64, target: &str) {
+    let event_id = format!("$red-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: ts,
+            event_type: "m.room.redaction",
+            content: Some(json!({})),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": target }),
+            megolm_session_id: None,
+            redacts: Some(target),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert redaction");
+}
+
+/// Build the read-API router over `store` with throwaway stubs for the ports the
+/// read endpoints don't touch (sender, lifecycle, verify, trust, media).
+fn read_app(store: Store) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
+    ))
+}
+
 /// Build a router whose lifecycle routes are backed by `lifecycle`, gated by a
 /// [`StubTokenVerifier`] that accepts [`TEST_TOKEN`]. The sender and live bus are
 /// unused by these paths.
@@ -1336,4 +1413,346 @@ async fn verification_bundle_error_maps_to_status() {
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }
+}
+
+/// M8b: the relation-aggregation read endpoints resolve over relations that land
+/// far outside the default timeline window, and the timeline read serves the
+/// collapsed/edited view. Exercises reactions (tally, dedup, `me`, redaction),
+/// the collapsed timeline (edited body in place, no stray edit rows), the edits
+/// trail, replies, and threads + a thread-scoped paginated timeline.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn aggregation_api_end_to_end() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let me_user = format!("@agg-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&me_user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!agg-{}:localhost", Uuid::new_v4());
+
+    // The base message at ts=1000; every relation below lands *far later* (ts 2k–9k)
+    // so a naive client window over the newest page would miss them.
+    let msg = insert_message(&store, account_id, &room_id, 1_000, "hello").await;
+
+    // --- Reactions: 👍 from alice (twice → dedup) + from me; ❤️ from bob; a 👎
+    // from carol that gets redacted (drops from the tally, leaving the rest). ---
+    let react = |sender: &'static str, ts: i64, target: String, key: &'static str| {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        async move {
+            insert_relation(
+                &store,
+                account_id,
+                &room_id,
+                sender,
+                ts,
+                "m.reaction",
+                json!({}),
+                json!({ "rel_type": "m.annotation", "event_id": target, "key": key }),
+            )
+            .await
+        }
+    };
+    react("@alice:localhost", 9_000, msg.clone(), "👍").await;
+    react("@alice:localhost", 9_001, msg.clone(), "👍").await; // duplicate (sender,key)
+    let my_thumb = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        &me_user,
+        9_002,
+        "m.reaction",
+        json!({}),
+        json!({ "rel_type": "m.annotation", "event_id": msg.clone(), "key": "👍" }),
+    )
+    .await;
+    react("@bob:localhost", 9_003, msg.clone(), "❤️").await;
+    let downvote = react("@carol:localhost", 9_004, msg.clone(), "👎").await;
+    insert_redaction(&store, account_id, &room_id, 9_005, &downvote).await;
+
+    let app = read_app(store.clone());
+
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{msg}/reactions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tally = &body["data"];
+    assert_eq!(tally["👍"]["count"], 2, "alice + me, the dup counts once");
+    assert_eq!(tally["👍"]["me"], true);
+    let senders = tally["👍"]["senders"].as_array().expect("senders");
+    assert!(senders.iter().any(|s| s == "@alice:localhost"));
+    assert!(senders.iter().any(|s| s == me_user.as_str()));
+    assert_eq!(tally["❤️"]["count"], 1);
+    assert_eq!(tally["❤️"]["me"], false);
+    assert!(tally.get("👎").is_none(), "redacted reaction drops out");
+    // my_event_ids carries the account user's own reaction event(s) for the key —
+    // the ids a client redacts to unreact — and is empty for keys we didn't send.
+    let mine = tally["👍"]["my_event_ids"]
+        .as_array()
+        .expect("my_event_ids");
+    assert_eq!(mine.len(), 1, "only my own 👍 reaction event");
+    assert_eq!(mine[0], my_thumb.as_str());
+    assert_eq!(
+        tally["❤️"]["my_event_ids"],
+        json!([]),
+        "no own reaction event for a key we didn't send"
+    );
+
+    // An event with no reactions → empty object, not a 404.
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/$nobody:localhost/reactions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"], json!({}));
+
+    // --- Edits: two valid edits by the original sender (latest wins) + one from a
+    // non-sender (ignored by the collapse, but present in the forensic trail). ---
+    let edit = |sender: &'static str, ts: i64, new_body: &'static str| {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        let target = msg.clone();
+        async move {
+            insert_relation(
+                &store,
+                account_id,
+                &room_id,
+                sender,
+                ts,
+                "m.room.message",
+                json!({
+                    "msgtype": "m.text",
+                    "body": format!("* {new_body}"),
+                    "m.new_content": { "msgtype": "m.text", "body": new_body },
+                }),
+                json!({ "rel_type": "m.replace", "event_id": target }),
+            )
+            .await
+        }
+    };
+    edit("@alice:localhost", 2_000, "hello (v2)").await;
+    edit("@alice:localhost", 3_000, "hello (v3)").await; // latest valid edit
+    edit("@mallory:localhost", 4_000, "PWNED").await; // non-sender → not honored
+
+    // Timeline serves the collapsed/edited view: msg's body is the latest edit,
+    // `edited`/`edit_count` are set, and no standalone m.replace rows appear.
+    let (status, page) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = page["data"]["events"].as_array().expect("events");
+    let m = events
+        .iter()
+        .find(|e| e["event_id"] == msg.as_str())
+        .expect("base message present in timeline");
+    assert_eq!(m["body"], "hello (v3)", "non-sender edit must not win");
+    assert_eq!(m["edited"], true);
+    assert_eq!(m["edit_count"], 2, "two valid edits; mallory's is excluded");
+    assert!(
+        events
+            .iter()
+            .all(|e| e["relates_to"]["rel_type"] != "m.replace"),
+        "standalone edit rows must be collapsed out of the timeline"
+    );
+
+    // The forensic edits trail is unfiltered (includes the non-sender edit), oldest
+    // first.
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{msg}/edits"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let edits = body["data"].as_array().expect("edits");
+    assert_eq!(edits.len(), 3, "two valid + one non-sender, all preserved");
+    assert_eq!(edits[0]["body"], "* hello (v2)", "oldest first");
+
+    // --- Replies: a plain reply (no rel_type) is found via nested m.in_reply_to;
+    // thread members (below) must not bleed into it. ---
+    let reply = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        "@bob:localhost",
+        5_000,
+        "m.room.message",
+        json!({ "msgtype": "m.text", "body": "a reply" }),
+        json!({ "m.in_reply_to": { "event_id": msg.clone() } }),
+    )
+    .await;
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/events/{msg}/replies"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let replies = body["data"].as_array().expect("replies");
+    assert_eq!(replies.len(), 1, "only the plain reply, not thread members");
+    assert_eq!(replies[0]["event_id"], reply.as_str());
+    assert_eq!(replies[0]["body"], "a reply");
+
+    // --- Threads: two thread replies rooted at msg → one thread, reply_count 2,
+    // latest is the newest; the thread timeline pages reverse-chronologically. ---
+    let thread = |ts: i64, body: &'static str| {
+        let store = store.clone();
+        let room_id = room_id.clone();
+        let root = msg.clone();
+        async move {
+            insert_relation(
+                &store,
+                account_id,
+                &room_id,
+                "@bob:localhost",
+                ts,
+                "m.room.message",
+                json!({ "msgtype": "m.text", "body": body }),
+                json!({
+                    "rel_type": "m.thread",
+                    "event_id": root,
+                    "m.in_reply_to": { "event_id": root, "is_falling_back": true },
+                }),
+            )
+            .await
+        }
+    };
+    let t1 = thread(6_000, "thread 1").await;
+    let t2 = thread(6_001, "thread 2").await;
+
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/threads"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let threads = body["data"].as_array().expect("threads");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0]["root_event_id"], msg.as_str());
+    assert_eq!(threads[0]["reply_count"], 2);
+    assert_eq!(threads[0]["latest_reply_event_id"], t2.as_str());
+    assert_eq!(threads[0]["latest_reply_ts"], 6_001);
+
+    // Thread-scoped timeline, paginated: page 1 (limit 1) → [t2] + cursor;
+    // page 2 → [t1]; only thread members appear, newest first.
+    let base = format!("/v1/accounts/{account_id}/rooms/{room_id}/threads/{msg}/timeline");
+    let (status, page1) = get(&app, &format!("{base}?limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let evs = page1["data"]["events"].as_array().expect("events");
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["event_id"], t2.as_str());
+    let cursor = page1["data"]["next_cursor"].as_str().expect("next_cursor");
+
+    let (status, page2) = get(&app, &format!("{base}?limit=1&cursor={cursor}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let evs2 = page2["data"]["events"].as_array().expect("events");
+    assert_eq!(evs2.len(), 1);
+    assert_eq!(evs2[0]["event_id"], t1.as_str());
+
+    // An unknown thread root → an empty page, not a 404.
+    let (status, empty) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/threads/$nope:localhost/timeline"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["data"]["events"].as_array().expect("events").len(), 0);
+
+    // A malformed cursor on the thread timeline is a 400, like the room timeline.
+    let (status, err) = get(&app, &format!("{base}?cursor=not-a-cursor")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// Regression for the unreact round-trip after relation aggregation (Adam's M8b
+/// review, finding 1): the collapsed timeline strips raw `m.reaction` rows, so a
+/// client can no longer recover its own reaction event ids by scanning events. It
+/// must instead read them from the aggregated tally's `my_event_ids`. This walks
+/// react → reload the timeline → withdraw (redact the id from `my_event_ids`) →
+/// reload again and confirm the reaction is gone.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unreact_uses_aggregated_reaction_ids_from_timeline() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let me_user = format!("@unreact-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&me_user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!unreact-{}:localhost", Uuid::new_v4());
+
+    let msg = insert_message(&store, account_id, &room_id, 1_000, "hello").await;
+    // I react with 👍; the raw reaction lands far later than the message.
+    let my_reaction = insert_relation(
+        &store,
+        account_id,
+        &room_id,
+        &me_user,
+        9_000,
+        "m.reaction",
+        json!({}),
+        json!({ "rel_type": "m.annotation", "event_id": msg.clone(), "key": "👍" }),
+    )
+    .await;
+
+    let app = read_app(store.clone());
+    let timeline = format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline");
+
+    // Reload the timeline: the raw reaction row is gone, but the aggregated tally
+    // on the message carries my_event_ids — the id a client redacts to unreact.
+    let (status, page) = get(&app, &timeline).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = page["data"]["events"].as_array().expect("events");
+    assert!(
+        !events.iter().any(|e| e["event_id"] == my_reaction.as_str()),
+        "raw m.reaction must not appear in the collapsed timeline"
+    );
+    let m = events
+        .iter()
+        .find(|e| e["event_id"] == msg.as_str())
+        .expect("base message present");
+    assert_eq!(m["reactions"]["👍"]["count"], 1);
+    assert_eq!(m["reactions"]["👍"]["me"], true);
+    let mine = m["reactions"]["👍"]["my_event_ids"]
+        .as_array()
+        .expect("my_event_ids");
+    assert_eq!(mine, &[json!(my_reaction)], "the id to redact to unreact");
+
+    // Withdraw: redact exactly the id the client read from my_event_ids.
+    insert_redaction(&store, account_id, &room_id, 9_001, &my_reaction).await;
+
+    // Reload again: the reaction is gone from the message's tally entirely.
+    let (status, page) = get(&app, &timeline).await;
+    assert_eq!(status, StatusCode::OK);
+    let m = page["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|e| e["event_id"] == msg.as_str())
+        .expect("base message present")
+        .clone();
+    assert!(
+        m["reactions"].is_null() || m["reactions"].get("👍").is_none(),
+        "withdrawn reaction drops from the tally"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
 }

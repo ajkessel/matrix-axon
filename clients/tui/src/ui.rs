@@ -1311,6 +1311,7 @@ mod tests {
                 relates_to: None,
                 redacted: false,
                 redaction_event_id: None,
+                reactions: None,
             }],
         );
 

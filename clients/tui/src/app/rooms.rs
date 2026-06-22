@@ -460,6 +460,7 @@ mod tests {
             relates_to: None,
             redacted: false,
             redaction_event_id: None,
+            reactions: None,
         }
     }
 
@@ -482,6 +483,7 @@ mod tests {
             relates_to: Some(json!({"rel_type": "m.replace", "event_id": target_id})),
             redacted: false,
             redaction_event_id: None,
+            reactions: None,
         }
     }
 
@@ -543,6 +545,7 @@ mod tests {
             relates_to: Some(json!({"rel_type": "m.replace", "event_id": "$orig"})),
             redacted: false,
             redaction_event_id: None,
+            reactions: None,
         };
         // relates_to is set but content has no m.new_content → None
         assert!(event.edit_relation().is_none());

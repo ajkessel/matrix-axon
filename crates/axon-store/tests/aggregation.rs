@@ -441,7 +441,7 @@ async fn reaction_tally_rules() {
         "👍",
     )
     .await;
-    insert_reaction(
+    let my_thumb = insert_reaction(
         &store,
         account_id,
         &room_id,
@@ -478,6 +478,13 @@ async fn reaction_tally_rules() {
     assert!(thumbs.me, "this account reacted, so me=true");
     assert!(thumbs.senders.contains(&"@bob:localhost".to_string()));
     assert!(thumbs.senders.contains(&me_user));
+    // The account's own reaction id survives @bob's duplicates (dedup happens
+    // per (sender, key) before the cap, so one sender can't evict another's data).
+    assert_eq!(
+        thumbs.my_event_ids,
+        vec![my_thumb],
+        "my_event_ids is the account's own reaction id, for unreact"
+    );
 
     common::cleanup_account(&pool, account_id).await;
 }

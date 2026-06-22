@@ -96,9 +96,33 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/rooms/{room_id}/timeline",
             get(routes::rooms::room_timeline),
         )
+        // Relation aggregation reads (M8b): the room's threads and a thread-scoped
+        // timeline, reusing the room timeline's cursor pagination.
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/threads",
+            get(routes::rooms::room_threads),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/threads/{root_id}/timeline",
+            get(routes::rooms::thread_timeline),
+        )
         .route(
             "/v1/accounts/{account_id}/events/{event_id}",
             get(routes::events::get_event),
+        )
+        // Per-event relation aggregations (M8b): reaction tallies, direct replies,
+        // and the forensic edit trail — resolved regardless of pagination.
+        .route(
+            "/v1/accounts/{account_id}/events/{event_id}/reactions",
+            get(routes::events::get_reactions),
+        )
+        .route(
+            "/v1/accounts/{account_id}/events/{event_id}/replies",
+            get(routes::events::get_replies),
+        )
+        .route(
+            "/v1/accounts/{account_id}/events/{event_id}/edits",
+            get(routes::events::get_edits),
         )
         // Per-event verification bundle (M7c): at-decrypt snapshot + live evidence.
         .route(

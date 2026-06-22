@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -475,6 +476,26 @@ pub struct EventDto {
     pub relates_to: Option<Value>,
     pub redacted: bool,
     pub redaction_event_id: Option<String>,
+    /// Server-aggregated per-emoji reaction tally (M8), keyed by reaction key.
+    /// The collapsed timeline strips raw `m.reaction` rows, so reaction badges and
+    /// the ids needed to withdraw a reaction come from here rather than from
+    /// scanning events. `None` on the live `/v1/ws` stream and for events with no
+    /// reactions.
+    #[serde(default)]
+    pub reactions: Option<HashMap<String, ReactionTally>>,
+}
+
+/// One emoji's aggregated tally on an [`EventDto`], mirroring the API's
+/// `ReactionDto`. `my_event_ids` are the account user's own reaction events for
+/// the key — the ids redacted to withdraw the reaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactionTally {
+    pub count: i64,
+    pub me: bool,
+    // `senders` is part of the wire shape but unused by the TUI, so it is left
+    // out here — serde ignores the extra key.
+    #[serde(default)]
+    pub my_event_ids: Vec<String>,
 }
 
 impl EventDto {
@@ -543,19 +564,6 @@ impl EventDto {
             .and_then(|nc| nc.get("body"))
             .and_then(|b| b.as_str())?;
         Some((target, new_body))
-    }
-
-    pub fn reaction_annotation(&self) -> Option<(&str, &str)> {
-        if self.event_type != "m.reaction" {
-            return None;
-        }
-        let relates_to = self.relates_to.as_ref()?;
-        if relates_to.get("rel_type")?.as_str()? != "m.annotation" {
-            return None;
-        }
-        let target = relates_to.get("event_id")?.as_str()?;
-        let key = relates_to.get("key")?.as_str()?;
-        Some((target, key))
     }
 
     pub fn state_key(&self) -> Option<&str> {

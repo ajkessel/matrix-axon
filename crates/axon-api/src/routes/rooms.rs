@@ -7,7 +7,7 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::cursor;
-use crate::dto::{EventDto, RoomDto, TimelinePage};
+use crate::dto::{EventDto, RoomDto, ThreadSummaryDto, TimelinePage};
 use crate::extract::{Path, Query};
 use crate::response::{ApiError, ApiResponse};
 
@@ -86,6 +86,84 @@ pub async fn room_timeline(
 
     let rows = store
         .room_timeline(account_id, &room_id, before, limit)
+        .await?;
+    // A full page implies there may be more; a short page is the end.
+    let next_cursor = (rows.len() as i64 == limit)
+        .then(|| rows.last().map(|r| cursor::encode(r.cursor())))
+        .flatten();
+    let events = rows
+        .into_iter()
+        .map(|r| EventDto::from_row(account_id, r))
+        .collect();
+
+    Ok(ApiResponse::new(TimelinePage {
+        events,
+        next_cursor,
+    }))
+}
+
+/// List the threads in a room (M8): one summary per distinct `m.thread` root,
+/// most-recently-active first, each with its reply count and latest reply. The
+/// root events themselves are read via the single-event endpoint; a thread's
+/// members are paged via [`thread_timeline`]. An unknown `account_id`/`room_id`
+/// (or a room with no threads) yields an empty list (200), not a 404. The list is
+/// hard-capped in the store against a room with a pathological thread count.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/threads",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id"),
+    ),
+    responses(
+        (status = 200, description = "Threads, most-recently-active first", body = ApiResponse<Vec<ThreadSummaryDto>>),
+    ),
+    tag = "rooms",
+)]
+pub async fn room_threads(
+    State(store): State<Store>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+) -> Result<ApiResponse<Vec<ThreadSummaryDto>>, ApiError> {
+    let threads = store.room_threads(account_id, &room_id).await?;
+    Ok(ApiResponse::new(
+        threads.into_iter().map(ThreadSummaryDto::from).collect(),
+    ))
+}
+
+/// Read a thread's timeline (M8): the `m.thread` members whose root is
+/// `root_id`, newest first, with the same cursor pagination as the room
+/// timeline. The thread root itself is not included (fetch it via the
+/// single-event endpoint). Reactions and edits on thread members are aggregated
+/// onto their rows like any other timeline read. An unknown thread yields an
+/// empty page (200); a malformed cursor is a 400.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/threads/{root_id}/timeline",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id"),
+        ("root_id" = String, Path, description = "Matrix event id of the thread root"),
+        TimelineQuery,
+    ),
+    responses(
+        (status = 200, description = "A page of thread events", body = ApiResponse<TimelinePage>),
+        (status = 400, description = "Malformed cursor", body = crate::response::ErrorResponse),
+    ),
+    tag = "rooms",
+)]
+pub async fn thread_timeline(
+    State(store): State<Store>,
+    Path((account_id, room_id, root_id)): Path<(Uuid, String, String)>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<ApiResponse<TimelinePage>, ApiError> {
+    let before = match q.cursor.as_deref() {
+        Some(c) => Some(cursor::decode(c).ok_or_else(|| ApiError::bad_request("invalid cursor"))?),
+        None => None,
+    };
+    let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+
+    let rows = store
+        .thread_timeline(account_id, &room_id, &root_id, before, limit)
         .await?;
     // A full page implies there may be more; a short page is the end.
     let next_cursor = (rows.len() as i64 == limit)

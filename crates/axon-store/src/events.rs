@@ -5,6 +5,8 @@
 //! Matrix timeline event. The operation is idempotent: re-delivering the same
 //! `(account_id, event_id)` is a no-op, so callers need not deduplicate.
 
+use std::sync::LazyLock;
+
 use serde_json::Value;
 use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
@@ -262,16 +264,27 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 ///   original, **unless the target is redacted** — redaction wins (and zeroes
 ///   `edit_count` too).
 /// * `react` — every non-redacted `m.reaction` (`m.annotation`) in the same room
-///   targeting `e`, grouped by `key` into a `{key: {count, senders, me}}` JSON
-///   object; `(sender, key)` is deduplicated via `COUNT(DISTINCT sender)`, and
-///   `me` compares against the account's own `user_id` (the `accounts` join
-///   `ac`). Restricted to the `m.reaction` event type — generic `m.annotation`
-///   aggregation is tracked separately (GH issue #112).
+///   targeting `e`, grouped by `key` into a `{key: {count, senders, me,
+///   my_event_ids}}` JSON object; `(sender, key)` is deduplicated via
+///   `COUNT(DISTINCT sender)`, and `me` compares against the account's own
+///   `user_id` (the `accounts` join `ac`). `my_event_ids` is the account user's
+///   own (undeduplicated) reaction event ids for the key — the ids a client
+///   redacts to withdraw the reaction, since the raw `m.reaction` rows are
+///   stripped from the collapsed timeline. Reactions are first deduplicated to
+///   distinct `(sender, key)` pairs (keeping each pair's lowest `event_id`), then
+///   the oldest `REACTION_AGG_PAIR_CAP` pairs by `(origin_ts, event_id)` are kept
+///   before grouping — so the per-key `count`/`senders`/`my_event_ids` and the
+///   number of keys are all bounded *and* deterministically truncated, and one
+///   sender spamming a reaction can't consume the budget and hide others
+///   (`REACTION_AGG_PAIR_CAP`). Restricted to the `m.reaction` event type —
+///   generic `m.annotation` aggregation is tracked separately (GH #112).
 ///
 /// Callers append their own `WHERE` (binding `account_id` as `$1`) plus ordering
-/// / pagination. Selects exactly the columns [`TimelineRow`] reads.
-const TIMELINE_SELECT: &str =
-    "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
+/// / pagination. Selects exactly the columns [`TimelineRow`] reads. Built once via
+/// [`LazyLock`] so the scan cap is interpolated from a single constant.
+static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
             e.origin_ts, e.event_type, \
             CASE WHEN r.event_id IS NOT NULL THEN NULL \
                  WHEN edit.new_content IS NOT NULL THEN edit.new_content \
@@ -323,32 +336,82 @@ const TIMELINE_SELECT: &str =
          LIMIT 1 \
      ) edit ON TRUE \
      LEFT JOIN LATERAL ( \
-         SELECT jsonb_object_agg(t.key, t.tally) AS reactions \
+         SELECT jsonb_object_agg(grp.key, grp.tally) AS reactions \
          FROM ( \
-             SELECT rx.relates_to->>'key' AS key, \
+             SELECT capped.key AS key, \
                     jsonb_build_object( \
-                        'count', COUNT(DISTINCT rx.sender), \
-                        'senders', jsonb_agg(DISTINCT rx.sender), \
-                        'me', bool_or(rx.sender = ac.user_id) \
+                        'count', COUNT(*), \
+                        'senders', jsonb_agg(capped.sender ORDER BY capped.sender), \
+                        'me', bool_or(capped.is_me), \
+                        'my_event_ids', COALESCE( \
+                            jsonb_agg(capped.event_id ORDER BY capped.event_id) \
+                                FILTER (WHERE capped.is_me), \
+                            '[]'::jsonb) \
                     ) AS tally \
-             FROM events rx \
-             WHERE rx.account_id = e.account_id \
-               AND rx.room_id = e.room_id \
-               AND rx.event_type = 'm.reaction' \
-               AND rx.relates_to->>'rel_type' = 'm.annotation' \
-               AND rx.relates_to->>'event_id' = e.event_id \
-               AND rx.relates_to->>'key' IS NOT NULL \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM events rr \
-                   WHERE rr.account_id = rx.account_id \
-                     AND rr.event_type = 'm.room.redaction' \
-                     AND rr.redacts = rx.event_id \
-               ) \
-             GROUP BY rx.relates_to->>'key' \
-         ) t \
+             FROM ( \
+                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me \
+                 FROM ( \
+                     SELECT DISTINCT ON (rx.sender, rx.relates_to->>'key') \
+                            rx.relates_to->>'key' AS key, \
+                            rx.sender               AS sender, \
+                            rx.event_id             AS event_id, \
+                            (rx.sender = ac.user_id) AS is_me, \
+                            rx.origin_ts            AS origin_ts \
+                     FROM events rx \
+                     WHERE rx.account_id = e.account_id \
+                       AND rx.room_id = e.room_id \
+                       AND rx.event_type = 'm.reaction' \
+                       AND rx.relates_to->>'rel_type' = 'm.annotation' \
+                       AND rx.relates_to->>'event_id' = e.event_id \
+                       AND rx.relates_to->>'key' IS NOT NULL \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM events rr \
+                           WHERE rr.account_id = rx.account_id \
+                             AND rr.event_type = 'm.room.redaction' \
+                             AND rr.redacts = rx.event_id \
+                       ) \
+                     ORDER BY rx.sender, rx.relates_to->>'key', rx.event_id \
+                 ) pair \
+                 ORDER BY pair.origin_ts, pair.event_id \
+                 LIMIT {REACTION_AGG_PAIR_CAP} \
+             ) capped \
+             GROUP BY capped.key \
+         ) grp \
      ) react ON TRUE \
      LEFT JOIN event_sender_device_keys sd \
-         ON sd.account_id = e.account_id AND sd.event_id = e.event_id";
+         ON sd.account_id = e.account_id AND sd.event_id = e.event_id"
+    )
+});
+
+/// Hard cap on the number of rows any single non-paginated relation aggregation
+/// read (`event_edits`, `event_reactions`, `event_replies`, `room_threads`)
+/// returns. These endpoints answer in one shot rather than via a cursor, so the
+/// cap bounds both the database aggregation and the response body against a
+/// pathological or hostile room — a message with an absurd number of edits or a
+/// room with an unbounded thread/reply count can't force an unbounded allocation.
+/// Well above anything a personal account realistically produces; the paginated
+/// timeline reads remain the path for genuinely large result sets.
+const RELATION_READ_CAP: i64 = 1000;
+
+/// Hard cap on the number of distinct `(sender, key)` reaction pairs aggregated
+/// into a single event's tally — applied in the shared [`TIMELINE_SELECT`] on-row
+/// reactions map and in [`Store::event_reactions`]. Unlike [`RELATION_READ_CAP`]
+/// (which bounds *output rows*), this bounds what the tally aggregates over, so
+/// the per-key `count`, the `senders` and `my_event_ids` arrays, and the number of
+/// distinct keys are each bounded — a hostile room can't force unbounded memory or
+/// response size on every timeline/get-event/reply/thread row carrying the
+/// message.
+///
+/// The cap is applied **after** deduplicating `(sender, key)` and with a
+/// deterministic order, not as a raw `LIMIT` over un-grouped reaction rows. That
+/// matters for two reasons: (1) a single sender spamming the same reaction can no
+/// longer consume the whole budget and hide other senders' reactions or the
+/// account's own `my_event_ids` — duplicates collapse to one pair before the cap;
+/// and (2) truncation is stable across identical reads (oldest pairs by
+/// `(origin_ts, event_id)` win) rather than an arbitrary subset. Far above any
+/// real message; a message exceeding it reports its oldest `REACTION_AGG_PAIR_CAP`
+/// distinct reactions deterministically.
+const REACTION_AGG_PAIR_CAP: i64 = 1000;
 
 impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
@@ -584,10 +647,11 @@ impl Store {
         // nor collapsed, so they must stay visible as raw rows. `COALESCE(...,'')`
         // keeps NULL-`rel_type` rows (ordinary messages, replies) visible.
         let mut sql = format!(
-            "{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2 \
+            "{} WHERE e.account_id = $1 AND e.room_id = $2 \
              AND COALESCE(e.relates_to->>'rel_type', '') <> 'm.replace' \
              AND NOT (COALESCE(e.relates_to->>'rel_type', '') = 'm.annotation' \
-                      AND e.event_type = 'm.reaction')"
+                      AND e.event_type = 'm.reaction')",
+            TIMELINE_SELECT.as_str()
         );
         if before.is_some() {
             sql.push_str(" AND (e.origin_ts, e.id) < ($3, $4)");
@@ -616,7 +680,10 @@ impl Store {
         account_id: Uuid,
         event_id: &str,
     ) -> Result<Option<TimelineRow>, StoreError> {
-        let sql = format!("{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.event_id = $2");
+        let sql = format!(
+            "{} WHERE e.account_id = $1 AND e.event_id = $2",
+            TIMELINE_SELECT.as_str()
+        );
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
             .bind(event_id)
@@ -668,14 +735,16 @@ impl Store {
         event_id: &str,
     ) -> Result<Vec<TimelineRow>, StoreError> {
         let sql = format!(
-            "{TIMELINE_SELECT} WHERE e.account_id = $1 \
+            "{} WHERE e.account_id = $1 \
                AND e.relates_to->>'rel_type' = 'm.replace' \
                AND e.relates_to->>'event_id' = $2 \
                AND e.room_id = ( \
                    SELECT t.room_id FROM events t \
                    WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
                ) \
-             ORDER BY e.origin_ts ASC, e.id ASC"
+             ORDER BY e.origin_ts ASC, e.id ASC \
+             LIMIT {RELATION_READ_CAP}",
+            TIMELINE_SELECT.as_str()
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
@@ -699,35 +768,61 @@ impl Store {
         account_id: Uuid,
         event_id: &str,
     ) -> Result<Vec<ReactionTally>, StoreError> {
-        let rows = sqlx_core::query_as::query_as::<Postgres, ReactionTally>(
-            "SELECT rx.relates_to->>'key'        AS key, \
-                    COUNT(DISTINCT rx.sender)     AS count, \
-                    array_agg(DISTINCT rx.sender) AS senders, \
-                    bool_or(rx.sender = ac.user_id) AS me \
-             FROM events rx \
-             JOIN accounts ac ON ac.account_id = rx.account_id \
-             WHERE rx.account_id = $1 \
-               AND rx.event_type = 'm.reaction' \
-               AND rx.relates_to->>'rel_type' = 'm.annotation' \
-               AND rx.relates_to->>'event_id' = $2 \
-               AND rx.relates_to->>'key' IS NOT NULL \
-               AND rx.room_id = ( \
-                   SELECT t.room_id FROM events t \
-                   WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
-               ) \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM events rr \
-                   WHERE rr.account_id = rx.account_id \
-                     AND rr.event_type = 'm.room.redaction' \
-                     AND rr.redacts = rx.event_id \
-               ) \
-             GROUP BY rx.relates_to->>'key' \
-             ORDER BY count DESC, key ASC",
-        )
-        .bind(account_id)
-        .bind(event_id)
-        .fetch_all(&self.pool)
-        .await?;
+        // Deduplicate to distinct `(sender, key)` pairs (keeping each pair's lowest
+        // `event_id`), then keep the oldest `REACTION_AGG_PAIR_CAP` pairs before
+        // grouping (see the constant). Bounding the deduplicated, deterministically
+        // ordered pair set caps every per-key array (`senders`, `my_event_ids`),
+        // the distinct-sender `count`, and the number of keys — and one sender
+        // spamming a reaction can't consume the budget or hide other senders.
+        let sql = format!(
+            "SELECT capped.key                       AS key, \
+                    COUNT(*)                          AS count, \
+                    array_agg(capped.sender ORDER BY capped.sender) AS senders, \
+                    COALESCE( \
+                        array_agg(capped.event_id ORDER BY capped.event_id) \
+                            FILTER (WHERE capped.is_me), \
+                        ARRAY[]::text[] \
+                    ) AS my_event_ids, \
+                    bool_or(capped.is_me) AS me \
+             FROM ( \
+                 SELECT pair.key, pair.sender, pair.event_id, pair.is_me \
+                 FROM ( \
+                     SELECT DISTINCT ON (rx.sender, rx.relates_to->>'key') \
+                            rx.relates_to->>'key' AS key, \
+                            rx.sender               AS sender, \
+                            rx.event_id             AS event_id, \
+                            (rx.sender = ac.user_id) AS is_me, \
+                            rx.origin_ts            AS origin_ts \
+                     FROM events rx \
+                     JOIN accounts ac ON ac.account_id = rx.account_id \
+                     WHERE rx.account_id = $1 \
+                       AND rx.event_type = 'm.reaction' \
+                       AND rx.relates_to->>'rel_type' = 'm.annotation' \
+                       AND rx.relates_to->>'event_id' = $2 \
+                       AND rx.relates_to->>'key' IS NOT NULL \
+                       AND rx.room_id = ( \
+                           SELECT t.room_id FROM events t \
+                           WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
+                       ) \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM events rr \
+                           WHERE rr.account_id = rx.account_id \
+                             AND rr.event_type = 'm.room.redaction' \
+                             AND rr.redacts = rx.event_id \
+                       ) \
+                     ORDER BY rx.sender, rx.relates_to->>'key', rx.event_id \
+                 ) pair \
+                 ORDER BY pair.origin_ts, pair.event_id \
+                 LIMIT {REACTION_AGG_PAIR_CAP} \
+             ) capped \
+             GROUP BY capped.key \
+             ORDER BY count DESC, key ASC"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, ReactionTally>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -743,14 +838,16 @@ impl Store {
         event_id: &str,
     ) -> Result<Vec<TimelineRow>, StoreError> {
         let sql = format!(
-            "{TIMELINE_SELECT} WHERE e.account_id = $1 \
+            "{} WHERE e.account_id = $1 \
                AND e.relates_to->>'rel_type' IS NULL \
                AND e.relates_to->'m.in_reply_to'->>'event_id' = $2 \
                AND e.room_id = ( \
                    SELECT t.room_id FROM events t \
                    WHERE t.account_id = $1 AND t.event_id = $2 LIMIT 1 \
                ) \
-             ORDER BY e.origin_ts ASC, e.id ASC"
+             ORDER BY e.origin_ts ASC, e.id ASC \
+             LIMIT {RELATION_READ_CAP}",
+            TIMELINE_SELECT.as_str()
         );
         let rows = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
@@ -772,7 +869,7 @@ impl Store {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<Vec<ThreadSummary>, StoreError> {
-        let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(
+        let sql = format!(
             "SELECT th.root_event_id, th.reply_count, \
                     th.latest_reply_event_id, th.latest_reply_ts \
              FROM ( \
@@ -786,12 +883,14 @@ impl Store {
                    AND relates_to->>'rel_type' = 'm.thread' \
                  GROUP BY relates_to->>'event_id' \
              ) th \
-             ORDER BY th.latest_reply_ts DESC, th.root_event_id",
-        )
-        .bind(account_id)
-        .bind(room_id)
-        .fetch_all(&self.pool)
-        .await?;
+             ORDER BY th.latest_reply_ts DESC, th.root_event_id \
+             LIMIT {RELATION_READ_CAP}"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, ThreadSummary>(&sql)
+            .bind(account_id)
+            .bind(room_id)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -809,9 +908,10 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<TimelineRow>, StoreError> {
         let mut sql = format!(
-            "{TIMELINE_SELECT} WHERE e.account_id = $1 AND e.room_id = $2 \
+            "{} WHERE e.account_id = $1 AND e.room_id = $2 \
                AND e.relates_to->>'rel_type' = 'm.thread' \
-               AND e.relates_to->>'event_id' = $3"
+               AND e.relates_to->>'event_id' = $3",
+            TIMELINE_SELECT.as_str()
         );
         if before.is_some() {
             sql.push_str(" AND (e.origin_ts, e.id) < ($4, $5)");
@@ -842,7 +942,7 @@ impl Store {
         mxc_url: &str,
     ) -> Result<Option<TimelineRow>, StoreError> {
         let sql = format!(
-            "{TIMELINE_SELECT} \
+            "{} \
              WHERE e.account_id = $1 \
                AND e.id = ( \
                    SELECT id FROM ( \
@@ -860,7 +960,8 @@ impl Store {
                          AND content->'info'->'thumbnail_file'->>'url' = $2 \
                    ) media_matches \
                    LIMIT 1 \
-               )"
+               )",
+            TIMELINE_SELECT.as_str()
         );
         let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
             .bind(account_id)
@@ -883,6 +984,11 @@ pub struct ReactionTally {
     pub senders: Vec<String>,
     /// Whether this Axon account's own user is among the senders.
     pub me: bool,
+    /// The account user's own (undeduplicated) reaction event ids for this key —
+    /// the events a client redacts to withdraw the reaction. Empty when `me` is
+    /// false. Carried because the raw `m.reaction` rows are stripped from the
+    /// collapsed timeline, so a client can no longer recover them itself.
+    pub my_event_ids: Vec<String>,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for ReactionTally {
@@ -892,6 +998,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for ReactionTally {
             count: row.try_get("count")?,
             senders: row.try_get("senders")?,
             me: row.try_get("me")?,
+            my_event_ids: row.try_get("my_event_ids")?,
         })
     }
 }

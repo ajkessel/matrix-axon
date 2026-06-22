@@ -324,6 +324,186 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/events/{event_id}/edits": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "The forensic edit history of an event (M8): every `m.replace` targeting it,\noldest first, *unfiltered* by the resolution rules — including edits from a\nnon-sender or an incompatible `msgtype` — for clients that want to show or\naudit the edit trail. The collapsed timeline (and `EventDto.edited` /\n`edit_count`) is the resolved view; this is the raw provenance. An event with\nno edits (or an unknown event) yields an empty array, not a 404. The result is\nhard-capped in the store against a pathological edit count.",
+        "operationId": "get_edits",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The forensic edit trail, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_EventDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/events/{event_id}/reactions": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Per-emoji reaction tally for an event (M8), resolved over *every* reaction on\ndisk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. The number of distinct keys returned is\nhard-capped in the store against a pathological room.",
+        "operationId": "get_reactions",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-emoji reaction tallies, keyed by emoji",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_BTreeMap_String_ReactionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/events/{event_id}/replies": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Direct replies to an event (M8): events whose nested\n`m.relates_to.m.in_reply_to.event_id` is this event and which carry no\n`rel_type` (a plain reply, not a thread member). Oldest first;\nredaction-masked. An event with no replies (or an unknown event) yields an\nempty array, not a 404 — empty is the natural answer. The result is\nhard-capped in the store against a pathological room.",
+        "operationId": "get_replies",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "description": "Matrix event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct replies, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_EventDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/events/{event_id}/verification": {
       "get": {
         "tags": [
@@ -1031,6 +1211,164 @@
           },
           "503": {
             "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/threads": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "List the threads in a room (M8): one summary per distinct `m.thread` root,\nmost-recently-active first, each with its reply count and latest reply. The\nroot events themselves are read via the single-event endpoint; a thread's\nmembers are paged via [`thread_timeline`]. An unknown `account_id`/`room_id`\n(or a room with no threads) yields an empty list (200), not a 404. The list is\nhard-capped in the store against a room with a pathological thread count.",
+        "operationId": "room_threads",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Threads, most-recently-active first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_ThreadSummaryDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/threads/{root_id}/timeline": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "Read a thread's timeline (M8): the `m.thread` members whose root is\n`root_id`, newest first, with the same cursor pagination as the room\ntimeline. The thread root itself is not included (fetch it via the\nsingle-event endpoint). Reactions and edits on thread members are aggregated\nonto their rows like any other timeline read. An unknown thread yields an\nempty page (200); a malformed cursor is a 400.",
+        "operationId": "thread_timeline",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "root_id",
+            "in": "path",
+            "description": "Matrix event id of the thread root",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page's `next_cursor`; omit for the newest page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of thread events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_TimelinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1790,6 +2128,55 @@
           }
         }
       },
+      "ApiResponse_BTreeMap_String_ReactionDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over every reaction targeting\nthe event regardless of pagination (issue #22 Option A).",
+              "required": [
+                "count",
+                "me",
+                "senders"
+              ],
+              "properties": {
+                "count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Distinct senders who reacted with this key (a `(sender, key)` duplicate\ncounts once)."
+                },
+                "me": {
+                  "type": "boolean",
+                  "description": "Whether this Axon account's own user is among the senders."
+                },
+                "my_event_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The account user's own reaction event ids for this key — the events a\nclient redacts (`DELETE …/rooms/{room_id}/events/{event_id}`) to withdraw\nthe reaction. Empty unless `me` is true. Exposed because the collapsed\ntimeline strips the raw `m.reaction` rows, so a client can no longer\nrecover these ids by scanning events itself."
+                },
+                "senders": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The distinct Matrix user ids that reacted with this key."
+                }
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ApiResponse_EventDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -1807,7 +2194,9 @@
               "sender",
               "origin_ts",
               "type",
-              "redacted"
+              "redacted",
+              "edited",
+              "edit_count"
             ],
             "properties": {
               "account_id": {
@@ -1829,14 +2218,44 @@
                 ],
                 "description": "Decrypted `content` JSON. `null` for UTDs and redacted events."
               },
+              "edit_count": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Number of valid edits targeting this event (M8); `0` when unedited."
+              },
+              "edited": {
+                "type": "boolean",
+                "description": "Relation aggregation (M8): `true` when at least one valid `m.replace` edit\ntargets this event, in which case `content`/`body` above are already the\nlatest edited values (the standalone edit events are stripped from the\ntimeline). Always `false` on the `/v1/ws` live stream, whose frames are raw\npre-aggregation events — the read API is the authoritative resolved view."
+              },
               "event_id": {
                 "type": "string",
                 "description": "Matrix event ID."
+              },
+              "latest_edit_ts": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "`origin_server_ts` of the winning (latest) edit in milliseconds (M8), or\n`null` when unedited or redacted."
               },
               "origin_ts": {
                 "type": "integer",
                 "format": "int64",
                 "description": "`origin_server_ts` in milliseconds."
+              },
+              "reactions": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ReactionDto"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
               },
               "redacted": {
                 "type": "boolean",
@@ -2088,6 +2507,137 @@
           }
         }
       },
+      "ApiResponse_Vec_EventDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "A single timeline event — used both as a timeline element and as the\nsingle-event payload. `content`/`body` are `null` for UTDs and for redacted\nevents; `redacted` is the convenience flag derived from `redaction_event_id`.",
+              "required": [
+                "account_id",
+                "event_id",
+                "room_id",
+                "sender",
+                "origin_ts",
+                "type",
+                "redacted",
+                "edited",
+                "edit_count"
+              ],
+              "properties": {
+                "account_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Axon account this event belongs to."
+                },
+                "body": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Plaintext body. `null` when absent or masked by redaction."
+                },
+                "content": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Decrypted `content` JSON. `null` for UTDs and redacted events."
+                },
+                "edit_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Number of valid edits targeting this event (M8); `0` when unedited."
+                },
+                "edited": {
+                  "type": "boolean",
+                  "description": "Relation aggregation (M8): `true` when at least one valid `m.replace` edit\ntargets this event, in which case `content`/`body` above are already the\nlatest edited values (the standalone edit events are stripped from the\ntimeline). Always `false` on the `/v1/ws` live stream, whose frames are raw\npre-aggregation events — the read API is the authoritative resolved view."
+                },
+                "event_id": {
+                  "type": "string",
+                  "description": "Matrix event ID."
+                },
+                "latest_edit_ts": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "`origin_server_ts` of the winning (latest) edit in milliseconds (M8), or\n`null` when unedited or redacted."
+                },
+                "origin_ts": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "`origin_server_ts` in milliseconds."
+                },
+                "reactions": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/ReactionDto"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  }
+                },
+                "redacted": {
+                  "type": "boolean",
+                  "description": "`true` when this event has been redacted (content/body masked)."
+                },
+                "redaction_event_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The `event_id` of the redaction that masked this event, if redacted."
+                },
+                "relates_to": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "The event's `m.relates_to` object, if any."
+                },
+                "room_id": {
+                  "type": "string",
+                  "description": "Matrix room ID."
+                },
+                "sender": {
+                  "type": "string",
+                  "description": "Matrix user ID of the sender."
+                },
+                "sender_trust": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Sender-device trust snapshot at decrypt time (M7c): `verified`,\n`unverified`, `unknown`, or `verification_violation`. `null` for\nunencrypted events and rows with no recorded verdict (e.g. a UTD not yet\nre-decrypted). This is the at-receipt snapshot; the sender's *current*\ntrust is available from the per-event verification bundle."
+                },
+                "state_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Matrix state key for state events. `null` for message-like events."
+                },
+                "type": {
+                  "type": "string",
+                  "description": "Matrix event type, e.g. `m.room.message`."
+                }
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_Vec_FlowDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -2223,6 +2773,52 @@
                     "null"
                   ],
                   "description": "Room topic (`m.room.topic`), if set."
+                }
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_Vec_ThreadSummaryDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One thread in the `GET …/rooms/{room_id}/threads` response (M8): a thread root\nwith its reply count and latest reply. The root event itself is fetched via\nthe single-event endpoint; the members are paged via the thread timeline.",
+              "required": [
+                "root_event_id",
+                "reply_count"
+              ],
+              "properties": {
+                "latest_reply_event_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The `event_id` of the most recent thread member, or `null` if none."
+                },
+                "latest_reply_ts": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64",
+                  "description": "`origin_server_ts` of the most recent member in milliseconds, or `null`."
+                },
+                "reply_count": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Number of thread members, counting redacted ones for structure."
+                },
+                "root_event_id": {
+                  "type": "string",
+                  "description": "The `event_id` of the thread root (the event the members relate to)."
                 }
               }
             }
@@ -2411,7 +3007,9 @@
           "sender",
           "origin_ts",
           "type",
-          "redacted"
+          "redacted",
+          "edited",
+          "edit_count"
         ],
         "properties": {
           "account_id": {
@@ -2433,14 +3031,44 @@
             ],
             "description": "Decrypted `content` JSON. `null` for UTDs and redacted events."
           },
+          "edit_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of valid edits targeting this event (M8); `0` when unedited."
+          },
+          "edited": {
+            "type": "boolean",
+            "description": "Relation aggregation (M8): `true` when at least one valid `m.replace` edit\ntargets this event, in which case `content`/`body` above are already the\nlatest edited values (the standalone edit events are stripped from the\ntimeline). Always `false` on the `/v1/ws` live stream, whose frames are raw\npre-aggregation events — the read API is the authoritative resolved view."
+          },
           "event_id": {
             "type": "string",
             "description": "Matrix event ID."
+          },
+          "latest_edit_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`origin_server_ts` of the winning (latest) edit in milliseconds (M8), or\n`null` when unedited or redacted."
           },
           "origin_ts": {
             "type": "integer",
             "format": "int64",
             "description": "`origin_server_ts` in milliseconds."
+          },
+          "reactions": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ReactionDto"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "redacted": {
             "type": "boolean",
@@ -2590,6 +3218,40 @@
           }
         }
       },
+      "ReactionDto": {
+        "type": "object",
+        "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over every reaction targeting\nthe event regardless of pagination (issue #22 Option A).",
+        "required": [
+          "count",
+          "me",
+          "senders"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct senders who reacted with this key (a `(sender, key)` duplicate\ncounts once)."
+          },
+          "me": {
+            "type": "boolean",
+            "description": "Whether this Axon account's own user is among the senders."
+          },
+          "my_event_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The account user's own reaction event ids for this key — the events a\nclient redacts (`DELETE …/rooms/{room_id}/events/{event_id}`) to withdraw\nthe reaction. Empty unless `me` is true. Exposed because the collapsed\ntimeline strips the raw `m.reaction` rows, so a client can no longer\nrecover these ids by scanning events itself."
+          },
+          "senders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The distinct Matrix user ids that reacted with this key."
+          }
+        }
+      },
       "RecoverRequest": {
         "type": "object",
         "description": "Request body for recovery-key key acquisition\n(`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery\nkey imports the account's megolm key backup + cross-signing keys, self-verifies\naxon's device, and unlocks stored UTDs. Like the login password it is a\ncrown-jewel secret: used once to recover and **never persisted** or echoed back.",
@@ -2731,6 +3393,40 @@
           "flow_id": {
             "type": "string",
             "description": "The verification transaction id."
+          }
+        }
+      },
+      "ThreadSummaryDto": {
+        "type": "object",
+        "description": "One thread in the `GET …/rooms/{room_id}/threads` response (M8): a thread root\nwith its reply count and latest reply. The root event itself is fetched via\nthe single-event endpoint; the members are paged via the thread timeline.",
+        "required": [
+          "root_event_id",
+          "reply_count"
+        ],
+        "properties": {
+          "latest_reply_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `event_id` of the most recent thread member, or `null` if none."
+          },
+          "latest_reply_ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`origin_server_ts` of the most recent member in milliseconds, or `null`."
+          },
+          "reply_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of thread members, counting redacted ones for structure."
+          },
+          "root_event_id": {
+            "type": "string",
+            "description": "The `event_id` of the thread root (the event the members relate to)."
           }
         }
       },

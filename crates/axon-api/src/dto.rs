@@ -3,7 +3,9 @@
 //! The store rows (`RoomSummary`, `TimelineRow`) are store-internal and don't
 //! derive `Serialize`; these are the public JSON shapes, owned by the API layer.
 
-use axon_store::{Account, AccountState, RoomSummary, TimelineRow};
+use std::collections::BTreeMap;
+
+use axon_store::{Account, AccountState, ReactionTally, RoomSummary, ThreadSummary, TimelineRow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -87,6 +89,24 @@ pub struct EventDto {
     /// re-decrypted). This is the at-receipt snapshot; the sender's *current*
     /// trust is available from the per-event verification bundle.
     pub sender_trust: Option<String>,
+    /// Relation aggregation (M8): `true` when at least one valid `m.replace` edit
+    /// targets this event, in which case `content`/`body` above are already the
+    /// latest edited values (the standalone edit events are stripped from the
+    /// timeline). Always `false` on the `/v1/ws` live stream, whose frames are raw
+    /// pre-aggregation events — the read API is the authoritative resolved view.
+    pub edited: bool,
+    /// Number of valid edits targeting this event (M8); `0` when unedited.
+    pub edit_count: i64,
+    /// `origin_server_ts` of the winning (latest) edit in milliseconds (M8), or
+    /// `null` when unedited or redacted.
+    pub latest_edit_ts: Option<i64>,
+    /// Per-emoji reaction tally (M8), keyed by reaction key:
+    /// `{ "👍": { "count": 2, "senders": [...], "me": true, "my_event_ids": [...] } }`,
+    /// resolved over every reaction targeting this event regardless of pagination.
+    /// `null` when the event has no reactions and on the raw `/v1/ws` live stream.
+    /// Typed so generated clients can model the tally shape (each value is a
+    /// [`ReactionDto`]) rather than an opaque object.
+    pub reactions: Option<BTreeMap<String, ReactionDto>>,
 }
 
 impl From<axon_core::LiveEvent> for EventDto {
@@ -109,6 +129,12 @@ impl From<axon_core::LiveEvent> for EventDto {
             redacted: false,
             redaction_event_id: None,
             sender_trust: e.sender_trust,
+            // A live frame is a raw, pre-aggregation event: edits/reactions arrive
+            // as their own later events and are resolved by the read API, not here.
+            edited: false,
+            edit_count: 0,
+            latest_edit_ts: None,
+            reactions: None,
         }
     }
 }
@@ -131,6 +157,13 @@ impl EventDto {
             redacted: row.redaction_event_id.is_some(),
             redaction_event_id: row.redaction_event_id,
             sender_trust: row.sender_trust,
+            edited: row.edited,
+            edit_count: row.edit_count,
+            latest_edit_ts: row.latest_edit_ts,
+            // The store builds this as a `{key: {count, senders, me, my_event_ids}}`
+            // JSON object; deserialize it into the typed map. A malformed/absent
+            // tally degrades to `None` rather than failing the whole row.
+            reactions: row.reactions.and_then(|v| serde_json::from_value(v).ok()),
         }
     }
 }
@@ -497,4 +530,63 @@ pub struct TimelinePage {
     pub events: Vec<EventDto>,
     /// Opaque cursor for the next (older) page, or `null` at the end.
     pub next_cursor: Option<String>,
+}
+
+/// One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
+/// The response body is a JSON object keyed by emoji — `{ "👍": { … }, "❤️":
+/// { … } }` — with this as each value, resolved over every reaction targeting
+/// the event regardless of pagination (issue #22 Option A).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReactionDto {
+    /// Distinct senders who reacted with this key (a `(sender, key)` duplicate
+    /// counts once).
+    pub count: i64,
+    /// Whether this Axon account's own user is among the senders.
+    pub me: bool,
+    /// The distinct Matrix user ids that reacted with this key.
+    pub senders: Vec<String>,
+    /// The account user's own reaction event ids for this key — the events a
+    /// client redacts (`DELETE …/rooms/{room_id}/events/{event_id}`) to withdraw
+    /// the reaction. Empty unless `me` is true. Exposed because the collapsed
+    /// timeline strips the raw `m.reaction` rows, so a client can no longer
+    /// recover these ids by scanning events itself.
+    #[serde(default)]
+    pub my_event_ids: Vec<String>,
+}
+
+impl From<ReactionTally> for ReactionDto {
+    fn from(t: ReactionTally) -> Self {
+        ReactionDto {
+            count: t.count,
+            me: t.me,
+            senders: t.senders,
+            my_event_ids: t.my_event_ids,
+        }
+    }
+}
+
+/// One thread in the `GET …/rooms/{room_id}/threads` response (M8): a thread root
+/// with its reply count and latest reply. The root event itself is fetched via
+/// the single-event endpoint; the members are paged via the thread timeline.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ThreadSummaryDto {
+    /// The `event_id` of the thread root (the event the members relate to).
+    pub root_event_id: String,
+    /// Number of thread members, counting redacted ones for structure.
+    pub reply_count: i64,
+    /// The `event_id` of the most recent thread member, or `null` if none.
+    pub latest_reply_event_id: Option<String>,
+    /// `origin_server_ts` of the most recent member in milliseconds, or `null`.
+    pub latest_reply_ts: Option<i64>,
+}
+
+impl From<ThreadSummary> for ThreadSummaryDto {
+    fn from(s: ThreadSummary) -> Self {
+        ThreadSummaryDto {
+            root_event_id: s.root_event_id,
+            reply_count: s.reply_count,
+            latest_reply_event_id: s.latest_reply_event_id,
+            latest_reply_ts: s.latest_reply_ts,
+        }
+    }
 }

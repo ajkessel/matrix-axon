@@ -546,7 +546,7 @@ impl App {
         } else if self.shortcuts.submit.matches(key) {
             let reaction = choices[selected].clone();
             self.mode = Mode::Compose;
-            self.withdraw_reaction(reaction).await;
+            self.withdraw_reaction(&target_event_id, reaction).await;
         }
     }
 

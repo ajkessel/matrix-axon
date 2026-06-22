@@ -1020,6 +1020,7 @@ impl App {
             relates_to: None,
             redacted: false,
             redaction_event_id: None,
+            reactions: None,
         };
         self.messages.scroll = usize::MAX;
         // Clear selection so the next message-targeted command auto-selects
@@ -1235,6 +1236,7 @@ mod tests {
             relates_to: None,
             redacted: false,
             redaction_event_id: None,
+            reactions: None,
         }
     }
 
@@ -1247,14 +1249,32 @@ mod tests {
         )
     }
 
-    fn reaction_event(event_id: &str, sender: &str, target: &str, key: &str) -> EventDto {
-        let mut event = event_with_id(event_id, "m.reaction", None, serde_json::json!({}));
-        event.sender = sender.to_owned();
-        event.relates_to = Some(serde_json::json!({
-            "rel_type": "m.annotation",
-            "event_id": target,
-            "key": key
-        }));
+    fn tally(count: i64, me: bool, my_event_ids: &[&str]) -> crate::api::ReactionTally {
+        crate::api::ReactionTally {
+            count,
+            me,
+            my_event_ids: my_event_ids.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// A message event carrying a server-aggregated reaction tally — the M8 shape
+    /// the timeline now returns in place of raw `m.reaction` events.
+    fn message_with_reactions(
+        event_id: &str,
+        reactions: Vec<(&str, crate::api::ReactionTally)>,
+    ) -> EventDto {
+        let mut event = event_with_id(
+            event_id,
+            "m.room.message",
+            Some("message"),
+            serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+        );
+        event.reactions = Some(
+            reactions
+                .into_iter()
+                .map(|(key, tally)| (key.to_owned(), tally))
+                .collect(),
+        );
         event
     }
 
@@ -2611,36 +2631,21 @@ mod tests {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
         app.rooms.selected = Some(0);
-        let mut redacted = reaction_event(
-            "$redacted:example.com",
-            "@alice:example.com",
-            "$message:example.com",
-            "🚀",
-        );
-        redacted.redacted = true;
+        // The server-aggregated tally: the account user's own 👍 (two reaction
+        // events, deduplicated to one count), a 🎉 from someone else (`me` false),
+        // and no redacted 🚀 (the server drops it from the tally).
         app.messages.events.insert(
             RoomKey::from(&room),
-            vec![
-                reaction_event(
-                    "$one:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "👍",
-                ),
-                reaction_event(
-                    "$two:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "👍",
-                ),
-                reaction_event(
-                    "$other:example.com",
-                    "@bob:example.com",
-                    "$message:example.com",
-                    "🎉",
-                ),
-                redacted,
-            ],
+            vec![message_with_reactions(
+                "$message:example.com",
+                vec![
+                    (
+                        "👍",
+                        tally(1, true, &["$one:example.com", "$two:example.com"]),
+                    ),
+                    ("🎉", tally(1, false, &[])),
+                ],
+            )],
         );
 
         assert_eq!(
@@ -2660,26 +2665,13 @@ mod tests {
         app.messages.selection = Some("$message:example.com".to_owned());
         app.messages.events.insert(
             RoomKey::from(&room),
-            vec![
-                event_with_id(
-                    "$message:example.com",
-                    "m.room.message",
-                    Some("message"),
-                    serde_json::json!({ "msgtype": "m.text", "body": "message" }),
-                ),
-                reaction_event(
-                    "$rocket:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "🚀",
-                ),
-                reaction_event(
-                    "$thumb:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "👍",
-                ),
-            ],
+            vec![message_with_reactions(
+                "$message:example.com",
+                vec![
+                    ("🚀", tally(1, true, &["$rocket:example.com"])),
+                    ("👍", tally(1, true, &["$thumb:example.com"])),
+                ],
+            )],
         );
 
         app.start_unreact_from_selected_message().await;
@@ -2731,26 +2723,13 @@ mod tests {
         app.mode = Mode::MessageList;
         app.messages.events.insert(
             RoomKey::from(&room),
-            vec![
-                event_with_id(
-                    "$message:example.com",
-                    "m.room.message",
-                    Some("message"),
-                    serde_json::json!({ "msgtype": "m.text", "body": "message" }),
-                ),
-                reaction_event(
-                    "$rocket:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "🚀",
-                ),
-                reaction_event(
-                    "$thumb:example.com",
-                    "@alice:example.com",
-                    "$message:example.com",
-                    "👍",
-                ),
-            ],
+            vec![message_with_reactions(
+                "$message:example.com",
+                vec![
+                    ("🚀", tally(1, true, &["$rocket:example.com"])),
+                    ("👍", tally(1, true, &["$thumb:example.com"])),
+                ],
+            )],
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT))
@@ -2760,25 +2739,132 @@ mod tests {
     }
 
     #[test]
-    fn redacted_reactions_are_not_rendered_in_counts() {
-        let mut visible = reaction_event(
-            "$visible:example.com",
-            "@alice:example.com",
-            "$message:example.com",
-            "👍",
-        );
-        let mut redacted = visible.clone();
-        redacted.event_id = "$redacted:example.com".to_owned();
-        redacted.redacted = true;
+    fn reaction_badges_come_from_aggregated_tally_and_skip_redacted_messages() {
+        // Badges are read from the message's server-aggregated tally; the server
+        // has already dropped redacted reactions from it.
+        let mut message =
+            message_with_reactions("$message:example.com", vec![("👍", tally(1, false, &[]))]);
 
-        let reactions = collect_reactions(&[visible.clone(), redacted]);
+        let reactions = collect_reactions(std::slice::from_ref(&message));
 
         assert_eq!(
             reactions.get("$message:example.com"),
             Some(&vec![("👍".to_owned(), 1)])
         );
-        visible.redacted = true;
-        assert!(collect_reactions(&[visible]).is_empty());
+
+        // A redacted message shows no badges at all.
+        message.redacted = true;
+        assert!(collect_reactions(&[message]).is_empty());
+    }
+
+    #[test]
+    fn local_react_makes_badge_and_unreact_available_before_reload() {
+        // A successful react must update the target message's aggregated tally in
+        // place: the collapsed timeline no longer carries the raw `m.reaction` row,
+        // so without the optimistic patch the badge would not appear and the
+        // reaction could not be withdrawn until the next full reload.
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![event_with_id(
+                "$message:example.com",
+                "m.room.message",
+                Some("message"),
+                serde_json::json!({ "msgtype": "m.text", "body": "message" }),
+            )],
+        );
+
+        app.apply_local_reaction("$message:example.com", "👍", "$mine:example.com".to_owned());
+
+        let events = &app.messages.events[&RoomKey::from(&room)];
+        assert_eq!(
+            collect_reactions(events).get("$message:example.com"),
+            Some(&vec![("👍".to_owned(), 1)]),
+            "badge appears immediately after react"
+        );
+        assert_eq!(
+            app.own_reactions_for("$message:example.com"),
+            Ok(vec![OwnReaction {
+                key: "👍".to_owned(),
+                event_ids: vec!["$mine:example.com".to_owned()],
+            }]),
+            "the reaction is withdrawable immediately after react"
+        );
+    }
+
+    #[test]
+    fn local_unreact_clears_badge_and_choice_before_reload() {
+        // Withdrawing the only reaction must clear the badge and the unreact choice
+        // in place; the redacted raw `m.reaction` row is absent from the collapsed
+        // timeline, so the aggregate has to be patched directly.
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions(
+                "$message:example.com",
+                vec![("👍", tally(1, true, &["$mine:example.com"]))],
+            )],
+        );
+
+        app.remove_local_reaction(
+            "$message:example.com",
+            "👍",
+            &["$mine:example.com".to_owned()],
+        );
+
+        let events = &app.messages.events[&RoomKey::from(&room)];
+        assert!(
+            collect_reactions(events).is_empty(),
+            "badge disappears after the last reaction is withdrawn"
+        );
+        assert_eq!(
+            app.own_reactions_for("$message:example.com"),
+            Ok(Vec::new()),
+            "no withdrawable reaction remains"
+        );
+        assert!(
+            events[0].reactions.is_none(),
+            "an emptied tally is cleared from the row"
+        );
+    }
+
+    #[test]
+    fn local_unreact_keeps_other_senders_count_and_drops_my_contribution() {
+        // When others also reacted with the same key, withdrawing my reaction drops
+        // only my distinct-sender contribution and clears `me`; the badge persists
+        // with the remaining count and is no longer withdrawable by me.
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![message_with_reactions(
+                "$message:example.com",
+                vec![("👍", tally(2, true, &["$mine:example.com"]))],
+            )],
+        );
+
+        app.remove_local_reaction(
+            "$message:example.com",
+            "👍",
+            &["$mine:example.com".to_owned()],
+        );
+
+        let events = &app.messages.events[&RoomKey::from(&room)];
+        assert_eq!(
+            collect_reactions(events).get("$message:example.com"),
+            Some(&vec![("👍".to_owned(), 1)]),
+            "the other sender's reaction still shows"
+        );
+        assert_eq!(
+            app.own_reactions_for("$message:example.com"),
+            Ok(Vec::new()),
+            "I can no longer withdraw a reaction I removed"
+        );
     }
 
     #[test]
