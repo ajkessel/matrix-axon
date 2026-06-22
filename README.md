@@ -24,7 +24,7 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 
 ## Developer quick-start
 
-Prerequisites: Rust (stable), Docker.
+Prerequisites: Rust (stable). Docker is only needed if you don't have a local Postgres instance.
 
 Once prerequisites are installed, the quickest path is:
 
@@ -33,15 +33,19 @@ Once prerequisites are installed, the quickest path is:
 ./run.sh tui      # starts axon-tui instead
 ./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
 .\run.ps1         # Windows (PowerShell) — starts axon-server (default)
-.\run.ps1 tui     # starts axon-tui instead
+.\run.ps1 tui     # axon-tui
 .\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
 ```
 
 The run script handles the rest automatically: validates that required
 environment variables are set (offering to create `.env` from `.env.example`
-if neither exists), starts Postgres via Docker Compose, runs the chosen
-target, and stops Docker when it exits — whether by Ctrl-C, SIGTERM, or any
-other cause.
+if neither exists), runs the chosen target, and tears down any containers it
+started on exit — whether by Ctrl-C, SIGTERM, or any other cause.
+
+**Postgres:** if a Postgres instance is already reachable at
+`POSTGRES_HOST:POSTGRES_PORT` (defaulting to `127.0.0.1:5432`) when the
+script starts, it uses that directly and Docker is not required at all.
+Otherwise it starts Postgres via Docker Compose automatically.
 
 The steps below explain what the run scripts do and how to configure the pieces
 individually.
@@ -112,7 +116,7 @@ cp .env.example .env
 
 The server loads `.env` automatically on startup. The defaults in `.env.example` match the docker-compose settings; adjust `DATABASE_URL` if your Postgres is configured differently.
 
-> **Port already in use?** If you have a local Postgres (Homebrew, Postgres.app) on 5432, the docker-compose container can't claim the port and connections hit the local instance instead — you'll see `role "axon" does not exist`. Set `POSTGRES_PORT` to a free port in `.env` (e.g. `5433`), update the port in `DATABASE_URL` to match, then `docker compose up -d postgres`.
+> **Local Postgres detected automatically.** If you already have Postgres running on `127.0.0.1:5432` (Homebrew, Postgres.app, a system package, etc.), `run.sh`/`run.ps1` will detect it and skip Docker entirely. Just make sure the role and database exist (see the "Without Docker" step above) and that `DATABASE_URL` in your `.env` points to it. To use a different host or port, set `POSTGRES_HOST` and `POSTGRES_PORT` in `.env`.
 >
 > **macOS + Docker note:** `localhost` can resolve to IPv6 (`::1`) on macOS, but Docker only binds to IPv4. The examples use `127.0.0.1` explicitly to avoid this.
 
@@ -122,7 +126,7 @@ The server loads `.env` automatically on startup. The defaults in `.env.example`
 # Enable the git pre-commit hook (fmt + clippy) — once per clone
 ./scripts/setup-hooks.sh
 
-# Quick path — starts Docker, runs the target, tears down Docker on exit:
+# Quick path — auto-detects local Postgres or starts one via Docker, tears down on exit:
 ./run.sh          # macOS / Linux / WSL  — axon-server (default)
 ./run.sh tui      # axon-tui
 ./run.sh clean    # destroys Postgres data volume and exits (no rebuild)
