@@ -515,7 +515,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
 
-
     let (command_line, command_title, mut cursor_col) = match &app.mode {
         Mode::Search(kind, q) => {
             let kind_label = match kind {

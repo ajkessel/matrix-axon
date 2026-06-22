@@ -1174,7 +1174,6 @@ impl App {
         self.open_popup(PopupKind::MediaPreview);
     }
 
-
     fn show_whereami(&mut self) {
         if self.selected_room().is_none() {
             self.status = Status::Info("select a room before using /whereami".to_owned());
@@ -1633,7 +1632,6 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
         .collect();
     format!("unknown — first bytes: {prefix}  ({printable})")
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -247,7 +247,10 @@ async fn list_rooms_excludes_tombstoned_rooms() {
     let rooms = store.list_rooms(Some(account_id)).await.expect("list");
     let ids: Vec<&str> = rooms.iter().map(|r| r.room_id.as_str()).collect();
     assert!(ids.contains(&live.as_str()), "live room shown");
-    assert!(ids.contains(&replacement.as_str()), "replacement room shown");
+    assert!(
+        ids.contains(&replacement.as_str()),
+        "replacement room shown"
+    );
     assert!(
         !ids.contains(&tombstoned.as_str()),
         "tombstoned room hidden"
