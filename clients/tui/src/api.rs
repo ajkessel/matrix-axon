@@ -788,6 +788,11 @@ pub struct EventDto {
     /// reactions.
     #[serde(default)]
     pub reactions: Option<HashMap<String, ReactionTally>>,
+    /// Sender-device trust snapshot at decrypt time (M7c / ADR 0031): one of
+    /// `verified`, `unverified`, `unknown`, `verification_violation`. `None` for
+    /// unencrypted events or rows with no recorded verdict.
+    #[serde(default)]
+    pub sender_trust: Option<String>,
 }
 
 /// One emoji's aggregated tally on an [`EventDto`], mirroring the API's
@@ -801,11 +806,6 @@ pub struct ReactionTally {
     // out here — serde ignores the extra key.
     #[serde(default)]
     pub my_event_ids: Vec<String>,
-    /// Sender-device trust snapshot at decrypt time (M7c / ADR 0031): one of
-    /// `verified`, `unverified`, `unknown`, `verification_violation`. `None` for
-    /// unencrypted events or rows with no recorded verdict.
-    #[serde(default)]
-    pub sender_trust: Option<String>,
 }
 
 #[derive(Clone, Copy)]
