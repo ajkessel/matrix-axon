@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use axon_search::IndexHandle;
 use axon_store::{PendingUtd, Store};
 use futures_util::StreamExt;
 use matrix_sdk::deserialized_responses::{EncryptionInfo, TimelineEvent, TimelineEventKind};
@@ -73,7 +74,13 @@ fn extract_content_and_type(raw: &Raw<AnyTimelineEvent>) -> Option<(Value, Strin
 /// unlocks. Runs until `cancel` fires or the stream closes. `None` from the
 /// subscription means there is no `OlmMachine` (not logged in / E2EE off) — we
 /// log and return rather than spin.
-pub(crate) async fn run(client: Client, store: Store, account_id: Uuid, cancel: CancellationToken) {
+pub(crate) async fn run(
+    client: Client,
+    store: Store,
+    account_id: Uuid,
+    cancel: CancellationToken,
+    index: Option<IndexHandle>,
+) {
     let stream = match client.encryption().room_keys_received_stream().await {
         Some(stream) => stream,
         None => {
@@ -98,6 +105,7 @@ pub(crate) async fn run(client: Client, store: Store, account_id: Uuid, cancel: 
                             account_id,
                             info.room_id.as_str(),
                             &info.session_id,
+                            index.as_ref(),
                         )
                         .await;
                     }
@@ -117,7 +125,12 @@ pub(crate) async fn run(client: Client, store: Store, account_id: Uuid, cancel: 
 /// One startup pass over every pending UTD for the account. Keys already in the
 /// crypto store (from a prior run or a just-finished `recover()`) won't fire the
 /// arrival stream, so we retry the full backlog once at boot.
-pub(crate) async fn sweep_pending_utds(client: &Client, store: &Store, account_id: Uuid) {
+pub(crate) async fn sweep_pending_utds(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    index: Option<&IndexHandle>,
+) {
     let rows = match store.pending_utds_for_account(account_id).await {
         Ok(rows) => rows,
         Err(err) => {
@@ -132,7 +145,7 @@ pub(crate) async fn sweep_pending_utds(client: &Client, store: &Store, account_i
     // `from_backup`: recover() imported the backup *decryption key* but not the
     // room keys themselves, so the sweep must pull them from the server backup
     // before decrypting (see redecrypt_rows).
-    redecrypt_rows(client, store, account_id, rows, true).await;
+    redecrypt_rows(client, store, account_id, rows, true, index).await;
 }
 
 /// Drain the pending UTDs in `room_id` waiting on `session_id`.
@@ -142,6 +155,7 @@ async fn redecrypt_session(
     account_id: Uuid,
     room_id: &str,
     session_id: &str,
+    index: Option<&IndexHandle>,
 ) {
     let rows = match store
         .pending_utds_for_session(account_id, room_id, session_id)
@@ -157,7 +171,7 @@ async fn redecrypt_session(
         return;
     }
     // The arrival stream's keys are already in the crypto store — no backup fetch.
-    redecrypt_rows(client, store, account_id, rows, false).await;
+    redecrypt_rows(client, store, account_id, rows, false, index).await;
 }
 
 /// Re-decrypt a set of pending rows, fetching each `Room` handle once. Per-row
@@ -173,6 +187,7 @@ async fn redecrypt_rows(
     account_id: Uuid,
     rows: Vec<PendingUtd>,
     from_backup: bool,
+    index: Option<&IndexHandle>,
 ) {
     let mut by_room: HashMap<String, Vec<PendingUtd>> = HashMap::new();
     for row in rows {
@@ -195,7 +210,7 @@ async fn redecrypt_rows(
             }
         }
         for row in &rows {
-            redecrypt_one(&room, store, account_id, row).await;
+            redecrypt_one(&room, store, account_id, row, index).await;
         }
     }
 }
@@ -203,7 +218,13 @@ async fn redecrypt_rows(
 /// Re-decrypt a single stored UTD and back-fill it on success. Every failure
 /// path — a malformed envelope, a still-missing key, a write error — is logged
 /// and swallowed.
-async fn redecrypt_one(room: &Room, store: &Store, account_id: Uuid, row: &PendingUtd) {
+async fn redecrypt_one(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    row: &PendingUtd,
+    index: Option<&IndexHandle>,
+) {
     let raw: Raw<OriginalSyncRoomEncryptedEvent> =
         match serde_json::from_value(row.raw_event.clone()) {
             Ok(raw) => raw,
@@ -254,13 +275,22 @@ async fn redecrypt_one(room: &Room, store: &Store, account_id: Uuid, row: &Pendi
         )
         .await
     {
-        Ok(()) => tracing::info!(
-            %account_id,
-            room_id = %room.room_id(),
-            event_id = row.event_id,
-            event_type = event_type.as_str(),
-            "re-decrypted UTD"
-        ),
+        Ok(()) => {
+            tracing::info!(
+                %account_id,
+                room_id = %room.room_id(),
+                event_id = row.event_id,
+                event_type = event_type.as_str(),
+                "re-decrypted UTD"
+            );
+            // The body is now available, so re-indexing is owed. `update_decrypted_event`
+            // wrote that obligation to `search_outbox` transactionally (this event plus
+            // any relation target the now-decrypted body reveals); this is just the
+            // best-effort wakeup hint (M9).
+            if let Some(index) = index {
+                index.notify();
+            }
+        }
         Err(err) => {
             tracing::warn!(
                 %account_id,

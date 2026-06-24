@@ -11,6 +11,7 @@ mod error;
 mod events;
 mod migrations;
 mod rooms;
+mod search;
 mod state;
 mod tokens;
 
@@ -21,6 +22,7 @@ pub use events::{
     ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use rooms::RoomSummary;
+pub use search::{IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE};
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
 pub use tokens::{IssuedToken, Token};
 

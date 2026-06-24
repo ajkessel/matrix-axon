@@ -282,7 +282,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 /// Callers append their own `WHERE` (binding `account_id` as `$1`) plus ordering
 /// / pagination. Selects exactly the columns [`TimelineRow`] reads. Built once via
 /// [`LazyLock`] so the scan cap is interpolated from a single constant.
-static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
+pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
             e.origin_ts, e.event_type, \
@@ -413,32 +413,63 @@ const RELATION_READ_CAP: i64 = 1000;
 /// distinct reactions deterministically.
 const REACTION_AGG_PAIR_CAP: i64 = 1000;
 
+/// The tail of a search-outbox fan-out statement (ADR 0039). Prepended with a
+/// `WITH ins AS ( <writing query> RETURNING account_id, event_id, relates_to,
+/// redacts )`, it appends the index obligations for whatever the leading query
+/// actually wrote: the row's own document, plus the *target* of a relation
+/// (`relates_to->>'event_id'`, the top-level edit/annotation/thread target —
+/// `NULL` for a plain reply, whose target nests under `m.in_reply_to` and whose
+/// own document a reply never changes) and of a redaction (`redacts`). When the
+/// leading query writes nothing (an idempotent no-op), `ins` is empty and no
+/// obligation is appended. The exclusion of replies mirrors `events_for_index`
+/// and `axon-search`'s live re-derive; the three must stay in lockstep.
+const SEARCH_FANOUT_TAIL: &str = "\
+    INSERT INTO search_outbox (account_id, event_id) \
+    SELECT account_id, event_id FROM ins \
+    UNION ALL \
+    SELECT account_id, relates_to->>'event_id' FROM ins \
+      WHERE relates_to->>'event_id' IS NOT NULL \
+    UNION ALL \
+    SELECT account_id, redacts FROM ins WHERE redacts IS NOT NULL";
+
 impl Store {
     /// Insert a Matrix event. Idempotent: if `(account_id, event_id)` already
     /// exists the existing row is left unchanged and no error is returned.
+    ///
+    /// Appends the search-index obligations in the **same statement** (ADR 0039):
+    /// the event's own document, plus the *target* of any relation
+    /// (`relates_to->>'event_id'` — an edit or annotation folds into its target)
+    /// or redaction (`redacts`). Because the `INSERT … RETURNING` feeds the
+    /// outbox insert, an event change and its indexing obligation commit
+    /// atomically, and a no-op (`ON CONFLICT DO NOTHING`) appends nothing — a
+    /// duplicate delivery does no redundant indexing. See [`SEARCH_FANOUT_TAIL`].
     pub async fn upsert_event(&self, ev: &NewEvent<'_>) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "INSERT INTO events \
-             (event_id, room_id, account_id, sender, origin_ts, event_type, \
-              content, raw_event, megolm_session_id, redacts, relates_to, \
-              decrypted_body_text) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-             ON CONFLICT (account_id, event_id) DO NOTHING",
-        )
-        .bind(ev.event_id)
-        .bind(ev.room_id)
-        .bind(ev.account_id)
-        .bind(ev.sender)
-        .bind(ev.origin_ts)
-        .bind(ev.event_type)
-        .bind(&ev.content)
-        .bind(&ev.raw_event)
-        .bind(ev.megolm_session_id)
-        .bind(ev.redacts)
-        .bind(&ev.relates_to)
-        .bind(ev.decrypted_body_text)
-        .execute(&self.pool)
-        .await?;
+        let sql = format!(
+            "WITH ins AS ( \
+               INSERT INTO events \
+                 (event_id, room_id, account_id, sender, origin_ts, event_type, \
+                  content, raw_event, megolm_session_id, redacts, relates_to, \
+                  decrypted_body_text) \
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+               ON CONFLICT (account_id, event_id) DO NOTHING \
+               RETURNING account_id, event_id, relates_to, redacts \
+             ) {SEARCH_FANOUT_TAIL}"
+        );
+        sqlx_core::query::query(&sql)
+            .bind(ev.event_id)
+            .bind(ev.room_id)
+            .bind(ev.account_id)
+            .bind(ev.sender)
+            .bind(ev.origin_ts)
+            .bind(ev.event_type)
+            .bind(&ev.content)
+            .bind(&ev.raw_event)
+            .bind(ev.megolm_session_id)
+            .bind(ev.redacts)
+            .bind(&ev.relates_to)
+            .bind(ev.decrypted_body_text)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -592,19 +623,27 @@ impl Store {
         decrypted_body_text: Option<&str>,
         relates_to: Option<&Value>,
     ) -> Result<(), StoreError> {
-        sqlx_core::query::query(
-            "UPDATE events \
-             SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6 \
-             WHERE account_id = $1 AND event_id = $2 AND content IS NULL",
-        )
-        .bind(account_id)
-        .bind(event_id)
-        .bind(content)
-        .bind(event_type)
-        .bind(decrypted_body_text)
-        .bind(relates_to)
-        .execute(&self.pool)
-        .await?;
+        // In-place decryption mints no new `events.id`, so the outbox is the only
+        // durable signal that this row (and any relation/redaction target the now-
+        // decrypted body reveals) needs re-indexing — appended atomically, and only
+        // when the guarded UPDATE actually decrypts a still-UTD row (ADR 0039).
+        let sql = format!(
+            "WITH ins AS ( \
+               UPDATE events \
+               SET content = $3, event_type = $4, decrypted_body_text = $5, relates_to = $6 \
+               WHERE account_id = $1 AND event_id = $2 AND content IS NULL \
+               RETURNING account_id, event_id, relates_to, redacts \
+             ) {SEARCH_FANOUT_TAIL}"
+        );
+        sqlx_core::query::query(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .bind(content)
+            .bind(event_type)
+            .bind(decrypted_body_text)
+            .bind(relates_to)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

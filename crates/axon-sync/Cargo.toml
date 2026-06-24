@@ -7,9 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-axon-core  = { workspace = true }
-axon-media = { workspace = true }
-axon-store = { workspace = true }
+axon-core   = { workspace = true }
+axon-media  = { workspace = true }
+axon-search = { workspace = true }
+axon-store  = { workspace = true }
 
 # matrix-sdk + matrix-sdk-ui must move together (version skew breaks the build).
 # bundled-sqlite vendors SQLite (no system libsqlite3 needed) for the SDK's own

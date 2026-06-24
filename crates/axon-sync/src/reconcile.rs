@@ -185,6 +185,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            None,
         )
     }
 

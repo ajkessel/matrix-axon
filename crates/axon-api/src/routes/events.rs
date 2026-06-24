@@ -69,8 +69,8 @@ pub async fn get_verification_bundle(
     )))
 }
 
-/// Per-emoji reaction tally for an event (M8), resolved over *every* reaction on
-/// disk regardless of where the original message falls in the timeline window —
+/// Per-emoji reaction tally for an event (M8), resolved over the event's reactions
+/// on disk regardless of where the original message falls in the timeline window —
 /// the fix for the dropped-reaction bug (issue #22). The body is a JSON object
 /// keyed by emoji:
 /// `{ "👍": { "count": 2, "me": true, "senders": [...], "my_event_ids": [...] } }`.
@@ -79,8 +79,10 @@ pub async fn get_verification_bundle(
 /// timeline no longer carries the raw `m.reaction` rows. An event with no
 /// reactions (or an unknown event) yields an empty object (`{ "data": {} }`), not
 /// a 404 — an absent event and one with no reactions are indistinguishable here
-/// and empty is the natural answer. The number of distinct keys returned is
-/// hard-capped in the store against a pathological room.
+/// and empty is the natural answer. Against a pathological event, the store
+/// hard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs
+/// (deterministically by `(origin_ts, event_id)`), so an event beyond that bound
+/// reports those rather than literally every reaction.
 #[utoipa::path(
     get,
     path = "/v1/accounts/{account_id}/events/{event_id}/reactions",

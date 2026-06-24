@@ -102,8 +102,10 @@ pub struct EventDto {
     pub latest_edit_ts: Option<i64>,
     /// Per-emoji reaction tally (M8), keyed by reaction key:
     /// `{ "👍": { "count": 2, "senders": [...], "me": true, "my_event_ids": [...] } }`,
-    /// resolved over every reaction targeting this event regardless of pagination.
-    /// `null` when the event has no reactions and on the raw `/v1/ws` live stream.
+    /// resolved over this event's reactions regardless of pagination (the store
+    /// hard-caps a pathological event at the oldest 1000 distinct `(sender, key)`
+    /// pairs). `null` when the event has no reactions and on the raw `/v1/ws` live
+    /// stream.
     /// Typed so generated clients can model the tally shape (each value is a
     /// [`ReactionDto`]) rather than an opaque object.
     pub reactions: Option<BTreeMap<String, ReactionDto>>,
@@ -534,8 +536,9 @@ pub struct TimelinePage {
 
 /// One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
 /// The response body is a JSON object keyed by emoji — `{ "👍": { … }, "❤️":
-/// { … } }` — with this as each value, resolved over every reaction targeting
-/// the event regardless of pagination (issue #22 Option A).
+/// { … } }` — with this as each value, resolved over the event's reactions
+/// regardless of pagination (issue #22 Option A; the store hard-caps a pathological
+/// event at the oldest 1000 distinct `(sender, key)` pairs).
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReactionDto {
     /// Distinct senders who reacted with this key (a `(sender, key)` duplicate

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
+use axon_search::IndexHandle;
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
@@ -95,13 +96,22 @@ pub struct SyncEngine {
     /// [`VerificationEngine`] (the runtime port) and each account's supervised task
     /// (which listens for peer-initiated requests). Ephemeral — never persisted.
     verifications: FlowRegistry,
+    /// Producer handle for the search-index actor (M9), or `None` when search is
+    /// disabled. Cloned into every supervised task's persist + re-decryption paths
+    /// so newly ingested events are indexed, and into the lifecycle port so a
+    /// deleted account's documents are purged.
+    index: Option<IndexHandle>,
 }
 
 impl SyncEngine {
     /// Provision the configured account (if any), then spawn one supervised sync
     /// task per account in the store. Returns once tasks are spawned; call
     /// [`SyncEngine::shutdown`] to stop them.
-    pub async fn start(store: Store, config: SyncConfig) -> Result<Self, SyncError> {
+    pub async fn start(
+        store: Store,
+        config: SyncConfig,
+        index: Option<IndexHandle>,
+    ) -> Result<Self, SyncError> {
         let cancel = CancellationToken::new();
         // The bus exists for the lifetime of the engine regardless of how many
         // accounts there are (zero accounts → an idle but valid `/v1/ws`). The
@@ -152,6 +162,7 @@ impl SyncEngine {
             tasks.clone(),
             locks.clone(),
             verifications.clone(),
+            index.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
@@ -176,6 +187,7 @@ impl SyncEngine {
                 manager.clone(),
                 locks.clone(),
                 verifications.clone(),
+                index.clone(),
             );
         }
 
@@ -198,6 +210,7 @@ impl SyncEngine {
             config,
             locks,
             verifications,
+            index,
         })
     }
 
@@ -238,6 +251,7 @@ impl SyncEngine {
             self.tasks.clone(),
             self.locks.clone(),
             self.verifications.clone(),
+            self.index.clone(),
         )
     }
 
@@ -303,6 +317,7 @@ pub(crate) fn spawn_supervised(
     manager: ClientManager,
     locks: IdentityLocks,
     verifications: FlowRegistry,
+    index: Option<IndexHandle>,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -316,6 +331,7 @@ pub(crate) fn spawn_supervised(
         locks,
         tracker.clone(),
         verifications,
+        index,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -341,6 +357,7 @@ async fn supervise_account(
     locks: IdentityLocks,
     tracker: TaskTracker,
     verifications: FlowRegistry,
+    index: Option<IndexHandle>,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -359,6 +376,7 @@ async fn supervise_account(
             &locks,
             &tracker,
             &verifications,
+            index.as_ref(),
         )
         .await
         {
@@ -396,6 +414,9 @@ struct PersistContext {
     /// Producer end of the live-event bus; [`persist_timeline_event`] publishes
     /// each freshly persisted event to it for `/v1/ws` fan-out.
     live_tx: broadcast::Sender<LiveFrame>,
+    /// Search-index producer (M9), or `None` when search is disabled. Each
+    /// persisted event is enqueued for (re)indexing from the resolved projection.
+    index: Option<IndexHandle>,
 }
 
 /// Event handler: persist every synced timeline event to Postgres.
@@ -512,6 +533,16 @@ async fn persist_timeline_event(
         event_type = event_type.as_str(),
         "persisted event"
     );
+
+    // Poke the search indexer (M9). The durable indexing obligation — this
+    // event's own document plus any relation/redaction *target* whose document it
+    // changes — was already written to `search_outbox` transactionally by
+    // `upsert_event`, so this is only a best-effort wakeup hint: a dropped notify
+    // costs nothing because the next drain (a later notify, the periodic tick, or a
+    // restart) still applies the on-disk obligation.
+    if let Some(index) = ctx.index.as_ref() {
+        index.notify();
+    }
 
     // Sibling rows are best-effort: a failure here must not take down sync. Done
     // *before* the live emit so the frame can carry the verdict actually persisted
@@ -730,6 +761,7 @@ async fn run_account(
     locks: &IdentityLocks,
     tracker: &TaskTracker,
     verifications: &FlowRegistry,
+    index: Option<&IndexHandle>,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -761,6 +793,7 @@ async fn run_account(
         store: store.clone(),
         account_id: account.account_id,
         live_tx: live_tx.clone(),
+        index: index.cloned(),
     };
     client.add_event_handler_context(persist_ctx);
     client.add_event_handler(persist_timeline_event);
@@ -806,10 +839,11 @@ async fn run_account(
         store.clone(),
         account.account_id,
         redecrypt_cancel.clone(),
+        index.cloned(),
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
     // keys: keys already in the crypto store don't fire the arrival stream.
-    redecrypt::sweep_pending_utds(&client, store, account.account_id).await;
+    redecrypt::sweep_pending_utds(&client, store, account.account_id, index).await;
 
     // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
     // the SDK's current cross-signing state. Same child-token + join-handle

@@ -83,9 +83,30 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .context("connecting to database")?;
 
+    // Open the search index and spawn its background indexing actor (M9), when
+    // enabled. The actor owns the sole Tantivy writer. `open` reports whether the
+    // physical index is `fresh` (new, empty, or built against a different schema
+    // version); if so the actor seeds the corpus from the store as a background
+    // task — boot never blocks on it, even for a large corpus. Either way it then
+    // drains the durable `search_outbox` change log, indexing live events as they
+    // arrive. We hand its producer handle to the sync engine; the actor's writer
+    // keeps the underlying index alive, so we don't retain the reader here (the
+    // `/v1/search` query endpoint that needs it lands in 9b).
+    let (index_handle, index_join) = if config.search.enabled {
+        let (search_index, fresh) = axon_search::SearchIndex::open(&config.search.index_path)
+            .context("opening search index")?;
+        let handles = search_index
+            .spawn_indexer(store.clone(), fresh, indexer_options(&config.search))
+            .context("starting search indexer")?;
+        (Some(handles.handle), Some(handles.join))
+    } else {
+        tracing::info!("search disabled (search.enabled = false); not indexing");
+        (None, None)
+    };
+
     // Start the sync engine: it provisions the configured account and runs one
     // supervised Simplified Sliding Sync task per account.
-    let sync_engine = SyncEngine::start(store.clone(), config.sync.clone())
+    let sync_engine = SyncEngine::start(store.clone(), config.sync.clone(), index_handle)
         .await
         .context("starting sync engine")?;
 
@@ -127,11 +148,37 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("server error")?;
 
     // HTTP has drained; now wind down the sync tasks and wait for them to flush
-    // their SDK stores before exiting.
+    // their SDK stores before exiting. This drops every `IndexHandle` the sync
+    // engine held, closing the search actor's channel.
     tracing::info!("stopping sync engine");
     sync_engine.shutdown().await;
 
+    // With all producers dropped, the search actor drains, commits, and exits;
+    // wait for it so a clean shutdown doesn't lose the last batch.
+    if let Some(join) = index_join {
+        tracing::info!("stopping search indexer");
+        let _ = join.await;
+    }
+
     Ok(())
+}
+
+/// Build the search indexer's tuning from config. The channel capacity and idle
+/// poll cadence are fixed (not operator-facing); the batch size, seed throttle, and
+/// writer heap come from `[search]`.
+fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOptions {
+    axon_search::IndexerOptions {
+        // The channel only carries coalescing wakeup hints (the durable obligation
+        // is the outbox), so a small bound is plenty; a full channel just drops a
+        // redundant hint.
+        channel_capacity: 64,
+        // Drain at least this often even without a wakeup — the safety net against a
+        // dropped hint, and the steady-state poll when notifications are quiet.
+        idle_poll_interval: std::time::Duration::from_secs(2),
+        writer_heap_mb: search.writer_heap_mb,
+        batch_size: search.index_batch_size,
+        seed_throttle: std::time::Duration::from_millis(search.build_throttle_ms),
+    }
 }
 
 /// Initialise the `tracing` subscriber. Honours `RUST_LOG` if set, otherwise

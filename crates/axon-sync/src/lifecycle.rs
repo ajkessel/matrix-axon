@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{LiveFrame, SyncConfig};
+use axon_search::IndexHandle;
 use axon_store::{Account, AccountState, Store, StoreError};
 use matrix_sdk::encryption::recovery::RecoveryError;
 use matrix_sdk::ruma::OwnedUserId;
@@ -308,6 +309,10 @@ pub struct AccountLifecycle {
     /// HTTP client for homeserver discovery (see [`discovery`](crate::discovery)).
     /// Cheap to clone (an `Arc` internally), shared across logins.
     http: matrix_sdk::reqwest::Client,
+    /// Search-index producer (M9), or `None` when search is disabled. Used to purge
+    /// a deleted account's documents, and handed to a runtime-login account's
+    /// supervised task so its events are indexed.
+    index: Option<IndexHandle>,
 }
 
 impl AccountLifecycle {
@@ -325,6 +330,7 @@ impl AccountLifecycle {
         tasks: TaskRegistry,
         locks: IdentityLocks,
         verifications: FlowRegistry,
+        index: Option<IndexHandle>,
     ) -> Self {
         Self {
             store,
@@ -337,6 +343,7 @@ impl AccountLifecycle {
             locks,
             verifications,
             http: crate::discovery::http_client(),
+            index,
         }
     }
 
@@ -503,6 +510,7 @@ impl AccountLifecycle {
             self.manager.clone(),
             self.locks.clone(),
             self.verifications.clone(),
+            self.index.clone(),
         );
         tracing::info!(%account_id, user_id = %username, "account logged in and supervised");
         Ok(account_id)
@@ -703,7 +711,12 @@ impl AccountLifecycle {
         // large backlog or a stalled homeserver can't pin the per-identity lock and
         // starve a concurrent logout/delete; an overrun leaves the remaining rows
         // for the next supervised boot sweep (keys + `verified` are already saved).
-        let sweep = crate::redecrypt::sweep_pending_utds(&client, &self.store, account_id);
+        let sweep = crate::redecrypt::sweep_pending_utds(
+            &client,
+            &self.store,
+            account_id,
+            self.index.as_ref(),
+        );
         if tokio::time::timeout(RECOVER_SWEEP_TIMEOUT, sweep)
             .await
             .is_err()
@@ -851,8 +864,21 @@ impl AccountLifecycle {
         // to them): the SDK store dir + its staging backup. Idempotent on a resume.
         crate::client::remove_account_store_dirs(&self.config, account_id).await?;
 
-        // Only now drop the row — FK cascades remove events/account_data/room_state.
+        // Drop the row. The FK cascade removes events/account_data/room_state, and
+        // the same statement appends a durable search-index purge obligation to
+        // `search_outbox` (which has no FK, so it outlives the row). That makes the
+        // purge crash-safe and independent of whether search is currently enabled
+        // (ADR 0039) — a deletion while search is off is healed on the next enabled
+        // boot's drain.
         self.store.delete_account_row(account_id).await?;
+
+        // When the indexer is live, flush so the account's documents are actually
+        // gone from Tantivy before this verb returns — closing the privacy window
+        // synchronously. If it is absent/stopped, the durable obligation above is
+        // the backstop, so returning without flushing is still correct.
+        if let Some(index) = self.index.as_ref() {
+            index.flush().await;
+        }
 
         // The identity is retired for good, so prune its lock-map entry — but only
         // if no other verb is parked on it (see `prune_lock`).
@@ -972,6 +998,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            None,
         )
     }
 
@@ -1008,6 +1035,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            None,
         )
     }
 

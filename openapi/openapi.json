@@ -389,7 +389,7 @@
         "tags": [
           "events"
         ],
-        "summary": "Per-emoji reaction tally for an event (M8), resolved over *every* reaction on\ndisk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. The number of distinct keys returned is\nhard-capped in the store against a pathological room.",
+        "summary": "Per-emoji reaction tally for an event (M8), resolved over the event's reactions\non disk regardless of where the original message falls in the timeline window —\nthe fix for the dropped-reaction bug (issue #22). The body is a JSON object\nkeyed by emoji:\n`{ \"👍\": { \"count\": 2, \"me\": true, \"senders\": [...], \"my_event_ids\": [...] } }`.\n`my_event_ids` carries the account user's own reaction event ids for the key —\nthe ids a client redacts to withdraw the reaction, since the collapsed\ntimeline no longer carries the raw `m.reaction` rows. An event with no\nreactions (or an unknown event) yields an empty object (`{ \"data\": {} }`), not\na 404 — an absent event and one with no reactions are indistinguishable here\nand empty is the natural answer. Against a pathological event, the store\nhard-caps the tally at the oldest 1000 distinct `(sender, key)` pairs\n(deterministically by `(origin_ts, event_id)`), so an event beyond that bound\nreports those rather than literally every reaction.",
         "operationId": "get_reactions",
         "parameters": [
           {
@@ -2139,7 +2139,7 @@
             "type": "object",
             "additionalProperties": {
               "type": "object",
-              "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over every reaction targeting\nthe event regardless of pagination (issue #22 Option A).",
+              "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over the event's reactions\nregardless of pagination (issue #22 Option A; the store hard-caps a pathological\nevent at the oldest 1000 distinct `(sender, key)` pairs).",
               "required": [
                 "count",
                 "me",
@@ -2249,7 +2249,7 @@
                   "object",
                   "null"
                 ],
-                "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+                "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over this event's reactions regardless of pagination (the store\nhard-caps a pathological event at the oldest 1000 distinct `(sender, key)`\npairs). `null` when the event has no reactions and on the raw `/v1/ws` live\nstream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
                 "additionalProperties": {
                   "$ref": "#/components/schemas/ReactionDto"
                 },
@@ -2581,7 +2581,7 @@
                     "object",
                     "null"
                   ],
-                  "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+                  "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over this event's reactions regardless of pagination (the store\nhard-caps a pathological event at the oldest 1000 distinct `(sender, key)`\npairs). `null` when the event has no reactions and on the raw `/v1/ws` live\nstream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
                   "additionalProperties": {
                     "$ref": "#/components/schemas/ReactionDto"
                   },
@@ -3062,7 +3062,7 @@
               "object",
               "null"
             ],
-            "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over every reaction targeting this event regardless of pagination.\n`null` when the event has no reactions and on the raw `/v1/ws` live stream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
+            "description": "Per-emoji reaction tally (M8), keyed by reaction key:\n`{ \"👍\": { \"count\": 2, \"senders\": [...], \"me\": true, \"my_event_ids\": [...] } }`,\nresolved over this event's reactions regardless of pagination (the store\nhard-caps a pathological event at the oldest 1000 distinct `(sender, key)`\npairs). `null` when the event has no reactions and on the raw `/v1/ws` live\nstream.\nTyped so generated clients can model the tally shape (each value is a\n[`ReactionDto`]) rather than an opaque object.",
             "additionalProperties": {
               "$ref": "#/components/schemas/ReactionDto"
             },
@@ -3220,7 +3220,7 @@
       },
       "ReactionDto": {
         "type": "object",
-        "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over every reaction targeting\nthe event regardless of pagination (issue #22 Option A).",
+        "description": "One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).\nThe response body is a JSON object keyed by emoji — `{ \"👍\": { … }, \"❤️\":\n{ … } }` — with this as each value, resolved over the event's reactions\nregardless of pagination (issue #22 Option A; the store hard-caps a pathological\nevent at the oldest 1000 distinct `(sender, key)` pairs).",
         "required": [
           "count",
           "me",

@@ -37,6 +37,10 @@ pub struct Config {
     /// account (if any) to provision on boot.
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Full-text search settings: whether the Tantivy index is enabled and
+    /// where it lives.
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 /// HTTP server bind settings.
@@ -115,6 +119,36 @@ pub struct SyncConfig {
     /// Defaults to 1024.
     #[serde(default = "default_live_event_buffer")]
     pub live_event_buffer: usize,
+}
+
+/// Full-text search (Tantivy) settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    /// Whether the search index is built and served. When `false`, the
+    /// ingestion hooks are no-ops and `GET /v1/search` returns `503`. Defaults
+    /// to `true`.
+    #[serde(default = "default_search_enabled")]
+    pub enabled: bool,
+    /// Directory holding the Tantivy index. Must be durable; lives on the same
+    /// disk as Postgres and inherits the operator's filesystem-level encryption
+    /// (the index holds decrypted message text — see the tech spec). Defaults to
+    /// `axon-data/search`.
+    #[serde(default = "default_search_index_path")]
+    pub index_path: PathBuf,
+    /// Rows streamed per batch by the indexer — both the corpus seed and the
+    /// outbox drain. Bounds the indexer's working set and its share of the
+    /// Postgres connection pool. Defaults to 1000.
+    #[serde(default = "default_search_index_batch_size")]
+    pub index_batch_size: i64,
+    /// Delay between corpus-seed batches, in milliseconds. A throttle so a large
+    /// from-scratch seed never starves live sync or API reads. Defaults to 0 (no
+    /// delay).
+    #[serde(default)]
+    pub build_throttle_ms: u64,
+    /// Heap budget for the single Tantivy `IndexWriter`, in megabytes. Bounds the
+    /// indexer's memory. Defaults to 50.
+    #[serde(default = "default_search_writer_heap_mb")]
+    pub writer_heap_mb: usize,
 }
 
 /// Provisioning details for a single Matrix account.
@@ -215,6 +249,22 @@ fn default_live_event_buffer() -> usize {
     1024
 }
 
+fn default_search_enabled() -> bool {
+    true
+}
+
+fn default_search_index_path() -> PathBuf {
+    PathBuf::from("axon-data/search")
+}
+
+fn default_search_index_batch_size() -> i64 {
+    1000
+}
+
+fn default_search_writer_heap_mb() -> usize {
+    50
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -241,6 +291,18 @@ impl Default for SyncConfig {
             account: None,
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
+        }
+    }
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_search_enabled(),
+            index_path: default_search_index_path(),
+            index_batch_size: default_search_index_batch_size(),
+            build_throttle_ms: 0,
+            writer_heap_mb: default_search_writer_heap_mb(),
         }
     }
 }
@@ -380,8 +442,35 @@ mod tests {
             },
             log: LogConfig::default(),
             sync: SyncConfig::default(),
+            search: SearchConfig::default(),
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
+    }
+
+    #[test]
+    fn search_defaults_when_absent() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let config = Config::load(None).expect("load");
+            assert!(config.search.enabled);
+            assert_eq!(config.search.index_path, PathBuf::from("axon-data/search"));
+            assert_eq!(config.search.index_batch_size, 1000);
+            assert_eq!(config.search.build_throttle_ms, 0);
+            assert_eq!(config.search.writer_heap_mb, 50);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn search_can_be_disabled_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_SEARCH__ENABLED", "false");
+            assert!(!Config::load(None).expect("load").search.enabled);
+            Ok(())
+        });
     }
 
     #[test]

@@ -289,14 +289,27 @@ impl Store {
     ///
     /// This is the **last** step of the account-delete teardown (in `axon-sync`) —
     /// the row is the durable key a boot reconcile uses to re-find external
-    /// resources, so the external cleanup (SDK store dir, and later the search
-    /// index / media cache) runs first and the row is dropped only once it has
-    /// (ADR 0024).
+    /// resources, so file-backed cleanup (SDK store dir, and later the media cache)
+    /// runs first and the row is dropped only once it has (ADR 0024).
+    ///
+    /// The **search index** is handled differently: its purge obligation is
+    /// appended to `search_outbox` in the *same statement* that drops the row, so
+    /// it commits atomically and — crucially — *outlives* the row (the outbox has
+    /// no FK to `accounts`). The indexer drains it whether or not search is
+    /// currently enabled, so an account deleted while search is off, or a crash
+    /// before the purge commits to Tantivy, still converges on the next enabled
+    /// boot (ADR 0039). Idempotent: a re-run after the row is gone appends nothing.
     pub async fn delete_account_row(&self, account_id: Uuid) -> Result<(), StoreError> {
-        sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
-            .bind(account_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx_core::query::query(
+            "WITH d AS ( \
+               DELETE FROM accounts WHERE account_id = $1 RETURNING account_id \
+             ) \
+             INSERT INTO search_outbox (account_id, event_id) \
+             SELECT account_id, '' FROM d",
+        )
+        .bind(account_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
