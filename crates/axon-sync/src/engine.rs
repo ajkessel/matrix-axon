@@ -166,6 +166,9 @@ impl SyncEngine {
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
+        // Explicit drop so the async state machine doesn't carry the IndexHandle
+        // clone inside `lifecycle` across the remaining await points in this fn.
+        drop(lifecycle);
 
         // `list_accounts` returns only `active` rows, so a `deactivated` or
         // `deleting` account never gets a supervised task (ADR 0022). Listed after

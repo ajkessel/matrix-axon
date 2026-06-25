@@ -54,4 +54,7 @@ pub enum SearchError {
     /// The caller's query string could not be parsed.
     #[error("invalid search query: {0}")]
     BadQuery(String),
+    /// The indexing actor was asked to shut down before seeding finished.
+    #[error("search seed cancelled")]
+    Cancelled,
 }

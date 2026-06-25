@@ -29,6 +29,7 @@ use axon_store::{IndexableEvent, SearchOutboxEntry, Store, TimelineRow};
 use tantivy::IndexWriter;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::schema::SearchSchema;
@@ -102,12 +103,16 @@ impl IndexHandle {
 }
 
 /// What [`SearchIndex::spawn_indexer`](crate::SearchIndex::spawn_indexer) returns:
-/// the producer handle and the actor's join handle.
+/// the producer handle, the actor's join handle, and a cancellation token.
 pub struct IndexerHandles {
     /// Clone and distribute to ingestion sites.
     pub handle: IndexHandle,
-    /// Resolves when the actor has done its final drain after the channel closed.
+    /// Resolves when the actor has done its final drain and exited.
     pub join: JoinHandle<()>,
+    /// Cancel the actor directly. Use this on shutdown if the channel cannot be
+    /// fully closed (e.g. a handle is leaked inside a third-party library). The
+    /// actor exits without a final drain; the durable outbox self-heals on restart.
+    pub cancel: CancellationToken,
 }
 
 /// Create the channel and spawn the actor task. `fresh` requests a one-time
@@ -123,10 +128,12 @@ pub(crate) fn spawn(
     opts: IndexerOptions,
 ) -> IndexerHandles {
     let (tx, rx) = mpsc::channel(opts.channel_capacity);
-    let join = tokio::spawn(run(writer, schema, store, dir, rx, fresh, opts));
+    let cancel = CancellationToken::new();
+    let join = tokio::spawn(run(writer, schema, store, dir, rx, cancel.clone(), fresh, opts));
     IndexerHandles {
         handle: IndexHandle { tx },
         join,
+        cancel,
     }
 }
 
@@ -137,11 +144,12 @@ async fn run(
     store: Store,
     dir: PathBuf,
     mut rx: mpsc::Receiver<Signal>,
+    cancel: CancellationToken,
     fresh: bool,
     opts: IndexerOptions,
 ) {
     if fresh {
-        match seed(&mut writer, &schema, &store, &opts).await {
+        match seed(&mut writer, &schema, &store, &mut rx, &cancel, &opts).await {
             // Stamp the seed-completion marker only now that the corpus is durably
             // committed, so the next boot trusts (and reopens) this index instead of
             // reseeding. A marker-write failure is non-fatal: it just means the next
@@ -155,6 +163,9 @@ async fn run(
             // onto a partial/empty index would serve permanently incomplete results
             // this session, so stop instead — the degraded state is honest (empty)
             // and self-heals on restart.
+            Err(SearchError::Cancelled) => {
+                return; // already logged in seed()
+            }
             Err(err) => {
                 tracing::warn!(error = %err, "search corpus seed failed; leaving index unmarked to reseed on next boot");
                 return;
@@ -182,6 +193,10 @@ async fn run(
                 }
             },
             _ = ticker.tick() => {}
+            _ = cancel.cancelled() => {
+                tracing::info!("search indexer cancelled; skipping final drain (outbox self-heals on restart)");
+                return;
+            }
         }
     }
 
@@ -282,6 +297,8 @@ async fn seed(
     writer: &mut IndexWriter,
     schema: &SearchSchema,
     store: &Store,
+    rx: &mut mpsc::Receiver<Signal>,
+    cancel: &CancellationToken,
     opts: &IndexerOptions,
 ) -> Result<(), SearchError> {
     let watermark = store.search_outbox_high_water().await?;
@@ -293,10 +310,12 @@ async fn seed(
     let mut after_id = 0i64;
     let mut total = 0usize;
     loop {
+        tracing::debug!(after_id, total, "search seed fetching next batch");
         let batch = store.events_for_index(after_id, opts.batch_size).await?;
         let Some(last) = batch.last() else { break };
         after_id = last.id;
         let n = batch.len();
+        tracing::debug!(n, after_id, "search seed indexing batch");
         for ev in &batch {
             if let Err(err) = schema.add(writer, ev) {
                 tracing::warn!(event_id = %ev.event_id, error = %err, "search index add failed during seed");
@@ -307,8 +326,28 @@ async fn seed(
         if (n as i64) < opts.batch_size {
             break;
         }
+        // Check for shutdown between batches (both channel close and explicit cancel).
+        if matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected))
+            || cancel.is_cancelled()
+        {
+            tracing::info!("search seed interrupted by shutdown");
+            return Err(SearchError::Cancelled);
+        }
         if !opts.seed_throttle.is_zero() {
-            tokio::time::sleep(opts.seed_throttle).await;
+            // Race the throttle sleep against both shutdown signals.
+            tokio::select! {
+                _ = tokio::time::sleep(opts.seed_throttle) => {}
+                msg = rx.recv() => {
+                    if msg.is_none() {
+                        tracing::info!("search seed interrupted by shutdown");
+                        return Err(SearchError::Cancelled);
+                    }
+                }
+                _ = cancel.cancelled() => {
+                    tracing::info!("search seed interrupted by shutdown");
+                    return Err(SearchError::Cancelled);
+                }
+            }
         }
     }
 

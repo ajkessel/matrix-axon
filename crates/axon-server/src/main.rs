@@ -92,16 +92,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // arrive. We hand its producer handle to the sync engine; the actor's writer
     // keeps the underlying index alive, so we don't retain the reader here (the
     // `/v1/search` query endpoint that needs it lands in 9b).
-    let (index_handle, index_join) = if config.search.enabled {
+    let (index_handle, index_join, index_cancel) = if config.search.enabled {
         let (search_index, fresh) = axon_search::SearchIndex::open(&config.search.index_path)
             .context("opening search index")?;
         let handles = search_index
             .spawn_indexer(store.clone(), fresh, indexer_options(&config.search))
             .context("starting search indexer")?;
-        (Some(handles.handle), Some(handles.join))
+        (Some(handles.handle), Some(handles.join), Some(handles.cancel))
     } else {
         tracing::info!("search disabled (search.enabled = false); not indexing");
-        (None, None)
+        (None, None, None)
     };
 
     // Start the sync engine: it provisions the configured account and runs one
@@ -153,8 +153,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!("stopping sync engine");
     sync_engine.shutdown().await;
 
-    // With all producers dropped, the search actor drains, commits, and exits;
-    // wait for it so a clean shutdown doesn't lose the last batch.
+    // The search actor normally exits once all IndexHandles are dropped (channel
+    // close). However, the matrix-sdk keeps internal background tasks that hold an
+    // Arc to the Client — and the PersistContext (with its IndexHandle) lives inside
+    // that Arc — so the channel may never close. Cancel the actor directly to ensure
+    // a prompt exit; the durable outbox self-heals any un-drained work on next boot.
+    if let Some(cancel) = index_cancel {
+        cancel.cancel();
+    }
     if let Some(join) = index_join {
         tracing::info!("stopping search indexer");
         let _ = join.await;
