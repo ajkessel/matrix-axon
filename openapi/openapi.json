@@ -1486,6 +1486,16 @@
               "type": "integer",
               "format": "int64"
             }
+          },
+          {
+            "name": "at_ts",
+            "in": "query",
+            "description": "Jump to a specific point in time: Unix milliseconds. Returns the page of\nevents at or before this timestamp. Mutually exclusive with `cursor`;\nsupplying both is a 400.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "responses": {
@@ -1500,7 +1510,7 @@
             }
           },
           "400": {
-            "description": "Malformed cursor",
+            "description": "Malformed cursor, or both cursor and at_ts supplied",
             "content": {
               "application/json": {
                 "schema": {

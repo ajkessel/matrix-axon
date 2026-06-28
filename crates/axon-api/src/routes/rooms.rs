@@ -52,6 +52,10 @@ pub struct TimelineQuery {
     pub cursor: Option<String>,
     /// Page size (default 50, max 200).
     pub limit: Option<i64>,
+    /// Jump to a specific point in time: Unix milliseconds. Returns the page of
+    /// events at or before this timestamp. Mutually exclusive with `cursor`;
+    /// supplying both is a 400.
+    pub at_ts: Option<i64>,
 }
 
 /// Read a room's timeline, newest first, with cursor pagination.
@@ -69,7 +73,7 @@ pub struct TimelineQuery {
     ),
     responses(
         (status = 200, description = "A page of timeline events", body = ApiResponse<TimelinePage>),
-        (status = 400, description = "Malformed cursor", body = crate::response::ErrorResponse),
+        (status = 400, description = "Malformed cursor, or both cursor and at_ts supplied", body = crate::response::ErrorResponse),
     ),
     tag = "rooms",
 )]
@@ -78,9 +82,17 @@ pub async fn room_timeline(
     Path((account_id, room_id)): Path<(Uuid, String)>,
     Query(q): Query<TimelineQuery>,
 ) -> Result<ApiResponse<TimelinePage>, ApiError> {
-    let before = match q.cursor.as_deref() {
-        Some(c) => Some(cursor::decode(c).ok_or_else(|| ApiError::bad_request("invalid cursor"))?),
-        None => None,
+    let before = match (q.cursor.as_deref(), q.at_ts) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "cursor and at_ts are mutually exclusive",
+            ));
+        }
+        (Some(c), None) => {
+            Some(cursor::decode(c).ok_or_else(|| ApiError::bad_request("invalid cursor"))?)
+        }
+        (None, Some(ts)) => Some(cursor::from_ts(ts)),
+        (None, None) => None,
     };
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
@@ -158,6 +170,18 @@ pub async fn room_threads(
     ))
 }
 
+/// Query parameters for a cursor-paginated timeline read: an opaque cursor plus
+/// a page size, with no timestamp jump. (The room timeline additionally accepts
+/// `at_ts`; see [`TimelineQuery`].)
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TimelineCursorQuery {
+    /// Opaque cursor from a previous page's `next_cursor`; omit for the newest page.
+    pub cursor: Option<String>,
+    /// Page size (default 50, max 200).
+    pub limit: Option<i64>,
+}
+
 /// Read a thread's timeline (M8): the `m.thread` members whose root is
 /// `root_id`, newest first, with the same cursor pagination as the room
 /// timeline. The thread root itself is not included (fetch it via the
@@ -171,7 +195,7 @@ pub async fn room_threads(
         ("account_id" = Uuid, Path, description = "Axon account id"),
         ("room_id" = String, Path, description = "Matrix room id"),
         ("root_id" = String, Path, description = "Matrix event id of the thread root"),
-        TimelineQuery,
+        TimelineCursorQuery,
     ),
     responses(
         (status = 200, description = "A page of thread events", body = ApiResponse<TimelinePage>),
@@ -182,7 +206,7 @@ pub async fn room_threads(
 pub async fn thread_timeline(
     State(store): State<Store>,
     Path((account_id, room_id, root_id)): Path<(Uuid, String, String)>,
-    Query(q): Query<TimelineQuery>,
+    Query(q): Query<TimelineCursorQuery>,
 ) -> Result<ApiResponse<TimelinePage>, ApiError> {
     let before = match q.cursor.as_deref() {
         Some(c) => Some(cursor::decode(c).ok_or_else(|| ApiError::bad_request("invalid cursor"))?),

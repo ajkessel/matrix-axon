@@ -530,6 +530,12 @@ async fn read_api_end_to_end() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(err["error"]["code"], "bad_request");
 
+    // cursor and at_ts are mutually exclusive: supplying both is a 400, not a
+    // silent preference for one over the other.
+    let (status, err) = get(&app, &format!("{base}?cursor={cursor}&at_ts=0")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(err["error"]["code"], "bad_request");
+
     // A non-UUID account_id is a 400 in the *envelope* (not axum's plain-text
     // rejection): once in a query filter, once in a path segment.
     let (status, err) = get(&app, "/v1/rooms?account_id=12345").await;

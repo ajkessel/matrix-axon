@@ -98,7 +98,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let handles = search_index
             .spawn_indexer(store.clone(), fresh, indexer_options(&config.search))
             .context("starting search indexer")?;
-        (Some(handles.handle), Some(handles.join), Some(handles.cancel))
+        (
+            Some(handles.handle),
+            Some(handles.join),
+            Some(handles.cancel),
+        )
     } else {
         tracing::info!("search disabled (search.enabled = false); not indexing");
         (None, None, None)

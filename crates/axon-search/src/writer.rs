@@ -129,7 +129,13 @@ pub(crate) fn spawn(
 ) -> IndexerHandles {
     let (tx, rx) = mpsc::channel(opts.channel_capacity);
     let cancel = CancellationToken::new();
-    let join = tokio::spawn(run(writer, schema, store, dir, rx, cancel.clone(), fresh, opts));
+    let indexer = Indexer {
+        writer,
+        schema,
+        store,
+        opts,
+    };
+    let join = tokio::spawn(indexer.run(dir, rx, cancel.clone(), fresh));
     IndexerHandles {
         handle: IndexHandle { tx },
         join,
@@ -137,228 +143,227 @@ pub(crate) fn spawn(
     }
 }
 
-/// The actor entry point: optional seed, then the drain/wait loop.
-async fn run(
-    mut writer: IndexWriter,
+/// The indexing actor's state: the Tantivy writer plus the dependencies every
+/// step (seed, drain, apply) shares. Bundling them keeps the per-call signatures
+/// small instead of threading the same four values through every helper.
+struct Indexer {
+    writer: IndexWriter,
     schema: SearchSchema,
     store: Store,
-    dir: PathBuf,
-    mut rx: mpsc::Receiver<Signal>,
-    cancel: CancellationToken,
-    fresh: bool,
     opts: IndexerOptions,
-) {
-    if fresh {
-        match seed(&mut writer, &schema, &store, &mut rx, &cancel, &opts).await {
-            // Stamp the seed-completion marker only now that the corpus is durably
-            // committed, so the next boot trusts (and reopens) this index instead of
-            // reseeding. A marker-write failure is non-fatal: it just means the next
-            // boot reseeds (wasteful but correct), so we log and keep serving.
-            Ok(()) => {
-                if let Err(err) = crate::index::write_seed_marker(&dir) {
-                    tracing::warn!(error = %err, "search seed-completion marker write failed; index will reseed on next boot");
-                }
-            }
-            // Leave the index unmarked so the next open reseeds. Draining the outbox
-            // onto a partial/empty index would serve permanently incomplete results
-            // this session, so stop instead — the degraded state is honest (empty)
-            // and self-heals on restart.
-            Err(SearchError::Cancelled) => {
-                return; // already logged in seed()
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "search corpus seed failed; leaving index unmarked to reseed on next boot");
-                return;
-            }
-        }
-    }
+}
 
-    let mut ticker = tokio::time::interval(opts.idle_poll_interval);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await; // skip the immediate first tick
-
-    loop {
-        if let Err(err) = drain_all(&mut writer, &schema, &store, &opts).await {
-            tracing::warn!(error = %err, "search outbox drain failed; will retry");
-        }
-        tokio::select! {
-            sig = rx.recv() => match sig {
-                None => break, // all handles dropped → shut down
-                Some(Signal::Wake) => {}
-                Some(Signal::Flush(ack)) => {
-                    if let Err(err) = drain_all(&mut writer, &schema, &store, &opts).await {
-                        tracing::warn!(error = %err, "search outbox flush drain failed");
+impl Indexer {
+    /// The actor entry point: optional seed, then the drain/wait loop. `dir` is
+    /// the index directory (stamped with the seed-completion marker), `rx` the
+    /// wakeup-hint channel, `cancel` the shutdown token, and `fresh` requests a
+    /// one-time corpus seed.
+    async fn run(
+        mut self,
+        dir: PathBuf,
+        mut rx: mpsc::Receiver<Signal>,
+        cancel: CancellationToken,
+        fresh: bool,
+    ) {
+        if fresh {
+            match self.seed(&mut rx, &cancel).await {
+                // Stamp the seed-completion marker only now that the corpus is durably
+                // committed, so the next boot trusts (and reopens) this index instead of
+                // reseeding. A marker-write failure is non-fatal: it just means the next
+                // boot reseeds (wasteful but correct), so we log and keep serving.
+                Ok(()) => {
+                    if let Err(err) = crate::index::write_seed_marker(&dir) {
+                        tracing::warn!(error = %err, "search seed-completion marker write failed; index will reseed on next boot");
                     }
-                    let _ = ack.send(());
                 }
-            },
-            _ = ticker.tick() => {}
-            _ = cancel.cancelled() => {
-                tracing::info!("search indexer cancelled; skipping final drain (outbox self-heals on restart)");
-                return;
+                // Leave the index unmarked so the next open reseeds. Draining the outbox
+                // onto a partial/empty index would serve permanently incomplete results
+                // this session, so stop instead — the degraded state is honest (empty)
+                // and self-heals on restart.
+                Err(SearchError::Cancelled) => {
+                    return; // already logged in seed()
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "search corpus seed failed; leaving index unmarked to reseed on next boot");
+                    return;
+                }
             }
         }
-    }
 
-    // A row may have been written between the last drain and the channel closing.
-    if let Err(err) = drain_all(&mut writer, &schema, &store, &opts).await {
-        tracing::warn!(error = %err, "search outbox final drain failed");
-    }
-}
+        let mut ticker = tokio::time::interval(self.opts.idle_poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // skip the immediate first tick
 
-/// Drain the outbox to empty, one batch at a time. Each batch is applied to the
-/// writer, committed, and only then has its `seq` recorded as the durable cursor
-/// and its rows pruned — so a crash mid-batch re-runs the batch (idempotent) and
-/// the cursor never claims uncommitted work.
-async fn drain_all(
-    writer: &mut IndexWriter,
-    schema: &SearchSchema,
-    store: &Store,
-    opts: &IndexerOptions,
-) -> Result<(), SearchError> {
-    loop {
-        let cursor = store.search_outbox_cursor().await?;
-        let batch = store.drain_search_outbox(cursor, opts.batch_size).await?;
-        let Some(last_seq) = batch.last().map(|e| e.seq) else {
-            break; // outbox drained
-        };
-        apply_batch(writer, schema, store, &batch).await?;
-        writer.commit()?;
-        store.set_search_outbox_cursor(last_seq).await?;
-        store.prune_search_outbox(last_seq).await?;
-        if (batch.len() as i64) < opts.batch_size {
-            break;
-        }
-    }
-    Ok(())
-}
-
-/// Apply one drained batch to the writer (no commit). Re-derivations dedup within
-/// the batch — an event edited several times enqueues its target repeatedly, but
-/// the resolved projection is the same, so we resolve each `(account, event)` once.
-/// A purge is never deduped: it removes every document for the account.
-///
-/// A failed store read aborts the whole batch (propagated) so the cursor does not
-/// advance past unindexed work — the batch is retried rather than silently lost.
-async fn apply_batch(
-    writer: &IndexWriter,
-    schema: &SearchSchema,
-    store: &Store,
-    batch: &[SearchOutboxEntry],
-) -> Result<(), SearchError> {
-    let mut seen: HashSet<(Uuid, &str)> = HashSet::new();
-    for entry in batch {
-        if entry.is_purge() {
-            schema.delete_account(writer, entry.account_id);
-        } else if seen.insert((entry.account_id, entry.event_id.as_str())) {
-            apply_event(writer, schema, store, entry.account_id, &entry.event_id).await?;
-        }
-    }
-    Ok(())
-}
-
-/// (Re)derive a single `(account_id, event_id)` document from the resolved M8
-/// projection and upsert or delete it. Order-independent: a target not (yet)
-/// stored, redacted, a standalone relation, or non-text resolves to "no document",
-/// so a relation/redaction that lands before its target self-heals once the target
-/// arrives and re-enqueues.
-async fn apply_event(
-    writer: &IndexWriter,
-    schema: &SearchSchema,
-    store: &Store,
-    account_id: Uuid,
-    event_id: &str,
-) -> Result<(), SearchError> {
-    match store.get_event(account_id, event_id).await? {
-        Some(row) => match indexable(account_id, row) {
-            Some(ev) => schema.upsert(writer, &ev)?,
-            None => schema.delete(writer, account_id, event_id),
-        },
-        None => schema.delete(writer, account_id, event_id),
-    }
-    Ok(())
-}
-
-/// Seed the index from the event store — the authoritative rebuild. Clears the
-/// (fresh) index, then streams the corpus in keyset batches through the same
-/// resolved projection the live path derives from, so a from-scratch rebuild
-/// converges with incremental indexing. Throttled between batches. Returning `Ok`
-/// is the actor's signal to stamp the seed-completion marker; an `Err` (or a crash)
-/// leaves the index unmarked so the next boot reseeds rather than trusting a partial
-/// index.
-///
-/// Leaves the durable cursor at the outbox high-water mark captured **before** the
-/// seed: everything committed by then is reflected in the corpus scan that runs
-/// after it, so the drain need only apply changes made since. (A change whose
-/// transaction is in flight at that instant and that the scan races past is the one
-/// bounded, self-healing window — the next edit/redaction/redecryption to that
-/// event re-enqueues it, and `axon search reindex` forces a clean rebuild.)
-async fn seed(
-    writer: &mut IndexWriter,
-    schema: &SearchSchema,
-    store: &Store,
-    rx: &mut mpsc::Receiver<Signal>,
-    cancel: &CancellationToken,
-    opts: &IndexerOptions,
-) -> Result<(), SearchError> {
-    let watermark = store.search_outbox_high_water().await?;
-
-    tracing::info!("seeding search index from event store");
-    writer.delete_all_documents()?;
-    writer.commit()?;
-
-    let mut after_id = 0i64;
-    let mut total = 0usize;
-    loop {
-        tracing::debug!(after_id, total, "search seed fetching next batch");
-        let batch = store.events_for_index(after_id, opts.batch_size).await?;
-        let Some(last) = batch.last() else { break };
-        after_id = last.id;
-        let n = batch.len();
-        tracing::debug!(n, after_id, "search seed indexing batch");
-        for ev in &batch {
-            if let Err(err) = schema.add(writer, ev) {
-                tracing::warn!(event_id = %ev.event_id, error = %err, "search index add failed during seed");
+        loop {
+            if let Err(err) = self.drain_all().await {
+                tracing::warn!(error = %err, "search outbox drain failed; will retry");
             }
-        }
-        writer.commit()?;
-        total += n;
-        if (n as i64) < opts.batch_size {
-            break;
-        }
-        // Check for shutdown between batches (both channel close and explicit cancel).
-        if matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected))
-            || cancel.is_cancelled()
-        {
-            tracing::info!("search seed interrupted by shutdown");
-            return Err(SearchError::Cancelled);
-        }
-        if !opts.seed_throttle.is_zero() {
-            // Race the throttle sleep against both shutdown signals.
             tokio::select! {
-                _ = tokio::time::sleep(opts.seed_throttle) => {}
-                msg = rx.recv() => {
-                    if msg.is_none() {
+                sig = rx.recv() => match sig {
+                    None => break, // all handles dropped → shut down
+                    Some(Signal::Wake) => {}
+                    Some(Signal::Flush(ack)) => {
+                        if let Err(err) = self.drain_all().await {
+                            tracing::warn!(error = %err, "search outbox flush drain failed");
+                        }
+                        let _ = ack.send(());
+                    }
+                },
+                _ = ticker.tick() => {}
+                _ = cancel.cancelled() => {
+                    tracing::info!("search indexer cancelled; skipping final drain (outbox self-heals on restart)");
+                    return;
+                }
+            }
+        }
+
+        // A row may have been written between the last drain and the channel closing.
+        if let Err(err) = self.drain_all().await {
+            tracing::warn!(error = %err, "search outbox final drain failed");
+        }
+    }
+
+    /// Drain the outbox to empty, one batch at a time. Each batch is applied to
+    /// the writer, committed, and only then has its `seq` recorded as the durable
+    /// cursor and its rows pruned — so a crash mid-batch re-runs the batch
+    /// (idempotent) and the cursor never claims uncommitted work.
+    async fn drain_all(&mut self) -> Result<(), SearchError> {
+        loop {
+            let cursor = self.store.search_outbox_cursor().await?;
+            let batch = self
+                .store
+                .drain_search_outbox(cursor, self.opts.batch_size)
+                .await?;
+            let Some(last_seq) = batch.last().map(|e| e.seq) else {
+                break; // outbox drained
+            };
+            self.apply_batch(&batch).await?;
+            self.writer.commit()?;
+            self.store.set_search_outbox_cursor(last_seq).await?;
+            self.store.prune_search_outbox(last_seq).await?;
+            if (batch.len() as i64) < self.opts.batch_size {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one drained batch to the writer (no commit). Re-derivations dedup within
+    /// the batch — an event edited several times enqueues its target repeatedly, but
+    /// the resolved projection is the same, so we resolve each `(account, event)` once.
+    /// A purge is never deduped: it removes every document for the account.
+    ///
+    /// A failed store read aborts the whole batch (propagated) so the cursor does not
+    /// advance past unindexed work — the batch is retried rather than silently lost.
+    async fn apply_batch(&self, batch: &[SearchOutboxEntry]) -> Result<(), SearchError> {
+        let mut seen: HashSet<(Uuid, &str)> = HashSet::new();
+        for entry in batch {
+            if entry.is_purge() {
+                self.schema.delete_account(&self.writer, entry.account_id);
+            } else if seen.insert((entry.account_id, entry.event_id.as_str())) {
+                self.apply_event(entry.account_id, &entry.event_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// (Re)derive a single `(account_id, event_id)` document from the resolved M8
+    /// projection and upsert or delete it. Order-independent: a target not (yet)
+    /// stored, redacted, a standalone relation, or non-text resolves to "no document",
+    /// so a relation/redaction that lands before its target self-heals once the target
+    /// arrives and re-enqueues.
+    async fn apply_event(&self, account_id: Uuid, event_id: &str) -> Result<(), SearchError> {
+        match self.store.get_event(account_id, event_id).await? {
+            Some(row) => match indexable(account_id, row) {
+                Some(ev) => self.schema.upsert(&self.writer, &ev)?,
+                None => self.schema.delete(&self.writer, account_id, event_id),
+            },
+            None => self.schema.delete(&self.writer, account_id, event_id),
+        }
+        Ok(())
+    }
+
+    /// Seed the index from the event store — the authoritative rebuild. Clears the
+    /// (fresh) index, then streams the corpus in keyset batches through the same
+    /// resolved projection the live path derives from, so a from-scratch rebuild
+    /// converges with incremental indexing. Throttled between batches. Returning `Ok`
+    /// is the actor's signal to stamp the seed-completion marker; an `Err` (or a crash)
+    /// leaves the index unmarked so the next boot reseeds rather than trusting a partial
+    /// index.
+    ///
+    /// Leaves the durable cursor at the outbox high-water mark captured **before** the
+    /// seed: everything committed by then is reflected in the corpus scan that runs
+    /// after it, so the drain need only apply changes made since. (A change whose
+    /// transaction is in flight at that instant and that the scan races past is the one
+    /// bounded, self-healing window — the next edit/redaction/redecryption to that
+    /// event re-enqueues it, and `axon search reindex` forces a clean rebuild.)
+    async fn seed(
+        &mut self,
+        rx: &mut mpsc::Receiver<Signal>,
+        cancel: &CancellationToken,
+    ) -> Result<(), SearchError> {
+        let watermark = self.store.search_outbox_high_water().await?;
+
+        tracing::info!("seeding search index from event store");
+        self.writer.delete_all_documents()?;
+        self.writer.commit()?;
+
+        let mut after_id = 0i64;
+        let mut total = 0usize;
+        loop {
+            tracing::debug!(after_id, total, "search seed fetching next batch");
+            let batch = self
+                .store
+                .events_for_index(after_id, self.opts.batch_size)
+                .await?;
+            let Some(last) = batch.last() else { break };
+            after_id = last.id;
+            let n = batch.len();
+            tracing::debug!(n, after_id, "search seed indexing batch");
+            for ev in &batch {
+                if let Err(err) = self.schema.add(&self.writer, ev) {
+                    tracing::warn!(event_id = %ev.event_id, error = %err, "search index add failed during seed");
+                }
+            }
+            self.writer.commit()?;
+            total += n;
+            if (n as i64) < self.opts.batch_size {
+                break;
+            }
+            // Check for shutdown between batches (both channel close and explicit cancel).
+            if matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected))
+                || cancel.is_cancelled()
+            {
+                tracing::info!("search seed interrupted by shutdown");
+                return Err(SearchError::Cancelled);
+            }
+            if !self.opts.seed_throttle.is_zero() {
+                // Race the throttle sleep against both shutdown signals.
+                tokio::select! {
+                    _ = tokio::time::sleep(self.opts.seed_throttle) => {}
+                    msg = rx.recv() => {
+                        if msg.is_none() {
+                            tracing::info!("search seed interrupted by shutdown");
+                            return Err(SearchError::Cancelled);
+                        }
+                    }
+                    _ = cancel.cancelled() => {
                         tracing::info!("search seed interrupted by shutdown");
                         return Err(SearchError::Cancelled);
                     }
                 }
-                _ = cancel.cancelled() => {
-                    tracing::info!("search seed interrupted by shutdown");
-                    return Err(SearchError::Cancelled);
-                }
             }
         }
-    }
 
-    store.set_search_outbox_cursor(watermark).await?;
-    store.prune_search_outbox(watermark).await?;
-    tracing::info!(
-        indexed = total,
-        cursor = watermark,
-        "search index seed complete"
-    );
-    Ok(())
+        self.store.set_search_outbox_cursor(watermark).await?;
+        self.store.prune_search_outbox(watermark).await?;
+        tracing::info!(
+            indexed = total,
+            cursor = watermark,
+            "search index seed complete"
+        );
+        Ok(())
+    }
 }
 
 /// Resolve a timeline row into the document to index, or `None` if the event

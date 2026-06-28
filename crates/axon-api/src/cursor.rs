@@ -18,6 +18,17 @@ pub fn encode(cursor: TimelineCursor) -> String {
     URL_SAFE_NO_PAD.encode(format!("{}.{}", cursor.origin_ts, cursor.id))
 }
 
+/// Construct a synthetic cursor positioned just before or at the given
+/// timestamp. Using `id = i64::MAX` as the tiebreaker means the store's
+/// `(origin_ts, id) < (ts, MAX)` comparison includes every row whose
+/// `origin_ts` equals `ts`, since real BIGSERIAL ids never reach `i64::MAX`.
+pub fn from_ts(origin_ts: i64) -> TimelineCursor {
+    TimelineCursor {
+        origin_ts,
+        id: i64::MAX,
+    }
+}
+
 /// Decode an opaque cursor string back into a sort key. Returns `None` for any
 /// malformed input (not base64, not UTF-8, wrong shape, unparsable integers) so
 /// the handler can map it to a `400`.
