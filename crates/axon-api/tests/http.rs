@@ -80,6 +80,29 @@ async fn request_parts(
     (status, headers, json)
 }
 
+/// As [`request_parts`], but returns the raw body bytes decoded as UTF-8 text.
+/// Used for non-JSON responses such as the browser fallback page.
+async fn request_text_parts(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, String) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(value) = auth {
+        builder = builder.header("authorization", value);
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    let resp = app.clone().oneshot(req).await.expect("request");
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+    (status, headers, body)
+}
+
 /// As [`request_parts`], dropping the response headers — the common case.
 async fn request(
     app: &axum::Router,
@@ -733,6 +756,48 @@ async fn auth_gate_covers_read_routes_but_healthz_is_open() {
     // The unversioned liveness probe carries no auth, so a monitor can reach it.
     let (status, _) = request(&app, "GET", "/healthz", None, None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn browser_fallback_serves_html_for_root_and_non_api_misses() {
+    let store = store().await;
+    let app = read_app(store);
+
+    for uri in ["/", "/not-a-route"] {
+        let (status, headers, body) = request_text_parts(&app, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::OK, "uri: {uri}");
+        assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+        assert!(body.contains("Axon"), "uri: {uri}");
+        assert!(
+            body.contains("self-hosted Matrix agent and API server"),
+            "uri: {uri}"
+        );
+        assert!(
+            body.contains("No web interface is served at this address"),
+            "uri: {uri}"
+        );
+        assert!(body.contains("axon-tui"), "uri: {uri}");
+        assert!(body.contains("/healthz"), "uri: {uri}");
+        assert!(body.contains("/v1/"), "uri: {uri}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unknown_v1_paths_stay_in_the_api_boundary() {
+    let store = store().await;
+    let app = read_app(store);
+
+    let (status, headers, err) = request_parts(&app, "GET", "/v1/not-a-route", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["error"]["code"], "unauthorized");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+
+    let (status, body) = request(&app, "GET", "/v1/not-a-route", None, Some(&bearer())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(body["error"]["message"], "route not found");
 }
 
 // ---- Lifecycle: login / logout / delete / recover ----

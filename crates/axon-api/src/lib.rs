@@ -38,6 +38,7 @@ pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError}
 
 use axum::{
     middleware::from_fn_with_state,
+    response::Html,
     routing::{get, post, put},
     Json, Router,
 };
@@ -151,6 +152,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/media/{account_id}/{server_name}/{media_id}",
             get(routes::media::get_media),
         )
+        // Keep unmatched `/v1/...` paths inside the authenticated API boundary:
+        // they must not fall through to the browser-facing HTML fallback below.
+        .route("/v1", get(v1_not_found))
+        .route("/v1/{*path}", get(v1_not_found))
         .route_layer(from_fn_with_state(verifier, auth::require_bearer));
 
     Router::new()
@@ -164,6 +169,10 @@ pub fn router(state: AppState) -> Router {
         // header on a socket, so the handler authenticates the token itself at
         // upgrade time rather than riding the `require_bearer` layer.
         .route("/v1/ws", get(ws::ws_handler))
+        // Human-facing browser fallback for the server root / other non-API
+        // unmatched paths. This is intentionally outside the `/v1` subtree so
+        // unknown API routes keep auth + JSON semantics above.
+        .fallback(browser_fallback)
         .with_state(state)
 }
 
@@ -171,4 +180,31 @@ pub fn router(state: AppState) -> Router {
 /// touch the database, so a transient DB outage does not cause restarts.
 async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// JSON `404` for unknown `/v1/...` paths. These stay in the authenticated API
+/// boundary instead of falling through to the browser-facing fallback page.
+async fn v1_not_found() -> ApiError {
+    ApiError::not_found("route not found")
+}
+
+/// Browser-facing informational page for unmatched non-API paths.
+async fn browser_fallback() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Axon</title>
+  </head>
+  <body>
+    <h1>Axon</h1>
+    <p>Axon is a self-hosted Matrix agent and API server.</p>
+    <p>No web interface is served at this address. Use a compatible client such as <code>axon-tui</code>.</p>
+    <p>Operational checks live at <code>/healthz</code>. The API is served under <code>/v1/</code>.</p>
+  </body>
+</html>
+"#,
+    )
 }
