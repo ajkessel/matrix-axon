@@ -1112,6 +1112,66 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/members": {
+      "get": {
+        "tags": [
+          "rooms"
+        ],
+        "summary": "List the current members of a room — the resolved `m.room.member` state,\none entry per user. Useful for seeding a display-name map without requiring\nmembership events to appear in the loaded timeline. An unknown\n`account_id`/`room_id` yields an empty list (200), not a 404.",
+        "operationId": "room_members",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current room members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_MemberDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/send": {
       "post": {
         "tags": [
@@ -2702,6 +2762,50 @@
           }
         }
       },
+      "ApiResponse_Vec_MemberDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived\nfrom the current resolved `m.room.member` state row for the user.",
+              "required": [
+                "user_id",
+                "membership"
+              ],
+              "properties": {
+                "avatar_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Avatar `mxc://` URI from the event content, if set."
+                },
+                "display_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Display name from the event content, if set."
+                },
+                "membership": {
+                  "type": "string",
+                  "description": "Membership value from the event content: `join`, `invite`, `leave`, `ban`."
+                },
+                "user_id": {
+                  "type": "string",
+                  "description": "Matrix user ID (the `m.room.member` state key)."
+                }
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_Vec_RoomDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -3202,6 +3306,38 @@
           "username": {
             "type": "string",
             "description": "Full Matrix user ID, e.g. `@alice:example.org`. A user ID written with\nthe homeserver's hostname as its domain (`@alice:matrix.example.org`)\nis rejected with a 400 whose message suggests the canonical spelling."
+          }
+        }
+      },
+      "MemberDto": {
+        "type": "object",
+        "description": "One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived\nfrom the current resolved `m.room.member` state row for the user.",
+        "required": [
+          "user_id",
+          "membership"
+        ],
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Avatar `mxc://` URI from the event content, if set."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name from the event content, if set."
+          },
+          "membership": {
+            "type": "string",
+            "description": "Membership value from the event content: `join`, `invite`, `leave`, `ban`."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Matrix user ID (the `m.room.member` state key)."
           }
         }
       },

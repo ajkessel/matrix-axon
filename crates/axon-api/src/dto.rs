@@ -264,6 +264,50 @@ impl VerificationBundleDto {
     }
 }
 
+/// One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived
+/// from the current resolved `m.room.member` state row for the user.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberDto {
+    /// Matrix user ID (the `m.room.member` state key).
+    pub user_id: String,
+    /// Membership value from the event content: `join`, `invite`, `leave`, `ban`.
+    pub membership: String,
+    /// Display name from the event content, if set.
+    pub display_name: Option<String>,
+    /// Avatar `mxc://` URI from the event content, if set.
+    pub avatar_url: Option<String>,
+}
+
+impl MemberDto {
+    pub fn from_state_row(row: axon_store::RoomStateRow) -> Self {
+        let membership = row
+            .content
+            .as_ref()
+            .and_then(|c| c.get("membership"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let display_name = row
+            .content
+            .as_ref()
+            .and_then(|c| c.get("displayname"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let avatar_url = row
+            .content
+            .as_ref()
+            .and_then(|c| c.get("avatar_url"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        MemberDto {
+            user_id: row.state_key,
+            membership,
+            display_name,
+            avatar_url,
+        }
+    }
+}
+
 /// Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as an
 /// `m.room.message`; `account_id`/`room_id` come from the path.
 ///

@@ -94,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/members",
+            get(routes::rooms::room_members),
+        )
+        .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/timeline",
             get(routes::rooms::room_timeline),
         )

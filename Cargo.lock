@@ -498,13 +498,11 @@ dependencies = [
  "ruma-html",
  "serde",
  "serde_json",
- "textwrap",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 0.8.23",
  "toml_edit 0.22.27",
- "unicode-width",
  "uuid",
  "zeroize",
 ]
@@ -5686,12 +5684,6 @@ dependencies = [
  "wezterm-input-types",
  "winapi",
 ]
-
-[[package]]
-name = "textwrap"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
 
 [[package]]
 name = "thiserror"

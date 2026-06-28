@@ -7,7 +7,7 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::cursor;
-use crate::dto::{EventDto, RoomDto, ThreadSummaryDto, TimelinePage};
+use crate::dto::{EventDto, MemberDto, RoomDto, ThreadSummaryDto, TimelinePage};
 use crate::extract::{Path, Query};
 use crate::response::{ApiError, ApiResponse};
 
@@ -100,6 +100,34 @@ pub async fn room_timeline(
         events,
         next_cursor,
     }))
+}
+
+/// List the current members of a room — the resolved `m.room.member` state,
+/// one entry per user. Useful for seeding a display-name map without requiring
+/// membership events to appear in the loaded timeline. An unknown
+/// `account_id`/`room_id` yields an empty list (200), not a 404.
+#[utoipa::path(
+    get,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/members",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id"),
+    ),
+    responses(
+        (status = 200, description = "Current room members", body = ApiResponse<Vec<MemberDto>>),
+    ),
+    tag = "rooms",
+)]
+pub async fn room_members(
+    State(store): State<Store>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+) -> Result<ApiResponse<Vec<MemberDto>>, ApiError> {
+    let rows = store
+        .room_state_of_type(account_id, &room_id, "m.room.member")
+        .await?;
+    Ok(ApiResponse::new(
+        rows.into_iter().map(MemberDto::from_state_row).collect(),
+    ))
 }
 
 /// List the threads in a room (M8): one summary per distinct `m.thread` root,
