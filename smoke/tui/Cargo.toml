@@ -1,5 +1,5 @@
 [package]
-name = "axon-tui-smoke"
+name = "axon-smoke-tui"
 description = "Black-box PTY smoke harness for the axon-tui binary."
 version.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ license.workspace = true
 # wire types are handwritten from the checked-in `openapi/` contract.
 
 [[bin]]
-name = "axon-tui-smoke"
+name = "axon-smoke-tui"
 path = "src/main.rs"
 
 [dependencies]

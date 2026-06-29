@@ -1,4 +1,4 @@
-# axon-tui-smoke — Contributor Notes
+# axon-smoke-tui — Contributor Notes
 
 Black-box PTY smoke harness for the shipped `axon-tui` binary. It spawns the
 real binary under a pseudo-terminal, points it at an in-process Axum stub of the
@@ -18,7 +18,7 @@ rendering behavior, not contract conformance (that is the `live` profile in S2).
 ## Running
 
 ```sh
-cargo run -p axon-tui-smoke -- --profile stub [--filter NAME]
+cargo run -p axon-smoke-tui -- --profile stub [--filter NAME]
 ```
 
 - `--profile stub` is the only S1 profile. `--filter` is a case-sensitive

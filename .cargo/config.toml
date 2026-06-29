@@ -1,5 +1,5 @@
 [alias]
 tui = 'run -p axon-tui'
 server = 'run -p axon-server'
-tui-smoke = 'run -p axon-tui-smoke'
-smoke-tui = 'run -p axon-tui-smoke'
+tui-smoke = 'run -p axon-smoke-tui'
+smoke-tui = 'run -p axon-smoke-tui'

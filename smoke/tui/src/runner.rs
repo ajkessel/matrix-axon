@@ -132,7 +132,7 @@ pub async fn run(profile: &str, filter: Option<&str>) -> anyhow::Result<i32> {
             .unwrap_or(20)
             .max(5),
     );
-    let base_dir = std::env::temp_dir().join(format!("axon-tui-smoke-{run_id}"));
+    let base_dir = std::env::temp_dir().join(format!("axon-smoke-tui-{run_id}"));
     let artifacts_dir = artifacts_root()?.join("tui").join(&run_id);
 
     let ctx = Ctx {

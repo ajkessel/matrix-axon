@@ -1,7 +1,8 @@
-//! `axon-tui-smoke` — black-box PTY smoke harness for the `axon-tui` binary.
+//! `axon-smoke-tui` — black-box PTY smoke harness for the `axon-tui` binary.
 //!
 //! ```sh
-//! cargo run -p axon-tui-smoke -- --profile stub [--filter NAME]
+//! cargo run -p axon-smoke-tui -- --profile stub [--filter NAME]
+//! cargo run -p axon-smoke-tui -- --profile true-local [--filter NAME]
 //! ```
 //!
 //! It spawns the real `axon-tui` under a pseudo-terminal, points it at an
@@ -42,7 +43,7 @@ fn parse_args() -> anyhow::Result<Args> {
                 );
             }
             "--help" | "-h" => {
-                println!("Usage: axon-tui-smoke --profile stub [--filter NAME]");
+                println!("Usage: axon-smoke-tui --profile stub|true-local [--filter NAME]");
                 std::process::exit(0);
             }
             other => anyhow::bail!("unknown argument: {other}"),

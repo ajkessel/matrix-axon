@@ -40,7 +40,7 @@ and outbound message testing.
 Add two Rust binary packages as workspace members:
 
 - `smoke/server`, package `axon-server-smoke`
-- `smoke/tui`, package `axon-tui-smoke`
+- `smoke/tui`, package `axon-smoke-tui`
 
 They depend on neither product `axon-*` crates nor each other. They may use
 workspace-pinned third-party dependencies, but all public API DTOs and protocol
@@ -56,7 +56,7 @@ Each package is a sequential scenario runner rather than a `#[test]` suite:
 
 ```sh
 cargo run -p axon-server-smoke -- --profile local [--filter NAME]
-cargo run -p axon-tui-smoke    -- --profile stub  [--filter NAME]
+cargo run -p axon-smoke-tui    -- --profile stub  [--filter NAME]
 ```
 
 `--filter` performs case-sensitive substring matching against stable scenario
@@ -79,7 +79,7 @@ required branch-protection check.
 
 ### PR 1: TUI stub and PTY smoke
 
-`axon-tui-smoke` uses `portable-pty` to spawn the real `axon-tui` binary and
+`axon-smoke-tui` uses `portable-pty` to spawn the real `axon-tui` binary and
 `vt100` to model a fixed-size terminal screen. It runs with an isolated working
 directory and `XDG_CONFIG_HOME`, plus pinned `TERM` and locale values. The
 driver exposes process spawn, key input, bounded screen predicates, screen text,

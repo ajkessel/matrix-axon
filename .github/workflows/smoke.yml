@@ -31,19 +31,19 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-smoke-
 
       - name: Enforce smoke black-box boundary (no axon-* deps)
-        run: ./scripts/check-smoke-isolation.sh axon-tui-smoke
+        run: ./scripts/check-smoke-isolation.sh axon-smoke-tui
 
       - name: Build axon-tui (binary under test)
         run: cargo build -p axon-tui
 
-      - name: Build axon-tui-smoke (harness)
-        run: cargo build -p axon-tui-smoke
+      - name: Build axon-smoke-tui (harness)
+        run: cargo build -p axon-smoke-tui
 
       - name: Run TUI smoke suite
         env:
           # Use the binary we just built; skip the in-harness rebuild.
           AXON_TUI_BIN: target/debug/axon-tui
-        run: cargo run -p axon-tui-smoke -- --profile stub
+        run: cargo run -p axon-smoke-tui -- --profile stub
 
       - name: Upload failure artifacts
         if: failure()

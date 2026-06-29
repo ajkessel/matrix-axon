@@ -34,7 +34,7 @@ matrix-axon/
     tui/                     # axon-tui — terminal client for the Axon API, should grow to support all API endpoints as they are enabled
     web/                     # axon-web (Vite + React + TS) — alpha client
   smoke/                     # black-box smoke harnesses (depend on no axon-* crate; ADR 0025)
-    tui/                     # axon-tui-smoke — PTY-drives the real axon-tui against an in-process API stub
+    tui/                     # axon-smoke-tui — PTY-drives the real axon-tui against an in-process API stub
   openapi/                   # OpenAPI 3.1 spec (source of truth)
   docs/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)

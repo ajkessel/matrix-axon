@@ -7,7 +7,7 @@ Stand up black-box smoke coverage for the two shipped binaries:
 - **`smoke/server`** (package `axon-server-smoke`): boots the real
   `axon-server` binary against real Postgres and Synapse, then exercises its
   public HTTP API and `/v1/ws` stream end to end.
-- **`smoke/tui`** (package `axon-tui-smoke`): runs the real `axon-tui` binary
+- **`smoke/tui`** (package `axon-smoke-tui`): runs the real `axon-tui` binary
   inside a pseudo-terminal and asserts on what is actually rendered and what
   actually crosses the wire.
 
@@ -91,7 +91,7 @@ Given that, Rust wins the remaining tradeoffs:
 
 ```sh
 cargo run -p axon-server-smoke -- --profile local [--filter NAME]
-cargo run -p axon-tui-smoke    -- --profile stub  [--filter NAME]
+cargo run -p axon-smoke-tui    -- --profile stub  [--filter NAME]
 ```
 
 A sequential scenario runner owns the expensive shared environment (compose
@@ -157,7 +157,7 @@ artifacts — no JUnit machinery.
   remains the E2EE gate, and `axon-itest` remains its Rust seeder. Porting
   that flow into the harness is revisited in S4 only if it pays for itself.
 
-## TUI smoke (`axon-tui-smoke`)
+## TUI smoke (`axon-smoke-tui`)
 
 ### Terminal driver
 
