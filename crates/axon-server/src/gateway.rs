@@ -8,7 +8,7 @@
 //! two crates decoupled.
 
 use async_trait::async_trait;
-use axon_api::{Formatted, MessageSender, SendError};
+use axon_api::{Formatted, MessageSender, Relation, SendError};
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
@@ -44,9 +44,10 @@ impl MessageSender for GatewayAdapter {
         room_id: &str,
         body: &str,
         formatted: Option<Formatted<'_>>,
+        relation: Relation<'_>,
     ) -> Result<String, SendError> {
         self.0
-            .send_message(account_id, room_id, body, formatted)
+            .send_message(account_id, room_id, body, formatted, relation)
             .await
             .map_err(map_err)
     }

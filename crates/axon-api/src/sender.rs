@@ -12,7 +12,7 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
-use axon_core::Formatted;
+use axon_core::{Formatted, Relation};
 use uuid::Uuid;
 
 /// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
@@ -42,12 +42,15 @@ pub trait MessageSender: Send + Sync {
     /// Send a message to a room; returns the new event id. `body` is the
     /// plain-text content; `formatted`, when present, carries the rich-text
     /// rendering (validated at the handler so both its fields are set).
+    /// `relation` attaches an `m.relates_to` (reply and/or thread); its default
+    /// (no targets) sends a plain, unrelated message.
     async fn send_message(
         &self,
         account_id: Uuid,
         room_id: &str,
         body: &str,
         formatted: Option<Formatted<'_>>,
+        relation: Relation<'_>,
     ) -> Result<String, SendError>;
 
     /// Edit an existing message (`m.replace`); returns the replacement event id.

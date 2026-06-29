@@ -3500,6 +3500,20 @@
               "null"
             ],
             "description": "The rendered HTML body. Must be paired with `format`."
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send as a reply to this event id (`m.in_reply_to`). Optional."
+          },
+          "thread_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set with `reply_to`, the reply is\nscoped to the thread, otherwise it falls back to the root."
           }
         }
       },

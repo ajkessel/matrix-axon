@@ -12,7 +12,7 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
-use axon_core::Formatted;
+use axon_core::{Formatted, Relation};
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
@@ -65,22 +65,71 @@ impl SdkGateway {
 
     /// Send an `m.room.message`. `body` is the plain-text content; `formatted`,
     /// when present, adds the rich-text rendering (`format` + `formatted_body`).
-    /// Returns the new event id.
+    /// `relation`, when set, attaches an `m.relates_to` (a reply and/or thread
+    /// membership). Returns the new event id.
     pub async fn send_message(
         &self,
         account_id: Uuid,
         room_id: &str,
         body: &str,
         formatted: Option<Formatted<'_>>,
+        relation: Relation<'_>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        // `format` is validated to `org.matrix.custom.html` at the API boundary,
-        // so the typed `text_html` constructor carries it faithfully.
-        let content = match formatted {
-            None => RoomMessageEventContent::text_plain(body),
-            Some(f) => RoomMessageEventContent::text_html(body, f.body),
+
+        // Plain, unrelated message: use the typed constructor. `format` is
+        // validated to `org.matrix.custom.html` at the API boundary, so
+        // `text_html` carries it faithfully.
+        if !relation.is_some() {
+            let content = match formatted {
+                None => RoomMessageEventContent::text_plain(body),
+                Some(f) => RoomMessageEventContent::text_html(body, f.body),
+            };
+            let resp = room.send(content).await.map_err(map_sdk_err)?;
+            return Ok(resp.response.event_id.to_string());
+        }
+
+        // A relation is requested: build a raw envelope with `m.relates_to`,
+        // mirroring how `edit` constructs its relation by hand. Validate the
+        // referenced event ids up front so a bad id is a clean 400, not a 502.
+        if let Some(id) = relation.reply_to {
+            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("reply_to: {e}")))?;
+        }
+        if let Some(id) = relation.thread_root {
+            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))?;
+        }
+
+        let relates_to = match (relation.thread_root, relation.reply_to) {
+            // Thread member. The `m.in_reply_to` fallback points at an explicit
+            // reply target when given, otherwise the root (marked as falling
+            // back) per the Matrix threads spec for non-thread-aware clients.
+            (Some(root), reply) => json!({
+                "rel_type": "m.thread",
+                "event_id": root,
+                "m.in_reply_to": {
+                    "event_id": reply.unwrap_or(root),
+                    "is_falling_back": reply.is_none(),
+                },
+            }),
+            // Plain reply (no thread).
+            (None, Some(reply)) => json!({ "m.in_reply_to": { "event_id": reply } }),
+            // Unreachable: `relation.is_some()` guaranteed one arm above.
+            (None, None) => unreachable!("relation.is_some() checked above"),
         };
-        let resp = room.send(content).await.map_err(map_sdk_err)?;
+
+        let mut content = json!({
+            "msgtype": "m.text",
+            "body": body,
+            "m.relates_to": relates_to,
+        });
+        if let Some(f) = formatted {
+            content["format"] = json!(f.format);
+            content["formatted_body"] = json!(f.body);
+        }
+        let resp = room
+            .send_raw("m.room.message", content)
+            .await
+            .map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
     }
 

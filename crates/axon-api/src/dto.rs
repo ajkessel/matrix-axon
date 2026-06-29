@@ -327,6 +327,14 @@ pub struct SendMessageRequest {
     /// The rendered HTML body. Must be paired with `format`.
     #[serde(default)]
     pub formatted_body: Option<String>,
+    /// Send as a reply to this event id (`m.in_reply_to`). Optional.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Send into this thread, identified by its root event id
+    /// (`rel_type: m.thread`). Optional; when set with `reply_to`, the reply is
+    /// scoped to the thread, otherwise it falls back to the root.
+    #[serde(default)]
+    pub thread_root: Option<String>,
 }
 
 /// Request body for editing a message (`PUT …/events/{event_id}`). Replaces the

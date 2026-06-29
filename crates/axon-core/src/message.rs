@@ -21,3 +21,29 @@ pub struct Formatted<'a> {
     /// The rendered body (HTML).
     pub body: &'a str,
 }
+
+/// How an outbound message relates to an existing event, via `m.relates_to`.
+///
+/// Both fields are optional and independent; the default (`reply_to: None`,
+/// `thread_root: None`) is a plain, unrelated message. Like [`Formatted`], it is
+/// borrowed for one send call and carried verbatim by the gateway, which builds
+/// the concrete `m.relates_to` envelope:
+///
+/// - `reply_to` only → a plain reply (`m.in_reply_to`).
+/// - `thread_root` set → a thread member (`rel_type: m.thread`), with an
+///   `m.in_reply_to` fallback pointing at `reply_to` if given, else the root
+///   (marked `is_falling_back`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Relation<'a> {
+    /// The event this message replies to (`m.in_reply_to`).
+    pub reply_to: Option<&'a str>,
+    /// The thread root this message belongs to (`rel_type: m.thread`).
+    pub thread_root: Option<&'a str>,
+}
+
+impl Relation<'_> {
+    /// Whether any relation is set; `false` means a plain message.
+    pub fn is_some(&self) -> bool {
+        self.reply_to.is_some() || self.thread_root.is_some()
+    }
+}

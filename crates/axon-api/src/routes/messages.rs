@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use uuid::Uuid;
 
-use axon_core::Formatted;
+use axon_core::{Formatted, Relation};
 
 use crate::dto::{EditRequest, ReactRequest, RedactQuery, SendMessageRequest, SendResultDto};
 use crate::extract::{Json, Path, Query};
@@ -67,8 +67,12 @@ pub async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<ApiResponse<SendResultDto>, ApiError> {
     let fmt = formatted(&req.format, &req.formatted_body)?;
+    let relation = Relation {
+        reply_to: req.reply_to.as_deref(),
+        thread_root: req.thread_root.as_deref(),
+    };
     let event_id = sender
-        .send_message(account_id, &room_id, &req.body, fmt)
+        .send_message(account_id, &room_id, &req.body, fmt, relation)
         .await?;
     Ok(ApiResponse::new(SendResultDto { event_id }))
 }

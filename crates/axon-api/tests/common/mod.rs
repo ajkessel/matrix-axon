@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, Formatted,
     LoginError, LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError,
-    SendError, SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
+    Relation, SendError, SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
     VerificationService, VerifyError,
 };
 use uuid::Uuid;
@@ -69,6 +69,10 @@ pub enum Call {
         body: String,
         /// The `(format, formatted_body)` the handler passed, if any.
         formatted: Option<(String, String)>,
+        /// The `reply_to` event id the handler passed, if any.
+        reply_to: Option<String>,
+        /// The `thread_root` event id the handler passed, if any.
+        thread_root: Option<String>,
     },
     Edit {
         account_id: Uuid,
@@ -620,12 +624,15 @@ impl MessageSender for StubSender {
         room_id: &str,
         body: &str,
         formatted: Option<Formatted<'_>>,
+        relation: Relation<'_>,
     ) -> Result<String, SendError> {
         self.calls.lock().unwrap().push(Call::Send {
             account_id,
             room_id: room_id.to_owned(),
             body: body.to_owned(),
             formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
+            reply_to: relation.reply_to.map(str::to_owned),
+            thread_root: relation.thread_root.map(str::to_owned),
         });
         self.outcome.to_result()
     }

@@ -144,6 +144,8 @@ async fn mutations_route_to_sender_and_envelope_result() {
                 room_id: room_id.to_owned(),
                 body: "hello".to_owned(),
                 formatted: None,
+                reply_to: None,
+                thread_root: None,
             },
             Call::Edit {
                 account_id,
@@ -283,6 +285,8 @@ async fn formatted_fields_reach_the_sender() {
                     "org.matrix.custom.html".to_owned(),
                     "<strong>hello</strong>".to_owned(),
                 )),
+                reply_to: None,
+                thread_root: None,
             },
             Call::Edit {
                 account_id,
@@ -293,6 +297,59 @@ async fn formatted_fields_reach_the_sender() {
                     "org.matrix.custom.html".to_owned(),
                     "<em>edited</em>".to_owned(),
                 )),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reply_and_thread_fields_reach_the_sender() {
+    let store = store().await;
+    let stub = Arc::new(StubSender::ok("$created:localhost"));
+    let app = app(store, stub.clone());
+
+    let account_id = Uuid::new_v4();
+    let room_id = "!room:localhost";
+
+    // A plain reply: reply_to set, thread_root absent.
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/send"),
+        Some(json!({ "body": "a reply", "reply_to": "$target:localhost" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A thread message: thread_root set (reply_to may also be set).
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/send"),
+        Some(json!({ "body": "in thread", "thread_root": "$root:localhost" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(
+        stub.calls(),
+        vec![
+            Call::Send {
+                account_id,
+                room_id: room_id.to_owned(),
+                body: "a reply".to_owned(),
+                formatted: None,
+                reply_to: Some("$target:localhost".to_owned()),
+                thread_root: None,
+            },
+            Call::Send {
+                account_id,
+                room_id: room_id.to_owned(),
+                body: "in thread".to_owned(),
+                formatted: None,
+                reply_to: None,
+                thread_root: Some("$root:localhost".to_owned()),
             },
         ]
     );
