@@ -84,6 +84,7 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
 * Make sure to run `cargo fmt` on the code you modified after finishing making changes; limit the scope to the code you changed
 * Make sure to fix any clippy issues `cargo clippy` on the code you modified after making changes
+* Don't ignore any linting warning or add comments like "#[allow(clippy::too_many_arguments)]". The user can override a clippy warning but the agent should not do so on its own.
 * More complete formatting and clippy checks can run before committing/pushing
 **CI no longer runs automatically on push or PR.** We exhausted our free GitHub Actions usage, so the workflows are manual `workflow_dispatch` only — nothing runs these checks for you on push anymore. The local hooks are now the safety net. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
 
