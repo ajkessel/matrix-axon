@@ -9,7 +9,7 @@ the top — a room that hasn't received a message recently sinks down the list.
 The Matrix spec provides a standard mechanism for this: per-room account-data events
 of type `m.tag`, with the predefined tag `m.favourite` and an optional `order` float
 field indicating sort position within the tag group. Clients that implement `m.tag`
-honour `m.favourite` by floating those rooms to the top, and the state syncs across
+honor `m.favourite` by floating those rooms to the top, and the state syncs across
 all Matrix clients via the homeserver.
 
 The Axon backend currently:

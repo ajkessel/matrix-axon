@@ -195,7 +195,7 @@ impl SyncEngine {
         }
 
         // Background reaper for terminal verification flows, so their grace TTL is
-        // honoured even on an account with no further verify API traffic to drive
+        // honored even on an account with no further verify API traffic to drive
         // the lazy sweep. Runs on the same tracker under a child of the engine
         // token, so `shutdown` cancels and joins it with everything else.
         tracker.spawn(reap_expired_flows(

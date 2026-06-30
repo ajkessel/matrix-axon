@@ -191,7 +191,7 @@ fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOpti
     }
 }
 
-/// Initialise the `tracing` subscriber. Honours `RUST_LOG` if set, otherwise
+/// Initialize the `tracing` subscriber. Honors `RUST_LOG` if set, otherwise
 /// falls back to the configured log level.
 fn init_tracing(level: &str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
