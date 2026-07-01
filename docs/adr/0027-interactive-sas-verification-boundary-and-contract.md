@@ -107,7 +107,8 @@ method set has the `qrcode` feature on, so the SDK default would let a peer pick
 QR — which this driver does not implement and would immediately cancel. QR is
 explicitly deferred (ADR 0011).
 
-**Self-verification only.** The incoming-request listener rejects (cancels) any
+**Self-verification only.** *(Superseded by ADR 0040 — cross-user verification.)*
+The incoming-request listener rejects (cancels) any
 request that is not `is_self_verification()`. M7a verifies axon's *own* device
 against another of the user's trusted devices; actively verifying another user's
 identity is out of scope. This also keeps the `(account_id, flow_id)` registry key
