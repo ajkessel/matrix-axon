@@ -17,10 +17,14 @@ use api::{websocket_task, AxonClient};
 use app::{App, LiveFrameAction, Mode, PopupKind};
 use args::{normalize_token, Args};
 use config::TuiConfig;
-use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -106,6 +110,15 @@ fn terminal_image_picker() -> Picker {
     }
     let font_size = query_font_size();
     let mut picker = picker_with_tmux_state(font_size);
+    // GNU screen has no reliable pixel-graphics passthrough (and historically a
+    // small DCS string buffer), so Sixel/Kitty/iTerm2 sequences come out mangled
+    // or empty.  Force halfblocks, which are ordinary cells every multiplexer
+    // forwards safely, and skip the capability probes (their terminal I/O is
+    // pointless here and could mislead).
+    if inside_screen() {
+        picker.set_protocol_type(ProtocolType::Halfblocks);
+        return picker;
+    }
     // Inside tmux, graphics protocols need an explicit pixel-to-cell ratio:
     // tmux's reported pixel dimensions can describe the outer window rather
     // than the current pane. Outside tmux, retain ratatui-image's established
@@ -393,9 +406,28 @@ fn detect_image_protocol_from_env() -> Option<ProtocolType> {
 /// True when running inside a tmux session. Capability queries behave differently
 /// here: tmux answers them itself, so a query meant for the outer terminal must be
 /// wrapped in tmux passthrough.
-fn inside_tmux() -> bool {
+pub(crate) fn inside_tmux() -> bool {
     std::env::var_os("TMUX").is_some()
         || std::env::var("TERM_PROGRAM").is_ok_and(|value| value == "tmux")
+}
+
+/// True when running inside GNU screen (but not tmux, which can share
+/// `TERM=screen-*`).  `STY` is screen's authoritative session marker; the
+/// `TERM=screen*` check is a fallback for the rare setup where it is unset.
+/// screen lacks reliable pixel-graphics passthrough, so callers fall back to
+/// halfblocks here.
+fn inside_screen() -> bool {
+    screen_from_env(
+        std::env::var_os("STY").is_some(),
+        std::env::var("TERM").ok().as_deref(),
+        inside_tmux(),
+    )
+}
+
+/// Pure core of [`inside_screen`], split out so the precedence rules can be tested
+/// without mutating process-global environment variables.
+fn screen_from_env(sty_set: bool, term: Option<&str>, inside_tmux: bool) -> bool {
+    !inside_tmux && (sty_set || term.is_some_and(|value| value.starts_with("screen")))
 }
 
 async fn run_app(
@@ -408,6 +440,12 @@ async fn run_app(
     let (live_tx, mut live_rx) = mpsc::unbounded_channel();
     tokio::spawn(websocket_task(client.clone(), live_tx));
 
+    // Whether the terminal's keyboard-enhancement protocol is active (pushed by
+    // TerminalGuard). Queried once now, before the input thread starts consuming
+    // stdin, so the /editconfig suspend/resume can drop and restore it around the
+    // external editor.
+    let kbd_enhanced = matches!(supports_keyboard_enhancement(), Ok(true));
+
     let (key_tx, mut key_rx) = mpsc::unbounded_channel();
     let input_paused = Arc::new(AtomicBool::new(false));
     std::thread::spawn({
@@ -417,28 +455,42 @@ async fn run_app(
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
     let (media_tx, mut media_rx) = mpsc::channel(app::MEDIA_WORKERS * 2);
+    let (relations_tx, mut relations_rx) = mpsc::unbounded_channel();
+    let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_media_sender(media_tx);
+    app.set_relations_sender(relations_tx);
+    app.set_members_sender(members_tx);
     app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
 
     let mut tick = time::interval(Duration::from_millis(100));
+    let mut next_sixel_inline_refresh = Instant::now() + Duration::from_secs(5);
     let mut next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
 
         tokio::select! {
             _ = tick.tick() => {
+                let now = Instant::now();
+                if inside_tmux()
+                    && app.picker.protocol_type() == ProtocolType::Sixel
+                    && now >= next_sixel_inline_refresh
+                {
+                    app.sixel_inline_generation =
+                        app.sixel_inline_generation.wrapping_add(1);
+                    next_sixel_inline_refresh = now + Duration::from_secs(5);
+                }
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && app.mode == Mode::Popup(PopupKind::MediaPreview)
-                    && Instant::now() >= next_sixel_preview_refresh
+                    && now >= next_sixel_preview_refresh
                 {
                     app.sixel_preview_generation =
                         app.sixel_preview_generation.wrapping_add(1);
-                    next_sixel_preview_refresh = Instant::now() + Duration::from_secs(5);
+                    next_sixel_preview_refresh = now + Duration::from_secs(5);
                 }
             }
             Some(key) = key_rx.recv() => {
@@ -454,7 +506,10 @@ async fn run_app(
                     std::thread::sleep(Duration::from_millis(60));
                     while key_rx.try_recv().is_ok() {} // drain any stray events
 
-                    // Suspend the TUI: restore normal terminal state.
+                    // Suspend the TUI: restore normal terminal state. Drop the
+                    // keyboard-enhancement flags too so the editor sees ordinary
+                    // key encoding.
+                    disable_keyboard_enhancement(terminal.backend_mut(), kbd_enhanced);
                     disable_raw_mode()?;
                     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                     terminal.show_cursor()?;
@@ -462,9 +517,17 @@ async fn run_app(
                     let result = open_in_editor(&app.config_path);
                     app.apply_editor_result(result);
 
-                    // Re-enter the TUI.
+                    // Re-enter the TUI, restoring keyboard enhancement.
                     enable_raw_mode()?;
                     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    if kbd_enhanced {
+                        let _ = execute!(
+                            terminal.backend_mut(),
+                            PushKeyboardEnhancementFlags(
+                                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                            )
+                        );
+                    }
                     terminal.clear()?;
 
                     // Drain events the editor may have left in the buffer,
@@ -487,6 +550,12 @@ async fn run_app(
             }
             Some(result) = media_rx.recv() => {
                 app.handle_media_result(result);
+            }
+            Some(outcome) = relations_rx.recv() => {
+                app.apply_relation_outcome(outcome);
+            }
+            Some(outcome) = members_rx.recv() => {
+                app.apply_members_outcome(outcome);
             }
         }
     }
@@ -548,9 +617,37 @@ fn input_task(tx: mpsc::UnboundedSender<KeyEvent>, paused: Arc<AtomicBool>) {
     }
 }
 
+/// Opt into the terminal's progressive keyboard-enhancement protocol (a.k.a. the
+/// kitty keyboard protocol) when supported, so modified keys like Shift+Enter are
+/// reported distinctly rather than collapsing to a bare Enter. Returns whether it
+/// was enabled, so the caller knows to pop the matching stack entry on exit.
+/// Terminals without support (older builds) are left untouched and rely on the
+/// Alt+Enter fallback for line breaks.
+fn enable_keyboard_enhancement(out: &mut impl io::Write) -> bool {
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok()
+    } else {
+        false
+    }
+}
+
+/// Pop the keyboard-enhancement flags pushed by [`enable_keyboard_enhancement`].
+/// A no-op when they were never enabled, so an external program (e.g. an editor)
+/// or the restored shell never inherits the enhanced encoding.
+fn disable_keyboard_enhancement(out: &mut impl io::Write, enabled: bool) {
+    if enabled {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+}
+
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     active: bool,
+    kbd_enhanced: bool,
 }
 
 impl TerminalGuard {
@@ -558,16 +655,19 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        let kbd_enhanced = enable_keyboard_enhancement(&mut stdout);
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
             terminal,
             active: true,
+            kbd_enhanced,
         })
     }
 
     fn leave(&mut self) -> anyhow::Result<()> {
         if self.active {
+            disable_keyboard_enhancement(self.terminal.backend_mut(), self.kbd_enhanced);
             disable_raw_mode()?;
             execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
             self.terminal.show_cursor()?;
@@ -586,6 +686,29 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_screen_from_sty_or_term() {
+        // STY is screen's authoritative marker.
+        assert!(screen_from_env(true, Some("xterm-256color"), false));
+        // TERM=screen* as a fallback when STY is unset.
+        assert!(screen_from_env(false, Some("screen-256color"), false));
+        assert!(screen_from_env(false, Some("screen"), false));
+    }
+
+    #[test]
+    fn screen_detection_yields_to_tmux() {
+        // tmux often runs with TERM=screen-* and sets STY-like state; it must not
+        // be misclassified as screen, since tmux has working Sixel passthrough.
+        assert!(!screen_from_env(true, Some("screen-256color"), true));
+        assert!(!screen_from_env(false, Some("screen-256color"), true));
+    }
+
+    #[test]
+    fn no_screen_for_plain_terminals() {
+        assert!(!screen_from_env(false, Some("xterm-256color"), false));
+        assert!(!screen_from_env(false, None, false));
+    }
 
     #[test]
     fn parses_explicit_image_protocol_overrides() {

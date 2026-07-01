@@ -216,7 +216,7 @@ background = "default"
 [display]
 debug = false
 show_state_events = false
-sender_name = "display_name"
+message_density = "normal"
 input_lines = 1
 confirm_logout = true
 ```
@@ -234,10 +234,13 @@ Set `display.show_state_events = true` to show all state events in room
 timelines. When it is `false`, membership events such as joins, leaves, bans,
 and invites are still shown.
 
-Set `display.sender_name = "matrix_address"` to show Matrix user IDs such as
-`@alice:example.com` instead of display names. The default is
-`"display_name"`, with Matrix IDs used as a fallback when no display name is
-known.
+Set `display.message_density` to choose how messages are laid out. The default
+is `"normal"`: the sender and timestamp sit on their own line and the message
+begins on the next line, indented to align under the sender; the sender is the
+display name when known, otherwise the full Matrix ID such as
+`@alice:example.com`. Set it to `"dense"` to put the sender, timestamp, and
+message start on one line (wrapped lines align under the body); the sender is
+shortened to the display name or bare `@localpart` (no homeserver).
 
 Set `display.input_lines` to control the height of the command/entry box.
 The default is `1`; set it higher for composing multi-line messages.
@@ -310,13 +313,14 @@ environment hints; half-block rendering is the portable fallback. Set
 `AXON_IMAGE_PROTOCOL` to `kitty`, `sixel`, `iterm2`, or `halfblocks` to override
 detection without running a terminal capability query.
 
-### Sixel inside tmux
+### Sixel rendering
 
-Sixel works through tmux passthrough, but tmux does not retain Sixel graphics as
-part of its pane contents. A tmux client refresh can therefore erase an image
-even though axon-tui's text-cell buffer has not changed. While an image preview
-is open, axon-tui retransmits it every five seconds inside tmux. This keeps the
-preview visible, but the retransmission may cause a brief flicker.
+Sixel graphics are not ordinary text cells. Terminals and multiplexers can drop
+the graphics layer even though axon-tui's text-cell buffer has not changed, so
+ratatui may otherwise skip repainting an image it believes is still present.
+Inside tmux, axon-tui retransmits visible Sixel thumbnails every five seconds,
+and does the same for an open Sixel preview. This keeps images visible, but the
+retransmission may cause a brief flicker.
 
 Possible workarounds:
 

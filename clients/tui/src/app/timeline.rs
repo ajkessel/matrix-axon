@@ -1,19 +1,34 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
 use crate::api::{
-    EventDto, LiveFrame, RoomDto, SenderTrustViolationDto, VerificationFrame, VerificationFrameKind,
+    EventDto, LiveFrame, MemberDto, RoomDto, SenderTrustViolationDto, VerificationFrame,
+    VerificationFrameKind,
 };
-use crate::config::{DisplayOptions, SenderNameStyle};
+use crate::config::{DisplayOptions, MessageDensity};
 
 use ratatui_image::Resize;
 
+use super::relations::thread_visible;
 use super::{
     collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
     selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
-    LiveFrameAction, MediaKey, RoomKey, Status, IMAGE_THUMB_ROWS,
+    LiveFrameAction, MediaKey, RoomKey, RoomSort, Status, IMAGE_THUMB_ROWS,
 };
+
+/// Minimum interval between background `/members` refreshes for a single room,
+/// triggered by live messages from senders whose display name we don't yet know.
+/// Collapses bursts of unknown senders into one fetch per room per window.
+const MEMBERS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Result of a background `/members` refresh ([`App::spawn_members_refresh`]),
+/// drained by the main loop and applied via [`App::apply_members_outcome`].
+pub(crate) struct MembersOutcome {
+    pub(super) room_key: RoomKey,
+    pub(super) members: Vec<MemberDto>,
+}
 
 impl App {
     pub(crate) fn handle_live_frame(&mut self, frame: LiveFrame) -> LiveFrameAction {
@@ -163,10 +178,19 @@ impl App {
         {
             let visible_before = self.selected_display_line_count();
             let old_scroll_bottom = visible_before.saturating_sub(self.messages.page_size);
-            let should_follow_tail =
-                self.messages.scroll == usize::MAX || self.messages.scroll >= old_scroll_bottom;
-            let should_select =
-                self.messages.selection.is_none() && should_show_event(&event, &self.display);
+            // Don't auto-scroll when the user has jumped to a historical date;
+            // a live event arriving during history browse would otherwise kick
+            // the view back to today.
+            let should_follow_tail = self.last_jump_ts.is_none()
+                && (self.messages.scroll == usize::MAX
+                    || self.messages.scroll >= old_scroll_bottom);
+            let should_select = self.messages.selection.is_none()
+                && should_show_event(&event, &self.display)
+                && thread_visible(
+                    &event,
+                    self.thread_panel.as_deref(),
+                    &self.promoted_thread_events,
+                );
             let event_id = event.event_id.clone();
             if self.live.pending_own_event_id.as_deref() == Some(&event_id) {
                 self.live
@@ -183,11 +207,39 @@ impl App {
             {
                 return LiveFrameAction::None;
             }
+            // In historical view, don't append live events — they would
+            // overwrite the jumped-to snapshot with today's messages.
+            if self.last_jump_ts.is_some() {
+                return LiveFrameAction::None;
+            }
+            let thread_root = event.thread_relation().map(str::to_owned);
+            let account_id = event.account_id;
+            // A live message from a sender we have no name for (e.g. someone who
+            // joined after the last full load) would render as a raw MXID until
+            // the next room reload. Kick off a debounced /members refresh so it
+            // resolves in place. Member events already seeded the map above.
+            let sender_unknown = !self.display_name_known(&key, &event.sender);
             self.messages
                 .events
                 .entry(key.clone())
                 .or_default()
                 .push(event);
+            if sender_unknown {
+                self.spawn_members_refresh(key.clone());
+            }
+            if let Some(events) = self.messages.events.get_mut(&key) {
+                events.sort_by_key(|event| event.origin_ts);
+            }
+            if let Some(root) = thread_root.as_deref() {
+                self.apply_live_thread_member(&key, root);
+                // If the thread panel is not open for this root, promote the
+                // new event so it appears in the main timeline. This ensures
+                // the user sees new thread replies even when the panel is closed.
+                if self.thread_panel.as_deref() != Some(root) {
+                    self.promoted_thread_events.insert(event_id.clone());
+                    self.spawn_live_thread_root_fetch(account_id, &key, root);
+                }
+            }
             if should_follow_tail {
                 self.messages.scroll = usize::MAX;
             }
@@ -216,6 +268,131 @@ impl App {
         }
     }
 
+    /// Add display names from an incrementally loaded history slice without
+    /// clearing or overriding names already known for the room. Full timeline
+    /// loads rebuild from their complete snapshot and then seed current `/members`
+    /// state; PageUp/PageDown loads only a partial slice, so replacing the map
+    /// here would make existing senders fall back to raw MXIDs.
+    pub(crate) fn merge_missing_display_names_from_events(
+        &mut self,
+        room: &RoomDto,
+        events: &[EventDto],
+    ) {
+        let key = RoomKey::from(room);
+        let map = self.rooms.display_names.entry(key).or_default();
+        for event in events {
+            if event.event_type != "m.room.member" {
+                continue;
+            }
+            let user_id = event.state_key().unwrap_or(&event.sender);
+            let Some(display_name) = event.membership_display_name() else {
+                continue;
+            };
+            map.entry(user_id.to_owned())
+                .or_insert_with(|| display_name.to_owned());
+        }
+    }
+
+    /// Merge member-state display names into the map for `room`. Called after
+    /// `rebuild_display_names` so the authoritative current state overwrites any
+    /// stale name from an older membership event in the timeline page. Members
+    /// with no `display_name` (or an empty one) are left as-is; we never blank
+    /// out a name we already derived from the timeline.
+    pub(crate) fn seed_display_names_from_members(
+        &mut self,
+        room: &RoomDto,
+        members: &[MemberDto],
+    ) {
+        self.seed_display_names_for_key(RoomKey::from(room), members);
+    }
+
+    fn seed_display_names_for_key(&mut self, key: RoomKey, members: &[MemberDto]) {
+        let map = self.rooms.display_names.entry(key).or_default();
+        for member in members {
+            if let Some(name) = member
+                .display_name
+                .as_deref()
+                .filter(|n| !n.trim().is_empty())
+            {
+                map.insert(member.user_id.clone(), name.to_owned());
+            }
+        }
+    }
+
+    /// True when a non-empty display name is already known for `sender` in `key`'s
+    /// room. Used to decide whether a live message warrants a `/members` refresh.
+    fn display_name_known(&self, key: &RoomKey, sender: &str) -> bool {
+        self.rooms
+            .display_names
+            .get(key)
+            .and_then(|names| names.get(sender))
+            .is_some_and(|name| !name.trim().is_empty())
+    }
+
+    /// Fetch `/members` in the background to resolve sender display names for a
+    /// room the user is actively watching, triggered when a live message arrives
+    /// from a sender we have no name for (e.g. someone who joined after the last
+    /// full load). Rate-limited per room by [`MEMBERS_REFRESH_COOLDOWN`] so a
+    /// burst of messages from unknown senders triggers at most one fetch per
+    /// window; returns immediately and never blocks the event loop.
+    pub(crate) fn spawn_members_refresh(&mut self, key: RoomKey) {
+        let Some(tx) = self.members_tx.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .members_refresh_after
+            .get(&key)
+            .is_some_and(|after| now < *after)
+        {
+            return;
+        }
+        self.members_refresh_after
+            .insert(key.clone(), now + MEMBERS_REFRESH_COOLDOWN);
+        let client = self.client.clone();
+        let account_id = key.account_id;
+        let room_id = key.room_id.clone();
+        tokio::spawn(async move {
+            if let Ok(members) = client.room_members(account_id, &room_id).await {
+                let _ = tx.send(MembersOutcome {
+                    room_key: key,
+                    members,
+                });
+            }
+        });
+    }
+
+    /// Apply a completed [`MembersOutcome`] by overlaying its display names onto
+    /// the room map. Room-keyed, so a result that lands after the user navigates
+    /// away updates that room's names harmlessly and shows when they return.
+    pub(crate) fn apply_members_outcome(&mut self, outcome: MembersOutcome) {
+        let MembersOutcome { room_key, members } = outcome;
+        self.seed_display_names_for_key(room_key.clone(), &members);
+        // For an unnamed room (e.g. a DM) derive a list title from its members so
+        // it shows the other participant's name rather than the raw room id.
+        let derived = self
+            .rooms
+            .rooms
+            .iter()
+            .find(|room| RoomKey::from(*room) == room_key)
+            .filter(|room| {
+                room.name.as_deref().is_none_or(|n| n.trim().is_empty())
+                    && room
+                        .canonical_alias
+                        .as_deref()
+                        .is_none_or(|a| a.trim().is_empty())
+            })
+            .and_then(|room| {
+                super::dm_title_from_members(room.account_user_id.as_deref(), &members)
+            });
+        if let Some(title) = derived {
+            self.room_titles.insert(room_key, title);
+            if matches!(self.room_sort, RoomSort::AlphaAsc | RoomSort::AlphaDesc) {
+                self.resort_rooms();
+            }
+        }
+    }
+
     fn remember_display_name_from_event(&mut self, key: &RoomKey, event: &EventDto) {
         if event.event_type != "m.room.member" {
             return;
@@ -232,20 +409,29 @@ impl App {
     }
 
     pub(crate) fn sender_label(&self, event: &EventDto) -> String {
-        if self.display.sender_name == SenderNameStyle::MatrixAddress {
-            return event.sender.clone();
-        }
         let key = RoomKey {
             account_id: event.account_id,
             room_id: event.room_id.clone(),
         };
-        self.rooms
+        let display_name = self
+            .rooms
             .display_names
             .get(&key)
             .and_then(|names| names.get(&event.sender))
             .filter(|name| !name.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| event.sender.clone())
+            .cloned();
+        if let Some(name) = display_name {
+            return name;
+        }
+        // No displayname is known for this sender. Dense mode shortens the mxid
+        // to its bare `@localpart` (dropping the homeserver); normal mode shows
+        // the full `@user:homeserver`.
+        match self.display.message_density {
+            MessageDensity::Dense => super::account_localpart(&event.sender)
+                .map(|local| format!("@{local}"))
+                .unwrap_or_else(|| event.sender.clone()),
+            MessageDensity::Normal => event.sender.clone(),
+        }
     }
 
     pub(crate) fn selected_room(&self) -> Option<&RoomDto> {
@@ -266,12 +452,16 @@ impl App {
     }
 
     pub(crate) fn selected_events(&self) -> Vec<&EventDto> {
+        let thread_panel = self.thread_panel.as_deref();
         self.selected_room()
             .and_then(|room| self.messages.events.get(&RoomKey::from(room)))
             .map(|events| {
                 events
                     .iter()
                     .filter(|event| should_show_event(event, &self.display))
+                    .filter(|event| {
+                        thread_visible(event, thread_panel, &self.promoted_thread_events)
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -291,6 +481,18 @@ impl App {
             s.push_str(&format!(
                 "  [{}: preview image]",
                 self.shortcuts.media_preview.label()
+            ));
+        }
+        // Hint the thread-open shortcut when the selected message heads a thread
+        // and we are not already inside the panel (ADR 0032 M2).
+        if self.thread_panel.is_none()
+            && self
+                .selected_message_event()
+                .is_some_and(|event| self.is_thread_root(&event.event_id))
+        {
+            s.push_str(&format!(
+                "  [{}: open thread]",
+                self.shortcuts.thread.label()
             ));
         }
         s
@@ -341,6 +543,7 @@ impl App {
     }
 
     pub(crate) fn jump_to_last_message(&mut self) {
+        self.last_jump_ts = None;
         let events = self.selected_events();
         if events.is_empty() {
             self.messages.selection = None;
@@ -420,6 +623,41 @@ impl App {
         if range.start < scroll || range.end > scroll.saturating_add(page_size) {
             scroll = range.start;
         }
+        self.messages.scroll = scroll.min(max_scroll);
+    }
+
+    /// Select the first loaded message at or after `pivot` (Unix ms) and center
+    /// it in the pane, so a jump lands with later messages filling the lower
+    /// half. Falls back to the newest loaded message when none is at or after
+    /// `pivot` (e.g. the pivot lies past all loaded history).
+    pub(crate) fn center_on_pivot(&mut self, pivot: i64) {
+        let target = {
+            let events = self.selected_events();
+            events
+                .iter()
+                .position(|e| e.origin_ts >= pivot)
+                .or_else(|| events.len().checked_sub(1))
+                .map(|index| (index, events[index].event_id.clone()))
+        };
+        if let Some((index, event_id)) = target {
+            self.messages.selection = Some(event_id);
+            self.center_message_index(index);
+        }
+    }
+
+    /// Scroll so the message at `index` sits roughly in the vertical middle of
+    /// the pane, keeping earlier and later messages visible above and below it.
+    /// Used by the day-skip shortcuts to frame the day they land on.
+    pub(crate) fn center_message_index(&mut self, index: usize) {
+        let events = self.selected_events();
+        let ranges = self.selected_message_ranges(events.as_slice());
+        let Some(range) = ranges.get(index) else {
+            return;
+        };
+        let page_size = self.messages.page_size.max(1);
+        let total_lines = ranges.last().map(|range| range.end).unwrap_or_default();
+        let max_scroll = total_lines.saturating_sub(page_size);
+        let scroll = range.start.saturating_sub(page_size / 2);
         self.messages.scroll = scroll.min(max_scroll);
     }
 
@@ -616,6 +854,7 @@ impl App {
                 }
             })
             .collect();
+        let relations = self.relation_context(events);
         message_layout(
             events,
             sender_labels.as_slice(),
@@ -625,6 +864,9 @@ impl App {
             &reactions,
             &self.live.own_senders,
             &image_thumb_rows,
+            &relations,
+            self.display.message_density,
+            self.display.time_format,
         )
         .ranges
     }
@@ -665,7 +907,7 @@ pub(crate) fn should_show_event(event: &EventDto, display: &DisplayOptions) -> b
     display.show_state_events || event.is_message_event() || event.is_membership_event()
 }
 
-fn room_matches_search(room: &RoomDto, query: &str) -> bool {
+pub(crate) fn room_matches_search(room: &RoomDto, query: &str) -> bool {
     [
         Some(room.room_id.as_str()),
         room.canonical_alias.as_deref(),

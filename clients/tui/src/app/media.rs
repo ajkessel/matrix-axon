@@ -23,6 +23,21 @@ const MAX_DECODED_PIXELS: u64 = 40_000_000;
 const MAX_DECODE_ALLOC_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_CACHED_IMAGE_DIMENSION: u32 = 1600;
 
+/// Byte budget for a Sixel payload sent through tmux passthrough.  tmux collects
+/// each passthrough DCS sequence into a single buffer and, when it would exceed
+/// `INPUT_BUF_DEFAULT_SIZE` (1,048,576 bytes), sets `INPUT_DISCARD` and drops the
+/// *entire* sequence — leaving an empty pane.  Sixel size depends on image entropy
+/// (icy_sixel emits anywhere from ~0.3 to ~5 bytes/pixel), so a pixel-based cap
+/// can't reliably bound it; we measure the encoded bytes instead and re-encode
+/// smaller when over budget.  The margin below 1 MiB covers the passthrough
+/// wrapper and tmux's escape doubling.
+const MAX_TMUX_SIXEL_BYTES: usize = 900_000;
+
+/// Largest number of re-encode attempts when shrinking an over-budget Sixel.  Each
+/// attempt scales the cell box toward the budget, so this converges quickly; the
+/// bound just guarantees termination for pathological images.
+const MAX_SIXEL_SHRINK_ATTEMPTS: usize = 4;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MediaKey {
     pub(crate) account_id: Uuid,
@@ -58,7 +73,7 @@ pub(crate) enum ProtocolState {
 
 pub(crate) struct CachedProtocol {
     inline: Protocol,
-    sixel_preview_alternate: Option<Protocol>,
+    sixel_alternate: Option<Protocol>,
 }
 
 impl CachedProtocol {
@@ -66,7 +81,7 @@ impl CachedProtocol {
         let Protocol::Sixel(sixel) = &protocol else {
             return Self {
                 inline: protocol,
-                sixel_preview_alternate: None,
+                sixel_alternate: None,
             };
         };
 
@@ -76,21 +91,23 @@ impl CachedProtocol {
         alternate.data.push_str("\x1b[00m");
         Self {
             inline: Protocol::Sixel(primary),
-            sixel_preview_alternate: Some(Protocol::Sixel(alternate)),
+            sixel_alternate: Some(Protocol::Sixel(alternate)),
         }
     }
 
-    pub(crate) fn inline(&self) -> &Protocol {
-        &self.inline
+    pub(crate) fn inline(&self, generation: u64) -> &Protocol {
+        self.generated(generation)
     }
 
     pub(crate) fn preview(&self, generation: u64) -> &Protocol {
+        self.generated(generation)
+    }
+
+    fn generated(&self, generation: u64) -> &Protocol {
         if generation % 2 == 0 {
             &self.inline
         } else {
-            self.sixel_preview_alternate
-                .as_ref()
-                .unwrap_or(&self.inline)
+            self.sixel_alternate.as_ref().unwrap_or(&self.inline)
         }
     }
 }
@@ -104,6 +121,64 @@ pub(crate) enum MediaResult {
         key: ProtocolKey,
         outcome: Result<CachedProtocol, String>,
     },
+}
+
+/// Encode `image` into a protocol that fits the `size` cell box, re-encoding at a
+/// smaller box when the result is a tmux-passthrough Sixel over
+/// [`MAX_TMUX_SIXEL_BYTES`] (which tmux would otherwise drop, see that constant).
+///
+/// Only tmux Sixel is shrunk: every other protocol — and Sixel outside tmux, which
+/// has no passthrough buffer — is returned from the first encode at full
+/// resolution.  Each attempt scales the box toward the budget by `sqrt(budget /
+/// bytes)` (bytes track pixel area), so it converges in one or two passes; the
+/// attempt cap guarantees termination, and a still-oversized result is returned as
+/// the best effort rather than failing the preview.
+fn encode_within_tmux_budget(
+    picker: &Picker,
+    image: &image::DynamicImage,
+    size: Size,
+) -> Result<Protocol, String> {
+    let mut box_size = size;
+    for _ in 0..=MAX_SIXEL_SHRINK_ATTEMPTS {
+        let protocol = picker
+            .new_protocol(image.clone(), box_size, Resize::Fit(None))
+            .map_err(|err| err.to_string())?;
+        let Protocol::Sixel(sixel) = &protocol else {
+            return Ok(protocol);
+        };
+        if !sixel.is_tmux {
+            return Ok(protocol);
+        }
+        // Can't shrink further (within budget, or already minimal): best effort.
+        let Some(next) = shrink_box_for_bytes(box_size, sixel.data.len()) else {
+            return Ok(protocol);
+        };
+        box_size = next;
+    }
+    // Attempts exhausted: encode once more at the smallest box and accept it.
+    picker
+        .new_protocol(image.clone(), box_size, Resize::Fit(None))
+        .map_err(|err| err.to_string())
+}
+
+/// Next cell box to try when a Sixel encoded at `box_size` produced `encoded_len`
+/// bytes.  Returns `None` when `encoded_len` is within [`MAX_TMUX_SIXEL_BYTES`] or
+/// the box is already minimal (so no smaller box is worth trying).  Bytes scale
+/// with pixel area, so the linear box scales by `sqrt(budget / bytes)`, with a 5%
+/// undershoot to land under budget despite per-image variation.
+fn shrink_box_for_bytes(box_size: Size, encoded_len: usize) -> Option<Size> {
+    if encoded_len <= MAX_TMUX_SIXEL_BYTES {
+        return None;
+    }
+    let scale = (MAX_TMUX_SIXEL_BYTES as f64 / encoded_len as f64).sqrt() * 0.95;
+    let next = Size::new(
+        ((f64::from(box_size.width) * scale) as u16).max(1),
+        ((f64::from(box_size.height) * scale) as u16).max(1),
+    );
+    if next.width >= box_size.width && next.height >= box_size.height {
+        return None;
+    }
+    Some(next)
 }
 
 pub(crate) fn spawn_image_fetch(
@@ -143,10 +218,7 @@ pub(crate) fn spawn_protocol_encode(
         };
         let encode_key = key.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            picker
-                .new_protocol((*image).clone(), encode_key.size, Resize::Fit(None))
-                .map(CachedProtocol::new)
-                .map_err(|err| err.to_string())
+            encode_within_tmux_budget(&picker, &image, encode_key.size).map(CachedProtocol::new)
         })
         .await
         .unwrap_or_else(|err| Err(format!("image encode task failed: {err}")));
@@ -216,11 +288,85 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui_image::protocol::sixel::Sixel;
+
+    fn sixel_data(protocol: &Protocol) -> &str {
+        let Protocol::Sixel(sixel) = protocol else {
+            panic!("expected sixel protocol");
+        };
+        &sixel.data
+    }
 
     #[test]
     fn rejects_images_with_excessive_decoded_dimensions() {
         assert!(validate_image_dimensions(6000, 6000).is_ok()); // 36 MP — under new limit
         assert!(validate_image_dimensions(7000, 6000).is_err()); // 42 MP — over limit
         assert!(validate_image_dimensions(0, 100).is_err());
+    }
+
+    #[test]
+    fn within_budget_sixel_is_not_shrunk() {
+        assert_eq!(
+            shrink_box_for_bytes(Size::new(120, 36), MAX_TMUX_SIXEL_BYTES),
+            None
+        );
+        assert_eq!(shrink_box_for_bytes(Size::new(120, 36), 1_000), None);
+    }
+
+    #[test]
+    fn over_budget_sixel_shrinks_toward_budget_keeping_aspect() {
+        // ~4x over budget should roughly halve each dimension (sqrt(1/4)).
+        let box_size = Size::new(120, 36);
+        let next = shrink_box_for_bytes(box_size, MAX_TMUX_SIXEL_BYTES * 4)
+            .expect("over-budget box must shrink");
+        assert!(next.width < box_size.width && next.height < box_size.height);
+        // Aspect ratio (10:3) preserved within rounding.
+        let ratio = f64::from(next.width) / f64::from(next.height);
+        assert!(
+            (ratio - 120.0 / 36.0).abs() < 0.25,
+            "ratio drifted: {ratio}"
+        );
+        // One shrink step lands within ~sqrt of the overage; a second pass (the
+        // encode loop) closes the rest.  Here we only assert it moved meaningfully.
+        assert!(f64::from(next.width) < f64::from(box_size.width) * 0.6);
+    }
+
+    #[test]
+    fn shrink_converges_and_never_returns_zero() {
+        // Repeatedly applying the step to a wildly over-budget box terminates and
+        // never produces a zero dimension.
+        let mut size = Size::new(200, 60);
+        for _ in 0..MAX_SIXEL_SHRINK_ATTEMPTS {
+            match shrink_box_for_bytes(size, MAX_TMUX_SIXEL_BYTES * 50) {
+                Some(next) => {
+                    assert!(next.width >= 1 && next.height >= 1);
+                    assert!(next.width <= size.width && next.height <= size.height);
+                    size = next;
+                }
+                None => break,
+            }
+        }
+    }
+
+    #[test]
+    fn sixel_inline_payload_alternates_by_generation() {
+        let protocol = CachedProtocol::new(Protocol::Sixel(Sixel {
+            data: "sixel-data".to_owned(),
+            size: Size::new(1, 1),
+            is_tmux: false,
+        }));
+
+        assert_eq!(
+            sixel_data(protocol.inline(0)),
+            sixel_data(protocol.inline(2))
+        );
+        assert_ne!(
+            sixel_data(protocol.inline(0)),
+            sixel_data(protocol.inline(1))
+        );
+        assert_eq!(
+            sixel_data(protocol.inline(1)),
+            sixel_data(protocol.preview(1))
+        );
     }
 }

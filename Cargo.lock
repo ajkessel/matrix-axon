@@ -439,6 +439,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "axon-smoke-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "vt100",
+]
+
+[[package]]
 name = "axon-store"
 version = "0.1.0"
 dependencies = [
@@ -483,6 +497,7 @@ name = "axon-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "emojis",
  "futures-util",
@@ -498,27 +513,15 @@ dependencies = [
  "ruma-html",
  "serde",
  "serde_json",
+ "textwrap",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 0.8.23",
  "toml_edit 0.22.27",
+ "unicode-width",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "axon-tui-smoke"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "portable-pty",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
- "vt100",
 ]
 
 [[package]]
@@ -4724,7 +4727,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5684,6 +5687,12 @@ dependencies = [
  "wezterm-input-types",
  "winapi",
 ]
+
+[[package]]
+name = "textwrap"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
 
 [[package]]
 name = "thiserror"

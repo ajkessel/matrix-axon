@@ -1,4 +1,4 @@
-use ratatui::layout::Size;
+use ratatui::layout::{Rect, Size};
 use ratatui_image::picker::Picker;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -9,11 +9,11 @@ use uuid::Uuid;
 use crate::api::LiveFrame;
 use crate::api::{
     AccountDto, AccountState, AxonClient, EmojiDto, EventDto, FlowDto, FlowStage, RoomDto,
-    VerificationFrameDto, VerificationFrameKind,
+    SendRelation, VerificationFrameDto, VerificationFrameKind,
 };
 use crate::command::Command;
 #[cfg(test)]
-use crate::config::SenderNameStyle;
+use crate::config::MessageDensity;
 use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
 use crate::html::{markdown_to_html_if_detected, rainbow_html, spoiler_html, strip_html_to_plain};
 #[cfg(test)]
@@ -28,6 +28,7 @@ pub(crate) use media::{
     MEDIA_WORKERS, PROTOCOL_CACHE_LIMIT,
 };
 mod reactions;
+mod relations;
 mod render;
 mod rooms;
 mod timeline;
@@ -35,9 +36,9 @@ mod timeline;
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
     display_body_with_sender, format_time, message_index_at_line, message_layout, ImageThumbRows,
-    IMAGE_THUMB_ROWS,
+    RelationContext, ReplyPreview, ThreadBadge, IMAGE_THUMB_ROWS,
 };
-pub(crate) use rooms::account_localpart;
+pub(crate) use rooms::{account_localpart, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
 
@@ -84,6 +85,9 @@ pub(crate) enum Mode {
     /// `y`/`n`/`Esc` keys; the live flow state lives in `App::verification`.
     Verification,
     Popup(PopupKind),
+    /// Date-jump input: user types a date string; Enter jumps the current room's
+    /// timeline to that date, Esc returns to MessageList.
+    DateJump,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,6 +249,138 @@ pub(crate) enum SearchKind {
     Rooms,
     Messages,
     Accounts,
+    /// Live name filter for the room list: each keystroke updates
+    /// `App::room_filter` to `RoomFilter::Name(query)` (ADR 0042). Distinct from
+    /// `Rooms`, which is a jump-to-match search committed on Enter.
+    RoomNameFilter,
+}
+
+/// Room-list filter mode (ADR 0042). The account filter is applied separately
+/// and always; this narrows within it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum RoomFilter {
+    #[default]
+    All,
+    /// Direct messages only (interim heuristic — see [`is_likely_dm`]).
+    Dms,
+    /// Group (non-DM) rooms only.
+    Groups,
+    /// Rooms with unread messages only.
+    Unread,
+    /// Pinned rooms only.
+    Favorites,
+    /// Rooms whose name/alias/topic/id contains the (lowercased) query.
+    Name(String),
+}
+
+impl RoomFilter {
+    /// The filters the cycle key rotates through. `Name` is excluded — it is
+    /// entered explicitly via its own text-input shortcut.
+    const CYCLE: [RoomFilter; 5] = [
+        RoomFilter::All,
+        RoomFilter::Dms,
+        RoomFilter::Groups,
+        RoomFilter::Unread,
+        RoomFilter::Favorites,
+    ];
+
+    /// The next filter in the cycle. A `Name` filter cycles to `All`.
+    pub(crate) fn next(&self) -> RoomFilter {
+        let pos = Self::CYCLE
+            .iter()
+            .position(|f| f == self)
+            .unwrap_or(Self::CYCLE.len() - 1);
+        Self::CYCLE[(pos + 1) % Self::CYCLE.len()].clone()
+    }
+
+    /// Short label for the room-list block title.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            RoomFilter::All => "All".to_owned(),
+            RoomFilter::Dms => "DMs".to_owned(),
+            RoomFilter::Groups => "Groups".to_owned(),
+            RoomFilter::Unread => "Unread".to_owned(),
+            RoomFilter::Favorites => "Favorites".to_owned(),
+            RoomFilter::Name(q) => format!("Filter: {q}"),
+        }
+    }
+
+    /// Config token for `[display] room_filter`. `Name` persists as `all`
+    /// (a stale query string is not restored).
+    pub(crate) fn as_config_str(&self) -> &'static str {
+        match self {
+            RoomFilter::All | RoomFilter::Name(_) => "all",
+            RoomFilter::Dms => "dms",
+            RoomFilter::Groups => "groups",
+            RoomFilter::Unread => "unread",
+            RoomFilter::Favorites => "favorites",
+        }
+    }
+
+    /// Parse a config token (and the `/filter` command argument). Unknown values
+    /// (other than the recognized keywords) are treated as a name filter.
+    pub(crate) fn parse(s: &str) -> RoomFilter {
+        match s.trim().to_lowercase().as_str() {
+            "" | "all" => RoomFilter::All,
+            "dms" | "dm" | "people" => RoomFilter::Dms,
+            "groups" | "group" | "rooms" => RoomFilter::Groups,
+            "unread" => RoomFilter::Unread,
+            "fav" | "favs" | "favorites" => RoomFilter::Favorites,
+            _ => RoomFilter::Name(s.trim().to_lowercase()),
+        }
+    }
+}
+
+/// Room-list sort mode (ADR 0042). Applies to the unpinned tail only; the pinned
+/// section keeps its pin-position order (ADR 0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RoomSort {
+    #[default]
+    RecentActivity,
+    OldestActivity,
+    AlphaAsc,
+    AlphaDesc,
+}
+
+impl RoomSort {
+    const CYCLE: [RoomSort; 4] = [
+        RoomSort::RecentActivity,
+        RoomSort::OldestActivity,
+        RoomSort::AlphaAsc,
+        RoomSort::AlphaDesc,
+    ];
+
+    pub(crate) fn next(self) -> RoomSort {
+        let pos = Self::CYCLE.iter().position(|s| *s == self).unwrap_or(0);
+        Self::CYCLE[(pos + 1) % Self::CYCLE.len()]
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            RoomSort::RecentActivity => "Recent",
+            RoomSort::OldestActivity => "Oldest",
+            RoomSort::AlphaAsc => "A–Z",
+            RoomSort::AlphaDesc => "Z–A",
+        }
+    }
+
+    pub(crate) fn as_config_str(self) -> &'static str {
+        match self {
+            RoomSort::RecentActivity => "recent",
+            RoomSort::OldestActivity => "oldest",
+            RoomSort::AlphaAsc => "az",
+            RoomSort::AlphaDesc => "za",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> RoomSort {
+        match s.trim().to_lowercase().as_str() {
+            "oldest" => RoomSort::OldestActivity,
+            "az" | "alpha" | "a-z" => RoomSort::AlphaAsc,
+            "za" | "z-a" => RoomSort::AlphaDesc,
+            _ => RoomSort::RecentActivity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +517,29 @@ impl From<&RoomDto> for RoomKey {
     }
 }
 
+impl RoomKey {
+    /// Parse a config entry of the form `"account_id:room_id"` (ADR 0038). The
+    /// account id is a UUID, so we split on the first `:`; the remainder is the
+    /// room id (which itself contains colons, e.g. `!abc:server`). Returns `None`
+    /// for malformed entries so a hand-edited config can't crash startup.
+    fn parse_config_entry(entry: &str) -> Option<Self> {
+        let (account, room_id) = entry.split_once(':')?;
+        let account_id = Uuid::parse_str(account).ok()?;
+        if room_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            account_id,
+            room_id: room_id.to_owned(),
+        })
+    }
+
+    /// Serialize to the `"account_id:room_id"` form stored in the config file.
+    fn to_config_entry(&self) -> String {
+        format!("{}:{}", self.account_id, self.room_id)
+    }
+}
+
 pub(crate) struct App {
     pub(crate) client: AxonClient,
     pub(crate) account_filter: Option<Uuid>,
@@ -397,6 +556,7 @@ pub(crate) struct App {
     pub(crate) popup_scroll: usize,
     pub(crate) help_selection: usize,
     pub(crate) last_search: Option<String>,
+    pub(crate) last_jump_ts: Option<i64>,
     pub(crate) show_input_help: bool,
     pub(crate) status: Status,
     /// A completed slash-command response waiting for the renderer to decide
@@ -417,8 +577,22 @@ pub(crate) struct App {
     pub(crate) config_path: PathBuf,
     /// Set by /editconfig; consumed by the main loop to suspend the TUI and open an editor.
     pub(crate) edit_config_requested: bool,
-    /// When true, the room list shows only rooms with unread messages.
-    pub(crate) unread_filter: bool,
+    /// Active room-list filter mode (ADR 0042). Replaces the old unread-only
+    /// boolean; `RoomFilter::Unread` is the equivalent state.
+    pub(crate) room_filter: RoomFilter,
+    /// Active room-list sort mode for the unpinned section (ADR 0042).
+    pub(crate) room_sort: RoomSort,
+    /// Filter active before a live name-filter input began, restored if the user
+    /// presses Esc to abandon it (ADR 0042). `None` outside name-filter input.
+    pub(crate) room_filter_before_input: Option<RoomFilter>,
+    /// Pinned rooms, ordered most recently pinned first (index 0 = top of the
+    /// pinned section). Persisted to `[display] pinned_rooms` in the config file
+    /// on every pin/unpin. See ADR 0038.
+    pub(crate) pinned_rooms: Vec<RoomKey>,
+    /// Display titles derived from members for rooms with no `m.room.name`/alias
+    /// (e.g. DMs), so the room list shows the other participant's name instead of
+    /// the raw room id. Filled lazily by background `/members` fetches.
+    pub(crate) room_titles: HashMap<RoomKey, String>,
     /// In-flight and decoded images, account-scoped and bounded by LRU order.
     pub(crate) image_cache: HashMap<MediaKey, ImageState>,
     image_cache_order: VecDeque<MediaKey>,
@@ -436,6 +610,9 @@ pub(crate) struct App {
     /// The active SAS verification flow, when `Mode::Verification` is open. The
     /// modal reads and mutates this; `None` whenever the modal is closed.
     pub(crate) verification: Option<VerificationFlow>,
+    /// Changes periodically for Sixel inline thumbnails, forcing ratatui's diff
+    /// renderer to retransmit pixels that terminal graphics layers may drop.
+    pub(crate) sixel_inline_generation: u64,
     /// Changes periodically while a Sixel preview is open inside tmux, forcing
     /// ratatui's diff renderer to retransmit pixels that tmux does not retain.
     pub(crate) sixel_preview_generation: u64,
@@ -445,6 +622,61 @@ pub(crate) struct App {
     /// without this explicit clear a ghost image lingers until something else
     /// overwrites those cells.
     pub(crate) clear_media_preview: bool,
+    /// Set to `true` by `open_thread_panel` / `close_thread_panel`.  The main
+    /// loop responds by emitting crossterm erase-line commands across every row
+    /// of `last_messages_area` before the next draw.  A targeted
+    /// `render_widget(Clear, area)` is insufficient when `messages_background`
+    /// is `Color::Reset`: both the old and new buffer cells compare equal so
+    /// ratatui's diff emits no terminal codes and sixel/halfblock pixels linger.
+    pub(crate) force_terminal_clear: bool,
+    /// Screen rects where pixel-protocol (sixel/iTerm2) image widgets were drawn
+    /// on the previous frame.  These pixels are not part of ratatui's cell model,
+    /// so when an image moves or disappears (scrolling, pane toggle, resize,
+    /// preview close) the old pixels survive the cell-diff and linger as a
+    /// misplaced "ghost" image.  `draw()` compares this against the current
+    /// frame's image rects and force-repaints any cell an image just vacated.
+    pub(crate) prev_image_rects: Vec<Rect>,
+    /// The active thread root event id when the thread panel is open; `None` in
+    /// the main timeline (ADR 0032 M2). The panel reuses the message pane —
+    /// `selected_events()` returns the root plus its members while it is set.
+    pub(crate) thread_panel: Option<String>,
+    /// Cross-window reply context cache: replied-to events fetched via
+    /// `GET …/events/{event_id}` when the target is older than the loaded slice
+    /// (ADR 0032 M3). Keyed by `(account_id, event_id)`.
+    pub(crate) reply_targets: HashMap<(Uuid, String), EventDto>,
+    /// Server-aggregated thread summaries per room, fetched from
+    /// `GET …/rooms/{room_id}/threads` (ADR 0032 M3). Keyed by thread root id.
+    pub(crate) thread_summaries: HashMap<RoomKey, HashMap<String, crate::api::ThreadSummaryDto>>,
+    /// Monotonic id for background relation refreshes. Results carry the id
+    /// current when spawned so an older room load cannot overwrite newer caches.
+    relation_refresh_next_id: u64,
+    relation_refresh_latest: HashMap<RoomKey, u64>,
+    /// Sender for completed background relation refreshes (thread summaries +
+    /// cross-window reply targets). `None` until the main loop wires it up (and
+    /// in unit tests), in which case relations stay in-slice-only.
+    pub(crate) relations_tx: Option<mpsc::UnboundedSender<relations::RelationOutcome>>,
+    /// Sender for completed background `/members` refreshes that resolve sender
+    /// display names for live messages from unknown senders. `None` until the
+    /// main loop wires it up (and in unit tests).
+    pub(crate) members_tx: Option<mpsc::UnboundedSender<timeline::MembersOutcome>>,
+    /// Earliest instant a room may trigger another background `/members` refresh,
+    /// rate-limiting the live unknown-sender path (see `spawn_members_refresh`).
+    members_refresh_after: HashMap<RoomKey, std::time::Instant>,
+    /// The event the next sent message replies to (ADR 0032 M4), set by `/reply`
+    /// or the reply hotkey. Mutually exclusive with `pending_thread`; the status
+    /// line shows it while set, and `Escape` clears it.
+    pub(crate) pending_reply: Option<String>,
+    /// The thread root the next sent message joins (ADR 0032 M4), set by
+    /// `/thread` on a message that has no thread yet. Mutually exclusive with
+    /// `pending_reply`. While the thread panel is open, sends target its root
+    /// even without this set.
+    pub(crate) pending_thread: Option<String>,
+    /// Live thread member event ids promoted to the main timeline. A thread
+    /// member normally hides behind its root's badge; when a new reply arrives
+    /// live and the thread panel is not open for that root, the reply is added
+    /// here so `thread_visible` lets it through and the user sees it inline.
+    /// Cleared per-root when the thread panel opens for that root.
+    pub(crate) promoted_thread_events: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -494,6 +726,11 @@ pub(crate) struct MessagePane {
     pub(crate) width: usize,
     pub(crate) line_ranges: Vec<std::ops::Range<usize>>,
     pub(crate) layout_event_ids: Vec<String>,
+    /// Per-room opaque cursor for the next older page of history (`next_cursor`
+    /// from the server). Absent when the room is at the beginning of history.
+    pub(crate) history_cursors: HashMap<RoomKey, String>,
+    /// True while a history-fetch request is in flight; prevents duplicate loads.
+    pub(crate) loading_history: bool,
 }
 
 impl Default for MessagePane {
@@ -506,6 +743,8 @@ impl Default for MessagePane {
             width: 80,
             line_ranges: Vec::new(),
             layout_event_ids: Vec::new(),
+            history_cursors: HashMap::new(),
+            loading_history: false,
         }
     }
 }
@@ -543,6 +782,14 @@ impl App {
             "connecting to Axon".to_owned()
         };
         let config_path = config.path.clone();
+        let pinned_rooms = config
+            .display
+            .pinned_rooms
+            .iter()
+            .filter_map(|entry| RoomKey::parse_config_entry(entry))
+            .collect();
+        let room_filter = RoomFilter::parse(&config.display.room_filter);
+        let room_sort = RoomSort::parse(&config.display.room_sort);
         Self {
             client,
             account_filter,
@@ -559,6 +806,7 @@ impl App {
             popup_scroll: 0,
             help_selection: 0,
             last_search: None,
+            last_jump_ts: None,
             show_input_help: true,
             status: Status::Info(config_status),
             pending_command_response: None,
@@ -573,13 +821,31 @@ impl App {
             proto_cache: HashMap::new(),
             proto_cache_order: VecDeque::new(),
             verification: None,
+            sixel_inline_generation: 0,
             sixel_preview_generation: 0,
             clear_media_preview: false,
+            force_terminal_clear: false,
+            prev_image_rects: Vec::new(),
+            thread_panel: None,
+            reply_targets: HashMap::new(),
+            thread_summaries: HashMap::new(),
+            relation_refresh_next_id: 0,
+            relation_refresh_latest: HashMap::new(),
+            relations_tx: None,
+            members_tx: None,
+            members_refresh_after: HashMap::new(),
+            pending_reply: None,
+            pending_thread: None,
+            promoted_thread_events: std::collections::HashSet::new(),
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
             config_path,
             edit_config_requested: false,
-            unread_filter: false,
+            room_filter,
+            room_sort,
+            room_filter_before_input: None,
+            pinned_rooms,
+            room_titles: HashMap::new(),
         }
     }
 
@@ -591,6 +857,41 @@ impl App {
     /// Wire up the channel the main loop drains for completed image downloads.
     pub(crate) fn set_media_sender(&mut self, tx: mpsc::Sender<MediaResult>) {
         self.media_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed relation refreshes.
+    pub(crate) fn set_relations_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<relations::RelationOutcome>,
+    ) {
+        self.relations_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed `/members` refreshes.
+    pub(crate) fn set_members_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<timeline::MembersOutcome>,
+    ) {
+        self.members_tx = Some(tx);
+    }
+
+    /// The title to show for `room` in the room list. Named rooms use their
+    /// `m.room.name`/canonical alias (via [`RoomDto::title`]); unnamed rooms (DMs)
+    /// use a member-derived title once one has been fetched, falling back to the
+    /// raw room id until then.
+    pub(crate) fn room_list_title(&self, room: &crate::api::RoomDto) -> String {
+        let named = room.name.as_deref().is_some_and(|n| !n.trim().is_empty())
+            || room
+                .canonical_alias
+                .as_deref()
+                .is_some_and(|a| !a.trim().is_empty());
+        if named {
+            return room.title().to_owned();
+        }
+        self.room_titles
+            .get(&RoomKey::from(room))
+            .cloned()
+            .unwrap_or_else(|| room.title().to_owned())
     }
 
     /// Request a background download of `mxc_url` if it is not already cached
@@ -734,6 +1035,7 @@ impl App {
                     | Mode::Reacting { .. }
                     | Mode::Unreacting { .. }
                     | Mode::Search(..)
+                    | Mode::DateJump
                     | Mode::Verification
             )
     }
@@ -833,32 +1135,128 @@ impl App {
         }
     }
 
+    /// `alt-u`: jump to the unread filter, or back to `All` if already on it.
     pub(crate) fn toggle_unread_filter(&mut self) {
-        self.unread_filter = !self.unread_filter;
+        let next = if self.room_filter == RoomFilter::Unread {
+            RoomFilter::All
+        } else {
+            RoomFilter::Unread
+        };
+        self.set_room_filter(next);
+    }
+
+    /// Set the room-list filter, persist it, and keep the selection visible.
+    /// Surfaces the active filter in the status line so key-chord shortcuts give
+    /// the same feedback as the `/filter` command.
+    pub(crate) fn set_room_filter(&mut self, filter: RoomFilter) {
+        self.room_filter = filter;
+        self.sync_room_selection_to_account_filter();
+        self.status = Status::from(format!("filter: {}", self.room_filter.label()));
+        self.persist_room_view();
+    }
+
+    /// `alt-f`: advance to the next filter in the cycle.
+    pub(crate) fn cycle_room_filter(&mut self) {
+        let next = self.room_filter.next();
+        self.set_room_filter(next);
+    }
+
+    /// Set the room-list sort mode, re-sort, persist, and surface it in the
+    /// status line (so key-chord shortcuts give feedback too).
+    pub(crate) fn set_room_sort(&mut self, sort: RoomSort) {
+        self.room_sort = sort;
+        self.resort_rooms();
+        self.status = Status::from(format!("sort: {}", self.room_sort.label()));
+        self.persist_room_view();
+    }
+
+    /// `alt-s`: advance to the next sort mode in the cycle.
+    pub(crate) fn cycle_room_sort(&mut self) {
+        let next = self.room_sort.next();
+        self.set_room_sort(next);
+    }
+
+    /// Enter live name-filter input (ADR 0042): remember the current filter so
+    /// Esc can restore it, start from an empty query, and switch to the input
+    /// mode. Pre-seeds the query from an existing name filter.
+    pub(crate) fn begin_room_name_filter(&mut self) {
+        let seed = match &self.room_filter {
+            RoomFilter::Name(q) => {
+                self.room_filter_before_input = Some(RoomFilter::Name(q.clone()));
+                q.clone()
+            }
+            other => {
+                self.room_filter_before_input = Some(other.clone());
+                String::new()
+            }
+        };
+        self.update_room_name_filter(seed.clone());
+        self.mode = Mode::Search(SearchKind::RoomNameFilter, seed);
+    }
+
+    /// Live-update the name filter as the user types. Does not persist (a name
+    /// filter is session-only — it saves as `all`).
+    pub(crate) fn update_room_name_filter(&mut self, query: String) {
+        self.room_filter = RoomFilter::Name(query.to_lowercase());
         self.sync_room_selection_to_account_filter();
     }
 
+    /// Abandon name-filter input: restore the pre-input filter (default `All`).
+    pub(crate) fn cancel_room_name_filter(&mut self) {
+        let restored = self
+            .room_filter_before_input
+            .take()
+            .unwrap_or(RoomFilter::All);
+        self.room_filter = restored;
+        self.sync_room_selection_to_account_filter();
+    }
+
+    /// Persist the current sort + filter to `[display]`. Best-effort: a save
+    /// failure surfaces in the status line but does not interrupt the UI.
+    fn persist_room_view(&mut self) {
+        if let Err(err) = TuiConfig::save_room_view(
+            &self.config_path,
+            self.room_sort.as_config_str(),
+            self.room_filter.as_config_str(),
+        ) {
+            self.status = Status::from(format!("config save failed: {err}"));
+        }
+    }
+
     pub(crate) fn visible_room_indices(&self) -> Vec<usize> {
-        let filter = self.active_account_filter();
+        let account = self.active_account_filter();
         let selected = self.rooms.selected;
         self.rooms
             .rooms
             .iter()
             .enumerate()
-            .filter(|(_, r)| filter.is_none_or(|id| r.account_id == id))
-            .filter(|(i, r)| {
-                !self.unread_filter
-                    || selected == Some(*i)
-                    || self
-                        .rooms
-                        .unread
-                        .get(&RoomKey::from(*r))
-                        .copied()
-                        .unwrap_or(0)
-                        > 0
-            })
+            .filter(|(_, r)| account.is_none_or(|id| r.account_id == id))
+            .filter(|(i, r)| selected == Some(*i) || self.room_passes_filter(r))
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Whether a room satisfies the active [`RoomFilter`]. The account filter and
+    /// the "keep the selected room visible" rule are applied by the caller.
+    fn room_passes_filter(&self, room: &RoomDto) -> bool {
+        match &self.room_filter {
+            RoomFilter::All => true,
+            RoomFilter::Dms => rooms::is_likely_dm(room),
+            RoomFilter::Groups => !rooms::is_likely_dm(room),
+            RoomFilter::Unread => {
+                self.rooms
+                    .unread
+                    .get(&RoomKey::from(room))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            }
+            RoomFilter::Favorites => self.is_room_pinned(&RoomKey::from(room)),
+            RoomFilter::Name(q) => {
+                timeline::room_matches_search(room, q)
+                    || self.room_list_title(room).to_ascii_lowercase().contains(q)
+            }
+        }
     }
 
     pub(crate) fn insert_char(&mut self, ch: char) {
@@ -1031,6 +1429,10 @@ impl App {
             Command::Recover(target) => self.start_recover(target),
             Command::Delete(target) => self.start_delete(target),
             Command::Room(target) => self.switch_room(&target).await,
+            Command::Pin(target) => self.pin_room(target.as_deref()),
+            Command::Unpin(target) => self.unpin_room(target.as_deref()),
+            Command::Filter(arg) => self.set_room_filter(RoomFilter::parse(&arg)),
+            Command::Sort(arg) => self.set_room_sort(RoomSort::parse(&arg)),
             Command::Account(target) => {
                 if self.switch_account(&target) {
                     self.load_selected_timeline().await;
@@ -1064,7 +1466,7 @@ impl App {
             }
             Command::Thread => {
                 self.select_most_recent_message_if_needed();
-                self.start_thread_from_selected_message();
+                self.start_thread_from_selected_message().await;
             }
             Command::Verify(device_id) => self.start_verification(device_id),
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
@@ -1119,6 +1521,12 @@ impl App {
                     &plain,
                     Some(("org.matrix.custom.html".to_owned(), html)),
                 );
+            }
+            Command::JumpToDate(ts) => {
+                self.jump_to_date(ts).await;
+            }
+            Command::JumpToTop => {
+                self.jump_to_top().await;
             }
             Command::Invalid(message)
             | Command::ApiUnsupported(message)
@@ -1215,9 +1623,14 @@ impl App {
             self.status = Status::from(PENDING_ECHO_MSG.to_owned());
             return;
         }
+        let event_id = event.event_id.clone();
+        // Reply and thread compose targets are mutually exclusive (ADR 0032 M4).
+        self.pending_thread = None;
+        self.pending_reply = Some(event_id.clone());
+        self.mode = Mode::Compose;
         self.status = Status::EventAction {
-            debug: format!("reply to {} waits for the Axon write API", event.event_id),
-            redacted: "reply to message waits for the Axon write API",
+            debug: format!("replying to {event_id} - Esc to cancel"),
+            redacted: "replying to message - Esc to cancel",
         };
     }
 
@@ -1246,23 +1659,39 @@ impl App {
         Ok((event_id, reaction_key))
     }
 
-    pub(crate) fn start_thread_from_selected_message(&mut self) {
+    /// Open the thread panel for the selected message (ADR 0032 M2/M3). When the
+    /// message is itself a thread member or a thread root, the panel opens at its
+    /// root. Starting a *new* thread on a standalone message needs the send path
+    /// (M4), which is not yet wired, so that case reports the gap.
+    pub(crate) async fn start_thread_from_selected_message(&mut self) {
         let Some(event) = self.selected_message_event() else {
             self.status =
-                Status::from("select a displayed message before starting a thread".to_owned());
+                Status::from("select a displayed message before opening a thread".to_owned());
             return;
         };
         if event.event_id.starts_with("local-echo:") {
             self.status = Status::from(PENDING_ECHO_MSG.to_owned());
             return;
         }
-        self.status = Status::EventAction {
-            debug: format!(
-                "thread from {} waits for the Axon write API",
-                event.event_id
-            ),
-            redacted: "thread from message waits for the Axon write API",
+        let account_id = event.account_id;
+        let event_id = event.event_id.clone();
+        let root = if let Some(root) = event.thread_relation() {
+            root.to_owned()
+        } else if self.is_thread_root(&event_id) {
+            event_id
+        } else {
+            // No thread exists here yet — compose a new one rooted at this message
+            // (ADR 0032 M4). The next sent message becomes its first reply.
+            self.pending_reply = None;
+            self.pending_thread = Some(event_id.clone());
+            self.mode = Mode::Compose;
+            self.status = Status::EventAction {
+                debug: format!("replying in new thread on {event_id} - Esc to cancel"),
+                redacted: "replying in new thread - Esc to cancel",
+            };
+            return;
         };
+        self.open_thread_panel(account_id, root).await;
     }
 
     pub(crate) fn start_edit_selected_message(&mut self) {
@@ -1295,6 +1724,15 @@ impl App {
         let Some(tx) = self.lifecycle_tx.clone() else {
             return;
         };
+        // Consume any pending reply/thread target (ADR 0032 M4): the relation is
+        // attached to exactly this send, then compose returns to normal. While the
+        // thread panel is open, a send defaults to that thread even without an
+        // explicit `/thread`.
+        let reply_to = self.pending_reply.take();
+        let thread_root = self
+            .pending_thread
+            .take()
+            .or_else(|| self.thread_panel.clone());
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -1329,6 +1767,23 @@ impl App {
                 "formatted_body": fb,
             })
         });
+        // Mirror the relation the server will build so the optimistic echo gets the
+        // same reply/thread treatment as the real event (reply context line; thread
+        // member shown in the panel and counted on the root's badge).
+        let echo_relates_to = match (&thread_root, &reply_to) {
+            (Some(root), reply) => Some(serde_json::json!({
+                "rel_type": "m.thread",
+                "event_id": root,
+                "m.in_reply_to": {
+                    "event_id": reply.clone().unwrap_or_else(|| root.clone()),
+                    "is_falling_back": reply.is_none(),
+                },
+            })),
+            (None, Some(reply)) => Some(serde_json::json!({
+                "m.in_reply_to": { "event_id": reply },
+            })),
+            (None, None) => None,
+        };
         let echo = EventDto {
             account_id: room.account_id,
             event_id: temp_id.clone(),
@@ -1339,7 +1794,7 @@ impl App {
             event_type: "m.room.message".to_owned(),
             content: echo_content,
             body: Some(body.to_owned()),
-            relates_to: None,
+            relates_to: echo_relates_to,
             redacted: false,
             redaction_event_id: None,
             reactions: None,
@@ -1361,8 +1816,12 @@ impl App {
             let fmt_refs = formatted
                 .as_ref()
                 .map(|(fmt, fb)| (fmt.as_str(), fb.as_str()));
+            let relation = SendRelation {
+                reply_to: reply_to.as_deref(),
+                thread_root: thread_root.as_deref(),
+            };
             let result = client
-                .send_message(room.account_id, &room.room_id, &body, fmt_refs)
+                .send_message(room.account_id, &room.room_id, &body, fmt_refs, relation)
                 .await
                 .map(|r| r.event_id)
                 .map_err(|e| e.to_string());
@@ -1636,8 +2095,9 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{AccountDto, AccountState, EmojiDto, VerificationFrameDto};
+    use crate::api::{AccountDto, AccountState, EmojiDto, MemberDto, VerificationFrameDto};
     use crate::command::HELP_COMMANDS;
+    use crate::config::TimeFormat;
     use crate::ui::{entry_status_text, popup_shortcuts_lines, popup_status_lines};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -1817,6 +2277,105 @@ mod tests {
         app.show_input_help = false;
         app.status = Status::Info(String::new());
         app
+    }
+
+    #[test]
+    fn visible_room_indices_filters_dms_groups_unread_and_favorites() {
+        // index 0: a DM (no name/alias); 1: a named group; 2: another DM.
+        let dm1 = room("!dm1:example.com", None, None);
+        let group = room("!g:example.com", None, Some("Team"));
+        let dm2 = room("!dm2:example.com", None, None);
+        let mut app = app_with_rooms(vec![dm1.clone(), group.clone(), dm2.clone()]);
+        // No selection, so the "keep selected visible" rule never interferes.
+        app.rooms.selected = None;
+
+        app.room_filter = RoomFilter::All;
+        assert_eq!(app.visible_room_indices(), vec![0, 1, 2]);
+
+        app.room_filter = RoomFilter::Dms;
+        assert_eq!(app.visible_room_indices(), vec![0, 2]);
+
+        app.room_filter = RoomFilter::Groups;
+        assert_eq!(app.visible_room_indices(), vec![1]);
+
+        // Mark the group unread; only it should show under the unread filter.
+        app.rooms.unread.insert(RoomKey::from(&group), 4);
+        app.room_filter = RoomFilter::Unread;
+        assert_eq!(app.visible_room_indices(), vec![1]);
+
+        // Pin dm2; favorites shows only pinned rooms.
+        app.pinned_rooms = vec![RoomKey::from(&dm2)];
+        app.room_filter = RoomFilter::Favorites;
+        assert_eq!(app.visible_room_indices(), vec![2]);
+
+        // Name filter matches on the group's name, case-insensitively.
+        app.room_filter = RoomFilter::Name("team".to_owned());
+        assert_eq!(app.visible_room_indices(), vec![1]);
+    }
+
+    #[test]
+    fn room_filter_name_cycles_to_all() {
+        assert_eq!(RoomFilter::Name("team".to_owned()).next(), RoomFilter::All);
+    }
+
+    #[test]
+    fn name_filter_matches_member_derived_room_title() {
+        let dm = room("!dm:example.com", None, None);
+        let group = room("!g:example.com", None, Some("Team"));
+        let mut app = app_with_rooms(vec![dm.clone(), group]);
+        app.rooms.selected = None;
+        app.room_titles
+            .insert(RoomKey::from(&dm), "Alice Example".to_owned());
+
+        app.room_filter = RoomFilter::Name("alice".to_owned());
+
+        assert_eq!(app.visible_room_indices(), vec![0]);
+    }
+
+    #[test]
+    fn cancel_reediting_name_filter_restores_existing_name_filter() {
+        let mut app = app_with_rooms(Vec::new());
+        app.room_filter = RoomFilter::Name("team".to_owned());
+
+        app.begin_room_name_filter();
+        app.update_room_name_filter("te".to_owned());
+        app.cancel_room_name_filter();
+
+        assert_eq!(app.room_filter, RoomFilter::Name("team".to_owned()));
+    }
+
+    #[test]
+    fn date_jump_counts_as_mid_command() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::DateJump;
+
+        assert!(app.is_mid_command());
+    }
+
+    #[tokio::test]
+    async fn date_jump_prompt_ignores_message_navigation_shortcuts() {
+        let mut app = app_with_rooms(Vec::new());
+        app.mode = Mode::DateJump;
+        app.input.buffer = "2026-06-25".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL))
+            .await;
+
+        assert_eq!(app.mode, Mode::DateJump);
+        assert_eq!(app.input.buffer, "2026-06-25");
+    }
+
+    #[test]
+    fn visible_room_indices_always_keeps_selected_room_visible() {
+        let dm = room("!dm:example.com", None, None);
+        let group = room("!g:example.com", None, Some("Team"));
+        let mut app = app_with_rooms(vec![dm, group]);
+        // Select the DM, then apply a Groups filter that would hide it.
+        app.rooms.selected = Some(0);
+        app.room_filter = RoomFilter::Groups;
+        // The selected DM stays visible alongside the matching group.
+        assert_eq!(app.visible_room_indices(), vec![0, 1]);
     }
 
     fn account(user_id: &str, state: AccountState) -> AccountDto {
@@ -2236,7 +2795,8 @@ mod tests {
         let mut display = DisplayOptions {
             debug: false,
             show_state_events: false,
-            sender_name: SenderNameStyle::DisplayName,
+            message_density: MessageDensity::Normal,
+            time_format: TimeFormat::H24,
             input_lines: 1,
             max_input_lines: None,
             preview_warmup_count: 5,
@@ -2244,6 +2804,9 @@ mod tests {
             search_wrap: true,
             accounts_panel_width: 25,
             rooms_panel_width_adj: 0,
+            pinned_rooms: Vec::new(),
+            room_sort: "recent".to_owned(),
+            room_filter: "all".to_owned(),
         };
         let state = event_with_state_key(
             "$m.room.topic:example.com",
@@ -2309,10 +2872,9 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn sender_label_can_use_matrix_address() {
+    pub(crate) fn sender_label_prefers_display_name_in_both_densities() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
-        app.display.sender_name = SenderNameStyle::MatrixAddress;
         let membership = event_with_state_key(
             "$member:example.com",
             "m.room.member",
@@ -2331,7 +2893,188 @@ mod tests {
             serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
         );
 
+        // A known display name is shown regardless of layout density.
+        app.display.message_density = MessageDensity::Normal;
+        assert_eq!(app.sender_label(&message), "Alice");
+        app.display.message_density = MessageDensity::Dense;
+        assert_eq!(app.sender_label(&message), "Alice");
+    }
+
+    #[test]
+    pub(crate) fn incremental_history_keeps_existing_display_names() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.seed_display_names_from_members(
+            &room,
+            &[MemberDto {
+                user_id: "@alice:example.com".to_owned(),
+                display_name: Some("Current Alice".to_owned()),
+            }],
+        );
+        let stale_membership = event_with_state_key(
+            "$older-member:example.com",
+            "m.room.member",
+            Some("@alice:example.com"),
+            None,
+            serde_json::json!({
+                "membership": "join",
+                "displayname": "Old Alice"
+            }),
+        );
+
+        app.merge_missing_display_names_from_events(&room, &[stale_membership]);
+
+        let message = event_with_id(
+            "$message:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        assert_eq!(app.sender_label(&message), "Current Alice");
+    }
+
+    #[test]
+    pub(crate) fn sender_label_without_display_name_varies_by_density() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        // No membership event, so no display name is known for the sender.
+        let message = event_with_id(
+            "$message:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+
+        // Normal mode shows the full mxid; dense mode drops the homeserver and
+        // keeps the `@localpart`.
+        app.display.message_density = MessageDensity::Normal;
         assert_eq!(app.sender_label(&message), "@alice:example.com");
+        app.display.message_density = MessageDensity::Dense;
+        assert_eq!(app.sender_label(&message), "@alice");
+    }
+
+    #[test]
+    pub(crate) fn members_outcome_resolves_previously_unknown_sender() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.display.message_density = MessageDensity::Normal;
+        let message = event_with_id(
+            "$message:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        // No name known yet — falls back to the raw mxid.
+        assert_eq!(app.sender_label(&message), "@alice:example.com");
+
+        // A background /members refresh lands and resolves the name in place.
+        app.apply_members_outcome(timeline::MembersOutcome {
+            room_key: RoomKey::from(&room),
+            members: vec![MemberDto {
+                user_id: "@alice:example.com".to_owned(),
+                display_name: Some("Alice".to_owned()),
+            }],
+        });
+        assert_eq!(app.sender_label(&message), "Alice");
+    }
+
+    #[test]
+    pub(crate) fn members_refresh_is_skipped_within_cooldown() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.set_members_sender(tx);
+        let key = RoomKey::from(&room);
+        // Pre-arm a future cooldown deadline. A refresh inside the window must be
+        // skipped at the gate — if it fell through to tokio::spawn it would panic
+        // outside a runtime, and the deadline would be overwritten.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.members_refresh_after.insert(key.clone(), deadline);
+        app.spawn_members_refresh(key.clone());
+        assert_eq!(app.members_refresh_after.get(&key), Some(&deadline));
+    }
+
+    #[test]
+    fn whereami_adds_dm_name_line_for_unnamed_room() {
+        // An unnamed room (no name/alias) behaves as a DM.
+        let dm = room("!dm:example.com", None, None);
+        let mut app = app_with_rooms(vec![dm.clone()]);
+        app.rooms.selected = Some(0);
+
+        // No derived title yet → no DM name line.
+        let before = crate::ui::popup_room_info_lines(&app);
+        assert!(!before.iter().any(|line| line.starts_with("DM name:")));
+
+        // Once a /members fetch resolves the partner, the line appears right after
+        // "Name:" without removing any existing information.
+        app.room_titles
+            .insert(RoomKey::from(&dm), "jamie".to_owned());
+        let after = crate::ui::popup_room_info_lines(&app);
+        assert!(
+            after.iter().any(|line| line == "DM name: jamie"),
+            "lines: {after:?}"
+        );
+        assert!(after.iter().any(|line| line.starts_with("Matrix ID:")));
+    }
+
+    #[test]
+    fn dm_title_prefers_other_members_name() {
+        let members = vec![
+            MemberDto {
+                user_id: "@me:example.com".to_owned(),
+                display_name: Some("Me".to_owned()),
+            },
+            MemberDto {
+                user_id: "@jamie:bostoncoop.net".to_owned(),
+                display_name: Some("jamie".to_owned()),
+            },
+        ];
+        assert_eq!(
+            dm_title_from_members(Some("@me:example.com"), &members).as_deref(),
+            Some("jamie")
+        );
+    }
+
+    #[test]
+    fn dm_title_falls_back_to_localpart_without_display_name() {
+        let members = vec![
+            MemberDto {
+                user_id: "@me:example.com".to_owned(),
+                display_name: None,
+            },
+            MemberDto {
+                user_id: "@jamie:bostoncoop.net".to_owned(),
+                display_name: None,
+            },
+        ];
+        assert_eq!(
+            dm_title_from_members(Some("@me:example.com"), &members).as_deref(),
+            Some("@jamie")
+        );
+    }
+
+    #[test]
+    fn dm_title_summarizes_large_rooms_and_skips_note_to_self() {
+        let mk = |uid: &str, name: &str| MemberDto {
+            user_id: uid.to_owned(),
+            display_name: Some(name.to_owned()),
+        };
+        // Only self → None, so the caller keeps the room id fallback.
+        let solo = vec![mk("@me:example.com", "Me")];
+        assert_eq!(dm_title_from_members(Some("@me:example.com"), &solo), None);
+
+        // Four others → first three (sorted by user id) plus "+1".
+        let many = vec![
+            mk("@me:example.com", "Me"),
+            mk("@a:x", "Al"),
+            mk("@b:x", "Bo"),
+            mk("@c:x", "Ci"),
+            mk("@d:x", "Di"),
+        ];
+        assert_eq!(
+            dm_title_from_members(Some("@me:example.com"), &many).as_deref(),
+            Some("Al, Bo, Ci, +1")
+        );
     }
 
     #[test]
@@ -2388,10 +3131,13 @@ mod tests {
             &HashMap::new(),
             &own_senders,
             &ImageThumbRows::new(),
+            &RelationContext::default(),
+            MessageDensity::Dense,
+            TimeFormat::H24,
         )
         .lines;
 
-        assert_eq!(lines[0].spans[2].style.fg, Some(colors.own_message_sender));
+        assert_eq!(lines[1].spans[2].style.fg, Some(colors.own_message_sender));
     }
 
     #[tokio::test]
@@ -2543,18 +3289,21 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &ImageThumbRows::new(),
+            &RelationContext::default(),
+            MessageDensity::Dense,
+            TimeFormat::H24,
         )
         .lines;
 
-        assert!(lines[0].spans.iter().any(|span| {
+        assert!(lines[1].spans.iter().any(|span| {
             span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
         }));
-        assert!(lines[0].spans.iter().any(|span| {
+        assert!(lines[1].spans.iter().any(|span| {
             span.content.contains("link")
                 && span.style.fg == Some(colors.status)
                 && span.style.add_modifier.contains(Modifier::UNDERLINED)
         }));
-        assert!(lines[0].spans.iter().any(|span| {
+        assert!(lines[1].spans.iter().any(|span| {
             span.content.contains("code") && span.style.fg == Some(colors.input_hint)
         }));
     }
@@ -2587,10 +3336,13 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &ImageThumbRows::new(),
+            &RelationContext::default(),
+            MessageDensity::Dense,
+            TimeFormat::H24,
         )
         .lines;
 
-        let text = lines[0]
+        let text = lines[1]
             .spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -2624,11 +3376,137 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::from([(key.clone(), 2)]),
+            &RelationContext::default(),
+            MessageDensity::Dense,
+            TimeFormat::H24,
         );
 
         assert_eq!(layout.image_body_rows.get(&key), Some(&2));
-        assert_eq!(layout.ranges, vec![0..4]);
-        assert_eq!(layout.lines.len(), 4);
+        assert_eq!(layout.ranges, vec![1..5]);
+        assert_eq!(layout.lines.len(), 5);
+    }
+
+    #[test]
+    fn normal_layout_puts_body_below_sender_header() {
+        let colors = TuiConfig::test_default().colors;
+        let event = event_with_id(
+            "$message:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let layout = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            None,
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ImageThumbRows::new(),
+            &RelationContext::default(),
+            MessageDensity::Normal,
+            TimeFormat::H24,
+        );
+
+        // Header row carries the sender but no body; the body is a separate row.
+        let header: String = layout.lines[1]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(header.contains("@alice:example.com"));
+        assert!(!header.contains("hello"));
+
+        let body: String = layout.lines[2]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        // Body indents to align under the sender (marker "  " + "HH:MM:SS ").
+        assert_eq!(body, format!("{}hello", " ".repeat(11)));
+        assert_eq!(layout.ranges, vec![1..3]);
+    }
+
+    #[test]
+    fn normal_layout_image_body_rows_includes_header_row() {
+        let colors = TuiConfig::test_default().colors;
+        let event = event_with_id(
+            "$image:example.com",
+            "m.room.message",
+            Some("caption"),
+            serde_json::json!({
+                "msgtype": "m.image",
+                "body": "caption",
+                "filename": "photo.jpg",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let key = (event.account_id, "mxc://example.com/photo".to_owned());
+        let layout = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            None,
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(key.clone(), 2)]),
+            &RelationContext::default(),
+            MessageDensity::Normal,
+            TimeFormat::H24,
+        );
+
+        // Same 2 caption rows + 2 thumbnail rows as the dense case, but the
+        // thumbnail offset now includes the separate sender header line.
+        assert_eq!(layout.image_body_rows.get(&key), Some(&3));
+        assert_eq!(layout.ranges, vec![1..6]);
+        assert_eq!(layout.lines.len(), 6);
+    }
+
+    #[test]
+    fn image_reply_offsets_thumbnail_below_the_reply_line() {
+        let colors = TuiConfig::test_default().colors;
+        let mut event = event_with_id(
+            "$image:example.com",
+            "m.room.message",
+            Some("caption"),
+            serde_json::json!({
+                "msgtype": "m.image",
+                "body": "caption",
+                "filename": "photo.jpg",
+                "url": "mxc://example.com/photo"
+            }),
+        );
+        // Mark the image as a reply: a reply-context line renders between the
+        // header and the body, so the thumbnail must drop below it.
+        event.relates_to = Some(serde_json::json!({
+            "m.in_reply_to": { "event_id": "$parent:example.com" }
+        }));
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let key = (event.account_id, "mxc://example.com/photo".to_owned());
+        let layout = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            None,
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::from([(key.clone(), 2)]),
+            &RelationContext::default(),
+            MessageDensity::Normal,
+            TimeFormat::H24,
+        );
+
+        // header(1) + reply line(1) + caption(2) = 4 rows above the thumbnail.
+        // Before the fix this was 3, so the thumbnail overwrote the filename.
+        assert_eq!(layout.image_body_rows.get(&key), Some(&4));
+        // 4 rows + 2 thumbnail rows = 6 message rows after the date separator.
+        assert_eq!(layout.ranges, vec![1..7]);
+        assert_eq!(layout.lines.len(), 7);
     }
 
     #[test]
@@ -2741,6 +3619,8 @@ mod tests {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
         app.rooms.selected = Some(0);
+        // Pin dense layout so the asserted scroll offsets match its line math.
+        app.display.message_density = MessageDensity::Dense;
         app.messages.page_size = 2;
         app.messages.width = 80;
         app.messages.scroll = 0;
@@ -2766,10 +3646,10 @@ mod tests {
         assert_eq!(app.selected_message_id(), Some("$multi:example.com"));
         app.move_selected_message(1);
         assert_eq!(app.selected_message_id(), Some("$next:example.com"));
-        assert_eq!(app.messages.scroll, 2);
+        assert_eq!(app.messages.scroll, 3);
         app.move_selected_message(-1);
         assert_eq!(app.selected_message_id(), Some("$multi:example.com"));
-        assert_eq!(app.messages.scroll, 0);
+        assert_eq!(app.messages.scroll, 1);
     }
 
     #[test]
@@ -2777,6 +3657,8 @@ mod tests {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
         app.rooms.selected = Some(0);
+        // Pin dense layout so the asserted scroll offsets match its line math.
+        app.display.message_density = MessageDensity::Dense;
         app.messages.page_size = 3;
         app.messages.scroll = 0;
         app.messages.events.insert(
@@ -2795,10 +3677,10 @@ mod tests {
 
         app.page_selected_message(1);
         assert_eq!(app.selected_message_id(), Some("$3:example.com"));
-        assert_eq!(app.messages.scroll, 3);
+        assert_eq!(app.messages.scroll, 4);
         app.page_selected_message(-1);
         assert_eq!(app.selected_message_id(), Some("$0:example.com"));
-        assert_eq!(app.messages.scroll, 0);
+        assert_eq!(app.messages.scroll, 1);
     }
 
     #[test]
@@ -2830,8 +3712,8 @@ mod tests {
         assert_eq!(app.selected_message_id(), Some("$message:example.com"));
     }
 
-    #[test]
-    fn reply_and_thread_actions_target_selected_message() {
+    #[tokio::test]
+    async fn reply_and_thread_actions_target_selected_message() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
         let mut app = app_with_rooms(vec![room.clone()]);
         app.rooms.selected = Some(0);
@@ -2847,16 +3729,410 @@ mod tests {
         app.messages.selection = Some("$message:example.com".to_owned());
 
         app.start_reply_to_selected_message();
-        assert_eq!(
-            app.status,
-            "reply to $message:example.com waits for the Axon write API"
+        assert_eq!(app.pending_reply.as_deref(), Some("$message:example.com"));
+        assert_eq!(app.pending_thread, None);
+
+        // A standalone message heads no thread, so /thread composes a new thread
+        // rooted at it (ADR 0032 M4) rather than opening a panel.
+        app.start_thread_from_selected_message().await;
+        assert_eq!(app.pending_thread.as_deref(), Some("$message:example.com"));
+        assert_eq!(app.pending_reply, None);
+    }
+
+    fn reply_event(event_id: &str, target: &str) -> EventDto {
+        let mut event = event_with_id(
+            event_id,
+            "m.room.message",
+            Some("reply body"),
+            serde_json::json!({ "msgtype": "m.text", "body": "reply body" }),
+        );
+        event.relates_to = Some(serde_json::json!({
+            "m.in_reply_to": { "event_id": target }
+        }));
+        event
+    }
+
+    fn thread_event(event_id: &str, root: &str, body: &str) -> EventDto {
+        let mut event = event_with_id(
+            event_id,
+            "m.room.message",
+            Some(body),
+            serde_json::json!({ "msgtype": "m.text", "body": body }),
+        );
+        event.relates_to = Some(serde_json::json!({
+            "rel_type": "m.thread",
+            "event_id": root
+        }));
+        event
+    }
+
+    fn ids(events: &[&EventDto]) -> Vec<String> {
+        events.iter().map(|event| event.event_id.clone()).collect()
+    }
+
+    #[test]
+    fn reply_context_resolves_from_loaded_slice() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let original = event_with_id(
+            "$orig:example.com",
+            "m.room.message",
+            Some("hello world"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello world" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                original,
+                reply_event("$reply:example.com", "$orig:example.com"),
+            ],
         );
 
-        app.start_thread_from_selected_message();
-        assert_eq!(
-            app.status,
-            "thread from $message:example.com waits for the Axon write API"
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        let preview = ctx.replies.get("$reply:example.com").expect("preview");
+        assert_eq!(preview.sender, "@alice:example.com");
+        assert_eq!(preview.snippet, "hello world");
+    }
+
+    #[test]
+    fn reply_context_absent_when_target_off_slice() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![reply_event("$reply:example.com", "$missing:example.com")],
         );
+
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        // No resolved preview => the layout renders the placeholder line.
+        assert!(ctx.replies.is_empty());
+    }
+
+    #[test]
+    fn thread_members_are_hidden_from_main_timeline_and_badged_on_root() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                root,
+                thread_event("$m1:example.com", "$root:example.com", "first"),
+                thread_event("$m2:example.com", "$root:example.com", "second"),
+            ],
+        );
+
+        // Main timeline shows only the root.
+        assert_eq!(ids(&app.selected_events()), vec!["$root:example.com"]);
+
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        let badge = ctx.thread_badges.get("$root:example.com").expect("badge");
+        assert_eq!(badge.count, 2);
+        assert_eq!(badge.latest_sender.as_deref(), Some("@alice:example.com"));
+        assert_eq!(badge.latest_snippet.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn thread_badge_count_prefers_server_aggregate() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                root,
+                thread_event("$m1:example.com", "$root:example.com", "first"),
+            ],
+        );
+        app.thread_summaries.insert(
+            RoomKey::from(&room),
+            HashMap::from([(
+                "$root:example.com".to_owned(),
+                crate::api::ThreadSummaryDto {
+                    root_event_id: "$root:example.com".to_owned(),
+                    reply_count: 7,
+                },
+            )]),
+        );
+
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        // Seven total on the server even though only one member is in the slice.
+        assert_eq!(ctx.thread_badges.get("$root:example.com").unwrap().count, 7);
+    }
+
+    #[test]
+    fn stale_relation_outcome_cannot_replace_newer_thread_summary() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let key = RoomKey::from(&room);
+        app.relation_refresh_latest.insert(key.clone(), 2);
+
+        app.apply_relation_outcome(relations::RelationOutcome {
+            room_key: key.clone(),
+            refresh_id: 1,
+            account_id: room.account_id,
+            threads: Some(HashMap::from([(
+                "$root:example.com".to_owned(),
+                crate::api::ThreadSummaryDto {
+                    root_event_id: "$root:example.com".to_owned(),
+                    reply_count: 99,
+                },
+            )])),
+            replies: Vec::new(),
+            is_incremental: false,
+        });
+
+        assert!(!app.thread_summaries.contains_key(&key));
+
+        app.apply_relation_outcome(relations::RelationOutcome {
+            room_key: key.clone(),
+            refresh_id: 2,
+            account_id: room.account_id,
+            threads: Some(HashMap::from([(
+                "$root:example.com".to_owned(),
+                crate::api::ThreadSummaryDto {
+                    root_event_id: "$root:example.com".to_owned(),
+                    reply_count: 3,
+                },
+            )])),
+            replies: Vec::new(),
+            is_incremental: false,
+        });
+
+        assert_eq!(
+            app.thread_summaries[&key]["$root:example.com"].reply_count,
+            3
+        );
+    }
+
+    #[test]
+    fn live_thread_member_increments_cached_server_summary() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(key.clone(), vec![root]);
+        app.thread_summaries.insert(
+            key.clone(),
+            HashMap::from([(
+                "$root:example.com".to_owned(),
+                crate::api::ThreadSummaryDto {
+                    root_event_id: "$root:example.com".to_owned(),
+                    reply_count: 2,
+                },
+            )]),
+        );
+
+        let live = thread_event("$m3:example.com", "$root:example.com", "third");
+        let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+
+        assert_eq!(action, LiveFrameAction::None);
+        assert_eq!(
+            app.thread_summaries[&key]["$root:example.com"].reply_count,
+            3
+        );
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        assert_eq!(ctx.thread_badges.get("$root:example.com").unwrap().count, 3);
+    }
+
+    #[test]
+    fn live_thread_member_promoted_to_main_timeline_when_panel_closed() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(key.clone(), vec![root]);
+
+        // Live thread member arrives with no thread panel open.
+        let live = thread_event("$reply:example.com", "$root:example.com", "my reply");
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+
+        // The promoted set must contain the new event.
+        assert!(app.promoted_thread_events.contains("$reply:example.com"));
+
+        // selected_events() must surface the promoted event in the main timeline.
+        let events = app.selected_events();
+        let ids = ids(&events);
+        assert!(
+            ids.contains(&"$reply:example.com".to_owned()),
+            "promoted thread member should appear in main timeline"
+        );
+
+        // The relation context must carry a thread_context entry for the member.
+        let ctx = app.relation_context(&events);
+        assert!(
+            ctx.thread_contexts.contains_key("$reply:example.com"),
+            "thread context should be built for the promoted event"
+        );
+        // Root is in the slice, so the context resolves (Some(preview)).
+        assert!(
+            ctx.thread_contexts["$reply:example.com"].is_some(),
+            "thread context should resolve when root is in the slice"
+        );
+    }
+
+    #[test]
+    fn promoted_events_cleared_when_thread_panel_opens() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(key.clone(), vec![root]);
+
+        // Promote a live reply.
+        let live = thread_event("$reply:example.com", "$root:example.com", "my reply");
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+        assert!(app.promoted_thread_events.contains("$reply:example.com"));
+
+        // Opening the thread panel for that root should clear the promotion.
+        app.promoted_thread_events.retain(|id| {
+            app.messages.events.get(&key).is_none_or(|events| {
+                events
+                    .iter()
+                    .find(|e| &e.event_id == id)
+                    .and_then(|e| e.thread_relation())
+                    != Some("$root:example.com")
+            })
+        });
+        assert!(
+            !app.promoted_thread_events.contains("$reply:example.com"),
+            "promoted event should be cleared when panel opens for its root"
+        );
+    }
+
+    #[test]
+    fn thread_panel_shows_root_and_members_then_closes() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                root,
+                thread_event("$m1:example.com", "$root:example.com", "first"),
+                thread_event("$m2:example.com", "$root:example.com", "second"),
+            ],
+        );
+
+        app.thread_panel = Some("$root:example.com".to_owned());
+        assert_eq!(
+            ids(&app.selected_events()),
+            vec!["$root:example.com", "$m1:example.com", "$m2:example.com"]
+        );
+
+        // Inside the panel the root is labeled and no badge clutters the view.
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        assert_eq!(ctx.thread_root.as_deref(), Some("$root:example.com"));
+        assert!(ctx.thread_badges.is_empty());
+
+        assert!(app.close_thread_panel());
+        assert!(app.thread_panel.is_none());
+        // After closing the panel, the thread root message should be selected.
+        assert_eq!(app.messages.selection.as_deref(), Some("$root:example.com"));
+        // Idempotent: a second Esc in the main timeline is not consumed here.
+        assert!(!app.close_thread_panel());
+    }
+
+    #[test]
+    fn selecting_a_thread_root_hints_the_open_thread_shortcut() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                root,
+                thread_event("$m1:example.com", "$root:example.com", "first"),
+            ],
+        );
+
+        app.move_selected_message(1);
+        assert_eq!(app.selected_message_id(), Some("$root:example.com"));
+        assert!(
+            app.status.text(false).contains("open thread"),
+            "status should hint the thread shortcut: {:?}",
+            app.status.text(false)
+        );
+    }
+
+    #[test]
+    fn is_thread_root_detects_members_and_server_summary() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let plain = event_with_id(
+            "$plain:example.com",
+            "m.room.message",
+            Some("nothing"),
+            serde_json::json!({ "msgtype": "m.text", "body": "nothing" }),
+        );
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("root"),
+            serde_json::json!({ "msgtype": "m.text", "body": "root" }),
+        );
+        app.messages.events.insert(
+            RoomKey::from(&room),
+            vec![
+                plain,
+                root,
+                thread_event("$m1:example.com", "$root:example.com", "first"),
+            ],
+        );
+
+        assert!(app.is_thread_root("$root:example.com"));
+        assert!(!app.is_thread_root("$plain:example.com"));
     }
 
     #[tokio::test]
@@ -2895,18 +4171,12 @@ mod tests {
         app.messages.selection = None;
         app.handle_command(Command::Reply).await;
         assert_eq!(app.selected_message_id(), Some("$newest:example.com"));
-        assert_eq!(
-            app.status,
-            "reply to $newest:example.com waits for the Axon write API"
-        );
+        assert_eq!(app.pending_reply.as_deref(), Some("$newest:example.com"));
 
         app.messages.selection = None;
         app.handle_command(Command::Thread).await;
         assert_eq!(app.selected_message_id(), Some("$newest:example.com"));
-        assert_eq!(
-            app.status,
-            "thread from $newest:example.com waits for the Axon write API"
-        );
+        assert_eq!(app.pending_thread.as_deref(), Some("$newest:example.com"));
     }
 
     #[tokio::test]
@@ -4306,6 +5576,9 @@ mod tests {
         let mut app = app_with_rooms(Vec::new());
         app.handle_command(Command::Help).await;
 
+        // Down twice to reach "//<text>" (the new "Alt+Enter" newline entry sits
+        // between it and "plain text").
+        app.handle_key(KeyEvent::from(KeyCode::Down)).await;
         app.handle_key(KeyEvent::from(KeyCode::Down)).await;
         app.handle_key(KeyEvent::from(KeyCode::Enter)).await;
 
@@ -4334,8 +5607,16 @@ mod tests {
     #[test]
     fn shortcuts_popup_lists_all_configurable_shortcuts() {
         let config = TuiConfig::test_default();
-        let lines = popup_shortcuts_lines(&config.shortcuts);
-        let text = lines.join("\n");
+        let text = popup_shortcuts_lines(&config.shortcuts)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(text.contains("F6"));
         assert!(text.contains("Ctrl-N"));

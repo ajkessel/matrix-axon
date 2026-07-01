@@ -705,7 +705,11 @@ impl App {
                 self.lifecycle_busy = false;
                 match result {
                     Ok(accounts) => {
-                        self.accounts.accounts = accounts;
+                        // Filter to Active accounts (set_accounts) instead of a raw
+                        // assignment: the latter briefly flashed every account —
+                        // including logged-out ones — into the account pane during
+                        // logout. resolve_logout_target re-filters to Active anyway.
+                        self.set_accounts(accounts);
                         match self.resolve_logout_target(target.as_deref()) {
                             LogoutResolution::Match(account) => self.request_logout(account),
                             LogoutResolution::Ambiguous(options) => {
@@ -1426,6 +1430,50 @@ mod tests {
             app.pending_command_response.as_deref(),
             Some("recovery failed for @alice:example.com: the recovery key was rejected by Axon")
         );
+    }
+
+    #[tokio::test]
+    async fn logout_ready_keeps_only_active_accounts_in_pane() {
+        let mut app = App::new(
+            AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+
+        let mk = |n: u128, user: &str, state| AccountDto {
+            account_id: Uuid::from_u128(n),
+            user_id: user.to_owned(),
+            state,
+            device_id: None,
+            verified: Some(false),
+        };
+        // Two active and one deactivated account come back from list_accounts.
+        // Empty target resolves to Ambiguous (two active), so the handler stops
+        // after populating the pane — exactly the window where the flash occurred.
+        app.handle_lifecycle_outcome(LifecycleOutcome::LogoutReady {
+            target: None,
+            result: Ok(vec![
+                mk(1, "@alice:example.com", AccountState::Active),
+                mk(2, "@bob:example.com", AccountState::Deactivated),
+                mk(3, "@carol:example.com", AccountState::Active),
+            ]),
+        })
+        .await;
+
+        // The deactivated account must not appear in the account pane.
+        let shown: Vec<&str> = app
+            .accounts
+            .accounts
+            .iter()
+            .map(|a| a.user_id.as_str())
+            .collect();
+        assert_eq!(shown, ["@alice:example.com", "@carol:example.com"]);
+        assert!(app
+            .accounts
+            .accounts
+            .iter()
+            .all(|a| a.state == AccountState::Active));
     }
 
     #[test]

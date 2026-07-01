@@ -37,3 +37,6 @@ image = { version = "0.25.9", default-features = false, features = ["jpeg", "png
 kamadak-exif = "0.6"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 html-escape = "0.2"
+textwrap = { version = "0.16", default-features = false }
+unicode-width = "0.2"
+chrono = { workspace = true, features = ["clock"] }

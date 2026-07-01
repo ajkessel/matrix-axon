@@ -138,6 +138,7 @@ impl AxonClient {
         account_id: Uuid,
         room_id: &str,
         cursor: Option<&str>,
+        at_ts: Option<i64>,
         limit: usize,
     ) -> Result<TimelinePage, ApiError> {
         let mut request = self.http.get(format!(
@@ -151,6 +152,24 @@ impl AxonClient {
         if let Some(cursor) = cursor {
             request = request.query(&[("cursor", cursor)]);
         }
+        if let Some(ts) = at_ts {
+            let ts = ts.to_string();
+            request = request.query(&[("at_ts", ts.as_str())]);
+        }
+        self.send(read_request(request)).await
+    }
+
+    pub async fn room_members(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<MemberDto>, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/rooms/{}/members",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
         self.send(read_request(request)).await
     }
 
@@ -160,6 +179,7 @@ impl AxonClient {
         room_id: &str,
         body: &str,
         formatted: Option<(&str, &str)>,
+        relation: SendRelation<'_>,
     ) -> Result<SendResultDto, ApiError> {
         let request = self.http.post(format!(
             "{}/v1/accounts/{}/rooms/{}/send",
@@ -171,6 +191,14 @@ impl AxonClient {
         if let Some((fmt, fb)) = formatted {
             payload["format"] = serde_json::json!(fmt);
             payload["formatted_body"] = serde_json::json!(fb);
+        }
+        // ADR 0032 M4 send contract: the server builds the `m.relates_to` envelope
+        // from these convenience fields (plain reply, or `m.thread` membership).
+        if let Some(reply_to) = relation.reply_to {
+            payload["reply_to"] = serde_json::json!(reply_to);
+        }
+        if let Some(thread_root) = relation.thread_root {
+            payload["thread_root"] = serde_json::json!(thread_root);
         }
         let request = message_mutation(request).json(&payload);
         self.send(request).await
@@ -301,6 +329,47 @@ impl AxonClient {
             account_id,
             path_segment(event_id)
         ));
+        self.send(read_request(request)).await
+    }
+
+    /// List the room's thread roots, most-recently-active first (ADR 0032 M3).
+    /// An unknown room or a room with no threads yields an empty list.
+    pub async fn room_threads(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<Vec<ThreadSummaryDto>, ApiError> {
+        let request = self.http.get(format!(
+            "{}/v1/accounts/{}/rooms/{}/threads",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
+        self.send(read_request(request)).await
+    }
+
+    /// A page of a single thread's members, newest first, reusing the room
+    /// timeline's opaque cursor pagination (ADR 0032 M3).
+    pub async fn thread_timeline(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        root_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TimelinePage, ApiError> {
+        let mut request = self.http.get(format!(
+            "{}/v1/accounts/{}/rooms/{}/threads/{}/timeline",
+            self.base_url,
+            account_id,
+            path_segment(room_id),
+            path_segment(root_id)
+        ));
+        let limit = limit.to_string();
+        request = request.query(&[("limit", limit.as_str())]);
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
         self.send(read_request(request)).await
     }
 
@@ -676,6 +745,16 @@ pub struct SendResultDto {
     pub event_id: String,
 }
 
+/// Optional relation a sent message carries (ADR 0032 M4). `reply_to` makes it a
+/// plain reply (`m.in_reply_to`); `thread_root` makes it a thread member
+/// (`rel_type: m.thread`). Default (both `None`) is an unrelated message; the
+/// server builds the concrete `m.relates_to` from these fields.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendRelation<'a> {
+    pub reply_to: Option<&'a str>,
+    pub thread_root: Option<&'a str>,
+}
+
 /// Response from `POST …/verify`: the transaction id for the new flow.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartVerifyResponse {
@@ -736,6 +815,14 @@ pub enum AccountState {
     Deleting,
 }
 
+/// One room member from `GET …/rooms/{room_id}/members`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemberDto {
+    pub user_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoomDto {
     pub account_id: Uuid,
@@ -763,6 +850,19 @@ impl RoomDto {
 pub struct TimelinePage {
     pub events: Vec<EventDto>,
     pub next_cursor: Option<String>,
+}
+
+/// One thread root in the `GET …/rooms/{room_id}/threads` response (M8 / ADR
+/// 0032 M3): the server-aggregated reply count and the id/timestamp of the most
+/// recent member. The latest member's sender and body are not carried here, so
+/// the TUI resolves them from the loaded slice when building a thread badge.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThreadSummaryDto {
+    pub root_event_id: String,
+    pub reply_count: i64,
+    // `latest_reply_event_id` / `latest_reply_ts` are part of the wire shape but
+    // the badge resolves the latest member's sender and body from the loaded
+    // slice instead, so serde ignores the extra keys.
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -980,6 +1080,29 @@ impl EventDto {
         let new_content = self.content.as_ref()?.get("m.new_content")?;
         let new_body = new_content.get("body")?.as_str()?;
         Some((target, new_body, new_content))
+    }
+
+    /// The `event_id` this event is a reply to (`m.relates_to.m.in_reply_to`),
+    /// when present and the event is *not* a thread member. A threaded message
+    /// may carry a fallback `m.in_reply_to` for older clients (Matrix 1.3); we
+    /// surface that through [`thread_relation`](Self::thread_relation) instead so
+    /// a threaded reply is not double-processed as a plain reply (ADR 0032 M1).
+    pub fn reply_relation(&self) -> Option<&str> {
+        let relates_to = self.relates_to.as_ref()?;
+        if relates_to.get("rel_type").and_then(Value::as_str) == Some("m.thread") {
+            return None;
+        }
+        relates_to.get("m.in_reply_to")?.get("event_id")?.as_str()
+    }
+
+    /// The thread root `event_id` this event belongs to, when it carries
+    /// `m.relates_to` with `rel_type: m.thread` (ADR 0032 M2).
+    pub fn thread_relation(&self) -> Option<&str> {
+        let relates_to = self.relates_to.as_ref()?;
+        if relates_to.get("rel_type")?.as_str()? != "m.thread" {
+            return None;
+        }
+        relates_to.get("event_id")?.as_str()
     }
 
     pub fn state_key(&self) -> Option<&str> {
@@ -1202,6 +1325,52 @@ mod tests {
             new_content.get("formatted_body").and_then(Value::as_str),
             Some("<strong>hello</strong>")
         );
+    }
+
+    fn event_with_relation(relates_to: Value) -> EventDto {
+        serde_json::from_value(serde_json::json!({
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "event_id": "$reply:localhost",
+            "room_id": "!room:localhost",
+            "sender": "@alice:localhost",
+            "origin_ts": 1234,
+            "type": "m.room.message",
+            "content": { "msgtype": "m.text", "body": "hi" },
+            "body": "hi",
+            "relates_to": relates_to,
+            "redacted": false,
+            "redaction_event_id": null
+        }))
+        .expect("valid event")
+    }
+
+    #[test]
+    fn reply_relation_reads_in_reply_to_target() {
+        let event = event_with_relation(serde_json::json!({
+            "m.in_reply_to": { "event_id": "$original:localhost" }
+        }));
+        assert_eq!(event.reply_relation(), Some("$original:localhost"));
+        assert_eq!(event.thread_relation(), None);
+    }
+
+    #[test]
+    fn thread_member_is_not_reported_as_a_plain_reply() {
+        // A threaded message may carry a fallback m.in_reply_to for older
+        // clients; it must surface as a thread relation, not a reply (ADR 0032).
+        let event = event_with_relation(serde_json::json!({
+            "rel_type": "m.thread",
+            "event_id": "$root:localhost",
+            "m.in_reply_to": { "event_id": "$latest:localhost" }
+        }));
+        assert_eq!(event.reply_relation(), None);
+        assert_eq!(event.thread_relation(), Some("$root:localhost"));
+    }
+
+    #[test]
+    fn plain_message_has_no_reply_or_thread_relation() {
+        let event = event_with_relation(Value::Null);
+        assert_eq!(event.reply_relation(), None);
+        assert_eq!(event.thread_relation(), None);
     }
 
     #[test]

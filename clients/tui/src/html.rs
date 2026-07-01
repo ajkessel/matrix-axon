@@ -227,20 +227,29 @@ fn render_html_node(
                 "a" => render_anchor(node, lines, context, colors, anchor_href(element)),
                 "blockquote" => {
                     push_rich_line_break_if_needed(lines);
-                    push_rich_span(
-                        lines,
-                        RichSpan::new("> ", Style::default().fg(colors.input_hint)),
-                    );
+                    // Render the quote body into its own buffer, then prefix every
+                    // resulting line with a gutter bar. Pushing a single inline
+                    // "> " instead orphaned it on its own line as soon as a
+                    // block-level child (e.g. <p>) forced a line break.
+                    let mut quote_lines = vec![Vec::new()];
                     render_children_with_style(
                         node,
-                        lines,
+                        &mut quote_lines,
                         HtmlContext {
                             style: context.style.fg(colors.input_hint),
                             ..context
                         },
                         colors,
                     );
-                    push_rich_line_break_if_needed(lines);
+                    trim_empty_rich_edges(&mut quote_lines);
+                    if !rich_lines_are_empty(&quote_lines) {
+                        let gutter = RichSpan::gutter("▌ ", Style::default().fg(colors.input_hint));
+                        for line in &mut quote_lines {
+                            line.insert(0, gutter.clone());
+                        }
+                        append_rich_lines(lines, quote_lines);
+                        push_rich_line_break_if_needed(lines);
+                    }
                 }
                 "ul" | "ol" => render_block_children(node, lines, context, colors),
                 "li" => {
@@ -530,6 +539,87 @@ mod tests {
         assert!(lines[0]
             .iter()
             .any(|span| matches!(span.style.fg, Some(Color::Rgb(_, _, _)))));
+    }
+
+    #[test]
+    fn blockquote_keeps_gutter_on_same_line_as_text() {
+        let colors = TuiConfig::test_default().colors;
+        let lines = formatted_message_body_lines(
+            "<blockquote><p>quoted text</p></blockquote>",
+            80,
+            80,
+            &colors,
+        )
+        .expect("blockquote should render");
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        // The gutter bar and the quoted text share one line (the bug put the
+        // marker alone on its own line, with the text on the next).
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains('▌') && t.contains("quoted text")),
+            "gutter and text should share a line; got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.trim() == "▌"),
+            "gutter must not be orphaned on its own line; got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn blockquote_gutters_every_line_of_a_multiline_quote() {
+        let colors = TuiConfig::test_default().colors;
+        let lines = formatted_message_body_lines(
+            "<blockquote><p>line one</p><p>line two</p></blockquote>",
+            80,
+            80,
+            &colors,
+        )
+        .expect("blockquote should render");
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains('▌') && t.contains("line one")),
+            "first quoted line should carry the gutter; got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains('▌') && t.contains("line two")),
+            "second quoted line should carry the gutter; got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn blockquote_gutter_repeats_on_wrapped_continuation_rows() {
+        let colors = TuiConfig::test_default().colors;
+        let lines = formatted_message_body_lines(
+            "<blockquote><p>this is a fairly long quoted sentence that wraps onto several rows</p></blockquote>",
+            20,
+            20,
+            &colors,
+        )
+        .expect("blockquote should render");
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .filter(|t| !t.trim().is_empty())
+            .collect();
+        assert!(
+            rows.len() >= 2,
+            "quote should wrap to multiple rows; got {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|t| t.contains('▌')),
+            "every wrapped quote row must carry the gutter; got {rows:?}"
+        );
     }
 
     #[test]

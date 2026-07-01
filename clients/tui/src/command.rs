@@ -11,6 +11,15 @@ pub enum Command {
     Recover(Option<String>),
     Delete(Option<String>),
     Room(String),
+    /// /pin [room] — pin the given room (or the selected room) to the top.
+    Pin(Option<String>),
+    /// /unpin [room] — unpin the given room (or the selected room).
+    Unpin(Option<String>),
+    /// /filter [all|dms|groups|unread|fav|<text>] — set the room-list filter
+    /// (ADR 0042). Empty argument clears to all rooms.
+    Filter(String),
+    /// /sort [recent|oldest|az|za] — set the room-list sort (ADR 0042).
+    Sort(String),
     Account(String),
     Status,
     Event(String),
@@ -42,6 +51,11 @@ pub enum Command {
         reason: Option<String>,
         text: String,
     },
+    /// /jump <date> — navigate the current room's timeline to the given date.
+    /// The i64 is a Unix timestamp in milliseconds.
+    JumpToDate(i64),
+    /// /top — jump to the earliest message the Axon server has for the current room.
+    JumpToTop,
     Invalid(String),
     ApiUnsupported(String),
     Unknown(String),
@@ -87,6 +101,10 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/delete", true),
     SlashCommand::supported("/room", true),
     SlashCommand::supported("/switch", true),
+    SlashCommand::supported("/pin", true),
+    SlashCommand::supported("/unpin", true),
+    SlashCommand::supported("/filter", true),
+    SlashCommand::supported("/sort", true),
     SlashCommand::supported("/account", true),
     SlashCommand::supported("/status", false),
     SlashCommand::supported("/event", true),
@@ -109,16 +127,37 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/literal", true),
     SlashCommand::supported("/rainbow", true),
     SlashCommand::supported("/spoiler", true),
+    SlashCommand::supported("/jump", true),
+    SlashCommand::supported("/top", false),
     SlashCommand::api_unsupported("/join", true),
     SlashCommand::api_unsupported("/leave", false),
     SlashCommand::api_unsupported("/part", false),
 ];
 
+/// Group boundaries for the help popup: `(start_index, section_title)`.
+/// Each entry marks the first `HELP_COMMANDS` index belonging to that group.
+pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
+    (0, "Messaging"),
+    (7, "Navigation"),
+    (12, "Account management"),
+    (16, "Information"),
+    (20, "Message actions"),
+    (24, "Verification"),
+    (26, "System"),
+    (32, "Pending"),
+];
+
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
+    // ── Messaging ────────────────────────────────────────────────────────────
     HelpCommand {
         label: "plain text",
         insert_text: "",
         description: "send a message to the current room",
+    },
+    HelpCommand {
+        label: "Alt+Enter",
+        insert_text: "",
+        description: "insert a line break for a multi-line message (rebindable via shortcuts.newline, e.g. shift-enter)",
     },
     HelpCommand {
         label: "//<text>",
@@ -145,6 +184,33 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/spoiler ",
         description: "send text as a spoiler; optional reason before \" | \" becomes the label",
     },
+    // ── Navigation ───────────────────────────────────────────────────────────
+    HelpCommand {
+        label: "/room <room>, /switch <room>",
+        insert_text: "/room ",
+        description: "switch room by name, alias, ID, or number",
+    },
+    HelpCommand {
+        label: "/pin [room], /unpin [room]",
+        insert_text: "/pin ",
+        description: "pin (or unpin) a room to the top of the list; defaults to the selected room",
+    },
+    HelpCommand {
+        label: "/filter [all|dms|groups|unread|fav|<text>]",
+        insert_text: "/filter ",
+        description: "set the room-list filter",
+    },
+    HelpCommand {
+        label: "/sort [recent|oldest|az|za]",
+        insert_text: "/sort ",
+        description: "set the room-list sort order",
+    },
+    HelpCommand {
+        label: "/account <account>",
+        insert_text: "/account ",
+        description: "filter by account (user ID, localpart, number, or \"all\")",
+    },
+    // ── Account management ───────────────────────────────────────────────────
     HelpCommand {
         label: "/login [user] [password] [homeserver]",
         insert_text: "/login ",
@@ -165,16 +231,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/delete ",
         description: "permanently delete an account and all its data (requires typing YES)",
     },
-    HelpCommand {
-        label: "/room <room>, /switch <room>",
-        insert_text: "/room ",
-        description: "switch room by name, alias, ID, or number",
-    },
-    HelpCommand {
-        label: "/account <account>",
-        insert_text: "/account ",
-        description: "filter by account (user ID, localpart, number, or \"all\")",
-    },
+    // ── Information ──────────────────────────────────────────────────────────
     HelpCommand {
         label: "/status",
         insert_text: "/status",
@@ -195,6 +252,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/whereami",
         description: "show room information",
     },
+    // ── Message actions ──────────────────────────────────────────────────────
     HelpCommand {
         label: "/react [emoji]",
         insert_text: "/react ",
@@ -208,14 +266,14 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     HelpCommand {
         label: "/reply",
         insert_text: "/reply",
-        description: "reply to the selected or most recent message (pending API support)",
+        description: "reply to the selected or most recent message",
     },
     HelpCommand {
         label: "/thread",
         insert_text: "/thread",
-        description:
-            "start a thread from the selected or most recent message (pending API support)",
+        description: "open the thread on, or start a thread from, the selected message",
     },
+    // ── Verification ─────────────────────────────────────────────────────────
     HelpCommand {
         label: "/verify <device_id>",
         insert_text: "/verify ",
@@ -227,6 +285,7 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/bundle ",
         description: "show the sender-trust verification bundle for an event",
     },
+    // ── System ───────────────────────────────────────────────────────────────
     HelpCommand {
         label: "/help, /?",
         insert_text: "/help",
@@ -256,6 +315,17 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/quit, /q",
         insert_text: "/quit",
         description: "quit",
+    },
+    // ── Pending ──────────────────────────────────────────────────────────────
+    HelpCommand {
+        label: "/jump <date>",
+        insert_text: "/jump ",
+        description: "jump to a date in the current room (YYYY-MM-DD, M/D/YYYY, or Jan 15 2025)",
+    },
+    HelpCommand {
+        label: "/top",
+        insert_text: "/top",
+        description: "jump to the earliest available message in the current room",
     },
     HelpCommand {
         label: "/join <room>",
@@ -327,6 +397,10 @@ pub fn parse(input: &str) -> Command {
         "room" | "switch" => {
             Command::Invalid("/room requires a room id, alias, name, or index".to_owned())
         }
+        "pin" => Command::Pin((!arg.is_empty()).then(|| arg.to_owned())),
+        "unpin" => Command::Unpin((!arg.is_empty()).then(|| arg.to_owned())),
+        "filter" => Command::Filter(arg.to_owned()),
+        "sort" => Command::Sort(arg.to_owned()),
         "account" if !arg.is_empty() => Command::Account(arg.to_owned()),
         "account" => Command::Invalid(
             "/account requires a user ID, localpart, number, or \"all\"".to_owned(),
@@ -378,6 +452,16 @@ pub fn parse(input: &str) -> Command {
             }
         }
         "spoiler" => Command::Invalid("/spoiler requires text to send".to_owned()),
+        "jump" if !arg.is_empty() => match parse_date_to_ms(arg) {
+            Some(ts) => Command::JumpToDate(ts),
+            None => Command::Invalid(format!(
+                "/jump: unrecognized date \"{arg}\" — try YYYY-MM-DD, M/D/YYYY, or \"Jan 15 2025\""
+            )),
+        },
+        "jump" => Command::Invalid(
+            "/jump requires a date (YYYY-MM-DD, M/D/YYYY, or \"January 15 2025\")".to_owned(),
+        ),
+        "top" => Command::JumpToTop,
         other => {
             let command_name = format!("/{other}");
             if SLASH_COMMANDS
@@ -394,6 +478,143 @@ pub fn parse(input: &str) -> Command {
     }
 }
 
+/// Parse a human-readable date string into a Unix timestamp in milliseconds
+/// (midnight UTC for date-only forms). Returns `None` for unrecognized formats.
+///
+/// Supported formats:
+///   YYYY-MM-DD          e.g. 2025-01-15
+///   YYYY-MM-DD HH:MM    e.g. 2025-01-15 10:30
+///   M/D/YYYY            e.g. 1/15/2025  or  01/15/2025
+///   Mon D YYYY          e.g. Jan 15 2025  or  January 15 2025
+///   Mon D, YYYY         e.g. January 15, 2025
+pub(crate) fn parse_date_to_ms(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if let Some(ts) = try_parse_iso(s) {
+        return Some(ts);
+    }
+    if let Some(ts) = try_parse_us_slash(s) {
+        return Some(ts);
+    }
+    if let Some(ts) = try_parse_named_month(s) {
+        return Some(ts);
+    }
+    None
+}
+
+/// YYYY-MM-DD or YYYY-MM-DD HH:MM
+fn try_parse_iso(s: &str) -> Option<i64> {
+    if s.len() < 10 || s.as_bytes()[4] != b'-' || s.as_bytes()[7] != b'-' {
+        return None;
+    }
+    let (y, m, d) = (
+        s[0..4].parse::<i64>().ok()?,
+        s[5..7].parse::<u32>().ok()?,
+        s[8..10].parse::<u32>().ok()?,
+    );
+    let (h, min) = if s.len() >= 16 && s.as_bytes()[10] == b' ' {
+        let rest = &s[11..];
+        if rest.len() >= 5 && rest.as_bytes()[2] == b':' {
+            (
+                rest[0..2].parse::<u32>().ok()?,
+                rest[3..5].parse::<u32>().ok()?,
+            )
+        } else {
+            return None;
+        }
+    } else if s.len() == 10 {
+        (0, 0)
+    } else {
+        return None;
+    };
+    ymd_hm_to_ms(y, m, d, h, min)
+}
+
+/// M/D/YYYY or MM/DD/YYYY
+fn try_parse_us_slash(s: &str) -> Option<i64> {
+    let parts: Vec<&str> = s.splitn(3, '/').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let m = parts[0].parse::<u32>().ok()?;
+    let d = parts[1].parse::<u32>().ok()?;
+    let y = parts[2].trim().parse::<i64>().ok()?;
+    ymd_hm_to_ms(y, m, d, 0, 0)
+}
+
+/// "January 15 2025", "Jan 15 2025", "January 15, 2025", "Jan 15, 2025"
+fn try_parse_named_month(s: &str) -> Option<i64> {
+    // Split on whitespace; allow an optional comma after the day token.
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return None;
+    }
+    let m = month_name_to_number(tokens[0])?;
+    let day_str = tokens[1].trim_end_matches(',');
+    let d = day_str.parse::<u32>().ok()?;
+    let y = tokens[2].trim_end_matches(',').parse::<i64>().ok()?;
+    ymd_hm_to_ms(y, m, d, 0, 0)
+}
+
+fn month_name_to_number(name: &str) -> Option<u32> {
+    let prefix = name
+        .chars()
+        .take(3)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match prefix.as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn ymd_hm_to_ms(y: i64, m: u32, d: u32, h: u32, min: u32) -> Option<i64> {
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) || h > 23 || min > 59 {
+        return None;
+    }
+    let days = days_since_epoch(y, m, d)?;
+    let secs = days * 86400 + h as i64 * 3600 + min as i64 * 60;
+    Some(secs * 1000)
+}
+
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Days from 1970-01-01 to the given date using the Gregorian civil-calendar algorithm.
+fn days_since_epoch(y: i64, m: u32, d: u32) -> Option<i64> {
+    // Shift Jan/Feb to previous year so leap-day math is at the end of the year.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    // Days from a reference era epoch to the given date.
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400); // year-of-era [0, 399]
+    let doy = (153 * m as i64 + 2) / 5 + d as i64 - 1; // day-of-year [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // day-of-era [0, 146096]
+    let civil_epoch_days = era * 146097 + doe - 719468; // days since Unix epoch
+    Some(civil_epoch_days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +627,18 @@ mod tests {
             Command::Room("#room:localhost".to_owned())
         );
         assert_eq!(parse("/switch 2"), Command::Room("2".to_owned()));
+    }
+
+    #[test]
+    fn parses_pin_and_unpin() {
+        assert_eq!(parse("/pin"), Command::Pin(None));
+        assert_eq!(parse("/pin 2"), Command::Pin(Some("2".to_owned())));
+        assert_eq!(
+            parse("/pin #room:localhost"),
+            Command::Pin(Some("#room:localhost".to_owned()))
+        );
+        assert_eq!(parse("/unpin"), Command::Unpin(None));
+        assert_eq!(parse("/unpin 2"), Command::Unpin(Some("2".to_owned())));
     }
 
     #[test]
@@ -523,6 +756,14 @@ mod tests {
     }
 
     #[test]
+    fn help_lists_filter_and_sort_commands() {
+        let labels: Vec<&str> = HELP_COMMANDS.iter().map(|command| command.label).collect();
+
+        assert!(labels.iter().any(|label| label.starts_with("/filter ")));
+        assert!(labels.iter().any(|label| label.starts_with("/sort ")));
+    }
+
+    #[test]
     fn parses_shortcuts() {
         assert_eq!(parse("/shortcuts"), Command::Shortcuts);
     }
@@ -604,5 +845,84 @@ mod tests {
             parse("/frobnicate"),
             Command::Unknown("unknown command: /frobnicate".to_owned())
         );
+    }
+
+    // ── /jump date parsing ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_date_iso() {
+        // 2025-01-15 00:00:00 UTC = 1736899200000 ms
+        assert_eq!(parse_date_to_ms("2025-01-15"), Some(1_736_899_200_000));
+    }
+
+    #[test]
+    fn parse_date_iso_with_time() {
+        // 2025-01-15 10:30:00 UTC = 1736899200000 + 10*3600 + 30*60 = +37800s
+        assert_eq!(
+            parse_date_to_ms("2025-01-15 10:30"),
+            Some(1_736_899_200_000 + 37_800_000)
+        );
+    }
+
+    #[test]
+    fn parse_date_us_slash() {
+        assert_eq!(parse_date_to_ms("1/15/2025"), Some(1_736_899_200_000));
+        assert_eq!(parse_date_to_ms("01/15/2025"), Some(1_736_899_200_000));
+    }
+
+    #[test]
+    fn parse_date_named_month_short() {
+        assert_eq!(parse_date_to_ms("Jan 15 2025"), Some(1_736_899_200_000));
+        assert_eq!(parse_date_to_ms("jan 15 2025"), Some(1_736_899_200_000));
+    }
+
+    #[test]
+    fn parse_date_named_month_long() {
+        assert_eq!(
+            parse_date_to_ms("January 15, 2025"),
+            Some(1_736_899_200_000)
+        );
+        assert_eq!(parse_date_to_ms("January 15 2025"), Some(1_736_899_200_000));
+    }
+
+    #[test]
+    fn parse_date_all_months() {
+        // Spot-check a few month names
+        assert!(parse_date_to_ms("February 1 2025").is_some());
+        assert!(parse_date_to_ms("Mar 31 2025").is_some());
+        assert!(parse_date_to_ms("December 25 2025").is_some());
+    }
+
+    #[test]
+    fn parse_date_leap_day() {
+        // 2024 is a leap year; 2025 is not.
+        assert!(parse_date_to_ms("2024-02-29").is_some());
+        assert!(parse_date_to_ms("2025-02-29").is_none());
+    }
+
+    #[test]
+    fn parse_date_invalid() {
+        assert!(parse_date_to_ms("not-a-date").is_none());
+        assert!(parse_date_to_ms("2025-13-01").is_none()); // month 13
+        assert!(parse_date_to_ms("2025-01-32").is_none()); // day 32
+        assert!(parse_date_to_ms("İan 1 2025").is_none());
+        assert!(parse_date_to_ms("").is_none());
+    }
+
+    #[test]
+    fn parse_jump_command() {
+        assert!(matches!(
+            parse("/jump 2025-01-15"),
+            Command::JumpToDate(1_736_899_200_000)
+        ));
+        assert!(matches!(parse("/jump"), Command::Invalid(_)));
+        assert!(matches!(parse("/jump garbage"), Command::Invalid(_)));
+    }
+
+    #[test]
+    fn parse_top_command() {
+        assert!(matches!(parse("/top"), Command::JumpToTop));
+        // Stray trailing whitespace still resolves to the command.
+        assert!(matches!(parse("/top   "), Command::JumpToTop));
     }
 }

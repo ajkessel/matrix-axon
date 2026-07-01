@@ -1,22 +1,22 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::{FontSize, Image, Resize};
 
-use crate::api::RoomDto;
 use crate::app::{
     account_localpart, format_time, message_layout, AccountSelection, App, ImageState,
-    ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomKey, SearchKind,
-    VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey,
+    SearchKind, VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
-use crate::command::HELP_COMMANDS;
+use crate::command::{HELP_COMMANDS, HELP_COMMAND_GROUPS};
 use crate::config::Shortcuts;
 use crate::wrap::{plain_rich_lines, wrap_rich_lines};
 
@@ -41,11 +41,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(Clear, ghost_area);
     }
 
+    // Screen rects where a pixel-protocol image widget is drawn this frame.
+    // Compared against `app.prev_image_rects` at the end of `draw()` to erase
+    // ghost pixels left wherever an image was drawn last frame but not this one.
+    let mut frame_image_rects: Vec<Rect> = Vec::new();
+
     let effective_input_lines = if let Some(max_lines) = app.display.max_input_lines {
         let inner_width = frame.area().width.saturating_sub(2) as usize;
-        let content_len = 2 + app.input.buffer.chars().count();
         let actual_lines = if inner_width > 0 {
-            content_len.div_ceil(inner_width).max(1) as u16
+            let (rows, _, _) = compose_layout(&app.input.buffer, app.input.cursor, inner_width);
+            rows.max(1) as u16
         } else {
             1
         };
@@ -239,22 +244,43 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             (rows_available / 2).max(1)
         };
+        // Pinned rooms are sorted to the front, so the leading run of visible
+        // rooms that are pinned marks the boundary for the separator (ADR 0038).
+        let pinned_visible_count = visible_indices
+            .iter()
+            .take_while(|&&i| app.is_room_pinned(&RoomKey::from(&app.rooms.rooms[i])))
+            .count();
         app.rooms.page_size = rooms_page_size;
-        if rooms_selected_vis < app.rooms.scroll {
-            app.rooms.scroll = rooms_selected_vis;
-        } else if rooms_page_size > 0 && rooms_selected_vis >= app.rooms.scroll + rooms_page_size {
-            app.rooms.scroll = rooms_selected_vis + 1 - rooms_page_size;
-        }
-        let rooms_max_scroll = visible_indices.len().saturating_sub(rooms_page_size);
-        app.rooms.scroll = app.rooms.scroll.min(rooms_max_scroll);
+        app.rooms.scroll = divider_aware_room_scroll(
+            app.rooms.scroll,
+            rooms_selected_vis,
+            rooms_page_size,
+            visible_indices.len(),
+            pinned_visible_count,
+        );
         let rooms_scroll = app.rooms.scroll;
 
-        let room_items = visible_indices
-            .iter()
-            .enumerate()
-            .skip(rooms_scroll)
-            .take(rooms_page_size)
-            .map(|(vis_pos, &full_index)| {
+        let separator_width = usize::from(rooms_area.width.saturating_sub(2)).max(1);
+        let mut room_items: Vec<ListItem> = Vec::new();
+        for (vis_pos, &full_index) in visible_indices.iter().enumerate().skip(rooms_scroll) {
+            if room_items.len() >= rooms_page_size {
+                break;
+            }
+            // Draw the pinned/unpinned divider only when this viewport shows the
+            // first unpinned room with at least one pinned room above it.
+            if vis_pos == pinned_visible_count && pinned_visible_count > 0 && vis_pos > rooms_scroll
+            {
+                room_items.push(ListItem::new(Line::from(Span::styled(
+                    "─".repeat(separator_width),
+                    Style::default()
+                        .fg(app.colors.border)
+                        .add_modifier(Modifier::DIM),
+                ))));
+            }
+            if room_items.len() >= rooms_page_size {
+                break;
+            }
+            let item = {
                 let room = &app.rooms.rooms[full_index];
                 let key = RoomKey::from(room);
                 let unread_count = app.rooms.unread.get(&key).copied().unwrap_or_default();
@@ -268,7 +294,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 let latest = room
                     .last_event_id
                     .as_deref()
-                    .map(|_| format!(" {}", format_time(room.last_activity_ts)))
+                    .map(|_| {
+                        format!(
+                            " {}",
+                            format_time(room.last_activity_ts, app.display.time_format)
+                        )
+                    })
                     .unwrap_or_default();
                 let alias = room
                     .canonical_alias
@@ -297,7 +328,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 if rooms_wide {
                     ListItem::new(Line::from(vec![
                         Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
-                        Span::styled(room.title().to_owned(), title_style),
+                        Span::styled(app.room_list_title(room), title_style),
                         Span::raw(account_tag),
                         Span::styled(unread_str, Style::default().fg(app.colors.unread_count)),
                         Span::raw(latest),
@@ -307,7 +338,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     ListItem::new(vec![
                         Line::from(vec![
                             Span::raw(format!("{marker}{} ", room_display_number(vis_pos))),
-                            Span::styled(room.title().to_owned(), title_style),
+                            Span::styled(app.room_list_title(room), title_style),
                             Span::raw(account_tag),
                         ]),
                         Line::from(vec![
@@ -317,7 +348,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         ]),
                     ])
                 }
-            });
+            };
+            room_items.push(item);
+        }
         let rooms_active = app.mode == Mode::RoomList;
         let rooms_border = if rooms_active {
             Style::default()
@@ -328,10 +361,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         };
         let rooms_title = if let Mode::Search(SearchKind::Rooms, q) = &app.mode {
             format!("Rooms  Search: {q}")
-        } else if app.unread_filter {
-            "Rooms (Unread)".to_owned()
+        } else if let Mode::Search(SearchKind::RoomNameFilter, q) = &app.mode {
+            format!("Rooms  Filter: {q}")
         } else {
-            "Rooms".to_owned()
+            // Show the active sort, and the filter when it is not the default.
+            match &app.room_filter {
+                RoomFilter::All => format!("Rooms — {}", app.room_sort.label()),
+                other => format!("Rooms — {} · {}", other.label(), app.room_sort.label()),
+            }
         };
         let rooms = List::new(room_items).block(
             Block::default()
@@ -382,6 +419,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         })
         .collect();
+    let relations = app.relation_context(selected_events.as_slice());
     let layout = message_layout(
         selected_events.as_slice(),
         sender_labels.as_slice(),
@@ -391,6 +429,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         &reactions,
         &app.live.own_senders,
         &image_thumb_rows,
+        &relations,
+        app.display.message_density,
+        app.display.time_format,
     );
     let total_lines = layout
         .ranges
@@ -412,8 +453,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .collect::<Vec<_>>();
     let title = app
         .selected_room()
-        .map(RoomDto::title)
-        .unwrap_or("No room selected");
+        .map(|room| app.room_list_title(room))
+        .unwrap_or_else(|| "No room selected".to_owned());
     let messages_active = app.mode == Mode::MessageList;
     let messages_border = if messages_active {
         Style::default()
@@ -424,8 +465,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     };
     let messages_title = if let Mode::Search(SearchKind::Messages, q) = &app.mode {
         format!("{title}  Search: {q}")
+    } else if app.thread_panel.is_some() {
+        format!("{title}  [in thread]")
     } else {
-        title.to_owned()
+        title
     };
     let messages = Paragraph::new(message_lines).block(
         Block::default()
@@ -491,13 +534,59 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     for (key, encrypted) in &media_requests {
         app.request_image(key.account_id, key.mxc_url.clone(), *encrypted);
     }
+    // A background refresh (thumbnail re-render) must never paint over an open
+    // modal popup: pixel-protocol graphics live outside ratatui's cell model, so
+    // a Clear under the popup would not erase them.  Suppress any thumbnail that
+    // overlaps the active modal's region.
+    let blocking_popup = blocking_popup_area(app, frame.area());
     for (rect, size, media) in thumb_specs {
         app.request_protocol(media.clone(), size);
         let protocol_key = ProtocolKey { media, size };
         if let Some(ProtocolState::Ready(protocol)) = app.proto_cache.get(&protocol_key) {
-            frame.render_widget(Image::new(protocol.inline()), rect);
+            let inline = protocol.inline(app.sixel_inline_generation);
+            // The widget anchors the image at `rect`'s top-left and paints it at
+            // its own aspect-fit cell size — only this sub-rect holds pixels.
+            // Collision/ghost tracking must use it; the full-width `rect` would
+            // hide thumbnails whose real pixels sit clear of the popup.
+            let drawn = image_draw_rect(rect, inline.size());
+            if thumbnail_overlaps_blocking_popup(drawn, blocking_popup) {
+                continue;
+            }
+            frame.render_widget(Image::new(inline), rect);
+            frame_image_rects.push(drawn);
         }
     }
+    // After all message-pane widgets have rendered, mark blank cells as
+    // AlwaysUpdate when the thread panel just opened or closed.  Blank cells
+    // (space + default colours) are invisible to ratatui's diff when the
+    // background is Color::Reset, so sixel/halfblock ghost pixels from the
+    // previous view are never overwritten.  AlwaysUpdate forces ratatui to emit
+    // terminal codes for those cells, clearing the stale pixels.
+    //
+    // We restrict this to cells whose symbol is a plain space: cells that
+    // contain halfblock (▄▀) or text characters are already caught by the normal
+    // diff (their symbol changed), and force-emitting ambiguous-width halfblock
+    // chars without explicit MoveTo causes cursor drift that staggers the border.
+    if std::mem::take(&mut app.force_terminal_clear) {
+        let buf = frame.buffer_mut();
+        for y in messages_area.top()..messages_area.bottom() {
+            for x in messages_area.left()..messages_area.right() {
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    // Only mark cells that have no diff option yet.  Sixel and
+                    // Kitty image widgets set CellDiffOption::Skip on every cell
+                    // they occupy; overwriting Skip with AlwaysUpdate causes
+                    // ratatui to emit a space directly over the newly-rendered
+                    // image, destroying it.  Cells that hold ghost pixels from a
+                    // previous frame have diff_option == None (the buffer-reset
+                    // default), so they are safe to force-update.
+                    if c.symbol() == " " && c.diff_option == CellDiffOption::None {
+                        c.set_diff_option(CellDiffOption::AlwaysUpdate);
+                    }
+                }
+            }
+        }
+    }
+
     // Pre-warm preview protocols for visible images so pressing 'v' shows the
     // image immediately rather than waiting for encoding to complete.  We cap
     // at `preview_warmup_count` (default 5) to bound proto_cache churn: warming
@@ -521,8 +610,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 SearchKind::Rooms => "Rooms",
                 SearchKind::Messages => "Messages",
                 SearchKind::Accounts => "Accounts",
+                SearchKind::RoomNameFilter => "Room filter",
             };
-            let hint = "  n: next match  N: prev match";
+            let hint = match kind {
+                SearchKind::RoomNameFilter => "  Enter: apply  Esc: cancel",
+                _ => "  n: next match  N: prev match",
+            };
             let q = q.clone();
             let col = 3u16 + q.chars().count() as u16;
             let line = Line::from(vec![
@@ -537,7 +630,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 Span::styled(hint, Style::default().fg(app.colors.input_hint)),
             ]);
-            (line, format!("Search: {kind_label}"), Some(col))
+            (Text::from(line), format!("Search: {kind_label}"), Some(col))
         }
         Mode::LoginPassword { .. } | Mode::RecoveryKey { .. } => {
             let masked = mask_secret_input(&app.input.buffer);
@@ -558,7 +651,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 "Recovery key".to_owned()
             };
-            (line, title, Some(col))
+            (Text::from(line), title, Some(col))
         }
         Mode::ConfirmLogout { account } => {
             let line = Line::from(vec![
@@ -570,7 +663,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         .add_modifier(Modifier::ITALIC),
                 ),
             ]);
-            (line, "Confirm logout".to_owned(), None)
+            (Text::from(line), "Confirm logout".to_owned(), None)
         }
         _ => {
             let in_search_list = matches!(
@@ -587,28 +680,54 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 Span::raw(mask_login_command(&app.input.buffer))
             };
-            let mut spans = vec![
-                Span::raw("> "),
-                input_text,
-                Span::raw("  "),
+            let status_span = Span::styled(
+                entry_status_text(app),
+                Style::default()
+                    .fg(app.colors.status)
+                    .add_modifier(Modifier::ITALIC),
+            );
+            let search_hint = in_search_list.then(|| {
                 Span::styled(
-                    entry_status_text(app),
-                    Style::default()
-                        .fg(app.colors.status)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ];
-            if in_search_list {
-                spans.push(Span::styled(
                     "  n: next match  N: prev match",
                     Style::default().fg(app.colors.input_hint),
-                ));
-            }
-            let line = Line::from(spans);
+                )
+            });
+            // A multi-line compose buffer (Shift+Enter) renders one row per hard
+            // line: the first carries the "> " prompt, continuations a "  " indent
+            // to stay aligned, and the trailing status sits after the last line.
+            let masked = mask_login_command(&app.input.buffer);
+            let is_help = app.show_input_help && app.input.buffer.is_empty();
+            let text = if is_help || !masked.contains('\n') {
+                let mut spans = vec![Span::raw("> "), input_text, Span::raw("  "), status_span];
+                spans.extend(search_hint);
+                Text::from(Line::from(spans))
+            } else {
+                let segments: Vec<&str> = masked.split('\n').collect();
+                let last = segments.len() - 1;
+                let lines: Vec<Line> = segments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, segment)| {
+                        let prefix = if i == 0 { "> " } else { "  " };
+                        let mut spans = vec![Span::raw(prefix), Span::raw(segment.to_owned())];
+                        if i == last {
+                            spans.push(Span::raw("  "));
+                            spans.push(status_span.clone());
+                            spans.extend(search_hint.clone());
+                        }
+                        Line::from(spans)
+                    })
+                    .collect();
+                Text::from(lines)
+            };
             let col = if matches!(
                 app.mode,
-                Mode::Compose | Mode::LoginUsername | Mode::Editing { .. } | Mode::Reacting { .. }
-            ) && !(app.show_input_help && app.input.buffer.is_empty())
+                Mode::Compose
+                    | Mode::LoginUsername
+                    | Mode::Editing { .. }
+                    | Mode::Reacting { .. }
+                    | Mode::DateJump
+            ) && !is_help
             {
                 Some(2u16 + app.input.buffer[..app.input.cursor].chars().count() as u16)
             } else {
@@ -618,9 +737,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Mode::RoomList if app.last_search.is_some() => "Search: Rooms".to_owned(),
                 Mode::MessageList if app.last_search.is_some() => "Search: Messages".to_owned(),
                 Mode::AccountList if app.last_search.is_some() => "Search: Accounts".to_owned(),
+                Mode::DateJump => "Jump to date".to_owned(),
                 _ => String::new(),
             };
-            (line, title, col)
+            (text, title, col)
         }
     };
     let input_active = matches!(
@@ -634,6 +754,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::Reacting { .. }
             | Mode::Unreacting { .. }
             | Mode::Search(_, _)
+            | Mode::DateJump
     );
     let input_border = if input_active {
         Style::default()
@@ -678,7 +799,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(col) = cursor_col {
         let inner_width = outer[1].width.saturating_sub(2) as usize;
-        let (vis_row, vis_col) = if inner_width > 0 && col as usize > inner_width {
+        // In compose, the buffer can span multiple hard lines (Shift+Enter), so
+        // resolve the cursor against the same layout the box renders; other input
+        // modes are always a single (wrapping) logical line.
+        let (vis_row, vis_col) = if app.mode == Mode::Compose {
+            let (_, row, col) = compose_layout(&app.input.buffer, app.input.cursor, inner_width);
+            (row, col)
+        } else if inner_width > 0 && col as usize > inner_width {
             let overflow = col as usize - inner_width;
             (1 + overflow / inner_width, overflow % inner_width)
         } else {
@@ -720,39 +847,29 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
 
-    if let Mode::Popup(kind) = app.mode {
-        let command_response = app.pending_command_response.as_deref().unwrap_or_default();
-        let area = match kind {
-            PopupKind::CommandResponse => {
-                command_response_popup_area(command_response, frame.area())
-            }
-            _ => centered_rect(72, 80, frame.area()),
-        };
-        if kind == PopupKind::MediaPreview {
-            render_media_preview(frame, app, frame.area());
-            return;
+    if let Mode::Popup(PopupKind::MediaPreview) = app.mode {
+        if let Some(rect) = render_media_preview(frame, app, frame.area()) {
+            frame_image_rects.push(rect);
         }
+    } else if let Mode::Popup(kind) = app.mode {
+        let area = blocking_popup_area(app, frame.area()).unwrap_or_else(|| frame.area());
+        let command_response = app.pending_command_response.as_deref().unwrap_or_default();
         frame.render_widget(Clear, area);
         let page_size = usize::from(area.height.saturating_sub(2)).max(1);
         let (popup_title, lines) = match kind {
             PopupKind::Help => {
                 let lines = popup_help_lines(app);
-                if app.help_selection < app.popup_scroll {
-                    app.popup_scroll = app.help_selection;
-                } else if app.help_selection >= app.popup_scroll.saturating_add(page_size) {
-                    app.popup_scroll = app
-                        .help_selection
-                        .saturating_add(1)
-                        .saturating_sub(page_size);
+                let sel_line = help_line_of_selection(app.help_selection);
+                if sel_line < app.popup_scroll {
+                    app.popup_scroll = sel_line;
+                } else if sel_line >= app.popup_scroll.saturating_add(page_size) {
+                    app.popup_scroll = sel_line.saturating_add(1).saturating_sub(page_size);
                 }
                 ("Help  (Enter to select, Esc to close)", lines)
             }
             PopupKind::Shortcuts => (
                 "Shortcuts  (Esc to close)",
-                popup_shortcuts_lines(&app.shortcuts)
-                    .into_iter()
-                    .map(Line::from)
-                    .collect(),
+                popup_shortcuts_lines(&app.shortcuts),
             ),
             PopupKind::RoomInfo => (
                 "Room Info  (Esc to close, Up/Down scroll)",
@@ -795,6 +912,42 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .wrap(Wrap { trim: false });
         frame.render_widget(popup, area);
     }
+
+    // Erase pixel-protocol ghosts: any cell an image occupied last frame but
+    // not this one. Halfblock images are ordinary glyphs already caught by the
+    // normal cell-diff, so skip the work entirely for that protocol.
+    if !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks) {
+        clear_image_ghosts(frame, &app.prev_image_rects, &frame_image_rects);
+    }
+    app.prev_image_rects = frame_image_rects;
+}
+
+/// Force-repaint cells that held a pixel-protocol image last frame but are no
+/// longer covered by one. Sixel/iTerm2 pixels are outside ratatui's cell model,
+/// so a vacated, still-blank cell would otherwise keep its stale pixels: both
+/// the old and new buffer cells compare equal and the diff emits nothing.
+/// Marking such cells `AlwaysUpdate` forces a terminal write that clears them.
+fn clear_image_ghosts(frame: &mut Frame<'_>, prev: &[Rect], current: &[Rect]) {
+    let buf = frame.buffer_mut();
+    for area in prev {
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                // Still covered by an image this frame — leave its Skip cells be.
+                if current.iter().any(|r| r.contains((x, y).into())) {
+                    continue;
+                }
+                if let Some(c) = buf.cell_mut((x, y)) {
+                    // Only touch blank cells with no diff decision yet. Cells
+                    // holding text/halfblocks (symbol != " ") are already caught
+                    // by the normal diff; cells a fresh image set to Skip must
+                    // not be overwritten or we'd paint over the new image.
+                    if c.symbol() == " " && c.diff_option == CellDiffOption::None {
+                        c.set_diff_option(CellDiffOption::AlwaysUpdate);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn image_thumbnail_spec(
@@ -829,6 +982,39 @@ fn image_thumbnail_spec(
     Some((rect, size))
 }
 
+fn thumbnail_overlaps_blocking_popup(rect: Rect, popup_area: Option<Rect>) -> bool {
+    popup_area.is_some_and(|area| rect.intersects(area))
+}
+
+/// The sub-rect a pixel-protocol image actually paints: anchored at `rect`'s
+/// top-left and clamped to the image's own aspect-fit cell `size`. The image
+/// widget never fills the whole reserved `rect`, so popup-collision and ghost
+/// tracking must use this narrower rect, not `rect` itself.
+fn image_draw_rect(rect: Rect, size: Size) -> Rect {
+    Rect::new(
+        rect.x,
+        rect.y,
+        size.width.min(rect.width),
+        size.height.min(rect.height),
+    )
+}
+
+/// The screen region occupied by an open modal popup, or `None` when no modal is
+/// active.  Every `Mode::Popup` variant is modal and must sit above background
+/// refreshes, so the area is computed identically to where each popup is drawn
+/// (see the `Mode::Popup` rendering block above).
+fn blocking_popup_area(app: &App, screen: Rect) -> Option<Rect> {
+    match app.mode {
+        Mode::Popup(PopupKind::MediaPreview) => Some(media_preview_modal_area(app, screen)),
+        Mode::Popup(PopupKind::CommandResponse) => {
+            let command_response = app.pending_command_response.as_deref().unwrap_or_default();
+            Some(command_response_popup_area(command_response, screen))
+        }
+        Mode::Popup(_) => Some(centered_rect(72, 80, screen)),
+        _ => None,
+    }
+}
+
 /// Compute the cell dimensions at which an image should be encoded for the
 /// media-preview popup on a screen of the given size.  Returns `None` when the
 /// image has zero natural dimensions (shouldn't happen for a valid decode).
@@ -854,7 +1040,67 @@ fn preview_target_size(
     ))
 }
 
-fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
+/// Returns the rect the image widget was drawn into, when one was actually
+/// rendered (used to track pixel-protocol ghosts); `None` for the loading,
+/// failure, and "no image" placeholder states that draw only text.
+/// Cell layout of the media-preview modal for the current selection and decoded
+/// image state: `(area, target_size, caption_h)`, where `area` is the bordered
+/// modal rect and the other two size the image and caption inside it. The modal
+/// shrinks to fit the image, falling back to the 88% max while the image is still
+/// loading or larger than the cap. Shared by the renderer and
+/// [`media_preview_modal_area`] so thumbnail suppression matches exactly where the
+/// modal is drawn (using the 88% max would hide thumbnails the modal never covers).
+fn media_preview_layout(
+    app: &App,
+    screen: Rect,
+    caption: Option<&str>,
+    media: &MediaKey,
+) -> (Rect, Size, u16) {
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+    let max_inner = Block::default().borders(Borders::ALL).inner(max_area);
+    let font_size = app.picker.font_size();
+    let target_size = match app.image_cache.get(media) {
+        Some(ImageState::Ready(img)) => preview_target_size(img, font_size, screen)
+            .unwrap_or_else(|| Size::new(max_inner.width, max_inner.height)),
+        _ => Size::new(max_inner.width, max_inner.height),
+    };
+    // Reserve lines below the image for the caption text.
+    let caption_h = caption
+        .map(|c| {
+            let w = (target_size.width as usize).max(1);
+            wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
+        })
+        .unwrap_or(0);
+    let (target_size, caption_h) = fit_preview_caption(target_size, caption_h, max_inner);
+    // Compute the popup area from target_size now — before we know whether the
+    // protocol is ready — so the border never jumps when encoding finishes.
+    let content_h = target_size.height.saturating_add(caption_h);
+    let area = if target_size.width < max_inner.width || content_h < max_inner.height {
+        // Add 1-cell border on each side and center with the same helper used
+        // everywhere else, avoiding independent centering arithmetic here.
+        centered_size(target_size.width + 2, content_h + 2, screen)
+    } else {
+        max_area
+    };
+    (area, target_size, caption_h)
+}
+
+/// The screen rect the media-preview modal occupies, for thumbnail-suppression.
+/// Falls back to the 88% max when the selected message has no image (matching the
+/// "no image" placeholder, which fills `max_area`).
+fn media_preview_modal_area(app: &App, screen: Rect) -> Rect {
+    let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+    let Some((media, caption)) = app.selected_message_event().and_then(|event| {
+        event.image_mxc().map(|(account_id, mxc_url)| {
+            (MediaKey::new(account_id, mxc_url), event.image_caption())
+        })
+    }) else {
+        return max_area;
+    };
+    media_preview_layout(app, screen, caption.as_deref(), &media).0
+}
+
+fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) -> Option<Rect> {
     let border_style = Style::default().fg(app.colors.selected_room);
 
     let selected = app.selected_message_event().and_then(|event| {
@@ -879,7 +1125,7 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
         frame.render_widget(Clear, max_area);
         frame.render_widget(block, max_area);
         frame.render_widget(Paragraph::new("Selected message has no image."), inner);
-        return;
+        return None;
     };
 
     let title = filename
@@ -889,39 +1135,10 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
 
     app.request_image(media.account_id, media.mxc_url.clone(), encrypted);
 
-    let font_size = app.picker.font_size();
-    let max_block = Block::default()
-        .title(title.as_str())
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let max_inner = max_block.inner(max_area);
-
-    let target_size = match app.image_cache.get(&media) {
-        Some(ImageState::Ready(img)) => preview_target_size(img, font_size, screen)
-            .unwrap_or_else(|| Size::new(max_inner.width, max_inner.height)),
-        _ => Size::new(max_inner.width, max_inner.height),
-    };
-
-    // Reserve lines below the image for the caption text.
-    let caption_h = caption
-        .as_deref()
-        .map(|c| {
-            let w = (target_size.width as usize).max(1);
-            wrap_rich_lines(plain_rich_lines(c), w, w).len() as u16
-        })
-        .unwrap_or(0);
-    let (target_size, caption_h) = fit_preview_caption(target_size, caption_h, max_inner);
-
-    // Compute the popup area from target_size now — before we know whether the
-    // protocol is ready — so the border never jumps when encoding finishes.
-    let content_h = target_size.height.saturating_add(caption_h);
-    let area = if target_size.width < max_inner.width || content_h < max_inner.height {
-        // Add 1-cell border on each side and center with the same helper used
-        // everywhere else, avoiding independent centering arithmetic here.
-        centered_size(target_size.width + 2, content_h + 2, screen)
-    } else {
-        max_area
-    };
+    // Size the modal to the image (shared with blocking_popup_area so thumbnail
+    // suppression matches exactly where the modal is drawn).
+    let (area, target_size, caption_h) =
+        media_preview_layout(app, screen, caption.as_deref(), &media);
     let block = Block::default()
         .title(title.as_str())
         .borders(Borders::ALL)
@@ -958,14 +1175,16 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
                 Paragraph::new(format!("Image unavailable: {error}")).wrap(Wrap { trim: false }),
                 inner,
             );
+            None
         }
         Some(ImageState::Ready(_)) => {
-            match app.proto_cache.get(&protocol_key) {
+            let drawn = match app.proto_cache.get(&protocol_key) {
                 Some(ProtocolState::Ready(protocol)) => {
                     frame.render_widget(
                         Image::new(protocol.preview(app.sixel_preview_generation)),
                         image_area,
                     );
+                    Some(image_area)
                 }
                 Some(ProtocolState::Failed(error)) => {
                     frame.render_widget(
@@ -973,9 +1192,13 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
                             .wrap(Wrap { trim: false }),
                         image_area,
                     );
+                    None
                 }
-                _ => frame.render_widget(Paragraph::new("Preparing image..."), image_area),
-            }
+                _ => {
+                    frame.render_widget(Paragraph::new("Preparing image..."), image_area);
+                    None
+                }
+            };
             if let (Some(cap), Some(crect)) = (caption.as_deref(), caption_area) {
                 frame.render_widget(
                     Paragraph::new(cap.to_owned())
@@ -984,8 +1207,12 @@ fn render_media_preview(frame: &mut Frame<'_>, app: &mut App, screen: Rect) {
                     crect,
                 );
             }
+            drawn
         }
-        _ => frame.render_widget(Paragraph::new("Loading image..."), inner),
+        _ => {
+            frame.render_widget(Paragraph::new("Loading image..."), inner);
+            None
+        }
     }
 }
 
@@ -1165,29 +1392,54 @@ fn verification_popup_view(flow: &VerificationFlow) -> (&'static str, Vec<Line<'
     ("Device Verification", lines)
 }
 
-fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
-    HELP_COMMANDS
+/// Returns the rendered line index of the nth `HELP_COMMANDS` entry,
+/// accounting for the section-header and blank lines inserted between groups.
+fn help_line_of_selection(selection: usize) -> usize {
+    // Each group after the first inserts a blank line + header line (2 lines).
+    // The first group inserts just the header (1 line, no leading blank).
+    let extra: usize = HELP_COMMAND_GROUPS
         .iter()
-        .enumerate()
-        .map(|(index, command)| {
-            let marker = if index == app.help_selection {
-                ">"
-            } else {
-                " "
-            };
-            let style = if index == app.help_selection {
-                Style::default()
-                    .fg(app.colors.selected_room)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(vec![
-                Span::styled(format!("{marker} {:<40}", command.label), style),
-                Span::raw(format!("  {}", command.description)),
-            ])
-        })
-        .collect()
+        .filter(|(start, _)| *start <= selection)
+        .map(|(start, _)| if *start == 0 { 1 } else { 2 })
+        .sum();
+    selection + extra
+}
+
+fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
+    let header_style = Style::default()
+        .fg(app.colors.selected_room)
+        .add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> =
+        Vec::with_capacity(HELP_COMMANDS.len() + HELP_COMMAND_GROUPS.len() * 2);
+    let mut group_iter = HELP_COMMAND_GROUPS.iter().peekable();
+
+    for (index, command) in HELP_COMMANDS.iter().enumerate() {
+        if group_iter.peek().map(|(i, _)| *i) == Some(index) {
+            let (_, title) = group_iter.next().unwrap();
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(*title, header_style)));
+        }
+
+        let marker = if index == app.help_selection {
+            ">"
+        } else {
+            " "
+        };
+        let row_style = if index == app.help_selection {
+            Style::default()
+                .fg(app.colors.selected_room)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {:<40}", command.label), row_style),
+            Span::raw(format!("  {}", command.description)),
+        ]));
+    }
+    lines
 }
 
 pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
@@ -1214,7 +1466,10 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         format!("Aliases: {aliases}"),
         format!("Topic: {topic}"),
         format!("Avatar: {avatar}"),
-        format!("Last activity: {}", format_time(room.last_activity_ts)),
+        format!(
+            "Last activity: {}",
+            format_time(room.last_activity_ts, app.display.time_format)
+        ),
         format!("Last event: {last_event}"),
         "Encryption: unavailable (API support needed)".to_owned(),
         "Access: unavailable (API support needed)".to_owned(),
@@ -1222,6 +1477,12 @@ pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
         "".to_owned(),
         "Members from loaded timeline:".to_owned(),
     ];
+
+    // For an unnamed room (e.g. a DM), the `Name:` line above is the raw room id.
+    // Surface the member-derived display name too, once one has been resolved.
+    if let Some(dm_name) = app.room_titles.get(&RoomKey::from(room)) {
+        lines.insert(1, format!("DM name: {dm_name}"));
+    }
 
     let members = known_room_members(app);
     if members.is_empty() {
@@ -1407,136 +1668,227 @@ fn room_display_number(visible_position: usize) -> usize {
     visible_position + 1
 }
 
+/// Visual layout of the compose buffer for a given inner width: the total number
+/// of rows it occupies and the cursor's `(row, col)` within them. Hard line
+/// breaks (`\n`, from Shift+Enter) start a new row; long logical lines wrap by
+/// character count, matching the input `Paragraph`'s wrapping. A two-column
+/// prompt/continuation prefix is accounted for on every logical line.
+fn compose_layout(buffer: &str, cursor: usize, inner_width: usize) -> (usize, usize, usize) {
+    const PREFIX: usize = 2;
+    let iw = inner_width.max(1);
+    let mut total_rows = 0usize;
+    let mut cur_row = 0usize;
+    let mut cur_col = PREFIX;
+    let mut offset = 0usize; // byte offset of the current logical line's start
+    for segment in buffer.split('\n') {
+        let text_cols = PREFIX + segment.chars().count();
+        let height = text_cols.div_ceil(iw).max(1);
+        let seg_start = offset;
+        let seg_end = offset + segment.len();
+        if cursor >= seg_start && cursor <= seg_end {
+            let col = PREFIX + buffer[seg_start..cursor].chars().count();
+            let (sub_row, sub_col) = if col > iw {
+                (1 + (col - iw) / iw, (col - iw) % iw)
+            } else {
+                (0, col)
+            };
+            cur_row = total_rows + sub_row;
+            cur_col = sub_col;
+        }
+        total_rows += height;
+        offset = seg_end + 1; // skip the '\n'
+    }
+    (total_rows.max(1), cur_row, cur_col)
+}
+
 // IMPORTANT: update this function whenever a keyboard shortcut is added or removed.
 // The shortcuts listed here should be the ones that are discoverable by users through the UI (e.g. not necessarily every single keybinding, but at least all the ones mentioned in the help text or error messages).
-pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
-    fn kv(key: impl std::fmt::Display, desc: &str) -> String {
-        format!("  {:<22}  {}", key, desc)
+pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+
+    enum Row {
+        Section(&'static str),
+        Dim(&'static str),
+        Blank,
+        Kv(String, &'static str),
     }
-    fn kv2(
-        key1: impl std::fmt::Display,
-        key2: impl std::fmt::Display,
-        desc1: &str,
-        desc2: &str,
-    ) -> String {
-        format!(
-            "  {:<22}  {} / {}",
-            format!("{} / {}", key1, key2),
-            desc1,
-            desc2
-        )
-    }
-    vec![
-        "Focus:".to_owned(),
-        kv(
+
+    let rows: Vec<Row> = vec![
+        Row::Section("Focus:"),
+        Row::Kv(
             shortcuts.focus_next.label(),
             "cycle focus: Input → Accounts → Rooms → Messages",
         ),
-        // kv(
-        //     shortcuts.focus_prev.label(),
-        //     "cycle focus backward: Input → Messages → Rooms → Accounts",
-        // ),
-        "".to_owned(),
-        "Always active:".to_owned(),
-        kv2(
-            shortcuts.next_room.label(),
-            shortcuts.previous_room.label(),
-            "next",
-            "previous room",
+        Row::Blank,
+        Row::Section("Always active:"),
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.next_room.label(),
+                shortcuts.previous_room.label()
+            ),
+            "next / previous room",
         ),
-        kv2(
-            shortcuts.next_account.label(),
-            shortcuts.previous_account.label(),
-            "next",
-            "previous account (when 2+ accounts logged in)",
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.next_account.label(),
+                shortcuts.previous_account.label()
+            ),
+            "next / previous account (2+ accounts)",
         ),
-        kv2(
-            shortcuts.message_down.label(),
-            shortcuts.message_up.label(),
-            "next",
-            "previous message",
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.message_down.label(),
+                shortcuts.message_up.label()
+            ),
+            "next / previous message",
         ),
-        kv(shortcuts.quit.label(), "quit"),
-        kv(
+        Row::Kv(shortcuts.quit.label(), "quit"),
+        Row::Kv(
             shortcuts.toggle_accounts_panel.label(),
             "show/hide Accounts panel",
         ),
-        kv(
+        Row::Kv(
             shortcuts.toggle_rooms_panel.label(),
             "show/hide Rooms panel",
         ),
-        kv(
+        Row::Kv(
             shortcuts.toggle_unread_filter.label(),
-            "toggle Rooms filter: show only rooms with unread messages",
+            "filter Rooms to unread (toggle)",
         ),
-        kv(
-            shortcuts.refresh.label(),
-            "refresh rooms and redraw (/refresh)",
+        Row::Kv(shortcuts.refresh.label(), "refresh rooms and redraw"),
+        Row::Blank,
+        Row::Section("Room list sort & filter:"),
+        Row::Kv(
+            shortcuts.room_filter_cycle.label(),
+            "cycle filter (all / DMs / groups / unread / favorites)",
         ),
-        "".to_owned(),
-        "Panel resizing:".to_owned(),
-        kv(
-            "Alt-Left / Alt-Right",
-            "narrow / widen focused Accounts or Rooms panel",
+        Row::Kv(
+            shortcuts.room_sort_cycle.label(),
+            "cycle sort (recent / oldest / A–Z / Z–A)",
         ),
-        kv(
-            "Alt-Up / Alt-Down",
-            "add / remove a line from the message entry pane (Input focus)",
+        Row::Kv(
+            shortcuts.room_filter_dms.label(),
+            "filter to DMs (/filter dms)",
         ),
-        "".to_owned(),
-        "Account list / Room list / Message list focus (Up/Down/PageUp/PageDown/Home/End navigate):".to_owned(),
-        "  /            start search".to_owned(),
-        "  n            next search match (no wrap)".to_owned(),
-        "  N            previous search match (no wrap)".to_owned(),
-        format!("  {}   page up", shortcuts.message_page_up.label()),
-        format!("  {}   page down", shortcuts.message_page_down.label()),
-        "  Home         jump to first (room list: first room; message list: oldest loaded message; account list: All)".to_owned(),
-        "  End          jump to last (room list: last room; message list: most recent message; account list: last account)".to_owned(),
-        format!(
-            "  Enter or {}   return to Input",
-            shortcuts.clear_input.label()
+        Row::Kv(
+            shortcuts.room_filter_groups.label(),
+            "filter to group rooms (/filter groups)",
         ),
-        "".to_owned(),
-        "Message actions (select a message first with Ctrl-J/K or arrow keys):".to_owned(),
-        kv(shortcuts.edit_message.label(), "edit message"),
-        kv(shortcuts.redact_message.label(), "redact message"),
-        kv(
+        Row::Kv(
+            shortcuts.room_filter_favorites.label(),
+            "filter to favorites (/filter fav)",
+        ),
+        Row::Kv(
+            shortcuts.room_filter_all.label(),
+            "clear filter (/filter all)",
+        ),
+        Row::Kv(
+            shortcuts.room_filter_by_name.label(),
+            "filter rooms by name (live)",
+        ),
+        Row::Kv(
+            shortcuts.room_sort_recent.label(),
+            "sort by recent activity (repeat: oldest)",
+        ),
+        Row::Kv(shortcuts.room_sort_alpha.label(), "sort A–Z (repeat: Z–A)"),
+        Row::Blank,
+        Row::Section("Panel resizing:"),
+        Row::Kv(
+            "Alt-Left / Alt-Right".to_owned(),
+            "narrow / widen Accounts or Rooms panel",
+        ),
+        Row::Kv(
+            "Alt-Up / Alt-Down".to_owned(),
+            "grow / shrink message entry pane",
+        ),
+        Row::Blank,
+        Row::Section("List navigation:"),
+        Row::Kv(shortcuts.find.label(), "start search"),
+        Row::Kv("n / N".to_owned(), "next / previous search match (no wrap)"),
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.message_page_up.label(),
+                shortcuts.message_page_down.label()
+            ),
+            "page up / down",
+        ),
+        Row::Kv("Home".to_owned(), "jump to top"),
+        Row::Kv("End".to_owned(), "jump to bottom"),
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.jump_day_back.label(),
+                shortcuts.jump_day_forward.label()
+            ),
+            "jump to prev / next day with messages",
+        ),
+        Row::Kv(
+            "J".to_owned(),
+            "jump to a date in history (/jump also works)",
+        ),
+        Row::Kv(
+            format!("Enter or {}", shortcuts.clear_input.label()),
+            "return to Input",
+        ),
+        Row::Dim("Room list:"),
+        Row::Kv(
+            shortcuts.pin_room.label(),
+            "pin / re-pin selected room to top (/pin)",
+        ),
+        Row::Kv(shortcuts.unpin_room.label(), "unpin selected room (/unpin)"),
+        Row::Blank,
+        Row::Section("Message actions (select a message first with Ctrl-J/K):"),
+        Row::Kv(shortcuts.edit_message.label(), "edit message"),
+        Row::Kv(shortcuts.redact_message.label(), "redact message"),
+        Row::Kv(
             shortcuts.react_message.label(),
-            "react to message (type emoji name, Tab to cycle, Enter to send)",
+            "react to message (type emoji name, Tab to cycle)",
         ),
-        kv(
-            shortcuts.unreact_message.label(),
-            "withdraw one of your reactions",
+        Row::Kv(shortcuts.unreact_message.label(), "withdraw your reaction"),
+        Row::Kv(shortcuts.media_preview.label(), "open image preview"),
+        Row::Kv(shortcuts.reply.label(), "reply to selected message"),
+        Row::Kv(
+            shortcuts.thread.label(),
+            "open thread, or start one (Esc to exit)",
         ),
-        kv(
-            shortcuts.media_preview.label(),
-            "open selected image preview",
+        Row::Blank,
+        Row::Section("Input:"),
+        Row::Kv(shortcuts.submit.label(), "send message"),
+        Row::Kv(
+            shortcuts.newline.label(),
+            "insert a line break (multi-line message)",
         ),
-        kv(shortcuts.reply.label(), "reply (pending API support)"),
-        kv(shortcuts.thread.label(), "thread (pending API support)"),
-        "".to_owned(),
-        "Input:".to_owned(),
-        kv(shortcuts.submit.label(), "submit / send"),
-        "  /html <html>          send raw HTML as a formatted message".to_owned(),
-        "  /literal <text>       send text as plaintext (skip markdown auto-convert)".to_owned(),
-        "  /rainbow <text>       send text with each character in a rainbow color".to_owned(),
-        "  /spoiler [reason |] <text>  send text as a spoiler (dimmed, labeled)".to_owned(),
-        kv(
+        Row::Kv(
+            "/html <html>".to_owned(),
+            "send raw HTML as a formatted message",
+        ),
+        Row::Kv(
+            "/literal <text>".to_owned(),
+            "send text as plaintext (skip markdown auto-convert)",
+        ),
+        Row::Kv(
+            "/rainbow <text>".to_owned(),
+            "send text with each character in a rainbow color",
+        ),
+        Row::Kv(
+            "/spoiler [reason |] <text>".to_owned(),
+            "send text as a spoiler (dimmed, labeled)",
+        ),
+        Row::Kv(
             shortcuts.clear_input.label(),
             "clear input / cancel / deselect",
         ),
-        kv(
+        Row::Kv(
             format!("{} / Shift-Tab", shortcuts.complete.label()),
             "complete forward / backward",
         ),
-        //kv(shortcuts.backspace.label(), "backspace"),
-        //kv("Delete", "delete forward"),
-        kv("Ctrl-U", "kill line (erase typed text)"),
-        //kv(shortcuts.cursor_start.label(), "cursor to start of line"),
-        //kv(shortcuts.cursor_end.label(), "cursor to end of line"),
-        //kv(shortcuts.cursor_left.label(), "cursor left"),
-        //kv(shortcuts.cursor_right.label(), "cursor right"),
-        kv(
+        Row::Kv("Ctrl-U".to_owned(), "erase typed text (kill line)"),
+        Row::Kv(
             format!(
                 "{} / {}",
                 shortcuts.edit_previous.label(),
@@ -1544,13 +1896,38 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<String> {
             ),
             "select previous / next message",
         ),
-        "".to_owned(),
-        "Device verification modal (/verify, or auto-opens on a request):".to_owned(),
-        kv("y", "confirm the emoji match"),
-        kv("n", "reject (cancel the flow)"),
-        kv("r", "resync flow state from server (if emoji didn't appear)"),
-        kv("Esc", "cancel a live flow / dismiss when finished"),
-    ]
+        Row::Blank,
+        Row::Section("Device verification (/verify or auto-opens on incoming request):"),
+        Row::Kv("y".to_owned(), "confirm emoji match"),
+        Row::Kv("n".to_owned(), "reject (cancel the flow)"),
+        Row::Kv("r".to_owned(), "resync state from server"),
+        Row::Kv("Esc".to_owned(), "cancel / dismiss"),
+    ];
+
+    let key_col = rows
+        .iter()
+        .filter_map(|r| {
+            if let Row::Kv(k, _) = r {
+                Some(k.len())
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(16)
+        + 2;
+
+    rows.into_iter()
+        .map(|row| match row {
+            Row::Section(title) => Line::from(Span::styled(title, bold)),
+            Row::Dim(title) => Line::from(Span::styled(format!("  {title}"), dim)),
+            Row::Blank => Line::from(""),
+            Row::Kv(key, desc) => Line::from(vec![
+                Span::styled(format!("  {:<width$}", key, width = key_col), bold),
+                Span::raw(desc),
+            ]),
+        })
+        .collect()
 }
 
 pub(crate) fn entry_status_text(app: &App) -> String {
@@ -1625,6 +2002,45 @@ fn wrap_command_response(response: &str, width: u16) -> Vec<String> {
     wrapped
 }
 
+fn divider_aware_room_scroll(
+    current_scroll: usize,
+    selected_vis: usize,
+    page_size: usize,
+    visible_len: usize,
+    pinned_visible_count: usize,
+) -> usize {
+    let divider_before = |scroll: usize| {
+        pinned_visible_count > 0
+            && pinned_visible_count < visible_len
+            && selected_vis >= pinned_visible_count
+            && pinned_visible_count > scroll
+    };
+
+    let mut scroll = current_scroll;
+    if selected_vis < scroll {
+        scroll = selected_vis;
+    } else if page_size > 0 {
+        let selected_row = selected_vis - scroll + usize::from(divider_before(scroll));
+        if selected_row >= page_size {
+            scroll = (scroll + selected_row + 1 - page_size).min(selected_vis);
+            if !divider_before(scroll) && scroll > 0 {
+                let candidate = scroll - 1;
+                let candidate_row =
+                    selected_vis - candidate + usize::from(divider_before(candidate));
+                if candidate_row < page_size {
+                    scroll = candidate;
+                }
+            }
+        }
+    }
+    let divider_rows = usize::from(pinned_visible_count > 0 && pinned_visible_count < visible_len);
+    let max_scroll = visible_len
+        .saturating_add(divider_rows)
+        .saturating_sub(page_size)
+        .min(visible_len.saturating_sub(1));
+    scroll.min(max_scroll)
+}
+
 fn command_response_popup_area(response: &str, terminal: Rect) -> Rect {
     const TITLE_WIDTH: u16 = 34;
     const MAX_WIDTH: u16 = 80;
@@ -1661,19 +2077,144 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn compose_layout_single_line() {
+        // "> hello" with the cursor after it: one row, cursor at col 2 + 5.
+        let (rows, row, col) = compose_layout("hello", 5, 80);
+        assert_eq!((rows, row, col), (1, 0, 7));
+    }
+
+    #[test]
+    fn compose_layout_counts_hard_line_breaks() {
+        // Two hard lines; cursor at end of the second ("hi\nthere", cursor=8).
+        let (rows, row, col) = compose_layout("hi\nthere", 8, 80);
+        assert_eq!(rows, 2);
+        assert_eq!(row, 1); // second visual row
+        assert_eq!(col, 2 + 5); // prefix + "there"
+    }
+
+    #[test]
+    fn compose_layout_cursor_at_start_of_second_line() {
+        // Cursor right after the '\n' (offset 3 in "hi\nx") sits at the start of
+        // the second row, at the continuation-prefix column.
+        let (rows, row, col) = compose_layout("hi\nx", 3, 80);
+        assert_eq!((rows, row, col), (2, 1, 2));
+    }
+
+    #[test]
+    fn compose_layout_wraps_long_line() {
+        // A logical line longer than the width wraps onto extra rows.
+        let buffer = "a".repeat(10);
+        let (rows, row, col) = compose_layout(&buffer, 10, 5);
+        // prefix(2) + 10 chars = 12 cols over width 5 -> 3 rows.
+        assert_eq!(rows, 3);
+        // cursor at col 12: overflow 7 -> row 1 + 7/5 = 2, col 7%5 = 2.
+        assert_eq!((row, col), (2, 2));
+    }
+
+    #[test]
     fn shortcuts_popup_lists_configured_navigation_and_actions() {
         let config = TuiConfig::test_default();
-        let text = popup_shortcuts_lines(&config.shortcuts).join("\n");
+        let text = popup_shortcuts_lines(&config.shortcuts)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(text.contains("F6"));
         assert!(text.contains("Ctrl-J"));
         assert!(text.contains("Ctrl-K"));
         assert!(text.contains("edit message"));
         assert!(text.contains("react to message"));
-        assert!(text.contains("withdraw one of your reactions"));
-        assert!(text.contains("open selected image preview"));
+        assert!(text.contains("withdraw your reaction"));
+        assert!(text.contains("open image preview"));
         assert!(text.contains("Up / Down"));
         assert!(text.contains("select previous / next message"));
+    }
+
+    #[test]
+    fn shortcuts_popup_search_key_follows_configured_find_binding() {
+        let config = TuiConfig::test_default();
+        let text = popup_shortcuts_lines(&config.shortcuts)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The search shortcut must be sourced from the configurable `find`
+        // binding (default Ctrl-F), never the obsolete hard-coded "/".
+        let find_label = config.shortcuts.find.label();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("start search") && l.contains(&find_label)),
+            "start-search line should display the configured find binding {find_label:?}"
+        );
+    }
+
+    #[test]
+    fn divider_aware_room_scroll_counts_separator_against_page() {
+        // Five rooms plus a pinned/unpinned separator need six rendered rows.
+        // With a five-row viewport and the last room selected, scroll by one
+        // room index so the selected room is not clipped off the bottom.
+        assert_eq!(divider_aware_room_scroll(0, 4, 5, 5, 2), 1);
+    }
+
+    #[test]
+    fn divider_aware_room_scroll_does_not_scroll_past_selected_room() {
+        // A one-row viewport cannot show the divider and the first unpinned room
+        // at once. Scroll to the selected room itself; the render loop skips the
+        // divider when the viewport starts at the boundary.
+        assert_eq!(divider_aware_room_scroll(0, 2, 1, 5, 2), 2);
+    }
+
+    #[test]
+    fn divider_aware_room_scroll_drops_separator_after_it_scrolls_out() {
+        // Once the divider is above the final viewport, it should not consume a
+        // row from the selected-room fit calculation.
+        assert_eq!(divider_aware_room_scroll(0, 19, 5, 20, 2), 15);
+    }
+
+    #[test]
+    fn divider_aware_room_scroll_keeps_tail_selected_when_divider_is_adjacent() {
+        // If backing up to fill the bottom row would bring the divider back into
+        // view and clip the selected room, keep the selected room visible.
+        assert_eq!(divider_aware_room_scroll(0, 19, 5, 20, 16), 16);
+    }
+
+    #[test]
+    fn modal_popups_block_thumbnail_refresh() {
+        let screen = Rect::new(0, 0, 120, 40);
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+
+        // No modal open: refreshes are free to render thumbnails.
+        assert!(blocking_popup_area(&app, screen).is_none());
+
+        // Every modal popup occupies a centered region; a thumbnail in the
+        // message pane that overlaps it must be suppressed so a background
+        // refresh never paints over the modal.
+        for kind in [PopupKind::Help, PopupKind::Shortcuts, PopupKind::Status] {
+            app.mode = Mode::Popup(kind);
+            let area = blocking_popup_area(&app, screen).expect("modal area");
+            let overlapping = Rect::new(area.x, area.y, 4, 2);
+            assert!(
+                thumbnail_overlaps_blocking_popup(overlapping, Some(area)),
+                "{kind:?} modal should suppress overlapping thumbnails"
+            );
+        }
     }
 
     #[test]
@@ -1688,6 +2229,24 @@ mod tests {
         assert_eq!(size, Size::new(46, 6));
         assert!(image_thumbnail_spec(area, 48, &range, 4, 10, 6, 1).is_none());
         assert!(image_thumbnail_spec(area, 48, &range, 0, 8, 6, 1).is_none());
+    }
+
+    #[test]
+    fn thumbnail_rendering_is_suppressed_under_media_preview_area() {
+        let popup = Rect::new(20, 5, 40, 12);
+
+        assert!(thumbnail_overlaps_blocking_popup(
+            Rect::new(10, 8, 20, 6),
+            Some(popup)
+        ));
+        assert!(!thumbnail_overlaps_blocking_popup(
+            Rect::new(0, 0, 10, 4),
+            Some(popup)
+        ));
+        assert!(!thumbnail_overlaps_blocking_popup(
+            Rect::new(10, 8, 20, 6),
+            None
+        ));
     }
 
     #[test]
@@ -1743,6 +2302,106 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
         assert_eq!(app.pending_command_response.as_deref(), Some(response));
+    }
+
+    #[test]
+    fn multiline_compose_buffer_renders_on_separate_rows() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        app.show_input_help = false;
+        app.mode = Mode::Compose;
+        app.input.buffer = "first\nsecond".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        // Collect each rendered row as a string and locate the two hard lines.
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(|x| buffer.cell((x, y)).map(|c| c.symbol().to_owned()))
+                    .collect::<String>()
+            })
+            .collect();
+        let first_row = rows.iter().position(|r| r.contains("first"));
+        let second_row = rows.iter().position(|r| r.contains("second"));
+        assert!(first_row.is_some(), "first hard line should render");
+        assert!(second_row.is_some(), "second hard line should render");
+        assert!(
+            second_row > first_row,
+            "the second hard line renders below the first"
+        );
+    }
+
+    #[test]
+    fn thumbnail_overlap_uses_actual_image_rect_not_full_reserved_box() {
+        // A popup sitting center-right of the message pane.
+        let modal = Rect::new(60, 5, 40, 20);
+        // The thumbnail reserves the full body width (x=3, width 100), but the
+        // actual aspect-fit image is only 12 cells wide, anchored top-left.
+        let reserved = Rect::new(3, 8, 100, 8);
+        let drawn = image_draw_rect(reserved, Size::new(12, 8));
+        assert_eq!(drawn, Rect::new(3, 8, 12, 8));
+        // The reserved box spuriously overlaps the modal; the real pixels do not.
+        assert!(thumbnail_overlaps_blocking_popup(reserved, Some(modal)));
+        assert!(
+            !thumbnail_overlaps_blocking_popup(drawn, Some(modal)),
+            "a thumbnail whose pixels are clear of the popup must still render"
+        );
+    }
+
+    #[test]
+    fn image_draw_rect_clamps_to_reserved_box() {
+        // An image larger than its reserved box is clamped (never exceeds it).
+        let drawn = image_draw_rect(Rect::new(5, 5, 10, 4), Size::new(40, 40));
+        assert_eq!(drawn, Rect::new(5, 5, 10, 4));
+    }
+
+    #[test]
+    fn preview_modal_area_shrinks_to_image_so_outside_thumbnails_survive() {
+        use crate::app::MediaKey;
+        use std::sync::Arc;
+
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(), // font size 10x20
+        );
+        // A small image (100x60 px -> ~10x3 cells) yields a small modal.
+        let media = MediaKey::new(Uuid::from_u128(1), "mxc://example.com/small".to_owned());
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(100, 60));
+        app.image_cache
+            .insert(media.clone(), ImageState::Ready(Arc::new(img)));
+
+        let screen = Rect::new(0, 0, 200, 60);
+        let max_area = centered_rect(PREVIEW_MAX_PCT, PREVIEW_MAX_PCT, screen);
+        let (area, _, _) = media_preview_layout(&app, screen, None, &media);
+
+        // The modal hugs the image rather than filling the 88% max.
+        assert!(
+            area.width < max_area.width && area.height < max_area.height,
+            "modal {area:?} should be smaller than max {max_area:?}"
+        );
+
+        // A timeline thumbnail to the left of the small centered modal is NOT
+        // suppressed — the regression was suppressing it against the 88% max.
+        let left_thumb = Rect::new(3, 5, 20, 3);
+        assert!(
+            !thumbnail_overlaps_blocking_popup(left_thumb, Some(area)),
+            "thumbnail outside the actual modal must render"
+        );
+        assert!(
+            thumbnail_overlaps_blocking_popup(left_thumb, Some(max_area)),
+            "regression guard: it would have been suppressed against the 88% max"
+        );
     }
 
     #[test]

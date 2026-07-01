@@ -3,7 +3,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::api::AccountDto;
 use crate::app::emoji_matches;
 use crate::app::{
-    cycle_index, AccountSelection, App, Mode, PopupKind, SearchKind, Status, VerificationStage,
+    cycle_index, AccountSelection, App, Mode, PopupKind, RoomFilter, RoomSort, SearchKind, Status,
+    VerificationStage,
 };
 use crate::command;
 use crate::command::HELP_COMMANDS;
@@ -34,22 +35,54 @@ impl App {
             self.abandon_transient_input_mode();
             self.cycle_account(-1);
             self.load_selected_timeline().await;
-        } else if self.shortcuts.message_down.matches(key) {
+        } else if self.shortcuts.message_down.matches(key) && self.mode != Mode::DateJump {
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
             self.move_selected_message(1);
             self.mode = Mode::MessageList;
-        } else if self.shortcuts.message_up.matches(key) {
+        } else if self.shortcuts.message_up.matches(key) && self.mode != Mode::DateJump {
             self.dismiss_input_help();
             self.abandon_transient_input_mode();
+            let at_first = self.is_at_first_message();
             self.move_selected_message(-1);
             self.mode = Mode::MessageList;
+            if at_first {
+                self.load_more_history().await;
+            }
         } else if self.shortcuts.toggle_accounts_panel.matches(key) && !self.is_mid_command() {
             self.toggle_accounts_panel();
         } else if self.shortcuts.toggle_rooms_panel.matches(key) && !self.is_mid_command() {
             self.toggle_rooms_panel();
         } else if self.shortcuts.toggle_unread_filter.matches(key) && !self.is_mid_command() {
             self.toggle_unread_filter();
+        } else if self.shortcuts.room_filter_cycle.matches(key) && !self.is_mid_command() {
+            self.cycle_room_filter();
+        } else if self.shortcuts.room_sort_cycle.matches(key) && !self.is_mid_command() {
+            self.cycle_room_sort();
+        } else if self.shortcuts.room_filter_dms.matches(key) && !self.is_mid_command() {
+            self.set_room_filter(RoomFilter::Dms);
+        } else if self.shortcuts.room_filter_groups.matches(key) && !self.is_mid_command() {
+            self.set_room_filter(RoomFilter::Groups);
+        } else if self.shortcuts.room_filter_favorites.matches(key) && !self.is_mid_command() {
+            self.set_room_filter(RoomFilter::Favorites);
+        } else if self.shortcuts.room_filter_all.matches(key) && !self.is_mid_command() {
+            self.set_room_filter(RoomFilter::All);
+        } else if self.shortcuts.room_filter_by_name.matches(key) && !self.is_mid_command() {
+            self.begin_room_name_filter();
+        } else if self.shortcuts.room_sort_recent.matches(key) && !self.is_mid_command() {
+            // Repeat toggles between the two activity directions.
+            self.set_room_sort(if self.room_sort == RoomSort::RecentActivity {
+                RoomSort::OldestActivity
+            } else {
+                RoomSort::RecentActivity
+            });
+        } else if self.shortcuts.room_sort_alpha.matches(key) && !self.is_mid_command() {
+            // Repeat toggles between A–Z and Z–A.
+            self.set_room_sort(if self.room_sort == RoomSort::AlphaAsc {
+                RoomSort::AlphaDesc
+            } else {
+                RoomSort::AlphaAsc
+            });
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
             self.refresh_rooms().await;
         } else {
@@ -84,6 +117,7 @@ impl App {
                 }
                 Mode::Verification => self.handle_verification_key(key),
                 Mode::Popup(kind) => self.handle_popup_key(key, kind),
+                Mode::DateJump => self.handle_date_jump_key(key).await,
             }
         }
         self.should_quit
@@ -186,18 +220,15 @@ impl App {
         if self.shortcuts.clear_input.matches(key) {
             self.reset_search_list_scroll(&kind);
             self.clear_search_status();
-            self.mode = match kind {
-                SearchKind::Rooms => Mode::RoomList,
-                SearchKind::Messages => Mode::MessageList,
-                SearchKind::Accounts => Mode::AccountList,
-            };
+            if kind == SearchKind::RoomNameFilter {
+                // Esc abandons the in-progress name filter and restores whatever
+                // filter was active before input started (ADR 0042).
+                self.cancel_room_name_filter();
+            }
+            self.mode = self.list_mode_for(kind);
         } else if self.shortcuts.submit.matches(key) {
             self.reset_search_list_scroll(&kind);
-            self.mode = match kind {
-                SearchKind::Rooms => Mode::RoomList,
-                SearchKind::Messages => Mode::MessageList,
-                SearchKind::Accounts => Mode::AccountList,
-            };
+            self.mode = self.list_mode_for(kind);
             match kind {
                 SearchKind::Rooms => self.commit_room_search(query).await,
                 SearchKind::Messages => self.commit_message_search(query),
@@ -209,23 +240,41 @@ impl App {
                         self.status = search_status;
                     }
                 }
+                // The filter is already live; Enter just confirms it and clears
+                // the saved fallback so a later Esc elsewhere can't revert it.
+                SearchKind::RoomNameFilter => self.room_filter_before_input = None,
             }
         } else if self.shortcuts.backspace.matches(key) || key.code == KeyCode::Delete {
             query.pop();
             self.reset_search_list_scroll(&kind);
+            if kind == SearchKind::RoomNameFilter {
+                self.update_room_name_filter(query.clone());
+            }
             self.mode = Mode::Search(kind, query);
         } else if let KeyCode::Char(ch) = key.code {
             if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                 query.push(ch);
                 self.reset_search_list_scroll(&kind);
+                if kind == SearchKind::RoomNameFilter {
+                    self.update_room_name_filter(query.clone());
+                }
                 self.mode = Mode::Search(kind, query);
             }
         }
     }
 
+    /// The list mode a search/filter input returns to on Esc/Enter.
+    fn list_mode_for(&self, kind: SearchKind) -> Mode {
+        match kind {
+            SearchKind::Rooms | SearchKind::RoomNameFilter => Mode::RoomList,
+            SearchKind::Messages => Mode::MessageList,
+            SearchKind::Accounts => Mode::AccountList,
+        }
+    }
+
     fn reset_search_list_scroll(&mut self, kind: &SearchKind) {
         match kind {
-            SearchKind::Rooms => self.rooms.scroll = 0,
+            SearchKind::Rooms | SearchKind::RoomNameFilter => self.rooms.scroll = 0,
             SearchKind::Accounts => self.accounts.scroll = 0,
             SearchKind::Messages => {}
         }
@@ -264,6 +313,10 @@ impl App {
                 self.rooms.selected = Some(last);
                 self.load_selected_timeline().await;
             }
+        } else if self.shortcuts.pin_room.matches(key) {
+            self.pin_room(None);
+        } else if self.shortcuts.unpin_room.matches(key) {
+            self.unpin_room(None);
         } else if self.shortcuts.find.matches(key) {
             self.rooms.scroll = 0;
             self.mode = Mode::Search(SearchKind::Rooms, String::new());
@@ -288,22 +341,49 @@ impl App {
     async fn handle_message_list_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Up || self.shortcuts.message_up.matches(key) {
             self.dismiss_input_help();
+            let at_first = self.is_at_first_message();
             self.move_selected_message(-1);
+            if at_first {
+                self.load_more_history().await;
+            }
         } else if key.code == KeyCode::Down || self.shortcuts.message_down.matches(key) {
             self.dismiss_input_help();
+            let at_last = self.is_at_last_message();
             self.move_selected_message(1);
+            if at_last {
+                self.load_newer_history().await;
+            }
+        } else if self.shortcuts.jump_day_back.matches(key) {
+            self.jump_adjacent_day(false).await;
+        } else if self.shortcuts.jump_day_forward.matches(key) {
+            self.jump_adjacent_day(true).await;
         } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
+            let at_top = self.messages.scroll == 0;
             self.page_selected_message(-1);
+            if at_top {
+                self.load_more_history().await;
+            }
         } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
             self.dismiss_input_help();
+            let at_last = self.is_at_last_message();
             self.page_selected_message(1);
+            if at_last {
+                self.load_newer_history().await;
+            }
         } else if key.code == KeyCode::Home {
             self.dismiss_input_help();
             self.jump_to_first_message();
         } else if key.code == KeyCode::End {
             self.dismiss_input_help();
+            // From a historical jump, End returns to the live tail (reloads the
+            // newest page); otherwise it just drops to the bottom of the buffer.
+            if self.last_jump_ts.is_some() {
+                self.load_selected_timeline().await;
+            }
             self.jump_to_last_message();
+        } else if key.code == KeyCode::Char('J') && key.modifiers == KeyModifiers::SHIFT {
+            self.start_date_jump();
         } else if self.shortcuts.find.matches(key) {
             self.mode = Mode::Search(SearchKind::Messages, String::new());
         } else if key.code == KeyCode::Char('/') && key.modifiers.is_empty() {
@@ -323,7 +403,7 @@ impl App {
             self.start_reply_to_selected_message();
         } else if self.shortcuts.thread.matches(key) {
             self.dismiss_input_help();
-            self.start_thread_from_selected_message();
+            self.start_thread_from_selected_message().await;
         } else if self.shortcuts.edit_message.matches(key) {
             self.dismiss_input_help();
             self.start_edit_selected_message();
@@ -340,8 +420,12 @@ impl App {
             self.dismiss_input_help();
             self.open_selected_media_preview();
         } else if self.shortcuts.clear_input.matches(key) {
-            self.clear_search_status();
-            self.mode = Mode::Compose;
+            // Esc leaves the thread panel first (ADR 0032 M2); a second Esc
+            // returns focus to compose as usual.
+            if !self.close_thread_panel() {
+                self.clear_search_status();
+                self.mode = Mode::Compose;
+            }
         }
     }
 
@@ -361,6 +445,21 @@ impl App {
             self.dismiss_input_help();
             self.move_selected_message(1);
             self.mode = Mode::MessageList;
+        } else if self.shortcuts.jump_day_back.matches(key) {
+            self.jump_adjacent_day(false).await;
+            self.mode = Mode::MessageList;
+        } else if self.shortcuts.jump_day_forward.matches(key) {
+            self.jump_adjacent_day(true).await;
+            self.mode = Mode::MessageList;
+        } else if key.code == KeyCode::Char('J')
+            && key.modifiers == KeyModifiers::SHIFT
+            && self.input.buffer.is_empty()
+        {
+            // Shift+J opens the date-jump prompt — but only on an empty input, so
+            // mid-message typing of a capital J is untouched. This makes the
+            // shortcut reachable from Compose (like the day-jump keys) without the
+            // old footgun where it was typed as text and then sent on Enter.
+            self.start_date_jump();
         } else if self.shortcuts.message_page_up.matches(key) {
             self.dismiss_input_help();
             self.page_selected_message(-1);
@@ -373,6 +472,14 @@ impl App {
             if self.messages.selection.is_some() {
                 self.mode = Mode::MessageList;
             }
+        } else if self.shortcuts.newline.matches(key) {
+            // The configurable newline key (default Alt+Enter) inserts a hard line
+            // break for multi-line messages; plain Enter still submits. Alt+Enter
+            // is the default because it is reported via the legacy Alt(ESC) prefix
+            // on terminals (and through tmux) that do not deliver a distinct
+            // Shift+Enter; users on terminals that do can rebind it to Shift+Enter.
+            self.dismiss_input_help();
+            self.insert_char('\n');
         } else if self.shortcuts.submit.matches(key) {
             self.dismiss_input_help();
             if let Some(completions) = self.input.partial_room_completions.as_ref() {
@@ -686,10 +793,19 @@ impl App {
     fn clear_input_and_selection(&mut self) {
         self.clear_input_buffer();
         self.input.react_tab = None;
+        // Cancel any pending reply/thread compose target (ADR 0032 M4).
+        self.pending_reply = None;
+        self.pending_thread = None;
+        self.mode = Mode::Compose;
+        // Esc from the input box while a thread is open dismisses the thread and
+        // returns to the main message pane (ADR 0032 M2). close_thread_panel
+        // restores the prior selection/scroll and sets its own status.
+        if self.close_thread_panel() {
+            return;
+        }
         self.messages.selection = None;
         self.messages.scroll = usize::MAX;
         self.status = Status::Info(String::new());
-        self.mode = Mode::Compose;
     }
 
     fn abandon_transient_input_mode(&mut self) {
@@ -703,6 +819,7 @@ impl App {
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
+                | Mode::DateJump
         ) {
             self.clear_input_buffer();
             self.input.react_tab = None;
@@ -891,5 +1008,120 @@ impl App {
             _ => {}
         }
         self.mode = prev;
+    }
+
+    /// True when the currently selected message is the first displayed event
+    /// (used to decide whether Up-arrow should trigger a history load).
+    fn is_at_first_message(&self) -> bool {
+        let events = self.selected_events();
+        match (events.first(), self.messages.selection.as_deref()) {
+            (Some(first), Some(sel)) => first.event_id == sel,
+            // No selection but events exist: treat as "at first" so Up triggers load.
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether the newest loaded message is the one selected — the trigger to
+    /// page forward (load newer history) on Down / PageDown in a jumped view.
+    fn is_at_last_message(&self) -> bool {
+        let events = self.selected_events();
+        match (events.last(), self.messages.selection.as_deref()) {
+            (Some(last), Some(sel)) => last.event_id == sel,
+            _ => false,
+        }
+    }
+
+    /// Key handler for `Mode::DateJump`: the user is typing a date string into
+    /// the compose buffer. Enter parses and jumps; Esc cancels.
+    async fn handle_date_jump_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.clear_input_buffer();
+                self.mode = Mode::MessageList;
+                self.status = Status::Info("jump cancelled".to_owned());
+            }
+            KeyCode::Enter => {
+                let text = self.input.buffer.trim().to_owned();
+                match crate::command::parse_date_to_ms(&text) {
+                    Some(ts) => {
+                        self.mode = Mode::MessageList;
+                        self.clear_input_buffer();
+                        self.jump_to_date(ts).await;
+                    }
+                    None => {
+                        self.status = Status::Info(format!(
+                            "unrecognized date \"{text}\" — try YYYY-MM-DD, M/D/YYYY, or \"Jan 15 2025\""
+                        ));
+                    }
+                }
+            }
+            _ => {
+                if !self.handle_input_navigation_key(key) {
+                    if let KeyCode::Char(ch) = key.code {
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                            self.insert_char(ch);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Jump to the previous (or next, when `forward`) calendar day that actually
+    /// has messages, skipping over empty days. The landing day is centered in the
+    /// pane so earlier and later messages stay visible around it (ADR 0038).
+    async fn jump_adjacent_day(&mut self, forward: bool) {
+        const DAY_MS: i64 = 86_400_000;
+        let anchor = self.jump_day_anchor();
+        let day_start = anchor.div_euclid(DAY_MS) * DAY_MS;
+
+        // Find the UTC day-start of the adjacent day that actually has messages,
+        // then let `jump_to_date` center on it (and fill later messages below).
+        let target_day_start = if forward {
+            let lower = day_start + DAY_MS;
+            match self.find_first_event_at_or_after(lower).await {
+                Some(first_ts) => first_ts.div_euclid(DAY_MS) * DAY_MS,
+                None => {
+                    self.status = Status::Info("no later day with messages".to_owned());
+                    return;
+                }
+            }
+        } else {
+            match self.last_event_ts_at_or_before(day_start - 1).await {
+                Some(last_ts) => last_ts.div_euclid(DAY_MS) * DAY_MS,
+                None => {
+                    self.status = Status::Info("no earlier day with messages".to_owned());
+                    return;
+                }
+            }
+        };
+        self.jump_to_date(target_day_start).await;
+    }
+
+    /// Enter DateJump mode (the `Shift+J` "jump to a date" prompt).
+    fn start_date_jump(&mut self) {
+        self.clear_input_buffer();
+        self.status =
+            Status::Info("Enter date (YYYY-MM-DD, M/D/YYYY, Jan 15 2025): Esc cancels".to_owned());
+        self.mode = Mode::DateJump;
+    }
+
+    /// Anchor timestamp for ±1-day jumps.
+    ///
+    /// Prefers the explicitly tracked jump timestamp so repeated Shift-PgUp/Dn
+    /// steps each exactly one calendar day rather than drifting based on which
+    /// message happens to be at the edge of the loaded page.  Falls back to the
+    /// selected message, then the newest visible message, then now.
+    fn jump_day_anchor(&self) -> i64 {
+        self.last_jump_ts
+            .or_else(|| self.selected_message_event().map(|e| e.origin_ts))
+            .or_else(|| {
+                self.selected_events()
+                    .into_iter()
+                    .last()
+                    .map(|e| e.origin_ts)
+            })
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
     }
 }

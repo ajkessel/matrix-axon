@@ -346,3 +346,20 @@ Thread is analogous:
   — the client stub should not be wired until it is confirmed.
 - The `EventDto` aggregation fields for M3 (reply counts, thread summaries,
   etc.) are documented in AGENTS.md under the M8b notes.
+
+## M4 implementation note (2026-06-26)
+
+M4 (sending) is wired in a PR stacked on the M1–M3 work. Two points of record:
+
+- **Send contract.** Rather than the client building a raw `m.relates_to` block,
+  the server exposes two convenience fields on
+  `POST …/rooms/{room_id}/send` — `reply_to` (event id) and `thread_root` (root
+  event id) — and constructs the envelope itself (plain `m.in_reply_to`, or
+  `rel_type: m.thread` with a falling-back reply). The TUI sends these via
+  `SendRelation`.
+- **Compose flow.** `/reply` and the reply hotkey set `pending_reply`; `/thread`
+  on a message that heads no thread sets `pending_thread` (the message becomes the
+  new root). Inside the thread panel a send defaults to that thread. Targets are
+  mutually exclusive, shown in the status line, consumed by the next send, and
+  cleared by `Escape` — mirroring the existing edit-mode affordance instead of a
+  bordered compose header.
