@@ -10,6 +10,7 @@ mod cli;
 mod gateway;
 mod lifecycle;
 mod media;
+mod search;
 mod token;
 mod trust;
 mod verification;
@@ -46,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Command::Token { action }) => token::run(action, &config).await,
+        Some(Command::Search { action }) => search::run(action, &config),
         None => serve(config).await,
     }
 }
@@ -89,23 +91,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // version); if so the actor seeds the corpus from the store as a background
     // task — boot never blocks on it, even for a large corpus. Either way it then
     // drains the durable `search_outbox` change log, indexing live events as they
-    // arrive. We hand its producer handle to the sync engine; the actor's writer
-    // keeps the underlying index alive, so we don't retain the reader here (the
-    // `/v1/search` query endpoint that needs it lands in 9b).
-    let (index_handle, index_join, index_cancel) = if config.search.enabled {
+    // arrive. We hand its producer handle to the sync engine. We also retain the
+    // read side (`SearchIndex`) and adapt it onto the API's `SearchQuery` port so
+    // `GET /v1/search` can query it (M9b); the actor's writer and our retained Arc
+    // both keep the underlying index alive.
+    let (index_handle, index_join, index_cancel, search_port) = if config.search.enabled {
         let (search_index, fresh) = axon_search::SearchIndex::open(&config.search.index_path)
             .context("opening search index")?;
+        let search_index = Arc::new(search_index);
         let handles = search_index
             .spawn_indexer(store.clone(), fresh, indexer_options(&config.search))
             .context("starting search indexer")?;
+        let search_port: Arc<dyn axon_api::SearchQuery> = Arc::new(search::SearchAdapter::new(
+            search_index,
+            config.search.max_concurrent_queries,
+            std::time::Duration::from_millis(config.search.query_timeout_ms),
+        ));
         (
             Some(handles.handle),
             Some(handles.join),
             Some(handles.cancel),
+            Some(search_port),
         )
     } else {
         tracing::info!("search disabled (search.enabled = false); not indexing");
-        (None, None, None)
+        (None, None, None, None)
     };
 
     // Start the sync engine: it provisions the configured account and runs one
@@ -138,6 +148,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         trust,
         verifier,
         media,
+        search_port,
     ));
 
     let listener = tokio::net::TcpListener::bind(addr)

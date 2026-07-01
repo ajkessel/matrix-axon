@@ -5,4 +5,5 @@ pub mod events;
 pub mod media;
 pub mod messages;
 pub mod rooms;
+pub mod search;
 pub mod verify;

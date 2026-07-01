@@ -2070,6 +2070,144 @@
           }
         }
       }
+    },
+    "/v1/search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Full-text search across the index, BM25-ranked, paginated.",
+        "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nor a malformed `cursor` is a `400`. Results are the resolved read-API event\nview (latest edited body, redaction-masked) plus each hit's score.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "The full-text query string (required, non-empty). Parsed against message\nbodies; all terms are required (AND).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "Restrict to one account. Omit to search across all accounts.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "query",
+            "description": "Restrict to one room.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sender",
+            "in": "query",
+            "description": "Restrict to one sender (Matrix user id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive lower bound on `origin_server_ts`, Unix milliseconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Inclusive upper bound on `origin_server_ts`, Unix milliseconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page's `next_cursor`; omit for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of ranked search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SearchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/empty query or malformed cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Search is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2431,6 +2569,44 @@
               "stage": {
                 "$ref": "#/components/schemas/FlowStageDto",
                 "description": "The flow's current stage."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_SearchPage": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One page of search results (M9b): the ranked hits, the total match count\nacross all pages, and the cursor to fetch the next page. `next_cursor` is\n`null` when the last page has been reached.",
+            "required": [
+              "results",
+              "total"
+            ],
+            "properties": {
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Opaque cursor for the next page, or `null` at the end."
+              },
+              "results": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SearchResultDto"
+                },
+                "description": "The hits on this page, most relevant first."
+              },
+              "total": {
+                "type": "integer",
+                "description": "Total number of matching events across all pages.",
+                "minimum": 0
               }
             }
           }
@@ -3476,6 +3652,54 @@
           }
         }
       },
+      "SearchPage": {
+        "type": "object",
+        "description": "One page of search results (M9b): the ranked hits, the total match count\nacross all pages, and the cursor to fetch the next page. `next_cursor` is\n`null` when the last page has been reached.",
+        "required": [
+          "results",
+          "total"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or `null` at the end."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchResultDto"
+            },
+            "description": "The hits on this page, most relevant first."
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total number of matching events across all pages.",
+            "minimum": 0
+          }
+        }
+      },
+      "SearchResultDto": {
+        "type": "object",
+        "description": "One hit in the `GET /v1/search` response (M9b): the hydrated event plus its\nBM25 relevance score. The event is the resolved read-API view (latest edited\nbody, redaction-masked), the same shape every other event endpoint returns.",
+        "required": [
+          "event",
+          "score"
+        ],
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/EventDto",
+            "description": "The matching event, hydrated from the store."
+          },
+          "score": {
+            "type": "number",
+            "format": "float",
+            "description": "BM25 relevance score (higher is more relevant)."
+          }
+        }
+      },
       "SendMessageRequest": {
         "type": "object",
         "description": "Request body for sending a message (`POST …/rooms/{room_id}/send`). Sent as an\n`m.room.message`; `account_id`/`room_id` come from the path.\n\n`body` is the plain-text content (and the fallback for clients that don't\nrender formatting). To send rich text, supply `format` *and* `formatted_body`\ntogether: `format` must be `org.matrix.custom.html` and `formatted_body` the\nrendered HTML. Axon carries them verbatim — it never interprets `body` as\nMarkdown.",
@@ -3737,6 +3961,10 @@
     {
       "name": "rooms",
       "description": "Rooms and their timelines"
+    },
+    {
+      "name": "search",
+      "description": "Full-text search across the index"
     },
     {
       "name": "events",

@@ -14,8 +14,9 @@ use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, Formatted,
     LoginError, LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError,
-    Relation, SendError, SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
-    VerificationService, VerifyError,
+    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
+    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
+    VerifyError,
 };
 use uuid::Uuid;
 
@@ -744,5 +745,69 @@ impl SenderTrustService for StubTrust {
             return Err(make());
         }
         Ok(self.bundle.clone().expect("ok stub has a bundle"))
+    }
+}
+
+/// The outcome [`StubSearchQuery`] returns for every call.
+#[derive(Clone)]
+pub enum SearchOutcome {
+    /// A page of hits plus the total match count across all pages.
+    Hits { hits: Vec<SearchHit>, total: usize },
+    /// A query-parse failure (→ `400`).
+    BadQuery(String),
+}
+
+/// An in-memory [`SearchQuery`] for tests: returns a preset page of hits (or a
+/// `BadQuery`) and records the params it received, so the `/v1/search` handler can
+/// be exercised — filter/limit/offset passthrough, hydration from the store,
+/// pagination, and error → status mapping — without a real Tantivy index.
+pub struct StubSearchQuery {
+    outcome: SearchOutcome,
+    calls: Mutex<Vec<SearchQueryParams>>,
+}
+
+impl StubSearchQuery {
+    /// A stub returning the given hits and total for every query.
+    pub fn returning(hits: Vec<SearchHit>, total: usize) -> Self {
+        Self {
+            outcome: SearchOutcome::Hits { hits, total },
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that fails every query with a `BadQuery`.
+    pub fn bad_query(message: &str) -> Self {
+        Self {
+            outcome: SearchOutcome::BadQuery(message.to_owned()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Build a hit from its `(account_id, event_id, score)` parts.
+    pub fn hit(account_id: Uuid, event_id: &str, score: f32) -> SearchHit {
+        SearchHit {
+            account_id,
+            event_id: event_id.to_owned(),
+            score,
+        }
+    }
+
+    /// The params of every recorded call, in order.
+    pub fn calls(&self) -> Vec<SearchQueryParams> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl SearchQuery for StubSearchQuery {
+    async fn search(&self, params: &SearchQueryParams) -> Result<SearchHits, SearchQueryError> {
+        self.calls.lock().unwrap().push(params.clone());
+        match &self.outcome {
+            SearchOutcome::Hits { hits, total } => Ok(SearchHits {
+                hits: hits.clone(),
+                total: *total,
+            }),
+            SearchOutcome::BadQuery(message) => Err(SearchQueryError::BadQuery(message.clone())),
+        }
     }
 }

@@ -223,6 +223,7 @@ fn read_app(store: Store) -> axum::Router {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ))
 }
 
@@ -240,6 +241,7 @@ fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Ro
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ))
 }
 
@@ -255,6 +257,7 @@ fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> a
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ))
 }
 
@@ -271,6 +274,7 @@ fn trust_app(store: Store, trust: Arc<dyn axon_api::SenderTrustService>) -> axum
         trust,
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ))
 }
 
@@ -286,6 +290,7 @@ fn media_app(store: Store, media: Arc<dyn MediaProxy>) -> axum::Router {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         media,
+        None,
     ))
 }
 
@@ -491,6 +496,7 @@ async fn read_api_end_to_end() {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ));
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
@@ -625,6 +631,7 @@ async fn accounts_read_api() {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ));
 
     // GET /v1/accounts — the client-visible set: `active` and `deactivated` are

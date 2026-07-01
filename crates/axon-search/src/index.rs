@@ -147,6 +147,26 @@ impl SearchIndex {
         ))
     }
 
+    /// Mark the index directory for a from-scratch reseed on the next
+    /// [`open`](Self::open), by removing the seed-completion marker
+    /// ([`SCHEMA_VERSION_FILE`]). With no marker, `needs_rebuild` reports `fresh`,
+    /// so the next boot wipes the directory and the indexing actor reseeds the
+    /// corpus from Postgres.
+    ///
+    /// This is what backs `axon search reindex`. It deliberately touches **only**
+    /// the sidecar marker — never the live, possibly memory-mapped index files — so
+    /// it is safe to run even while a server holds the index open; that server keeps
+    /// serving from its in-memory reader and reseeds when it next restarts. Removing
+    /// an already-absent marker (or pointing at a directory that doesn't exist yet)
+    /// is a no-op success: an unseeded index is already `fresh`.
+    pub fn mark_for_reseed(dir: &Path) -> Result<(), SearchError> {
+        match std::fs::remove_file(dir.join(SCHEMA_VERSION_FILE)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Force the reader to pick up the latest commit. Production reads rely on the
     /// auto-reload policy; tests call this to read deterministically right after a
     /// commit.
@@ -510,6 +530,42 @@ mod tests {
             !dir.path().join(SCHEMA_VERSION_FILE).exists(),
             "the marker is absent until the actor finishes reseeding"
         );
+    }
+
+    #[test]
+    fn mark_for_reseed_forces_fresh_on_next_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let acct = Uuid::new_v4();
+        {
+            let (index, fresh) = SearchIndex::open(dir.path()).expect("open");
+            assert!(fresh);
+            index.index_for_test(&[ev(acct, "$a", "!r", "@u:x", 1, "doomed body")]);
+            write_seed_marker(dir.path()).expect("mark seeded");
+        }
+        // Reopen in place: the marker matches, so it is not fresh.
+        let (_index, fresh) = SearchIndex::open(dir.path()).expect("reopen");
+        assert!(!fresh, "a seeded index reopens in place");
+
+        // `axon search reindex` removes the marker.
+        SearchIndex::mark_for_reseed(dir.path()).expect("mark for reseed");
+        let (index, fresh) = SearchIndex::open(dir.path()).expect("open after reindex");
+        assert!(
+            fresh,
+            "removing the marker forces a reseed on the next open"
+        );
+        assert!(
+            index.is_empty(),
+            "the stale index was wiped, ready for re-seed"
+        );
+    }
+
+    #[test]
+    fn mark_for_reseed_is_idempotent_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No marker (and no index) yet — clearing is a no-op success.
+        SearchIndex::mark_for_reseed(dir.path()).expect("absent marker is ok");
+        // A path that doesn't exist at all is also fine.
+        SearchIndex::mark_for_reseed(&dir.path().join("nonexistent")).expect("absent dir is ok");
     }
 
     #[test]

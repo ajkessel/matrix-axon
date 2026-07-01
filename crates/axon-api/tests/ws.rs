@@ -67,6 +67,7 @@ async fn ws_streams_live_events() {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ));
 
     // Serve on an ephemeral port in the background.
@@ -180,6 +181,7 @@ async fn ws_upgrade_rejected_without_a_token() {
         Arc::new(StubTrust::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
+        None,
     ));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -264,6 +266,7 @@ async fn ws_socket_closes_when_token_is_revoked() {
             Arc::new(StubTrust::ok()),
             Arc::new(stub),
             Arc::new(StubMediaProxy),
+            None,
         )
         // Short cadence so the revocation is observed within the test, not 30s.
         .with_ws_revalidation_interval(Duration::from_millis(150)),

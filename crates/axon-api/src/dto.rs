@@ -586,6 +586,30 @@ pub struct TimelinePage {
     pub next_cursor: Option<String>,
 }
 
+/// One hit in the `GET /v1/search` response (M9b): the hydrated event plus its
+/// BM25 relevance score. The event is the resolved read-API view (latest edited
+/// body, redaction-masked), the same shape every other event endpoint returns.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SearchResultDto {
+    /// The matching event, hydrated from the store.
+    pub event: EventDto,
+    /// BM25 relevance score (higher is more relevant).
+    pub score: f32,
+}
+
+/// One page of search results (M9b): the ranked hits, the total match count
+/// across all pages, and the cursor to fetch the next page. `next_cursor` is
+/// `null` when the last page has been reached.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SearchPage {
+    /// The hits on this page, most relevant first.
+    pub results: Vec<SearchResultDto>,
+    /// Total number of matching events across all pages.
+    pub total: usize,
+    /// Opaque cursor for the next page, or `null` at the end.
+    pub next_cursor: Option<String>,
+}
+
 /// One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
 /// The response body is a JSON object keyed by emoji — `{ "👍": { … }, "❤️":
 /// { … } }` — with this as each value, resolved over the event's reactions

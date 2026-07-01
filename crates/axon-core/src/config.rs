@@ -124,9 +124,10 @@ pub struct SyncConfig {
 /// Full-text search (Tantivy) settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchConfig {
-    /// Whether the search index is built and served. When `false`, the
-    /// ingestion hooks are no-ops and `GET /v1/search` returns `503`. Defaults
-    /// to `true`.
+    /// Whether the search index is built and served. When `false`, the search
+    /// indexer and the `GET /v1/search` query surface are disabled (the endpoint
+    /// returns `503`); store writes still append `search_outbox` obligations, so
+    /// re-enabling search catches up the work it missed. Defaults to `true`.
     #[serde(default = "default_search_enabled")]
     pub enabled: bool,
     /// Directory holding the Tantivy index. Must be durable; lives on the same
@@ -149,6 +150,17 @@ pub struct SearchConfig {
     /// indexer's memory. Defaults to 50.
     #[serde(default = "default_search_writer_heap_mb")]
     pub writer_heap_mb: usize,
+    /// Maximum number of `GET /v1/search` queries executed concurrently. Each
+    /// query runs on a blocking thread and keeps a Tantivy reader busy, so this
+    /// caps how much of the blocking pool authenticated searches can occupy;
+    /// requests over the limit queue rather than being rejected. Defaults to 8.
+    #[serde(default = "default_search_max_concurrent_queries")]
+    pub max_concurrent_queries: usize,
+    /// Per-query wall-clock budget for `GET /v1/search`, in milliseconds. A query
+    /// exceeding it returns `503` (the offset cap already bounds per-query work;
+    /// this is a latency backstop). Defaults to 10000 (10s).
+    #[serde(default = "default_search_query_timeout_ms")]
+    pub query_timeout_ms: u64,
 }
 
 /// Provisioning details for a single Matrix account.
@@ -265,6 +277,14 @@ fn default_search_writer_heap_mb() -> usize {
     50
 }
 
+fn default_search_max_concurrent_queries() -> usize {
+    8
+}
+
+fn default_search_query_timeout_ms() -> u64 {
+    10_000
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -303,6 +323,8 @@ impl Default for SearchConfig {
             index_batch_size: default_search_index_batch_size(),
             build_throttle_ms: 0,
             writer_heap_mb: default_search_writer_heap_mb(),
+            max_concurrent_queries: default_search_max_concurrent_queries(),
+            query_timeout_ms: default_search_query_timeout_ms(),
         }
     }
 }

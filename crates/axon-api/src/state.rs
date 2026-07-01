@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 use crate::auth::TokenVerifier;
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
+use crate::search::SearchQuery;
 use crate::sender::MessageSender;
 use crate::trust::SenderTrustService;
 use crate::verification::VerificationService;
@@ -67,6 +68,11 @@ pub struct AppState {
     /// concrete implementation fetches via the SDK client's authenticated
     /// connection and is injected by the binary via an adapter.
     pub media: Arc<dyn MediaProxy>,
+    /// Full-text-search port for `GET /v1/search` (M9b). `None` when search is
+    /// disabled (`search.enabled = false`), in which case the handler returns
+    /// `503`. The concrete implementation is an adapter over the `axon-search`
+    /// Tantivy index, injected by the binary like the other ports.
+    pub search: Option<Arc<dyn SearchQuery>>,
 }
 
 impl AppState {
@@ -84,6 +90,7 @@ impl AppState {
         trust: Arc<dyn SenderTrustService>,
         verifier: Arc<dyn TokenVerifier>,
         media: Arc<dyn MediaProxy>,
+        search: Option<Arc<dyn SearchQuery>>,
     ) -> Self {
         Self {
             store,
@@ -95,6 +102,7 @@ impl AppState {
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
             media,
+            search,
         }
     }
 
@@ -152,6 +160,12 @@ impl FromRef<AppState> for Arc<dyn TokenVerifier> {
 impl FromRef<AppState> for Arc<dyn MediaProxy> {
     fn from_ref(state: &AppState) -> Arc<dyn MediaProxy> {
         state.media.clone()
+    }
+}
+
+impl FromRef<AppState> for Option<Arc<dyn SearchQuery>> {
+    fn from_ref(state: &AppState) -> Option<Arc<dyn SearchQuery>> {
+        state.search.clone()
     }
 }
 

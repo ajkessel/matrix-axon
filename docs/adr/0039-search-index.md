@@ -188,15 +188,44 @@ hydrate. Pagination is offset/limit (BM25 score doesn't compose with the timelin
 opaque cursor). Cross-account by default; `account_id` is an optional filter (tech
 spec: "account_id as a facet… scope to one account or aggregate across all").
 
+The query path is the first heavy user-triggered work on the bearer-gated API, so it
+carries three explicit resource bounds. **Per-query work** is bounded by capping the
+decoded paging offset (`MAX_OFFSET`): offset pagination is skip-N work at the index
+(Tantivy's collector keeps the top `offset + limit` docs), so a forged opaque cursor for
+a huge offset would amplify one authenticated request into large allocation/CPU — a
+cursor past the cap is a `400`, not an execution, and the cursor module is the single
+choke point that decodes offsets through a bounded helper. **Concurrency** is bounded by
+a semaphore in the query adapter (`search.max_concurrent_queries`, default 8): each query
+runs on a blocking thread and holds a Tantivy reader, so over-limit queries queue rather
+than flooding the blocking pool. The permit is owned by the blocking task itself, so it is
+released only when the search actually finishes — a timed-out but still-running search keeps
+counting against the cap, rather than freeing a slot a new request could claim while it runs.
+**Latency** is bounded by a per-query timeout (`search.query_timeout_ms`, default 10s) →
+`503`; a timed-out `spawn_blocking` closure can't be cancelled, but the offset cap already
+bounds its worst-case work, so it drains promptly. These are personal-scale defaults, tunable via `[search]`.
+
 ### Dependency direction
 
 `axon-search` is a leaf crate (depends only on `axon-core` + `axon-store`).
 `axon-sync` depends on `axon-search` directly to *notify* the actor (the work
 itself flows through the store's outbox, not the dependency) — the producer *is*
 `axon-sync`, there is no consumer-owned-port inversion to do (unlike
-`MessageSender`), and there is no cycle. The query-side `axon-api → axon-search`
-dependency (9b) is likewise direct, justified because `axon-search` is matrix-free,
-like `axon-store` which `axon-api` already depends on directly.
+`MessageSender`), and there is no cycle.
+
+The query side (9b) goes the *other* way: `axon-api` defines a small `SearchQuery`
+**port** (the query params, ranked hits, and a HTTP-shaped error), and `axon-server`
+adapts `axon-search` onto it — the same consumer-owned-port pattern as `MessageSender`,
+`AccountLifecycle`, `MediaProxy`, and the other API capabilities. An earlier draft of
+this ADR called for a *direct* `axon-api → axon-search` dependency ("matrix-free, like
+`axon-store`, which `axon-api` already depends on directly"). That reasoning is sound
+about Matrix purity and cycles but misses two things the implementation weighed: (1)
+`axon-search` pulls in `tantivy`, a heavy dependency, and the port keeps it (and its
+build/test cost) out of `axon-api`, whose deps stay `axon-core` + `axon-store` + `axum`;
+(2) every other capability the API needs is already a port, so a lone direct search
+dependency would be the odd one out. `axon-store` stays direct because it *is* the shared
+data layer every route touches and carries no comparably heavy transitive deps. The port
+adds ~90 LOC of near-duplicate types plus a mechanical adapter; that cost buys the
+decoupling and uniformity above and is accepted.
 
 ## Consequences
 

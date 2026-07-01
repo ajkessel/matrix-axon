@@ -19,6 +19,7 @@ mod media;
 mod openapi;
 mod response;
 mod routes;
+mod search;
 mod sender;
 mod state;
 mod trust;
@@ -31,6 +32,7 @@ pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, Reco
 pub use media::{MediaContent, MediaError, MediaProxy};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
+pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
 pub use sender::{MessageSender, SendError};
 pub use state::AppState;
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
@@ -92,6 +94,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/verify/{flow_id}/cancel",
             post(routes::verify::cancel),
         )
+        // Full-text search across the index (M9b). Cross-account by default;
+        // narrowed by the query filters. Returns hydrated events + BM25 score.
+        .route("/v1/search", get(routes::search::search))
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/members",

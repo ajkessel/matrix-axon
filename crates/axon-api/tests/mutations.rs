@@ -44,7 +44,7 @@ fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
     let verifier = Arc::new(StubTokenVerifier::ok());
     let media = Arc::new(StubMediaProxy);
     axon_api::router(AppState::new(
-        store, live, sender, lifecycle, verify, trust, verifier, media,
+        store, live, sender, lifecycle, verify, trust, verifier, media, None,
     ))
 }
 
