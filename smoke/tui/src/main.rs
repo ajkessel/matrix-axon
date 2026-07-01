@@ -11,7 +11,6 @@
 //! crate; all wire types are handwritten from the `openapi/` contract.
 
 mod env;
-mod local_stack;
 mod pty;
 mod runner;
 mod scenarios;
