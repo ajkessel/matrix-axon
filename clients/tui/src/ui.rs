@@ -557,30 +557,58 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
     // After all message-pane widgets have rendered, mark blank cells as
-    // AlwaysUpdate when the thread panel just opened or closed.  Blank cells
-    // (space + default colours) are invisible to ratatui's diff when the
-    // background is Color::Reset, so sixel/halfblock ghost pixels from the
-    // previous view are never overwritten.  AlwaysUpdate forces ratatui to emit
-    // terminal codes for those cells, clearing the stale pixels.
+    // AlwaysUpdate when the view was rebuilt (thread panel toggled, or a room
+    // switch via load_selected_timeline).  Blank cells (space + default colours)
+    // are invisible to ratatui's diff when the background is Color::Reset, so
+    // pixel-protocol ghost pixels from the previous view are never overwritten.
+    // AlwaysUpdate forces ratatui to emit terminal codes for those cells,
+    // clearing the stale pixels.
     //
     // We restrict this to cells whose symbol is a plain space: cells that
     // contain halfblock (▄▀) or text characters are already caught by the normal
     // diff (their symbol changed), and force-emitting ambiguous-width halfblock
     // chars without explicit MoveTo causes cursor drift that staggers the border.
-    if std::mem::take(&mut app.force_terminal_clear) {
+    //
+    // Crucially, confine the pass to the image rectangles (this frame's and the
+    // previous frame's) rather than the whole message pane. Pixel ghosts can only
+    // linger where an image was actually drawn; forcing every blank cell in the
+    // pane made ratatui emit a single long write-run per row, and on rows that
+    // carry an ambiguous-width glyph (a reaction emoji, a status badge) that run
+    // crossed the glyph without an intervening MoveTo, drifting the cursor and
+    // dropping the right border on that row until the next content change. Text
+    // rows hold no out-of-band pixels, so the normal diff is enough for them.
+    //
+    // Skip the pass entirely under Halfblocks: that protocol draws images as
+    // ordinary glyphs the normal diff already repaints (clear_image_ghosts skips
+    // it for the same reason), so there are no out-of-band pixels to clear.
+    if std::mem::take(&mut app.force_terminal_clear)
+        && !matches!(app.picker.protocol_type(), ProtocolType::Halfblocks)
+    {
+        let regions: Vec<Rect> = app
+            .prev_image_rects
+            .iter()
+            .chain(frame_image_rects.iter())
+            .filter_map(|rect| {
+                let clipped = rect.intersection(messages_area);
+                (clipped.width > 0 && clipped.height > 0).then_some(clipped)
+            })
+            .collect();
         let buf = frame.buffer_mut();
-        for y in messages_area.top()..messages_area.bottom() {
-            for x in messages_area.left()..messages_area.right() {
-                if let Some(c) = buf.cell_mut((x, y)) {
-                    // Only mark cells that have no diff option yet.  Sixel and
-                    // Kitty image widgets set CellDiffOption::Skip on every cell
-                    // they occupy; overwriting Skip with AlwaysUpdate causes
-                    // ratatui to emit a space directly over the newly-rendered
-                    // image, destroying it.  Cells that hold ghost pixels from a
-                    // previous frame have diff_option == None (the buffer-reset
-                    // default), so they are safe to force-update.
-                    if c.symbol() == " " && c.diff_option == CellDiffOption::None {
-                        c.set_diff_option(CellDiffOption::AlwaysUpdate);
+        for region in regions {
+            for y in region.top()..region.bottom() {
+                for x in region.left()..region.right() {
+                    if let Some(c) = buf.cell_mut((x, y)) {
+                        // Only mark cells that have no diff option yet.  Sixel and
+                        // Kitty image widgets set CellDiffOption::Skip on every
+                        // cell they occupy; overwriting Skip with AlwaysUpdate
+                        // causes ratatui to emit a space directly over the
+                        // newly-rendered image, destroying it.  Cells that hold
+                        // ghost pixels from a previous frame have diff_option ==
+                        // None (the buffer-reset default), so they are safe to
+                        // force-update.
+                        if c.symbol() == " " && c.diff_option == CellDiffOption::None {
+                            c.set_diff_option(CellDiffOption::AlwaysUpdate);
+                        }
                     }
                 }
             }
