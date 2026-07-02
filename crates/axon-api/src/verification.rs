@@ -72,8 +72,12 @@ pub enum FlowStage {
 pub struct FlowSummary {
     /// The verification transaction id.
     pub flow_id: String,
-    /// The other device in the flow (the user's trusted device).
-    pub target_device_id: String,
+    /// The user being verified — the account's own user id for self-verification,
+    /// or the peer's user id for cross-user verification (ADR 0040).
+    pub target_user_id: String,
+    /// The other device in the flow for self-verification. `None` for cross-user
+    /// verification, which targets another user's identity.
+    pub target_device_id: Option<String>,
     /// The flow's current stage.
     pub stage: FlowStage,
     /// SAS emoji as `(symbol, description)` pairs — present once keys are
@@ -90,12 +94,22 @@ pub struct FlowSummary {
 /// `Arc<dyn VerificationService>`.
 #[async_trait]
 pub trait VerificationService: Send + Sync {
-    /// Start a SAS verification of the **active** account `account_id` against its
-    /// own trusted device `device_id`, returning the new flow's `flow_id`. A
-    /// logged-out/mid-teardown account is [`NotActive`](VerifyError::NotActive); a
-    /// `device_id` that isn't a known device of the account is
-    /// [`BadRequest`](VerifyError::BadRequest).
-    async fn start(&self, account_id: Uuid, device_id: &str) -> Result<String, VerifyError>;
+    /// Start a SAS verification for the **active** account `account_id`, returning
+    /// the new flow's `flow_id`. The target is one of:
+    ///
+    /// * `device_id` only — self-verification of the account's own trusted device.
+    /// * `user_id` only — cross-user verification of another user's identity
+    ///   (ADR 0040), carried over a DM room.
+    ///
+    /// A logged-out/mid-teardown account is [`NotActive`](VerifyError::NotActive);
+    /// a request that names neither (or a device/user the account cannot resolve)
+    /// is [`BadRequest`](VerifyError::BadRequest).
+    async fn start(
+        &self,
+        account_id: Uuid,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<String, VerifyError>;
 
     /// List the account's currently-tracked flows (live, plus recently-terminal
     /// ones still within their grace window). An unknown account is

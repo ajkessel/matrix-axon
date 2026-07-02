@@ -105,7 +105,10 @@ impl App {
                     self.open_incoming_verification(
                         account_id,
                         payload.flow_id.clone(),
-                        payload.device_id.clone(),
+                        payload
+                            .device_id
+                            .clone()
+                            .unwrap_or_else(|| "identity".to_owned()),
                     );
                 }
             }
@@ -116,7 +119,11 @@ impl App {
                 let applies = self.verification.as_ref().is_some_and(|flow| {
                     flow.account_id == account_id
                         && (flow.flow_id.as_deref() == Some(payload.flow_id.as_str())
-                            || (flow.flow_id.is_none() && flow.device_id == payload.device_id))
+                            || (flow.flow_id.is_none()
+                                && payload
+                                    .device_id
+                                    .as_ref()
+                                    .is_some_and(|device_id| flow.device_id == *device_id)))
                 });
                 if applies {
                     if let Some(flow) = self.verification.as_mut() {

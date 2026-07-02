@@ -186,6 +186,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            crate::verification::VerificationRooms::new(),
             None,
             crate::backfill::BackfillHealth::new(None),
         )

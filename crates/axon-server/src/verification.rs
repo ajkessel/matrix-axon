@@ -37,6 +37,15 @@ fn map_err(err: SyncVerifyError) -> VerifyError {
         SyncVerifyError::UnknownDevice(device_id) => {
             VerifyError::BadRequest(format!("unknown device: {device_id}"))
         }
+        SyncVerifyError::NoTarget => VerifyError::BadRequest(
+            "neither a device_id nor a user_id verification target was provided".to_owned(),
+        ),
+        SyncVerifyError::AmbiguousTarget => VerifyError::BadRequest(
+            "provide exactly one verification target: device_id or user_id".to_owned(),
+        ),
+        SyncVerifyError::UnknownUser(user_id) => {
+            VerifyError::BadRequest(format!("unknown user: {user_id}"))
+        }
         SyncVerifyError::WrongStage(msg) => VerifyError::Conflict(msg),
         SyncVerifyError::Upstream(msg) => VerifyError::Upstream(msg),
         SyncVerifyError::Store(msg) => {
@@ -62,6 +71,7 @@ fn map_stage(stage: SyncFlowStage) -> FlowStage {
 fn map_state(state: SyncFlowState) -> FlowSummary {
     FlowSummary {
         flow_id: state.flow_id,
+        target_user_id: state.target_user_id,
         target_device_id: state.target_device_id,
         stage: map_stage(state.stage),
         emoji: state.emoji,
@@ -72,8 +82,16 @@ fn map_state(state: SyncFlowState) -> FlowSummary {
 
 #[async_trait]
 impl VerificationService for VerificationAdapter {
-    async fn start(&self, account_id: Uuid, device_id: &str) -> Result<String, VerifyError> {
-        self.0.start(account_id, device_id).await.map_err(map_err)
+    async fn start(
+        &self,
+        account_id: Uuid,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<String, VerifyError> {
+        self.0
+            .start(account_id, user_id, device_id)
+            .await
+            .map_err(map_err)
     }
 
     async fn list(&self, account_id: Uuid) -> Result<Vec<FlowSummary>, VerifyError> {

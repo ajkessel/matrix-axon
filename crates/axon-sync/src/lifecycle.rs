@@ -33,7 +33,7 @@ use crate::backfill::BackfillHealth;
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
-use crate::verification::FlowRegistry;
+use crate::verification::{FlowRegistry, VerificationRooms};
 
 /// How long logout waits for a cancelled supervised task to finish draining
 /// (sync-service stop + re-decryption join) before escalating to an abort
@@ -307,6 +307,10 @@ pub struct AccountLifecycle {
     /// here gets a supervised task whose incoming-request listener registers onto
     /// the same map the verification port reads.
     verifications: FlowRegistry,
+    /// Per-account verification room subscriptions, shared with the engine so an
+    /// account logged in here gets a supervised task whose sync loop subscribes the
+    /// rooms cross-user verification flows run over (ADR 0040).
+    verification_rooms: VerificationRooms,
     /// HTTP client for homeserver discovery (see [`discovery`](crate::discovery)).
     /// Cheap to clone (an `Arc` internally), shared across logins.
     http: matrix_sdk::reqwest::Client,
@@ -334,6 +338,7 @@ impl AccountLifecycle {
         tasks: TaskRegistry,
         locks: IdentityLocks,
         verifications: FlowRegistry,
+        verification_rooms: VerificationRooms,
         index: Option<IndexHandle>,
         backfill_health: BackfillHealth,
     ) -> Self {
@@ -347,6 +352,7 @@ impl AccountLifecycle {
             tasks,
             locks,
             verifications,
+            verification_rooms,
             http: crate::discovery::http_client(),
             index,
             backfill_health,
@@ -516,6 +522,7 @@ impl AccountLifecycle {
             self.manager.clone(),
             self.locks.clone(),
             self.verifications.clone(),
+            self.verification_rooms.clone(),
             self.index.clone(),
             self.backfill_health.clone(),
         );
@@ -1006,6 +1013,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            crate::verification::VerificationRooms::new(),
             None,
             crate::backfill::BackfillHealth::new(None),
         )
@@ -1045,6 +1053,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
+            crate::verification::VerificationRooms::new(),
             None,
             crate::backfill::BackfillHealth::new(None),
         )

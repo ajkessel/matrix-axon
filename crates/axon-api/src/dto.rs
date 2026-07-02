@@ -478,12 +478,18 @@ pub struct RecoverRequest {
 }
 
 /// Request body for starting a SAS verification
-/// (`POST /v1/accounts/{account_id}/verify`). Names the target device — one of
-/// the user's other trusted devices — rather than leaving the choice implicit.
+/// (`POST /v1/accounts/{account_id}/verify`). Names the verification target:
+/// either a `device_id` — one of the user's own trusted devices
+/// (self-verification) — or a `user_id` — another user's identity (cross-user
+/// verification, ADR 0040). Exactly one must be provided.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct StartVerifyRequest {
-    /// The device ID of the trusted device to verify against.
-    pub device_id: String,
+    /// The user ID of another user to verify (cross-user verification).
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// The device ID of the trusted device to verify against (self-verification).
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// Response body for starting a SAS verification: the new flow's transaction id,
@@ -543,8 +549,12 @@ pub struct EmojiDto {
 pub struct FlowDto {
     /// The verification transaction id.
     pub flow_id: String,
-    /// The other device in the flow.
-    pub device_id: String,
+    /// The user being verified — the account's own user id for self-verification,
+    /// or the peer's user id for cross-user verification (ADR 0040).
+    pub user_id: String,
+    /// The other device in the flow for self-verification. `null` for cross-user
+    /// verification, which targets a user identity rather than one known device.
+    pub device_id: Option<String>,
     /// The flow's current stage.
     pub stage: FlowStageDto,
     /// SAS emoji to compare, once keys are exchanged.
@@ -559,6 +569,7 @@ impl From<crate::verification::FlowSummary> for FlowDto {
     fn from(f: crate::verification::FlowSummary) -> Self {
         FlowDto {
             flow_id: f.flow_id,
+            user_id: f.target_user_id,
             device_id: f.target_device_id,
             stage: f.stage.into(),
             emoji: f.emoji.map(|pairs| {

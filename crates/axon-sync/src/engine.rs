@@ -6,7 +6,7 @@
 //! If the service errors or terminates unexpectedly the task restarts it with
 //! exponential backoff; a cancellation token drives graceful shutdown.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,10 +15,13 @@ use axon_search::IndexHandle;
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
+use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::{
     AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnySyncStateEvent, AnySyncTimelineEvent,
 };
+use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
+use matrix_sdk_ui::room_list_service::RoomListService;
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -33,8 +36,9 @@ use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::redecrypt;
 use crate::verification::{
-    cancel_account_flows, new_registry, on_incoming_request, reap_expired_flows, FlowRegistry,
-    VerificationEngine, VerificationListenerCtx,
+    active_flow_rooms, cancel_account_flows, new_registry, on_incoming_request,
+    on_incoming_room_request, reap_expired_flows, FlowRegistry, HandledRoomEvents,
+    VerificationEngine, VerificationListenerCtx, VerificationRooms,
 };
 
 /// Backoff bounds for restarting a failed per-account task.
@@ -97,6 +101,10 @@ pub struct SyncEngine {
     /// [`VerificationEngine`] (the runtime port) and each account's supervised task
     /// (which listens for peer-initiated requests). Ephemeral — never persisted.
     verifications: FlowRegistry,
+    /// Per-account verification room subscriptions (ADR 0040), shared between the
+    /// [`VerificationEngine`] (a cross-user `start` adds its DM) and each account's
+    /// sync loop (which subscribes the active set). Ephemeral, like `verifications`.
+    verification_rooms: VerificationRooms,
     /// Producer handle for the search-index actor (M9), or `None` when search is
     /// disabled. Cloned into every supervised task's persist + re-decryption paths
     /// so newly ingested events are indexed, and into the lifecycle port so a
@@ -150,6 +158,8 @@ impl SyncEngine {
         // Shared by the verification port and every account's incoming-request
         // listener. Ephemeral — lives only as long as the engine.
         let verifications = new_registry();
+        // Shared the same way: cross-user verification room subscriptions (ADR 0040).
+        let verification_rooms = VerificationRooms::new();
         // Shared disk-space health for the backfill engine (M10): one handle for
         // the whole engine, cloned into each account's backfill task and exposed to
         // the API status surface. Carries the guarded filesystem so `/v1/status`
@@ -171,6 +181,7 @@ impl SyncEngine {
             tasks.clone(),
             locks.clone(),
             verifications.clone(),
+            verification_rooms.clone(),
             index.clone(),
             backfill_health.clone(),
         );
@@ -200,6 +211,7 @@ impl SyncEngine {
                 manager.clone(),
                 locks.clone(),
                 verifications.clone(),
+                verification_rooms.clone(),
                 index.clone(),
                 backfill_health.clone(),
             );
@@ -224,6 +236,7 @@ impl SyncEngine {
             config,
             locks,
             verifications,
+            verification_rooms,
             index,
             backfill_health,
         })
@@ -266,6 +279,7 @@ impl SyncEngine {
             self.tasks.clone(),
             self.locks.clone(),
             self.verifications.clone(),
+            self.verification_rooms.clone(),
             self.index.clone(),
             self.backfill_health.clone(),
         )
@@ -292,6 +306,7 @@ impl SyncEngine {
             self.tracker.clone(),
             self.cancel.clone(),
             self.locks.clone(),
+            self.verification_rooms.clone(),
         )
     }
 
@@ -339,6 +354,7 @@ pub(crate) fn spawn_supervised(
     manager: ClientManager,
     locks: IdentityLocks,
     verifications: FlowRegistry,
+    verification_rooms: VerificationRooms,
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
 ) {
@@ -354,6 +370,7 @@ pub(crate) fn spawn_supervised(
         locks,
         tracker.clone(),
         verifications,
+        verification_rooms,
         index,
         backfill_health,
     ));
@@ -381,6 +398,7 @@ async fn supervise_account(
     locks: IdentityLocks,
     tracker: TaskTracker,
     verifications: FlowRegistry,
+    verification_rooms: VerificationRooms,
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
 ) {
@@ -401,6 +419,7 @@ async fn supervise_account(
             &locks,
             &tracker,
             &verifications,
+            &verification_rooms,
             index.as_ref(),
             &backfill_health,
         )
@@ -882,6 +901,132 @@ async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: 
     }
 }
 
+/// How often the sync loop polls for new verification candidate invites and
+/// re-derives the explicit subscription set (ADR 0040).
+const VERIFICATION_POLL: Duration = Duration::from_secs(5);
+
+/// Cap on candidate invites auto-joined per [`VERIFICATION_POLL`]. A backlog of
+/// direct invites must not translate into an unbounded join + explicit-subscribe
+/// spike — the blast radius ADR 0040 exists to avoid. Anything past the cap is
+/// left for a later poll. Sized well above the handful of concurrent verifications
+/// a real session runs.
+const MAX_CANDIDATE_JOINS_PER_POLL: usize = 8;
+
+/// Whether we currently share a joined room with `user_id`. Reads local state only
+/// (`get_member_no_sync`, no network) and short-circuits on the first shared room.
+///
+/// The `Join` membership check matters: `get_member_no_sync` returns a member for
+/// *any* user with a stored `m.room.member` event, including ones who have since
+/// left or been kicked/banned. Without it, a former co-member would still pass the
+/// consent gate and could make this account auto-join a DM by inviting it — the
+/// exact bypass the gate exists to prevent.
+async fn shares_joined_room(client: &Client, user_id: &UserId) -> bool {
+    for room in client.joined_rooms() {
+        if matches!(
+            room.get_member_no_sync(user_id).await,
+            Ok(Some(member)) if *member.membership() == MembershipState::Join
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Join pending direct invites **from known contacts** and register them as TTL'd
+/// candidate verification rooms (ADR 0040). Cross-user verification creates/uses a
+/// DM and invites us; until we join, the room's timeline — carrying the
+/// `m.key.verification.request` — is never delivered.
+///
+/// Two gates keep this from reintroducing the blast radius this PR exists to fix,
+/// and from being abusable. This mirrors how Element scopes verification: you
+/// verify a user from a room you already share, and Element does not silently
+/// auto-join an arbitrary invite to receive one.
+///
+///   * **Known-contact only.** We auto-join a direct invite only when we already
+///     share a joined room with the inviter — the only users a verification is
+///     meaningful with. This denies an arbitrary user the ability to make this
+///     account silently join a DM just by inviting it (the consent concern).
+///   * **Per-poll cap.** At most [`MAX_CANDIDATE_JOINS_PER_POLL`] invites are
+///     joined per poll, so a backlog can't produce an unbounded join + subscribe
+///     spike; the remainder is picked up on subsequent polls.
+///
+/// Each joined room is still tracked as a short-lived candidate, so a
+/// non-verification invite drops out of the explicit subscription set shortly
+/// after rather than being parked there forever. An invite that fails the
+/// direct/known-contact gates is memoized as rejected, so a standing non-candidate
+/// invite doesn't re-run the same checks every poll.
+async fn join_candidate_invites(client: &Client, account_id: Uuid, rooms: &VerificationRooms) {
+    let mut joined = 0usize;
+    for room in client.invited_rooms() {
+        if joined >= MAX_CANDIDATE_JOINS_PER_POLL {
+            tracing::debug!(
+                %account_id,
+                "candidate-invite join cap reached this poll; deferring remaining invites"
+            );
+            break;
+        }
+        let room_id = room.room_id().to_owned();
+        // Skip invites already rejected within the memo window — avoids re-running
+        // the membership scan on the same standing non-contact invite every poll.
+        if rooms.is_recently_rejected(account_id, &room_id) {
+            continue;
+        }
+        if !room.is_direct().await.unwrap_or(false) {
+            rooms.mark_rejected(account_id, room_id);
+            continue;
+        }
+        let inviter_id = match room.invite_details().await {
+            Ok(invite) => invite.inviter_id,
+            Err(err) => {
+                tracing::warn!(%account_id, %room_id, error = %err,
+                    "failed to read invite details; skipping candidate invite");
+                continue;
+            }
+        };
+        if !shares_joined_room(client, &inviter_id).await {
+            tracing::debug!(%account_id, %room_id, %inviter_id,
+                "ignoring direct invite from a user we share no room with (not a verification candidate)");
+            rooms.mark_rejected(account_id, room_id);
+            continue;
+        }
+        if let Err(err) = client.join_room_by_id(&room_id).await {
+            tracing::warn!(%account_id, %room_id, error = %err, "failed to join verification candidate invite");
+            continue;
+        }
+        joined += 1;
+        tracing::info!(%account_id, %room_id, %inviter_id,
+            "joined direct invite from known contact as verification candidate");
+        rooms.add_candidate(account_id, room_id);
+    }
+}
+
+/// Re-derive the explicit subscription set (active-flow rooms ∪ live candidate
+/// invites) and, **only if it changed**, push it to the sliding-sync service (ADR
+/// 0040). `subscribe_to_rooms` replaces all prior subscriptions and cancels the
+/// in-flight request, so we must not call it when nothing changed — otherwise the
+/// 5-second poll would repeatedly disrupt sync. The set is bounded by concurrent
+/// verifications plus recently-invited DMs, never the whole DM list.
+async fn maybe_resubscribe_verification_rooms(
+    rls: &RoomListService,
+    registry: &FlowRegistry,
+    rooms: &VerificationRooms,
+    account_id: Uuid,
+    subscribed: &mut HashSet<OwnedRoomId>,
+) {
+    let mut desired: HashSet<OwnedRoomId> = active_flow_rooms(registry, account_id)
+        .into_iter()
+        .collect();
+    desired.extend(rooms.live_candidates(account_id));
+    if desired == *subscribed {
+        return;
+    }
+    let ids: Vec<OwnedRoomId> = desired.iter().cloned().collect();
+    let refs: Vec<&RoomId> = ids.iter().map(AsRef::as_ref).collect();
+    rls.subscribe_to_rooms(&refs).await;
+    tracing::debug!(%account_id, count = refs.len(), "updated verification room subscriptions");
+    *subscribed = desired;
+}
+
 /// Run one account's sync to completion: authenticate, start the sync service,
 /// and monitor its state until cancellation (returns `Ok`) or an error/terminal
 /// state (returns `Err`, triggering a supervised restart).
@@ -896,6 +1041,7 @@ async fn run_account(
     locks: &IdentityLocks,
     tracker: &TaskTracker,
     verifications: &FlowRegistry,
+    verification_rooms: &VerificationRooms,
     index: Option<&IndexHandle>,
     backfill_health: &BackfillHealth,
 ) -> Result<(), SyncError> {
@@ -956,8 +1102,13 @@ async fn run_account(
         live_tx: live_tx.clone(),
         tracker: tracker.clone(),
         cancel: cancel.clone(),
+        rooms: verification_rooms.clone(),
+        handled_room_events: HandledRoomEvents::default(),
     });
     client.add_event_handler(on_incoming_request);
+    // Cross-user verification (ADR 0040) arrives as a room message rather than a
+    // to-device event; both handlers share the context above.
+    client.add_event_handler(on_incoming_room_request);
 
     // `SyncService::builder` consumes the client; keep a clone for the
     // re-decryption queue and the startup sweep (the client is Arc-backed, so
@@ -1034,10 +1185,35 @@ async fn run_account(
         trust_cancel.clone(),
     ));
 
+    // Cross-user verification room delivery (ADR 0040): register this run's
+    // resubscribe waker, and poll for new candidate invites. The sliding-sync
+    // selective window (rank 0..=19) delivers no timeline events to a DM outside
+    // it, so a verification request in such a room never reaches the handlers; the
+    // explicit subscription (active-flow rooms ∪ candidate invites) forces delivery.
+    let rls = sync_service.room_list_service();
+    let (verification_room_run_id, mut sub_rx) = verification_rooms.register(account.account_id);
+    let mut subscribed: HashSet<OwnedRoomId> = HashSet::new();
+    let mut verification_poll = tokio::time::interval(VERIFICATION_POLL);
+    verification_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     let mut state = sync_service.state();
     let result = loop {
         tokio::select! {
             _ = cancel.cancelled() => break Ok(()),
+            // A flow started/accepted or a candidate was added: recompute the set.
+            _ = sub_rx.recv() => {
+                maybe_resubscribe_verification_rooms(
+                    &rls, verifications, verification_rooms, account.account_id, &mut subscribed,
+                ).await;
+            }
+            // Periodically join fresh verification-DM invites and expire stale
+            // candidates from the subscription set.
+            _ = verification_poll.tick() => {
+                join_candidate_invites(&client, account.account_id, verification_rooms).await;
+                maybe_resubscribe_verification_rooms(
+                    &rls, verifications, verification_rooms, account.account_id, &mut subscribed,
+                ).await;
+            }
             next = state.next() => match next {
                 Some(State::Running) | Some(State::Idle) | Some(State::Offline) => continue,
                 Some(State::Error(err)) => break Err(SyncError::Sdk(format!("sync service error: {err}"))),
@@ -1047,6 +1223,7 @@ async fn run_account(
             },
         }
     };
+    verification_rooms.unregister(account.account_id, verification_room_run_id);
 
     // Always drain the service so its SQLite store flushes before we drop it,
     // then stop and join the re-decryption queue so it doesn't outlive this run

@@ -1604,7 +1604,7 @@
         "tags": [
           "verification"
         ],
-        "summary": "Start a SAS verification against one of the account's trusted devices,\nreturning the new flow's `flow_id`. The exchange then proceeds\nasynchronously: watch `verification.*` frames over `/v1/ws`, or poll\n`GET …/verify/{flow_id}`.",
+        "summary": "Start a SAS verification — against one of the account's own trusted devices\n(`device_id`, self-verification) or against another user's identity\n(`user_id`, cross-user verification; ADR 0040) — returning the new flow's\n`flow_id`. The exchange then proceeds asynchronously: watch `verification.*`\nframes over `/v1/ws`, or poll `GET …/verify/{flow_id}`.",
         "description": "Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route\n(M7b, ADR 0029).",
         "operationId": "start_verification",
         "parameters": [
@@ -1641,7 +1641,7 @@
             }
           },
           "400": {
-            "description": "The named device is not a known device of this account",
+            "description": "Neither a known device of this account nor a resolvable user was named",
             "content": {
               "application/json": {
                 "schema": {
@@ -2601,7 +2601,7 @@
             "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
             "required": [
               "flow_id",
-              "device_id",
+              "user_id",
               "stage"
             ],
             "properties": {
@@ -2625,8 +2625,11 @@
                 "description": "SAS decimal triple, the alternative to the emoji."
               },
               "device_id": {
-                "type": "string",
-                "description": "The other device in the flow."
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The other device in the flow for self-verification. `null` for cross-user\nverification, which targets a user identity rather than one known device."
               },
               "emoji": {
                 "type": [
@@ -2645,6 +2648,10 @@
               "stage": {
                 "$ref": "#/components/schemas/FlowStageDto",
                 "description": "The flow's current stage."
+              },
+              "user_id": {
+                "type": "string",
+                "description": "The user being verified — the account's own user id for self-verification,\nor the peer's user id for cross-user verification (ADR 0040)."
               }
             }
           }
@@ -2996,7 +3003,7 @@
               "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
               "required": [
                 "flow_id",
-                "device_id",
+                "user_id",
                 "stage"
               ],
               "properties": {
@@ -3020,8 +3027,11 @@
                   "description": "SAS decimal triple, the alternative to the emoji."
                 },
                 "device_id": {
-                  "type": "string",
-                  "description": "The other device in the flow."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The other device in the flow for self-verification. `null` for cross-user\nverification, which targets a user identity rather than one known device."
                 },
                 "emoji": {
                   "type": [
@@ -3040,6 +3050,10 @@
                 "stage": {
                   "$ref": "#/components/schemas/FlowStageDto",
                   "description": "The flow's current stage."
+                },
+                "user_id": {
+                  "type": "string",
+                  "description": "The user being verified — the account's own user id for self-verification,\nor the peer's user id for cross-user verification (ADR 0040)."
                 }
               }
             }
@@ -3544,7 +3558,7 @@
         "description": "A verification flow's replayable state (`GET …/verify` /\n`GET …/verify/{flow_id}`). `emoji`/`decimals` are `null` until keys are\nexchanged; `cancel_reason` is `null` unless the flow was cancelled.",
         "required": [
           "flow_id",
-          "device_id",
+          "user_id",
           "stage"
         ],
         "properties": {
@@ -3568,8 +3582,11 @@
             "description": "SAS decimal triple, the alternative to the emoji."
           },
           "device_id": {
-            "type": "string",
-            "description": "The other device in the flow."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The other device in the flow for self-verification. `null` for cross-user\nverification, which targets a user identity rather than one known device."
           },
           "emoji": {
             "type": [
@@ -3588,6 +3605,10 @@
           "stage": {
             "$ref": "#/components/schemas/FlowStageDto",
             "description": "The flow's current stage."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The user being verified — the account's own user id for self-verification,\nor the peer's user id for cross-user verification (ADR 0040)."
           }
         }
       },
@@ -3889,14 +3910,21 @@
       },
       "StartVerifyRequest": {
         "type": "object",
-        "description": "Request body for starting a SAS verification\n(`POST /v1/accounts/{account_id}/verify`). Names the target device — one of\nthe user's other trusted devices — rather than leaving the choice implicit.",
-        "required": [
-          "device_id"
-        ],
+        "description": "Request body for starting a SAS verification\n(`POST /v1/accounts/{account_id}/verify`). Names the verification target:\neither a `device_id` — one of the user's own trusted devices\n(self-verification) — or a `user_id` — another user's identity (cross-user\nverification, ADR 0040). Exactly one must be provided.",
         "properties": {
           "device_id": {
-            "type": "string",
-            "description": "The device ID of the trusted device to verify against."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The device ID of the trusted device to verify against (self-verification)."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user ID of another user to verify (cross-user verification)."
           }
         }
       },

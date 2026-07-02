@@ -18,10 +18,11 @@ use crate::extract::{Json, Path};
 use crate::response::{ApiError, ApiResponse};
 use crate::verification::VerificationService;
 
-/// Start a SAS verification against one of the account's trusted devices,
-/// returning the new flow's `flow_id`. The exchange then proceeds
-/// asynchronously: watch `verification.*` frames over `/v1/ws`, or poll
-/// `GET …/verify/{flow_id}`.
+/// Start a SAS verification — against one of the account's own trusted devices
+/// (`device_id`, self-verification) or against another user's identity
+/// (`user_id`, cross-user verification; ADR 0040) — returning the new flow's
+/// `flow_id`. The exchange then proceeds asynchronously: watch `verification.*`
+/// frames over `/v1/ws`, or poll `GET …/verify/{flow_id}`.
 ///
 /// Trust-bearing; gated by the bearer-token auth layer like every `/v1/` route
 /// (M7b, ADR 0029).
@@ -32,7 +33,7 @@ use crate::verification::VerificationService;
     request_body = StartVerifyRequest,
     responses(
         (status = 200, description = "The started flow's transaction id", body = ApiResponse<StartVerifyResponse>),
-        (status = 400, description = "The named device is not a known device of this account", body = crate::response::ErrorResponse),
+        (status = 400, description = "Neither a known device of this account nor a resolvable user was named", body = crate::response::ErrorResponse),
         (status = 409, description = "The account is not active (logged out or being deleted)", body = crate::response::ErrorResponse),
         (status = 502, description = "Upstream homeserver error sending the verification request", body = crate::response::ErrorResponse),
     ),
@@ -43,7 +44,22 @@ pub async fn start_verification(
     Path(account_id): Path<Uuid>,
     Json(req): Json<StartVerifyRequest>,
 ) -> Result<ApiResponse<StartVerifyResponse>, ApiError> {
-    let flow_id = verify.start(account_id, &req.device_id).await?;
+    match (req.user_id.as_deref(), req.device_id.as_deref()) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "provide exactly one verification target: device_id or user_id",
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::bad_request(
+                "neither a device_id nor a user_id verification target was provided",
+            ));
+        }
+        _ => {}
+    }
+    let flow_id = verify
+        .start(account_id, req.user_id.as_deref(), req.device_id.as_deref())
+        .await?;
     Ok(ApiResponse::new(StartVerifyResponse { flow_id }))
 }
 

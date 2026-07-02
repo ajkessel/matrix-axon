@@ -707,7 +707,8 @@ pub struct VerificationFrame {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct VerificationFrameDto {
     pub flow_id: String,
-    pub device_id: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
     #[serde(default)]
     pub emoji: Option<Vec<EmojiDto>>,
     #[serde(default)]
@@ -767,7 +768,8 @@ pub struct StartVerifyResponse {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct FlowDto {
     pub flow_id: String,
-    pub device_id: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
     pub stage: FlowStage,
     #[serde(default)]
     pub emoji: Option<Vec<EmojiDto>>,

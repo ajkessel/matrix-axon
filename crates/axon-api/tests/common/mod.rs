@@ -361,11 +361,26 @@ impl StubLifecycle {
 /// One recorded call to the [`StubVerification`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VerifyCall {
-    Start { account_id: Uuid, device_id: String },
-    List { account_id: Uuid },
-    Get { account_id: Uuid, flow_id: String },
-    Confirm { account_id: Uuid, flow_id: String },
-    Cancel { account_id: Uuid, flow_id: String },
+    Start {
+        account_id: Uuid,
+        user_id: Option<String>,
+        device_id: Option<String>,
+    },
+    List {
+        account_id: Uuid,
+    },
+    Get {
+        account_id: Uuid,
+        flow_id: String,
+    },
+    Confirm {
+        account_id: Uuid,
+        flow_id: String,
+    },
+    Cancel {
+        account_id: Uuid,
+        flow_id: String,
+    },
 }
 
 /// The error the [`StubVerification`] returns for every call (or `Ok`). `Clone`
@@ -417,7 +432,8 @@ impl StubVerification {
             flow_id: flow_id.to_owned(),
             summary: FlowSummary {
                 flow_id: flow_id.to_owned(),
-                target_device_id: "TRUSTEDDEV".to_owned(),
+                target_user_id: "@self:localhost".to_owned(),
+                target_device_id: Some("TRUSTEDDEV".to_owned()),
                 stage: FlowStage::KeysExchanged,
                 emoji: Some(vec![
                     ("🐶".to_owned(), "Dog".to_owned()),
@@ -445,10 +461,16 @@ impl StubVerification {
 
 #[async_trait]
 impl VerificationService for StubVerification {
-    async fn start(&self, account_id: Uuid, device_id: &str) -> Result<String, VerifyError> {
+    async fn start(
+        &self,
+        account_id: Uuid,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<String, VerifyError> {
         self.calls.lock().unwrap().push(VerifyCall::Start {
             account_id,
-            device_id: device_id.to_owned(),
+            user_id: user_id.map(str::to_owned),
+            device_id: device_id.map(str::to_owned),
         });
         match self.outcome.as_error() {
             Some(err) => Err(err),

@@ -179,6 +179,9 @@ impl VerificationFlow {
     /// Merge an authoritative `FlowDto` (a read-on-reconnect resync or a list
     /// entry) into the flow state.
     pub(crate) fn apply_flow(&mut self, flow: &FlowDto) {
+        if let Some(device_id) = &flow.device_id {
+            self.device_id = device_id.clone();
+        }
         if flow.emoji.is_some() {
             self.emoji = flow.emoji.clone();
         }
@@ -205,6 +208,9 @@ impl VerificationFlow {
     ) {
         if self.flow_id.is_none() {
             self.flow_id = Some(payload.flow_id.clone());
+        }
+        if let Some(device_id) = &payload.device_id {
+            self.device_id = device_id.clone();
         }
         match kind {
             VerificationFrameKind::Requested => {
@@ -2116,7 +2122,7 @@ mod tests {
     fn sas_frame() -> VerificationFrameDto {
         VerificationFrameDto {
             flow_id: "txn1".to_owned(),
-            device_id: "DEV".to_owned(),
+            device_id: Some("DEV".to_owned()),
             emoji: Some(vec![EmojiDto {
                 symbol: "🐶".to_owned(),
                 description: "Dog".to_owned(),
@@ -2166,7 +2172,7 @@ mod tests {
         let mut flow = outgoing_flow();
         flow.apply_flow(&FlowDto {
             flow_id: "txn1".to_owned(),
-            device_id: "DEV".to_owned(),
+            device_id: Some("DEV".to_owned()),
             stage: FlowStage::KeysExchanged,
             emoji: Some(vec![EmojiDto {
                 symbol: "🐱".to_owned(),

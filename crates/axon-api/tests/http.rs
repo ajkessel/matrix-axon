@@ -1272,9 +1272,60 @@ async fn verify_start_succeeds_and_returns_flow_id() {
         verify.calls(),
         vec![VerifyCall::Start {
             account_id,
-            device_id: "TRUSTEDDEV".to_owned(),
+            user_id: None,
+            device_id: Some("TRUSTEDDEV".to_owned()),
         }]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_start_rejects_ambiguous_target_before_service() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-unused"));
+    let app = verify_app(store, verify.clone());
+
+    let account_id = Uuid::new_v4();
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/verify"),
+        Some(json!({ "user_id": "@peer:localhost", "device_id": "TRUSTEDDEV" })),
+        Some(&bearer()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("exactly one verification target"));
+    assert!(verify.calls().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn verify_start_rejects_missing_target_before_service() {
+    let store = store().await;
+    let verify = Arc::new(StubVerification::ok("$flow-unused"));
+    let app = verify_app(store, verify.clone());
+
+    let account_id = Uuid::new_v4();
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/verify"),
+        Some(json!({})),
+        Some(&bearer()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("neither a device_id nor a user_id"));
+    assert!(verify.calls().is_empty());
 }
 
 #[tokio::test]

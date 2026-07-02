@@ -15,6 +15,7 @@
 //! lazily. See ADR 0011 and the M7a PR6 plan for the full crash/reconnect matrix.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,9 +28,11 @@ use matrix_sdk::encryption::verification::{
 use matrix_sdk::event_handler::Ctx;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent;
 use matrix_sdk::ruma::events::key::verification::VerificationMethod;
-use matrix_sdk::ruma::{OwnedDeviceId, OwnedUserId};
-use matrix_sdk::Client;
-use tokio::sync::{broadcast, OwnedMutexGuard};
+use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
+use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
+use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId};
+use matrix_sdk::{Client, Room};
+use tokio::sync::{broadcast, mpsc, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
@@ -76,7 +79,10 @@ pub enum FlowStage {
 #[derive(Debug, Clone)]
 pub struct FlowState {
     pub flow_id: String,
-    pub target_device_id: String,
+    /// The user being verified: the account's own user id for self-verification,
+    /// or the peer's user id for cross-user verification (ADR 0040).
+    pub target_user_id: String,
+    pub target_device_id: Option<String>,
     pub stage: FlowStage,
     pub emoji: Option<Vec<(String, String)>>,
     pub decimals: Option<(u16, u16, u16)>,
@@ -103,6 +109,16 @@ pub enum VerifyError {
     /// The named device is not a known device of this account.
     #[error("unknown device: {0}")]
     UnknownDevice(String),
+    /// The start request named no verification target.
+    #[error("no verification target named")]
+    NoTarget,
+    /// The start request named both target forms.
+    #[error("ambiguous verification target")]
+    AmbiguousTarget,
+    /// The named user can't be verified — invalid user id, or the SDK has no
+    /// cross-signing identity for them (cross-user verification, ADR 0040).
+    #[error("unknown user: {0}")]
+    UnknownUser(String),
     /// The flow is not in a stage that permits the requested operation.
     #[error("flow not in a state for this operation: {0}")]
     WrongStage(String),
@@ -128,7 +144,14 @@ enum TerminalOutcome {
 pub(crate) struct FlowEntry {
     request: VerificationRequest,
     sas: Option<SasVerification>,
-    target_device_id: String,
+    /// The user being verified — own user id (self-verification) or the peer's
+    /// (cross-user, ADR 0040).
+    target_user_id: String,
+    target_device_id: Option<String>,
+    /// The DM room a cross-user flow runs over (`None` for a to-device
+    /// self-verification flow). The sliding-sync loop subscribes it while the flow
+    /// is live so its events are delivered (ADR 0040).
+    room_id: Option<OwnedRoomId>,
     terminal: Option<TerminalOutcome>,
     terminal_at: Option<Instant>,
     /// The token the flow's driver runs under. Held here so a sync-run teardown can
@@ -145,6 +168,358 @@ pub(crate) type FlowRegistry = Arc<Mutex<HashMap<(Uuid, String), FlowEntry>>>;
 /// A fresh, empty flow registry. Owned by [`SyncEngine`](crate::SyncEngine).
 pub(crate) fn new_registry() -> FlowRegistry {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// How long a freshly-joined candidate invite room stays explicitly subscribed
+/// while we wait for a verification request to arrive in it. Element creates a DM
+/// and sends the `m.key.verification.request` within seconds; if none arrives in
+/// this window the room is dropped from the explicit subscription set (the Matrix
+/// spec allows a request up to 10 minutes, but a real verification DM produces the
+/// request immediately — a longer wait only keeps unrelated DMs subscribed).
+const CANDIDATE_TTL: Duration = Duration::from_secs(90);
+
+/// The Matrix verification request lifetime. Candidate invites can be dropped
+/// from explicit subscriptions quickly, but a real request event that temporarily
+/// outruns device-key availability must keep its room subscribed for the protocol
+/// retry window.
+const REQUEST_TTL: Duration = Duration::from_secs(600);
+
+/// How long a direct invite that failed the known-contact gate is remembered, so
+/// `join_candidate_invites` doesn't re-scan it (an `O(joined_rooms)` membership
+/// walk) on every 5s poll. Bounded so a membership change — we later share a room
+/// with the inviter — is eventually reconsidered.
+const REJECTED_INVITE_TTL: Duration = Duration::from_secs(300);
+
+/// A set of keys each carrying an expiry deadline; expired keys are pruned lazily
+/// on read, so membership reflects only un-expired entries with no background
+/// sweep. This collapses the otherwise-identical `Instant`-deadline maps in this
+/// module (candidate rooms, handled event ids, rejected invites) into one place.
+///
+/// (The terminal-flow grace sweep in [`sweep_expired`] is intentionally *not* built
+/// on this: it retains domain entries of the flow registry by a `terminal_at`
+/// *field*, keeping non-terminal entries forever — a different shape from a pure
+/// key→deadline set.)
+struct TtlSet<K: Eq + Hash> {
+    entries: HashMap<K, Instant>,
+}
+
+// Manual `Default` (not derived): an empty set is valid for any key type, whereas
+// `#[derive(Default)]` would wrongly demand `K: Default`.
+impl<K: Eq + Hash> Default for TtlSet<K> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash + Clone> TtlSet<K> {
+    /// Insert `key` (or refresh its deadline) with `ttl` from now. Returns `true`
+    /// if it was not already live — a fresh insert — and `false` if it merely
+    /// refreshed a still-live entry. Callers that act only on a genuine change
+    /// (e.g. waking the resubscribe loop) branch on this.
+    fn insert(&mut self, key: K, ttl: Duration) -> bool {
+        let now = Instant::now();
+        self.prune(now);
+        self.entries.insert(key, now + ttl).is_none()
+    }
+
+    /// Whether `key` is present and un-expired. Prunes expired entries first.
+    fn contains(&mut self, key: &K) -> bool {
+        let now = Instant::now();
+        self.prune(now);
+        self.entries.contains_key(key)
+    }
+
+    /// Forget `key` outright (regardless of its deadline).
+    fn remove(&mut self, key: &K) {
+        self.entries.remove(key);
+    }
+
+    /// The currently-live keys, pruning expired entries first.
+    fn live(&mut self) -> Vec<K> {
+        let now = Instant::now();
+        self.prune(now);
+        self.entries.keys().cloned().collect()
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.entries.retain(|_, deadline| *deadline > now);
+    }
+}
+
+/// Per-account set of rooms the sliding-sync loop should explicitly subscribe so
+/// their timeline events are delivered regardless of the room's rank in the
+/// selective window (ADR 0040). Cross-user verification is room-based, but a DM
+/// outside the window receives no timeline events, so the verification request /
+/// ready / accept / mac events never reach the handlers.
+///
+/// This holds only **candidate** rooms — DMs freshly joined from an invite that
+/// may carry an incoming verification request — each with a TTL. The rooms of
+/// *active* flows are derived separately from the flow registry
+/// ([`active_flow_rooms`]); the loop subscribes the union of the two. The set is
+/// therefore bounded by concurrent verifications plus recently-invited DMs, never
+/// the whole DM list (the blast radius that sank the earlier attempt).
+///
+/// `RoomListService::subscribe_to_rooms` *replaces* all prior explicit
+/// subscriptions, so the loop always re-subscribes the full union on any change;
+/// the [`mpsc`] waker tells it when to.
+#[derive(Clone, Default)]
+pub(crate) struct VerificationRooms {
+    inner: Arc<Mutex<HashMap<Uuid, AccountRooms>>>,
+}
+
+#[derive(Default)]
+struct AccountRooms {
+    /// Candidate invite rooms, each expiring from the subscription set after
+    /// [`CANDIDATE_TTL`].
+    candidates: TtlSet<OwnedRoomId>,
+    /// Rooms that have already delivered an in-room verification request, but the
+    /// SDK could not resolve it yet (usually because the sender's device keys have
+    /// not arrived). Kept subscribed for the request lifetime, decoupled from the
+    /// short candidate-invite window.
+    pending_requests: TtlSet<OwnedRoomId>,
+    /// Invites recently rejected by the direct/known-contact gate, so
+    /// `join_candidate_invites` skips re-evaluating them every poll
+    /// ([`REJECTED_INVITE_TTL`]).
+    rejected: TtlSet<OwnedRoomId>,
+    /// The current run's resubscribe waker, set by [`VerificationRooms::register`].
+    waker: Option<RoomWaker>,
+    /// A wake requested while no run waker was present. The next register gets an
+    /// immediate recompute even if the request happened during restart backoff.
+    pending_wake: bool,
+    next_run_id: u64,
+}
+
+struct RoomWaker {
+    run_id: u64,
+    tx: mpsc::UnboundedSender<()>,
+}
+
+impl VerificationRooms {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the per-account sync loop's resubscribe waker, returning the
+    /// receiver it awaits. Called once per run in `run_account`; an immediate wake
+    /// is queued so any rooms added before registration are picked up.
+    pub(crate) fn register(&self, account_id: Uuid) -> (u64, mpsc::UnboundedReceiver<()>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        let entry = guard.entry(account_id).or_default();
+        entry.next_run_id = entry.next_run_id.wrapping_add(1).max(1);
+        let run_id = entry.next_run_id;
+        entry.waker = Some(RoomWaker {
+            run_id,
+            tx: tx.clone(),
+        });
+        // Always queue one recompute: it covers rooms added before this run
+        // registered and active-flow rooms that live in the separate registry.
+        entry.pending_wake = false;
+        let _ = tx.send(());
+        (run_id, rx)
+    }
+
+    /// Drop the account's resubscribe waker (its run is tearing down) but **keep**
+    /// its candidate rooms. A candidate is a DM we've already *joined* from an
+    /// invite and are holding subscribed while we wait for its
+    /// `m.key.verification.request`; on a supervised restart inside that window the
+    /// room is in `joined_rooms()`, not `invited_rooms()`, so `join_candidate_invites`
+    /// can't re-add it — clearing it here would strand the verification with no
+    /// recovery. The candidates self-expire via their TTL, and the new run's
+    /// [`register`](Self::register) re-attaches a waker and replays them.
+    pub(crate) fn unregister(&self, account_id: Uuid, run_id: u64) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .expect("verification rooms poisoned")
+            .get_mut(&account_id)
+        {
+            if entry.waker.as_ref().is_some_and(|w| w.run_id == run_id) {
+                entry.waker = None;
+            }
+        }
+    }
+
+    fn wake_entry(entry: &mut AccountRooms) {
+        if let Some(waker) = &entry.waker {
+            let _ = waker.tx.send(());
+        } else {
+            entry.pending_wake = true;
+        }
+    }
+
+    /// Add (or refresh the TTL of) a candidate invite room and wake the loop.
+    pub(crate) fn add_candidate(&self, account_id: Uuid, room_id: OwnedRoomId) {
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        let entry = guard.entry(account_id).or_default();
+        if entry.candidates.insert(room_id, CANDIDATE_TTL) {
+            Self::wake_entry(entry);
+        }
+    }
+
+    /// Whether `room_id` is a direct invite we recently rejected for failing the
+    /// known-contact gate, so the poll can skip re-scanning it until the memo
+    /// lapses (see [`REJECTED_INVITE_TTL`]).
+    pub(crate) fn is_recently_rejected(&self, account_id: Uuid, room_id: &RoomId) -> bool {
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        guard
+            .get_mut(&account_id)
+            .is_some_and(|entry| entry.rejected.contains(&room_id.to_owned()))
+    }
+
+    /// Memoize a direct invite as rejected by the known-contact gate.
+    pub(crate) fn mark_rejected(&self, account_id: Uuid, room_id: OwnedRoomId) {
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        guard
+            .entry(account_id)
+            .or_default()
+            .rejected
+            .insert(room_id, REJECTED_INVITE_TTL);
+    }
+
+    /// Keep a room subscribed after a real in-room request arrived but before the
+    /// SDK can resolve its sender/device into a live request object.
+    pub(crate) fn add_pending_request(&self, account_id: Uuid, room_id: OwnedRoomId) {
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        let entry = guard.entry(account_id).or_default();
+        if entry.pending_requests.insert(room_id, REQUEST_TTL) {
+            Self::wake_entry(entry);
+        }
+    }
+
+    /// Wake the account's loop to recompute and re-subscribe (e.g. a flow we just
+    /// started added an active-flow room the loop derives from the registry).
+    pub(crate) fn wake(&self, account_id: Uuid) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .expect("verification rooms poisoned")
+            .get_mut(&account_id)
+        {
+            Self::wake_entry(entry);
+        }
+    }
+
+    /// Drop expired rooms and return the account's current request-room hold set.
+    /// Called by the loop just before it computes the subscription union.
+    pub(crate) fn live_candidates(&self, account_id: Uuid) -> Vec<OwnedRoomId> {
+        let mut guard = self.inner.lock().expect("verification rooms poisoned");
+        let Some(entry) = guard.get_mut(&account_id) else {
+            return Vec::new();
+        };
+        let mut rooms = entry.candidates.live();
+        rooms.extend(entry.pending_requests.live());
+        rooms
+    }
+
+    /// Remove `room_id` from the candidate set. Called once the room has produced a
+    /// real verification request: it's now an active-flow room kept subscribed via
+    /// the registry ([`active_flow_rooms`]), so it no longer needs the TTL'd
+    /// candidate slot. Only touches this in-memory set — the "promotion" to an
+    /// active-flow room is implicit in the registry, not written here. Idempotent.
+    pub(crate) fn clear_candidate(&self, account_id: Uuid, room_id: &RoomId) {
+        if let Some(entry) = self
+            .inner
+            .lock()
+            .expect("verification rooms poisoned")
+            .get_mut(&account_id)
+        {
+            entry.candidates.remove(&room_id.to_owned());
+            entry.pending_requests.remove(&room_id.to_owned());
+        }
+    }
+}
+
+/// How long a handled room-event id is remembered for dedup. Bound to the Matrix
+/// request lifetime, not the short candidate-invite window: a room-based
+/// self-verification request can be re-delivered while the SAS flow is still
+/// valid, and minting a fresh to-device request for that duplicate would produce
+/// competing prompts.
+const HANDLED_EVENT_TTL: Duration = REQUEST_TTL;
+
+/// Bounded dedup memory for incoming room verification events (ADR 0040). A room
+/// event can be re-delivered (reconnect, backfill), and the outgoing flow id of a
+/// self-verification counter-request differs from the event id, so the registry's
+/// flow-id dedup alone isn't enough to suppress a second delivery.
+///
+/// For the resolved cross-user path the id is recorded only *after* the event is
+/// fully handled ([`mark`]); the early [`seen`] check is a non-committing peek.
+/// That ordering is deliberate: a cross-user request's first delivery routinely
+/// races ahead of the peer's device keys, so the handler bails and relies on
+/// sliding-sync re-delivering the same event — committing the dedup mark on that
+/// miss would suppress the only recovery path and strand the flow.
+///
+/// The room-based *self*-verification fallback can't use that ordering: it mints a
+/// fresh to-device request (new flow id) per delivery, so two deliveries racing
+/// before either records the id would mint two competing requests. That path
+/// instead atomically claims the id up front with [`mark_if_new`] and rolls the
+/// claim back with [`forget`] if minting fails, so a real failure still retries.
+///
+/// [`mark`]: HandledRoomEvents::mark
+/// [`seen`]: HandledRoomEvents::seen
+/// [`mark_if_new`]: HandledRoomEvents::mark_if_new
+/// [`forget`]: HandledRoomEvents::forget
+#[derive(Clone, Default)]
+pub(crate) struct HandledRoomEvents {
+    inner: Arc<Mutex<TtlSet<String>>>,
+}
+
+impl HandledRoomEvents {
+    /// True if `event_id` was already handled within the TTL (a re-delivery the
+    /// caller should drop). Prunes expired entries as a side effect; does **not**
+    /// record the id — call [`mark`](Self::mark) once the event is fully handled.
+    pub(crate) fn seen(&self, event_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("handled_room_events poisoned")
+            .contains(&event_id.to_owned())
+    }
+
+    /// Record `event_id` as handled, so a later re-delivery is dropped by
+    /// [`seen`](Self::seen) until the TTL lapses.
+    pub(crate) fn mark(&self, event_id: String) {
+        self.inner
+            .lock()
+            .expect("handled_room_events poisoned")
+            .insert(event_id, HANDLED_EVENT_TTL);
+    }
+
+    /// Atomically claim `event_id`: record it and return `true` only if it was not
+    /// already handled. A racing re-delivery gets `false` and bails, so the caller
+    /// (the self-verification fallback) mints at most one to-device request per
+    /// event. Pair a `false`-on-failure path with [`forget`](Self::forget).
+    pub(crate) fn mark_if_new(&self, event_id: String) -> bool {
+        self.inner
+            .lock()
+            .expect("handled_room_events poisoned")
+            .insert(event_id, HANDLED_EVENT_TTL)
+    }
+
+    /// Release a previously [`mark_if_new`](Self::mark_if_new)-claimed id so a
+    /// re-delivery is processed again — used when handling bailed after the claim
+    /// (the mint failed) and we want the retry to land.
+    pub(crate) fn forget(&self, event_id: &str) {
+        self.inner
+            .lock()
+            .expect("handled_room_events poisoned")
+            .remove(&event_id.to_owned());
+    }
+}
+
+/// The rooms of every non-terminal flow of `account_id` that runs over a room
+/// (cross-user, ADR 0040). The sliding-sync loop subscribes these so a flow's
+/// ready/accept/mac events keep arriving; a terminal flow drops out on the next
+/// recompute, releasing its subscription.
+pub(crate) fn active_flow_rooms(registry: &FlowRegistry, account_id: Uuid) -> Vec<OwnedRoomId> {
+    registry
+        .lock()
+        .expect("flow registry poisoned")
+        .iter()
+        .filter(|((aid, _), entry)| *aid == account_id && entry.terminal.is_none())
+        .filter_map(|(_, entry)| entry.room_id.clone())
+        .collect()
 }
 
 /// How often the background reaper sweeps expired terminal flows, so the grace
@@ -214,6 +589,7 @@ fn emoji_pairs(sas: &SasVerification) -> Option<Vec<(String, String)>> {
 /// terminal outcome.
 fn snapshot(entry: &FlowEntry) -> FlowState {
     let flow_id = entry.request.flow_id().to_owned();
+    let target_user_id = entry.target_user_id.clone();
     let target_device_id = entry.target_device_id.clone();
 
     if let Some(outcome) = &entry.terminal {
@@ -223,6 +599,7 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
         };
         return FlowState {
             flow_id,
+            target_user_id,
             target_device_id,
             stage,
             emoji: None,
@@ -243,6 +620,7 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
         };
         FlowState {
             flow_id,
+            target_user_id,
             target_device_id,
             stage,
             emoji: emoji_pairs(sas),
@@ -260,6 +638,7 @@ fn snapshot(entry: &FlowEntry) -> FlowState {
         };
         FlowState {
             flow_id,
+            target_user_id,
             target_device_id,
             stage,
             emoji: None,
@@ -276,7 +655,8 @@ fn publish(
     live_tx: &broadcast::Sender<LiveFrame>,
     account_id: Uuid,
     flow_id: &str,
-    target_device_id: &str,
+    target_user_id: &str,
+    target_device_id: Option<&str>,
     kind: VerificationFrameKind,
     emoji: Option<Vec<(String, String)>>,
     decimals: Option<(u16, u16, u16)>,
@@ -289,7 +669,8 @@ fn publish(
         account_id,
         flow_id: flow_id.to_owned(),
         kind,
-        target_device_id: target_device_id.to_owned(),
+        target_user_id: target_user_id.to_owned(),
+        target_device_id: target_device_id.map(ToOwned::to_owned),
         emoji,
         decimals,
         outcome,
@@ -307,7 +688,7 @@ fn cancelled_err(reason: Option<&str>) -> VerifyError {
 
 /// Mark a flow terminal in the registry (so a reconnecting client reads the
 /// outcome within the grace window) and stamp the eviction clock.
-fn mark_terminal(registry: &FlowRegistry, key: &(Uuid, String), outcome: TerminalOutcome) {
+fn mark_terminal(registry: &FlowRegistry, key: &(Uuid, String), outcome: TerminalOutcome) -> bool {
     if let Some(entry) = registry
         .lock()
         .expect("flow registry poisoned")
@@ -315,6 +696,9 @@ fn mark_terminal(registry: &FlowRegistry, key: &(Uuid, String), outcome: Termina
     {
         entry.terminal = Some(outcome);
         entry.terminal_at = Some(Instant::now());
+        entry.room_id.is_some()
+    } else {
+        false
     }
 }
 
@@ -329,6 +713,13 @@ pub(crate) struct VerificationListenerCtx {
     /// The account's cancellation token: drivers spawned for incoming requests run
     /// under a child of it, so they end when the account stops.
     pub(crate) cancel: CancellationToken,
+    /// Rooms the sliding-sync loop should keep subscribed for verification (ADR
+    /// 0040). The room handler promotes the request's room out of the candidate
+    /// set and wakes the loop so it stays subscribed as an active-flow room.
+    pub(crate) rooms: VerificationRooms,
+    /// Dedup memory for incoming room verification events (see
+    /// [`HandledRoomEvents`]).
+    pub(crate) handled_room_events: HandledRoomEvents,
 }
 
 /// Event handler for peer-initiated `m.key.verification.request` to-device events.
@@ -364,6 +755,9 @@ pub(crate) async fn on_incoming_request(
         return;
     }
 
+    // Self-verification only on the to-device path (cross-user is room-based, ADR
+    // 0040), so the user being verified is our own user — the request sender.
+    let target_user_id = ev.sender.to_string();
     let target_device_id = ev.content.from_device.to_string();
     let key = (ctx.account_id, flow_id);
     let driver_cancel = ctx.cancel.child_token();
@@ -380,7 +774,9 @@ pub(crate) async fn on_incoming_request(
             FlowEntry {
                 request: request.clone(),
                 sas: None,
-                target_device_id: target_device_id.clone(),
+                target_user_id: target_user_id.clone(),
+                target_device_id: Some(target_device_id.clone()),
+                room_id: None,
                 terminal: None,
                 terminal_at: None,
                 driver_cancel: driver_cancel.clone(),
@@ -390,34 +786,202 @@ pub(crate) async fn on_incoming_request(
 
     ctx.tracker.spawn(drive_request(
         request,
-        ctx.account_id,
-        target_device_id,
-        ctx.registry.clone(),
-        ctx.live_tx.clone(),
-        driver_cancel,
+        FlowDriverCtx {
+            account_id: ctx.account_id,
+            target_user_id,
+            target_device_id: Some(target_device_id),
+            registry: ctx.registry.clone(),
+            live_tx: ctx.live_tx.clone(),
+            rooms: ctx.rooms.clone(),
+            cancel: driver_cancel,
+        },
     ));
+}
+
+/// Event handler for peer-initiated in-room `m.key.verification.request` messages.
+/// Element and other modern clients send a verification request as an
+/// `m.room.message` (msgtype `m.key.verification.request`) in a DM rather than as a
+/// to-device event. This is the transport for **cross-user** verification (ADR
+/// 0040); it also handles room-based **self**-verification for clients that use it.
+///
+/// Two cases need different handling:
+///
+/// * **Cross-user** (sender ≠ our user): the SDK stores the request normally and
+///   `get_verification_request()` returns it; we accept it through [`drive_request`].
+/// * **Self-verification by room** (sender == our user, other device): the SDK's
+///   `event_sent_from_us` guard treats any room event from our own user as
+///   sent-by-us and drops it, so `get_verification_request()` returns `None`. We
+///   fall back to initiating a to-device request to the sending device, which that
+///   device shows as an incoming prompt.
+pub(crate) async fn on_incoming_room_request(
+    ev: OriginalSyncMessageLikeEvent<RoomMessageEventContent>,
+    room: Room,
+    client: Client,
+    ctx: Ctx<VerificationListenerCtx>,
+) {
+    let MessageType::VerificationRequest(content) = &ev.content.msgtype else {
+        return;
+    };
+    let event_id = ev.event_id.to_string();
+    let room_id = room.room_id().to_owned();
+    let from_device = content.from_device.to_string();
+
+    // Ignore our own request echoed back into the room timeline.
+    if Some(content.from_device.as_ref()) == client.device_id() {
+        return;
+    }
+
+    // Dedup re-delivered events (reconnect / backfill): the outgoing flow id of the
+    // self-verification counter-request differs from this event id, so the
+    // registry's flow-id dedup alone wouldn't catch a second delivery. This is a
+    // non-committing peek — the id is recorded only after the event is fully
+    // handled (below), so a transient first-delivery miss stays eligible for the
+    // re-delivery that recovers it.
+    if ctx.handled_room_events.seen(&event_id) {
+        return;
+    }
+
+    let request = if let Some(req) = client
+        .encryption()
+        .get_verification_request(&ev.sender, &ev.event_id)
+        .await
+    {
+        req
+    } else if Some(ev.sender.as_ref()) == client.user_id() {
+        // Self-verification by room: the SDK dropped the request, so we mint a fresh
+        // to-device request back to the sending device. Each mint gets a *new* flow
+        // id, so the registry's flow-id dedup can't suppress a re-delivery — two
+        // deliveries racing here would mint two competing requests (two SAS prompts
+        // on the peer). Claim the event id atomically up front instead, so at most
+        // one request is minted; a racing re-delivery loses the claim and bails.
+        if !ctx.handled_room_events.mark_if_new(event_id.clone()) {
+            return;
+        }
+        let device = match client
+            .encryption()
+            .get_device(&ev.sender, &content.from_device)
+            .await
+        {
+            Ok(Some(device)) => device,
+            // No mint happened, so release the claim — a re-delivery (e.g. once the
+            // device's keys have loaded) should be allowed to retry.
+            Ok(None) => {
+                ctx.handled_room_events.forget(&event_id);
+                return;
+            }
+            Err(err) => {
+                ctx.handled_room_events.forget(&event_id);
+                tracing::warn!(
+                    account_id = %ctx.account_id, %room_id, %event_id, %from_device, error = %err,
+                    "failed to fetch device for self-verification room request"
+                );
+                return;
+            }
+        };
+        match device.request_verification_with_methods(sas_only()).await {
+            Ok(req) => req,
+            Err(err) => {
+                ctx.handled_room_events.forget(&event_id);
+                tracing::warn!(
+                    account_id = %ctx.account_id, %room_id, %event_id, %from_device, error = %err,
+                    "failed to initiate to-device response to self-verification room request"
+                );
+                return;
+            }
+        }
+    } else {
+        // SDK has no request and it isn't from our own user — the expected
+        // first-delivery race for a cross-user request (the peer's device keys
+        // aren't loaded yet). Return *without* recording the event id, but hold
+        // the room subscribed for the request lifetime so redelivery is not
+        // bounded by the short candidate-invite TTL.
+        ctx.rooms
+            .add_pending_request(ctx.account_id, room_id.clone());
+        tracing::debug!(
+            account_id = %ctx.account_id, %room_id, %event_id, sender = %ev.sender,
+            "no SDK verification request for room flow yet; awaiting re-delivery"
+        );
+        return;
+    };
+
+    let target_user_id = request.other_user_id().to_string();
+    let request_room_id = request.room_id().map(ToOwned::to_owned);
+    let target_device_id = request.is_self_verification().then(|| from_device.clone());
+    let registry_key = (ctx.account_id, request.flow_id().to_owned());
+    let driver_cancel = ctx.cancel.child_token();
+
+    {
+        let mut reg = ctx.registry.lock().expect("flow registry poisoned");
+        if reg.contains_key(&registry_key) {
+            return;
+        }
+        reg.insert(
+            registry_key,
+            FlowEntry {
+                request: request.clone(),
+                sas: None,
+                target_user_id: target_user_id.clone(),
+                target_device_id: target_device_id.clone(),
+                room_id: request_room_id,
+                terminal: None,
+                terminal_at: None,
+                driver_cancel: driver_cancel.clone(),
+            },
+        );
+    }
+
+    // The request resolved and a flow is now registered, so commit the side effects
+    // we deliberately deferred past the transient-miss window:
+    //   * record the event id, so a re-delivery is deduped (the flow exists now);
+    //   * promote the room out of the TTL'd candidate set — it's an active-flow
+    //     room kept subscribed via the registry. Done *after* registration so a
+    //     recompute racing in between still sees the room in `active_flow_rooms`
+    //     and never transiently unsubscribes it.
+    ctx.handled_room_events.mark(event_id);
+    ctx.rooms.clear_candidate(ctx.account_id, &room_id);
+
+    // Keep this account's active-flow room subscribed (the loop derives it from the
+    // registry on the next recompute).
+    ctx.rooms.wake(ctx.account_id);
+
+    ctx.tracker.spawn(drive_request(
+        request,
+        FlowDriverCtx {
+            account_id: ctx.account_id,
+            target_user_id,
+            target_device_id,
+            registry: ctx.registry.clone(),
+            live_tx: ctx.live_tx.clone(),
+            rooms: ctx.rooms.clone(),
+            cancel: driver_cancel,
+        },
+    ));
+}
+
+struct FlowDriverCtx {
+    account_id: Uuid,
+    target_user_id: String,
+    target_device_id: Option<String>,
+    registry: FlowRegistry,
+    live_tx: broadcast::Sender<LiveFrame>,
+    rooms: VerificationRooms,
+    cancel: CancellationToken,
 }
 
 /// Drive one verification request from its current state through to a
 /// `SasVerification`, then hand off to [`drive_sas`]. Publishes the
 /// `verification.requested` frame, accepts a peer-initiated request, and starts
 /// SAS once ready for a request we initiated.
-async fn drive_request(
-    request: VerificationRequest,
-    account_id: Uuid,
-    target_device_id: String,
-    registry: FlowRegistry,
-    live_tx: broadcast::Sender<LiveFrame>,
-    cancel: CancellationToken,
-) {
+async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     let flow_id = request.flow_id().to_owned();
-    let key = (account_id, flow_id.clone());
+    let key = (ctx.account_id, flow_id.clone());
 
     publish(
-        &live_tx,
-        account_id,
+        &ctx.live_tx,
+        ctx.account_id,
         &flow_id,
-        &target_device_id,
+        &ctx.target_user_id,
+        ctx.target_device_id.as_deref(),
         VerificationFrameKind::Requested,
         None,
         None,
@@ -430,7 +994,7 @@ async fn drive_request(
     // a method this driver doesn't implement.
     if !request.we_started() {
         if let Err(err) = request.accept_with_methods(sas_only()).await {
-            tracing::warn!(%account_id, %flow_id, error = %err, "failed to accept verification request");
+            tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept verification request");
         }
     }
 
@@ -439,18 +1003,18 @@ async fn drive_request(
 
     let sas = loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
+            _ = ctx.cancel.cancelled() => {
                 // Torn down mid-flight (typically the account logging out). Best-
                 // effort cancel upstream, then drop the entry — it has no terminal
                 // outcome to retain, and leaving it would leak (the TTL sweep only
                 // reclaims entries with `terminal_at` set).
                 let _ = request.cancel().await;
-                remove_flow(&registry, &key);
+                remove_flow(&ctx.registry, &key);
                 return;
             }
             next = changes.next() => match next {
                 None => {
-                    remove_flow(&registry, &key);
+                    remove_flow(&ctx.registry, &key);
                     return;
                 }
                 Some(state) => match state {
@@ -464,7 +1028,7 @@ async fn drive_request(
                                 Ok(Some(sas)) => break sas,
                                 Ok(None) => {}
                                 Err(err) => tracing::warn!(
-                                    %account_id, %flow_id, error = %err,
+                                    account_id = %ctx.account_id, %flow_id, error = %err,
                                     "failed to start SAS"
                                 ),
                             }
@@ -480,21 +1044,33 @@ async fn drive_request(
                         }
                     }
                     VerificationRequestState::Done => {
-                        mark_terminal(&registry, &key, TerminalOutcome::Done);
+                        if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
+                            ctx.rooms.wake(ctx.account_id);
+                        }
                         publish(
-                            &live_tx, account_id, &flow_id, &target_device_id,
+                            &ctx.live_tx,
+                            ctx.account_id,
+                            &flow_id,
+                            &ctx.target_user_id,
+                            ctx.target_device_id.as_deref(),
                             VerificationFrameKind::Done, None, None, None,
                         );
                         return;
                     }
                     VerificationRequestState::Cancelled(info) => {
                         let reason = info.reason().to_owned();
-                        mark_terminal(
-                            &registry, &key,
+                        if mark_terminal(
+                            &ctx.registry, &key,
                             TerminalOutcome::Cancelled(Some(reason.clone())),
-                        );
+                        ) {
+                            ctx.rooms.wake(ctx.account_id);
+                        }
                         publish(
-                            &live_tx, account_id, &flow_id, &target_device_id,
+                            &ctx.live_tx,
+                            ctx.account_id,
+                            &flow_id,
+                            &ctx.target_user_id,
+                            ctx.target_device_id.as_deref(),
                             VerificationFrameKind::Cancelled, None, None, Some(reason),
                         );
                         return;
@@ -506,7 +1082,8 @@ async fn drive_request(
 
     // Stash the SAS object so the read verbs and `confirm`/`cancel` can reach it,
     // then accept it (a no-op send for the side that started SAS).
-    if let Some(entry) = registry
+    if let Some(entry) = ctx
+        .registry
         .lock()
         .expect("flow registry poisoned")
         .get_mut(&key)
@@ -514,48 +1091,31 @@ async fn drive_request(
         entry.sas = Some(sas.clone());
     }
     if let Err(err) = sas.accept().await {
-        tracing::warn!(%account_id, %flow_id, error = %err, "failed to accept SAS");
+        tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept SAS");
     }
 
-    drive_sas(
-        sas,
-        account_id,
-        flow_id,
-        target_device_id,
-        registry,
-        live_tx,
-        cancel,
-    )
-    .await;
+    drive_sas(sas, flow_id, ctx).await;
 }
 
 /// Drive a SAS verification to a terminal state, publishing the `sas`, `done`,
 /// and `cancelled` frames and keeping the registry's terminal marker current.
-async fn drive_sas(
-    sas: SasVerification,
-    account_id: Uuid,
-    flow_id: String,
-    target_device_id: String,
-    registry: FlowRegistry,
-    live_tx: broadcast::Sender<LiveFrame>,
-    cancel: CancellationToken,
-) {
-    let key = (account_id, flow_id.clone());
+async fn drive_sas(sas: SasVerification, flow_id: String, ctx: FlowDriverCtx) {
+    let key = (ctx.account_id, flow_id.clone());
     let changes = sas.changes();
     pin_mut!(changes);
 
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
+            _ = ctx.cancel.cancelled() => {
                 // See drive_request: drop the entry rather than leak a non-terminal
                 // one the TTL sweep would never reclaim.
                 let _ = sas.cancel().await;
-                remove_flow(&registry, &key);
+                remove_flow(&ctx.registry, &key);
                 return;
             }
             next = changes.next() => match next {
                 None => {
-                    remove_flow(&registry, &key);
+                    remove_flow(&ctx.registry, &key);
                     return;
                 }
                 Some(state) => match state {
@@ -565,27 +1125,43 @@ async fn drive_sas(
                     | SasState::Confirmed => {}
                     SasState::KeysExchanged { .. } => {
                         publish(
-                            &live_tx, account_id, &flow_id, &target_device_id,
+                            &ctx.live_tx,
+                            ctx.account_id,
+                            &flow_id,
+                            &ctx.target_user_id,
+                            ctx.target_device_id.as_deref(),
                             VerificationFrameKind::Sas,
                             emoji_pairs(&sas), sas.decimals(), None,
                         );
                     }
                     SasState::Done { .. } => {
-                        mark_terminal(&registry, &key, TerminalOutcome::Done);
+                        if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
+                            ctx.rooms.wake(ctx.account_id);
+                        }
                         publish(
-                            &live_tx, account_id, &flow_id, &target_device_id,
+                            &ctx.live_tx,
+                            ctx.account_id,
+                            &flow_id,
+                            &ctx.target_user_id,
+                            ctx.target_device_id.as_deref(),
                             VerificationFrameKind::Done, None, None, None,
                         );
                         return;
                     }
                     SasState::Cancelled(info) => {
                         let reason = info.reason().to_owned();
-                        mark_terminal(
-                            &registry, &key,
+                        if mark_terminal(
+                            &ctx.registry, &key,
                             TerminalOutcome::Cancelled(Some(reason.clone())),
-                        );
+                        ) {
+                            ctx.rooms.wake(ctx.account_id);
+                        }
                         publish(
-                            &live_tx, account_id, &flow_id, &target_device_id,
+                            &ctx.live_tx,
+                            ctx.account_id,
+                            &flow_id,
+                            &ctx.target_user_id,
+                            ctx.target_device_id.as_deref(),
                             VerificationFrameKind::Cancelled, None, None, Some(reason),
                         );
                         return;
@@ -613,9 +1189,14 @@ pub struct VerificationEngine {
     /// the login activation window (row `active` but the supervised task not yet
     /// registered) is closed — login holds the lock across both.
     locks: IdentityLocks,
+    /// Per-account verification room subscriptions, shared with each account's
+    /// sync loop. A cross-user `start` adds its DM here and wakes the loop so the
+    /// flow's room events are delivered (ADR 0040).
+    rooms: VerificationRooms,
 }
 
 impl VerificationEngine {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Store,
         manager: ClientManager,
@@ -624,6 +1205,7 @@ impl VerificationEngine {
         tracker: TaskTracker,
         cancel: CancellationToken,
         locks: IdentityLocks,
+        rooms: VerificationRooms,
     ) -> Self {
         Self {
             store,
@@ -633,6 +1215,7 @@ impl VerificationEngine {
             tracker,
             cancel,
             locks,
+            rooms,
         }
     }
 
@@ -696,9 +1279,15 @@ impl VerificationEngine {
         Ok((client, user_id))
     }
 
-    /// Start a SAS verification of `account_id` against its trusted `device_id`,
-    /// returning the new flow's id.
-    pub async fn start(&self, account_id: Uuid, device_id: &str) -> Result<String, VerifyError> {
+    /// Start a SAS verification for `account_id`, returning the new flow's id. A
+    /// `device_id` target is self-verification of the account's own device; a
+    /// `target_user` target is cross-user verification (ADR 0040).
+    pub async fn start(
+        &self,
+        account_id: Uuid,
+        target_user: Option<&str>,
+        device_id: Option<&str>,
+    ) -> Result<String, VerifyError> {
         sweep_expired(&self.registry);
 
         // Read once (unlocked) to resolve the identity the lock is keyed by — the
@@ -729,19 +1318,53 @@ impl VerificationEngine {
             .ok_or(VerifyError::NotFound(account_id))?;
         let (client, user_id) = self.active_client(&account).await?;
 
-        let device_id_owned: OwnedDeviceId = device_id.into();
-        let device = client
-            .encryption()
-            .get_device(&user_id, &device_id_owned)
-            .await
-            .map_err(|e| VerifyError::Upstream(e.to_string()))?
-            .ok_or_else(|| VerifyError::UnknownDevice(device_id.to_owned()))?;
-
-        // SAS only — never the SDK default method set (which advertises QR).
-        let request = device
-            .request_verification_with_methods(sas_only())
-            .await
-            .map_err(|e| VerifyError::Upstream(e.to_string()))?;
+        // Build the SDK request and the flow's metadata from whichever target was
+        // named. SAS only — never the SDK default method set (which advertises QR).
+        let (request, target_user_id, target_device_id, room_id) = match (device_id, target_user) {
+            (Some(_), Some(_)) => return Err(VerifyError::AmbiguousTarget),
+            // Self-verification of one of our own devices (to-device transport).
+            (Some(device_id), None) => {
+                let device_id_owned: OwnedDeviceId = device_id.into();
+                let device = client
+                    .encryption()
+                    .get_device(&user_id, &device_id_owned)
+                    .await
+                    .map_err(|e| VerifyError::Upstream(e.to_string()))?
+                    .ok_or_else(|| VerifyError::UnknownDevice(device_id.to_owned()))?;
+                let request = device
+                    .request_verification_with_methods(sas_only())
+                    .await
+                    .map_err(|e| VerifyError::Upstream(e.to_string()))?;
+                (
+                    request,
+                    user_id.to_string(),
+                    Some(device_id.to_owned()),
+                    None,
+                )
+            }
+            // Cross-user verification of another user's identity over a DM (ADR
+            // 0040). The SDK finds or creates the DM and sends the room event; the
+            // returned request's `room_id` is the DM the loop must subscribe so the
+            // peer's ready/accept/mac events are delivered.
+            (None, Some(target_user)) => {
+                let peer: OwnedUserId = target_user
+                    .parse()
+                    .map_err(|_| VerifyError::UnknownUser(target_user.to_owned()))?;
+                let identity = client
+                    .encryption()
+                    .get_user_identity(&peer)
+                    .await
+                    .map_err(|e| VerifyError::Upstream(e.to_string()))?
+                    .ok_or_else(|| VerifyError::UnknownUser(target_user.to_owned()))?;
+                let request = identity
+                    .request_verification_with_methods(sas_only())
+                    .await
+                    .map_err(|e| VerifyError::Upstream(e.to_string()))?;
+                let room_id = request.room_id().map(ToOwned::to_owned);
+                (request, peer.to_string(), None, room_id)
+            }
+            (None, None) => return Err(VerifyError::NoTarget),
+        };
         let flow_id = request.flow_id().to_owned();
 
         // The driver runs under a child of the engine token (so engine shutdown
@@ -749,6 +1372,7 @@ impl VerificationEngine {
         // so a sync-run teardown for this account stops it (see
         // [`cancel_account_flows`]) — it never outlives the SDK client it drives.
         let driver_cancel = self.cancel.child_token();
+        let is_room_flow = room_id.is_some();
         self.registry
             .lock()
             .expect("flow registry poisoned")
@@ -757,20 +1381,33 @@ impl VerificationEngine {
                 FlowEntry {
                     request: request.clone(),
                     sas: None,
-                    target_device_id: device_id.to_owned(),
+                    target_user_id: target_user_id.clone(),
+                    target_device_id: target_device_id.clone(),
+                    room_id,
                     terminal: None,
                     terminal_at: None,
                     driver_cancel: driver_cancel.clone(),
                 },
             );
 
+        // A cross-user flow runs over a DM the sliding-sync loop must subscribe so
+        // the peer's responses are delivered; wake it to pick up the new active-flow
+        // room (which it derives from the registry).
+        if is_room_flow {
+            self.rooms.wake(account_id);
+        }
+
         self.tracker.spawn(drive_request(
             request,
-            account_id,
-            device_id.to_owned(),
-            self.registry.clone(),
-            self.live_tx.clone(),
-            driver_cancel,
+            FlowDriverCtx {
+                account_id,
+                target_user_id,
+                target_device_id,
+                registry: self.registry.clone(),
+                live_tx: self.live_tx.clone(),
+                rooms: self.rooms.clone(),
+                cancel: driver_cancel,
+            },
         ));
 
         Ok(flow_id)
@@ -943,6 +1580,122 @@ mod tests {
         }
     }
 
+    /// The dedup memory must record an id only on an explicit `mark`, never on a
+    /// bare `seen` peek — otherwise a cross-user request's transient first-delivery
+    /// miss would be committed as "handled" and its recovering re-delivery dropped
+    /// (ADR 0040). Pure in-memory; no DB.
+    #[test]
+    fn handled_room_events_commit_only_on_mark() {
+        let handled = HandledRoomEvents::default();
+
+        // Peeking the same un-marked id repeatedly never commits it, so a
+        // re-delivered event stays eligible to be processed.
+        assert!(!handled.seen("$evt"));
+        assert!(!handled.seen("$evt"));
+
+        // After the event is fully handled and marked, a re-delivery is deduped.
+        handled.mark("$evt".to_owned());
+        assert!(handled.seen("$evt"));
+
+        // Distinct ids are tracked independently.
+        assert!(!handled.seen("$other"));
+    }
+
+    /// `mark_if_new` is the atomic claim the self-verification fallback relies on to
+    /// mint at most one counter-request: it succeeds once, then a racing
+    /// re-delivery loses the claim — and `forget` releases it so a real failure
+    /// retries (ADR 0040). Pure in-memory; no DB.
+    #[test]
+    fn handled_room_events_claim_and_release() {
+        let handled = HandledRoomEvents::default();
+
+        // First claim wins; a second (the racing re-delivery) is rejected.
+        assert!(handled.mark_if_new("$evt".to_owned()));
+        assert!(!handled.mark_if_new("$evt".to_owned()));
+
+        // Releasing the claim (mint failed) makes the id claimable again.
+        handled.forget("$evt");
+        assert!(handled.mark_if_new("$evt".to_owned()));
+    }
+
+    /// `TtlSet`: fresh insert vs. refresh is distinguished (the signal `add_candidate`
+    /// uses to wake), removal is honored, and a zero-TTL entry is pruned on the next
+    /// read (the expiry path, without sleeping).
+    #[test]
+    fn ttl_set_insert_refresh_remove_expire() {
+        let mut set: TtlSet<String> = TtlSet::default();
+
+        // First insert is fresh; re-inserting a live key is a refresh, not fresh.
+        assert!(set.insert("a".to_owned(), Duration::from_secs(60)));
+        assert!(!set.insert("a".to_owned(), Duration::from_secs(60)));
+        assert!(set.contains(&"a".to_owned()));
+
+        // Removal is immediate.
+        set.remove(&"a".to_owned());
+        assert!(!set.contains(&"a".to_owned()));
+
+        // A zero-TTL entry is already expired, so the next read prunes it.
+        assert!(set.insert("b".to_owned(), Duration::ZERO));
+        assert!(!set.contains(&"b".to_owned()));
+        assert!(set.live().is_empty());
+    }
+
+    /// A supervised restart must not strand a joined-but-not-yet-requested candidate
+    /// DM: `unregister` drops only the waker, leaving live candidates for the next
+    /// run to replay (ADR 0040). Rejected-invite memoization is also exercised. Pure
+    /// in-memory; no DB.
+    #[test]
+    fn verification_rooms_unregister_keeps_candidates_and_memoizes_rejects() {
+        let account_id = Uuid::new_v4();
+        let room: OwnedRoomId = "!cand:localhost".try_into().unwrap();
+        let rooms = VerificationRooms::new();
+
+        // Simulate a run, a joined candidate, then a teardown (supervised restart).
+        let (run_id, _rx) = rooms.register(account_id);
+        rooms.add_candidate(account_id, room.clone());
+        rooms.unregister(account_id, run_id);
+
+        // The candidate survives the teardown so the new run re-subscribes it.
+        assert_eq!(rooms.live_candidates(account_id), vec![room.clone()]);
+
+        // A rejected invite is remembered (skips the per-poll membership rescan).
+        let other: OwnedRoomId = "!noshare:localhost".try_into().unwrap();
+        assert!(!rooms.is_recently_rejected(account_id, &other));
+        rooms.mark_rejected(account_id, other.clone());
+        assert!(rooms.is_recently_rejected(account_id, &other));
+    }
+
+    #[test]
+    fn verification_rooms_unregister_is_run_scoped() {
+        let account_id = Uuid::new_v4();
+        let rooms = VerificationRooms::new();
+
+        let (old_run, _old_rx) = rooms.register(account_id);
+        let (_new_run, mut new_rx) = rooms.register(account_id);
+        while new_rx.try_recv().is_ok() {}
+
+        rooms.unregister(account_id, old_run);
+        rooms.wake(account_id);
+
+        assert!(
+            new_rx.try_recv().is_ok(),
+            "old run unregister must not clear the new run's waker"
+        );
+    }
+
+    #[test]
+    fn verification_rooms_pending_request_outlives_candidate_slot() {
+        let account_id = Uuid::new_v4();
+        let room: OwnedRoomId = "!pending:localhost".try_into().unwrap();
+        let rooms = VerificationRooms::new();
+
+        rooms.add_pending_request(account_id, room.clone());
+        assert_eq!(rooms.live_candidates(account_id), vec![room.clone()]);
+
+        rooms.clear_candidate(account_id, &room);
+        assert!(rooms.live_candidates(account_id).is_empty());
+    }
+
     /// Build a verification engine over the test DB. The branches exercised here
     /// all return before any homeserver/SDK contact (account-state gating and
     /// registry lookups), so the manager/data_dir are never used.
@@ -968,6 +1721,7 @@ mod tests {
             TaskTracker::new(),
             CancellationToken::new(),
             Arc::new(Mutex::new(HashMap::new())),
+            VerificationRooms::new(),
         )
     }
 
@@ -983,7 +1737,10 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn start_on_unknown_account_is_not_found() {
         let eng = engine().await;
-        let err = eng.start(Uuid::new_v4(), "DEVICEID").await.unwrap_err();
+        let err = eng
+            .start(Uuid::new_v4(), None, Some("DEVICEID"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, VerifyError::NotFound(_)), "got {err:?}");
     }
 
@@ -1002,7 +1759,10 @@ mod tests {
             .await
             .unwrap();
 
-        let err = eng.start(acct.account_id, "DEVICEID").await.unwrap_err();
+        let err = eng
+            .start(acct.account_id, None, Some("DEVICEID"))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, VerifyError::NotActive(id) if id == acct.account_id),
             "got {err:?}"
@@ -1025,7 +1785,10 @@ mod tests {
             .await
             .unwrap();
 
-        let err = eng.start(acct.account_id, "DEVICEID").await.unwrap_err();
+        let err = eng
+            .start(acct.account_id, None, Some("DEVICEID"))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, VerifyError::BeingDeleted(id) if id == acct.account_id),
             "got {err:?}"

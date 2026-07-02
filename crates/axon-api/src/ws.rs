@@ -7,7 +7,8 @@
 //! `type`/`account_id`/`payload` shape used elsewhere on the wire. The `type`
 //! tag discriminates the kind: `timeline.event` carries the read API's
 //! [`EventDto`]; `verification.{requested,sas,done,cancelled}` carry a
-//! [`VerificationFramePayload`] (SAS emoji/decimals, target device, outcome).
+//! [`VerificationFramePayload`] (SAS emoji/decimals, optional target device,
+//! outcome).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -67,7 +68,8 @@ struct WsEnvelope<T> {
 #[derive(Debug, Serialize)]
 struct VerificationFramePayload {
     flow_id: String,
-    device_id: String,
+    user_id: String,
+    device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     emoji: Option<Vec<EmojiPair>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +120,7 @@ impl From<VerificationFrame> for VerificationFramePayload {
     fn from(frame: VerificationFrame) -> Self {
         Self {
             flow_id: frame.flow_id,
+            user_id: frame.target_user_id,
             device_id: frame.target_device_id,
             emoji: frame.emoji.map(|pairs| {
                 pairs
@@ -318,7 +321,8 @@ mod tests {
             account_id,
             flow_id: "$flow".to_owned(),
             kind: VerificationFrameKind::Sas,
-            target_device_id: "DEV".to_owned(),
+            target_user_id: "@u:hs".to_owned(),
+            target_device_id: Some("DEV".to_owned()),
             emoji: Some(vec![("🐶".to_owned(), "Dog".to_owned())]),
             decimals: Some((1, 2, 3)),
             outcome: None,
@@ -341,7 +345,8 @@ mod tests {
             account_id,
             flow_id: "$f".to_owned(),
             kind: VerificationFrameKind::Requested,
-            target_device_id: "DEV".to_owned(),
+            target_user_id: "@u:hs".to_owned(),
+            target_device_id: Some("DEV".to_owned()),
             emoji: None,
             decimals: None,
             outcome: None,
@@ -355,7 +360,8 @@ mod tests {
             account_id,
             flow_id: "$f".to_owned(),
             kind: VerificationFrameKind::Cancelled,
-            target_device_id: "DEV".to_owned(),
+            target_user_id: "@u:hs".to_owned(),
+            target_device_id: Some("DEV".to_owned()),
             emoji: None,
             decimals: None,
             outcome: Some("user cancelled".to_owned()),
@@ -367,7 +373,8 @@ mod tests {
             account_id,
             flow_id: "$f".to_owned(),
             kind: VerificationFrameKind::Done,
-            target_device_id: "DEV".to_owned(),
+            target_user_id: "@u:hs".to_owned(),
+            target_device_id: Some("DEV".to_owned()),
             emoji: None,
             decimals: None,
             outcome: None,

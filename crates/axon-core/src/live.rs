@@ -82,8 +82,13 @@ pub struct VerificationFrame {
     pub flow_id: String,
     /// Which stage this frame reports.
     pub kind: VerificationFrameKind,
-    /// The other device in the flow (the user's trusted device).
-    pub target_device_id: String,
+    /// The user whose identity/device is being verified. For self-verification
+    /// this is the account's own user id; for cross-user verification (ADR 0040)
+    /// it is the peer's user id.
+    pub target_user_id: String,
+    /// The other device in the flow for self-verification. Cross-user
+    /// verification targets an identity rather than one known device.
+    pub target_device_id: Option<String>,
     /// The SAS emoji as `(symbol, description)` pairs — present once keys are
     /// exchanged (a [`VerificationFrameKind::Sas`] frame).
     pub emoji: Option<Vec<(String, String)>>,

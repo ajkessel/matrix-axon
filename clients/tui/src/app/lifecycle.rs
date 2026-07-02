@@ -928,7 +928,9 @@ impl App {
                         self.open_incoming_verification(
                             account_id,
                             flow.flow_id.clone(),
-                            flow.device_id.clone(),
+                            flow.device_id
+                                .clone()
+                                .unwrap_or_else(|| "identity".to_owned()),
                         );
                         if let Some(active) = self.verification.as_mut() {
                             active.apply_flow(&flow);
