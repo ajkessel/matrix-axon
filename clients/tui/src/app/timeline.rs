@@ -97,18 +97,27 @@ impl App {
                     .verification
                     .as_ref()
                     .is_some_and(|flow| flow.matches(account_id, &payload.flow_id));
+                let pending_outgoing = self.verification.as_ref().is_some_and(|flow| {
+                    flow.is_pending_outgoing_target(
+                        account_id,
+                        &payload.user_id,
+                        payload.device_id.as_deref(),
+                    )
+                });
                 if tracked {
                     if let Some(flow) = self.verification.as_mut() {
                         flow.apply_frame(kind, &payload);
                     }
-                } else {
+                } else if pending_outgoing {
+                    // The server may echo `verification.requested` before the
+                    // start request returns its flow id. Treat it as our own
+                    // in-flight request, not as unsolicited incoming work.
+                } else if self.should_open_incoming_verification(account_id, &payload) {
                     self.open_incoming_verification(
                         account_id,
                         payload.flow_id.clone(),
-                        payload
-                            .device_id
-                            .clone()
-                            .unwrap_or_else(|| "identity".to_owned()),
+                        payload.user_id.clone(),
+                        payload.device_id.clone().unwrap_or_default(),
                     );
                 }
             }
@@ -119,19 +128,17 @@ impl App {
                 let applies = self.verification.as_ref().is_some_and(|flow| {
                     flow.account_id == account_id
                         && (flow.flow_id.as_deref() == Some(payload.flow_id.as_str())
-                            || (flow.flow_id.is_none()
-                                && payload
-                                    .device_id
-                                    .as_ref()
-                                    .is_some_and(|device_id| flow.device_id == *device_id)))
+                            || flow.is_pending_outgoing_device(
+                                account_id,
+                                payload.device_id.as_deref(),
+                            ))
                 });
                 if applies {
                     if let Some(flow) = self.verification.as_mut() {
                         flow.apply_frame(kind, &payload);
                     }
                     if kind == VerificationFrameKind::Done {
-                        self.status =
-                            Status::from("verification complete — device verified".to_owned());
+                        self.status = Status::from("verification complete".to_owned());
                         // The at-decrypt trust snapshots don't change live, but a
                         // refresh re-reads any rows re-decrypted post-verification.
                         return LiveFrameAction::RefreshRooms;

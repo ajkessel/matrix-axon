@@ -29,7 +29,8 @@ pub enum Command {
     Unreact,
     Reply,
     Thread,
-    /// Start an outgoing SAS verification against a pasted device ID (ADR 0028).
+    /// Start an outgoing SAS verification. The argument is either a device ID
+    /// (self-verification, ADR 0028) or a `@user:server` (cross-user, ADR 0040).
     Verify(Option<String>),
     /// Inspect the per-event verification bundle for an event ID (M7c).
     Bundle(String),
@@ -275,10 +276,10 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
     },
     // ── Verification ─────────────────────────────────────────────────────────
     HelpCommand {
-        label: "/verify <device_id>",
+        label: "/verify <device_id|@user:server>",
         insert_text: "/verify ",
         description:
-            "start emoji SAS verification of a device (incoming requests open automatically)",
+            "start emoji SAS verification of a device or another user (incoming requests open automatically)",
     },
     HelpCommand {
         label: "/bundle <event_id>",
@@ -416,11 +417,11 @@ pub fn parse(input: &str) -> Command {
         "thread" => Command::Thread,
         "verify" => {
             let mut tokens = arg.split_whitespace();
-            let device_id = tokens.next().map(str::to_owned);
+            let target = tokens.next().map(str::to_owned);
             if tokens.next().is_some() {
-                Command::Invalid("/verify takes at most one device id".to_owned())
+                Command::Invalid("/verify takes at most one device id or @user:server".to_owned())
             } else {
-                Command::Verify(device_id)
+                Command::Verify(target)
             }
         }
         "bundle" if !arg.is_empty() => Command::Bundle(arg.to_owned()),
@@ -730,6 +731,10 @@ mod tests {
         assert_eq!(
             parse("/verify ABCDEF"),
             Command::Verify(Some("ABCDEF".to_owned()))
+        );
+        assert_eq!(
+            parse("/verify @bob:example.org"),
+            Command::Verify(Some("@bob:example.org".to_owned()))
         );
         assert!(matches!(parse("/verify a b"), Command::Invalid(_)));
     }

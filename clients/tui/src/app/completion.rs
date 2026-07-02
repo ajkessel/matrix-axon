@@ -4,7 +4,8 @@ use crate::api::RoomDto;
 use crate::command::{SlashCommand, SLASH_COMMANDS};
 
 use super::{
-    cycle_index, emoji_matches, rooms::account_localpart, App, RoomTargetResolution, Status,
+    cycle_index, emoji_matches, rooms::account_localpart, App, RoomKey, RoomTargetResolution,
+    Status,
 };
 
 impl App {
@@ -30,6 +31,9 @@ impl App {
             return;
         }
         if self.complete_account_command_input(reverse) {
+            return;
+        }
+        if self.complete_verify_command_input(reverse) {
             return;
         }
         if self.complete_command_input() {
@@ -216,6 +220,80 @@ impl App {
             })
             .map(|a| a.user_id.clone())
             .collect()
+    }
+
+    pub(crate) fn complete_verify_command_input(&mut self, reverse: bool) -> bool {
+        let Some(target) = verify_target_prefix(&self.input.buffer) else {
+            return false;
+        };
+        // Only complete users (cross-user verification, ADR 0040); a device id for
+        // self-verification is pasted, not completed.
+        let query = self
+            .input
+            .verify_command_completion
+            .as_ref()
+            .map(|(query, _)| query.clone())
+            .unwrap_or_else(|| target.to_owned());
+        let candidates = self.verify_completion_candidates(&query);
+        if candidates.is_empty() {
+            self.input.verify_command_completion = None;
+            self.status = Status::Info(if query.trim().is_empty() {
+                "no known users in this room yet".to_owned()
+            } else {
+                format!("no user matches: {query}")
+            });
+            return true;
+        }
+        let selected = if let Some((_, current)) = self.input.verify_command_completion.as_ref() {
+            cycle_index(*current, candidates.len(), reverse)
+        } else if reverse {
+            candidates.len() - 1
+        } else {
+            0
+        };
+        let user_id = &candidates[selected];
+        self.input.buffer = format!("/verify {user_id}");
+        self.move_cursor_to_end();
+        self.input.verify_command_completion = Some((query, selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to verify",
+            selected + 1,
+            candidates.len(),
+            user_id
+        ));
+        true
+    }
+
+    /// Users known in the currently-selected room (from the per-room display-name
+    /// map), matched by user id, localpart, or display name. The account's own user
+    /// is excluded — verifying yourself is self-verification, not cross-user.
+    fn verify_completion_candidates(&self, target: &str) -> Vec<String> {
+        let Some(room) = self.selected_room() else {
+            return Vec::new();
+        };
+        let own_user = room.account_user_id.as_deref();
+        let key = RoomKey::from(room);
+        let Some(names) = self.rooms.display_names.get(&key) else {
+            return Vec::new();
+        };
+        let query = target.trim().trim_start_matches('@').to_lowercase();
+        let mut candidates: Vec<String> = names
+            .iter()
+            .filter(|(user_id, _)| Some(user_id.as_str()) != own_user)
+            .filter(|(user_id, display)| {
+                if query.is_empty() {
+                    return true;
+                }
+                user_id.to_lowercase().contains(&query)
+                    || account_localpart(user_id)
+                        .is_some_and(|local| local.to_lowercase().contains(&query))
+                    || display.to_lowercase().contains(&query)
+            })
+            .map(|(user_id, _)| user_id.clone())
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        candidates
     }
 
     pub(crate) fn complete_react_command_input(&mut self, reverse: bool) -> bool {
@@ -601,6 +679,17 @@ fn recover_target_prefix(input: &str) -> Option<&str> {
 
 fn account_target_prefix(input: &str) -> Option<&str> {
     let rest = input.strip_prefix("/account")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| rest.trim_start())
+}
+
+fn verify_target_prefix(input: &str) -> Option<&str> {
+    let rest = input.strip_prefix("/verify")?;
     if rest.is_empty() {
         return Some("");
     }

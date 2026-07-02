@@ -1338,10 +1338,20 @@ fn verification_popup_view(flow: &VerificationFlow) -> (&'static str, Vec<Line<'
     let mut lines: Vec<Line<'static>> = Vec::new();
     let direction = match flow.direction {
         VerificationDirection::Incoming => "Incoming verification request",
-        VerificationDirection::Outgoing => "Verifying device",
+        VerificationDirection::Outgoing => "Verifying",
+    };
+    // Name whichever target the flow carries: a user (cross-user, ADR 0040), a
+    // device (self-verification), or both once known.
+    let target = match (flow.user_id.as_str(), flow.device_id.as_str()) {
+        (user, device) if !user.is_empty() && !device.is_empty() => {
+            format!("{user} (device {device})")
+        }
+        (user, _) if !user.is_empty() => user.to_owned(),
+        (_, device) if !device.is_empty() => format!("device {device}"),
+        _ => "…".to_owned(),
     };
     lines.push(Line::from(Span::styled(
-        format!("{direction}: {}", flow.device_id),
+        format!("{direction}: {target}"),
         Style::default().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(""));
@@ -1399,7 +1409,7 @@ fn verification_popup_view(flow: &VerificationFlow) -> (&'static str, Vec<Line<'
         }
         VerificationStage::Done => {
             lines.push(Line::from(Span::styled(
-                "✓ Verification complete — the device is verified.",
+                "✓ Verification complete.",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -1417,7 +1427,7 @@ fn verification_popup_view(flow: &VerificationFlow) -> (&'static str, Vec<Line<'
         }
     }
 
-    ("Device Verification", lines)
+    ("Verification", lines)
 }
 
 /// Returns the rendered line index of the nth `HELP_COMMANDS` entry,

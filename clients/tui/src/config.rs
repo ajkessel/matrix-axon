@@ -161,6 +161,7 @@ confirm_logout = true
 search_wrap = true
 room_sort = "recent"
 room_filter = "all"
+accept_incoming_verification = true
 
 # ── Server connection ─────────────────────────────────────────────────────────
 # Uncomment and set these if your Axon server is not on the default address
@@ -393,6 +394,10 @@ pub struct DisplayOptions {
     pub preview_warmup_count: usize,
     pub confirm_logout: bool,
     pub search_wrap: bool,
+    /// Whether to surface unsolicited incoming cross-user verification requests
+    /// (ADR 0040). When `false`, a verification request from another user is
+    /// declined silently; self-verification of your own devices is unaffected.
+    pub accept_incoming_verification: bool,
     pub accounts_panel_width: u16,
     pub rooms_panel_width_adj: i16,
     /// Pinned rooms, serialized as `"account_id:room_id"`, ordered most recently
@@ -591,6 +596,7 @@ impl RawConfig {
                 preview_warmup_count: None,
                 confirm_logout: true,
                 search_wrap: true,
+                accept_incoming_verification: true,
                 accounts_panel_width: None,
                 rooms_panel_width_adj: None,
                 pinned_rooms: Vec::new(),
@@ -856,6 +862,7 @@ time_format = "{time_format}"
 input_lines = {input_lines}
 confirm_logout = {confirm_logout}
 search_wrap = {search_wrap}
+accept_incoming_verification = {accept_incoming_verification}
 {display_extra}"#,
             next_room = self.shortcuts.next_room,
             previous_room = self.shortcuts.previous_room,
@@ -920,6 +927,7 @@ search_wrap = {search_wrap}
             input_lines = self.display.input_lines,
             confirm_logout = self.display.confirm_logout,
             search_wrap = self.display.search_wrap,
+            accept_incoming_verification = self.display.accept_incoming_verification,
             display_extra = display_extra,
         )
     }
@@ -1124,6 +1132,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "preview_warmup_count"
                 | "confirm_logout"
                 | "search_wrap"
+                | "accept_incoming_verification"
                 | "accounts_panel_width"
                 | "rooms_panel_width_adj"
                 | "pinned_rooms"
@@ -1649,6 +1658,7 @@ struct RawDisplayOptions {
     preview_warmup_count: Option<u8>,
     confirm_logout: bool,
     search_wrap: bool,
+    accept_incoming_verification: bool,
     accounts_panel_width: Option<u16>,
     rooms_panel_width_adj: Option<i16>,
     pinned_rooms: Vec<String>,
@@ -1707,6 +1717,11 @@ impl RawDisplayOptions {
         } else {
             missing = true;
         }
+        if let Some(accept_incoming_verification) = partial.accept_incoming_verification {
+            self.accept_incoming_verification = accept_incoming_verification;
+        } else {
+            missing = true;
+        }
         if let Some(v) = partial.accounts_panel_width {
             self.accounts_panel_width = Some(v);
         }
@@ -1751,6 +1766,7 @@ impl RawDisplayOptions {
             preview_warmup_count: self.preview_warmup_count.unwrap_or(5) as usize,
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
+            accept_incoming_verification: self.accept_incoming_verification,
             accounts_panel_width: self
                 .accounts_panel_width
                 .unwrap_or(DEFAULT_ACCOUNTS_PANEL_WIDTH),
@@ -1773,6 +1789,7 @@ struct PartialDisplayOptions {
     preview_warmup_count: Option<u8>,
     confirm_logout: Option<bool>,
     search_wrap: Option<bool>,
+    accept_incoming_verification: Option<bool>,
     accounts_panel_width: Option<u16>,
     rooms_panel_width_adj: Option<i16>,
     pinned_rooms: Option<Vec<String>>,

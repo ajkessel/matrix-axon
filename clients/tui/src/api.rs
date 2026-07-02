@@ -373,17 +373,27 @@ impl AxonClient {
         self.send(read_request(request)).await
     }
 
-    /// Start an outgoing SAS flow against `device_id` (ADR 0028 §1). The returned
-    /// `flow_id` is stable for the flow's lifetime.
+    /// Start an outgoing SAS flow (ADR 0028 §1, ADR 0040). The target is either a
+    /// `device_id` (self-verification of the account's own device) or a `user_id`
+    /// (cross-user verification of another user). The returned `flow_id` is stable
+    /// for the flow's lifetime.
     pub async fn start_verification(
         &self,
         account_id: Uuid,
-        device_id: &str,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
     ) -> Result<StartVerifyResponse, ApiError> {
+        let mut body = serde_json::Map::new();
+        if let Some(user_id) = user_id {
+            body.insert("user_id".to_owned(), user_id.into());
+        }
+        if let Some(device_id) = device_id {
+            body.insert("device_id".to_owned(), device_id.into());
+        }
         let request = self
             .http
             .post(format!("{}/v1/accounts/{account_id}/verify", self.base_url))
-            .json(&serde_json::json!({ "device_id": device_id }));
+            .json(&serde_json::Value::Object(body));
         self.send(lifecycle(request)).await
     }
 
@@ -707,6 +717,11 @@ pub struct VerificationFrame {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct VerificationFrameDto {
     pub flow_id: String,
+    /// The user being verified — own user id (self-verification) or the peer's
+    /// (cross-user, ADR 0040). Defaulted for forward-compatibility with servers
+    /// that predate the field.
+    #[serde(default)]
+    pub user_id: String,
     #[serde(default)]
     pub device_id: Option<String>,
     #[serde(default)]
@@ -768,6 +783,8 @@ pub struct StartVerifyResponse {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct FlowDto {
     pub flow_id: String,
+    #[serde(default)]
+    pub user_id: String,
     #[serde(default)]
     pub device_id: Option<String>,
     pub stage: FlowStage,

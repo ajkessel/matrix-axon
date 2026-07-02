@@ -2,7 +2,7 @@ use ruma::OwnedUserId;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::api::{AccountDto, AccountState, FlowDto};
+use crate::api::{AccountDto, AccountState, FlowDto, VerificationFrameDto};
 
 use super::{
     AccountSelection, App, Mode, RecoveryOrigin, RoomKey, Status, VerificationDirection,
@@ -361,16 +361,21 @@ impl App {
         }
     }
 
-    /// Start an outgoing SAS flow against a pasted device id (ADR 0028 §1).
+    /// Start an outgoing SAS flow against a pasted device id (self-verification,
+    /// ADR 0028 §1) or a `@user:server` (cross-user verification, ADR 0040).
     /// Verification is deliberately *not* gated by `lifecycle_busy` (ADR 0028 §4).
-    pub(crate) fn start_verification(&mut self, device_id: Option<String>) {
-        let Some(device_id) = device_id.filter(|d| !d.trim().is_empty()) else {
+    pub(crate) fn start_verification(&mut self, target: Option<String>) {
+        let Some(target) = target.filter(|t| !t.trim().is_empty()) else {
             self.status = Status::from(
-                "usage: /verify <device_id> (incoming requests open automatically)".to_owned(),
+                "usage: /verify <device_id|@user:server> (incoming requests open automatically)"
+                    .to_owned(),
             );
             return;
         };
-        let device_id = device_id.trim().to_owned();
+        let target = target.trim().to_owned();
+        // A `@user:server` argument is a cross-user verification target; anything
+        // else is one of our own device ids (self-verification).
+        let is_user = target.starts_with('@');
         let account_id = match self.resolve_verification_account() {
             Ok(id) => id,
             Err(message) => {
@@ -381,9 +386,15 @@ impl App {
         let Some(tx) = self.lifecycle_tx.clone() else {
             return;
         };
+        let (user_id, device_id) = if is_user {
+            (target.clone(), String::new())
+        } else {
+            (String::new(), target.clone())
+        };
         self.verification = Some(VerificationFlow {
             account_id,
-            device_id: device_id.clone(),
+            user_id,
+            device_id,
             flow_id: None,
             direction: VerificationDirection::Outgoing,
             stage: VerificationStage::Starting,
@@ -391,11 +402,16 @@ impl App {
             decimals: None,
         });
         self.mode = Mode::Verification;
-        self.status = Status::from(format!("starting verification of {device_id}…"));
+        self.status = Status::from(format!("starting verification of {target}…"));
         let client = self.client.clone();
         tokio::spawn(async move {
+            let (user_arg, device_arg) = if is_user {
+                (Some(target.as_str()), None)
+            } else {
+                (None, Some(target.as_str()))
+            };
             let result = client
-                .start_verification(account_id, &device_id)
+                .start_verification(account_id, user_arg, device_arg)
                 .await
                 .map(|resp| resp.flow_id)
                 .map_err(|err| err.to_string());
@@ -409,6 +425,7 @@ impl App {
         &mut self,
         account_id: Uuid,
         flow_id: String,
+        user_id: String,
         device_id: String,
     ) {
         if self
@@ -420,6 +437,7 @@ impl App {
         }
         self.verification = Some(VerificationFlow {
             account_id,
+            user_id,
             device_id,
             flow_id: Some(flow_id),
             direction: VerificationDirection::Incoming,
@@ -429,6 +447,57 @@ impl App {
         });
         self.mode = Mode::Verification;
         self.status = Status::from("verification requested — compare the emoji".to_owned());
+    }
+
+    /// Whether to surface an incoming verification request, applying the
+    /// client-side suppression of unsolicited cross-user requests (ADR 0040). A
+    /// self-verification request (the peer is our own account user) is always
+    /// shown. A cross-user request is shown only when the
+    /// `accept_incoming_verification` display option is set; otherwise it is
+    /// declined silently — cancelled server-side, with no modal.
+    pub(crate) fn should_open_incoming_verification(
+        &self,
+        account_id: Uuid,
+        payload: &VerificationFrameDto,
+    ) -> bool {
+        if self.verification.as_ref().is_some_and(|flow| {
+            flow.is_pending_outgoing_target(
+                account_id,
+                &payload.user_id,
+                payload.device_id.as_deref(),
+            )
+        }) {
+            return false;
+        }
+        self.should_open_incoming_verification_target(
+            account_id,
+            &payload.flow_id,
+            &payload.user_id,
+        )
+    }
+
+    pub(crate) fn should_open_incoming_verification_target(
+        &self,
+        account_id: Uuid,
+        flow_id: &str,
+        user_id: &str,
+    ) -> bool {
+        let own_user = self
+            .accounts
+            .accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .map(|account| account.user_id.as_str());
+        let is_cross_user = !user_id.is_empty() && own_user.is_some_and(|own| own != user_id);
+        if is_cross_user && !self.display.accept_incoming_verification {
+            let client = self.client.clone();
+            let flow_id = flow_id.to_owned();
+            tokio::spawn(async move {
+                let _ = client.cancel_verification(account_id, &flow_id).await;
+            });
+            return false;
+        }
+        true
     }
 
     /// Confirm the SAS values match (the user pressed `y`).
@@ -923,14 +992,17 @@ impl App {
                         !matches!(
                             flow.stage,
                             crate::api::FlowStage::Done | crate::api::FlowStage::Cancelled
+                        ) && self.should_open_incoming_verification_target(
+                            account_id,
+                            &flow.flow_id,
+                            &flow.user_id,
                         )
                     }) {
                         self.open_incoming_verification(
                             account_id,
                             flow.flow_id.clone(),
-                            flow.device_id
-                                .clone()
-                                .unwrap_or_else(|| "identity".to_owned()),
+                            flow.user_id.clone(),
+                            flow.device_id.clone().unwrap_or_default(),
                         );
                         if let Some(active) = self.verification.as_mut() {
                             active.apply_flow(&flow);

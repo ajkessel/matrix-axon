@@ -131,11 +131,14 @@ impl VerificationStage {
     }
 }
 
-/// Live state for the verification modal. One flow at a time (the server only
-/// performs self-verification, so concurrent flows are not expected).
+/// Live state for the verification modal. One flow at a time (concurrent flows
+/// are not expected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerificationFlow {
     pub(crate) account_id: Uuid,
+    /// The user being verified — own user id (self-verification) or the peer's
+    /// (cross-user, ADR 0040). Empty if the server didn't report it.
+    pub(crate) user_id: String,
     pub(crate) device_id: String,
     /// `None` only between an outgoing start request and its `flow_id` response.
     pub(crate) flow_id: Option<String>,
@@ -149,6 +152,39 @@ impl VerificationFlow {
     /// Whether this flow matches a frame/response for `account_id` + `flow_id`.
     pub(crate) fn matches(&self, account_id: Uuid, flow_id: &str) -> bool {
         self.account_id == account_id && self.flow_id.as_deref() == Some(flow_id)
+    }
+
+    /// Whether a frame could be the server echo for an outgoing verification
+    /// whose `POST .../verify` response has not returned yet.
+    pub(crate) fn is_pending_outgoing_target(
+        &self,
+        account_id: Uuid,
+        user_id: &str,
+        device_id: Option<&str>,
+    ) -> bool {
+        if self.account_id != account_id
+            || self.flow_id.is_some()
+            || self.direction != VerificationDirection::Outgoing
+        {
+            return false;
+        }
+        device_id.is_some_and(|device_id| !device_id.is_empty() && self.device_id == device_id)
+            || (!user_id.is_empty() && self.user_id == user_id)
+    }
+
+    /// Whether a non-request frame can safely bind this pending outgoing flow to
+    /// the server flow id. User ids are not unique per verification flow, so only
+    /// a device id is specific enough to adopt here.
+    pub(crate) fn is_pending_outgoing_device(
+        &self,
+        account_id: Uuid,
+        device_id: Option<&str>,
+    ) -> bool {
+        self.account_id == account_id
+            && self.flow_id.is_none()
+            && self.direction == VerificationDirection::Outgoing
+            && device_id
+                .is_some_and(|device_id| !device_id.is_empty() && self.device_id == device_id)
     }
 
     /// Advance the UI stage from a server `FlowStage`, given whether SAS emoji
@@ -179,8 +215,13 @@ impl VerificationFlow {
     /// Merge an authoritative `FlowDto` (a read-on-reconnect resync or a list
     /// entry) into the flow state.
     pub(crate) fn apply_flow(&mut self, flow: &FlowDto) {
+        if self.user_id.is_empty() && !flow.user_id.is_empty() {
+            self.user_id = flow.user_id.clone();
+        }
         if let Some(device_id) = &flow.device_id {
-            self.device_id = device_id.clone();
+            if self.device_id.is_empty() {
+                self.device_id = device_id.clone();
+            }
         }
         if flow.emoji.is_some() {
             self.emoji = flow.emoji.clone();
@@ -209,8 +250,16 @@ impl VerificationFlow {
         if self.flow_id.is_none() {
             self.flow_id = Some(payload.flow_id.clone());
         }
+        // Adopt identity fields the server reports once known (a self-verification
+        // flow learns its own user id from frames; a cross-user flow learns the
+        // peer's device once SAS begins).
+        if self.user_id.is_empty() && !payload.user_id.is_empty() {
+            self.user_id = payload.user_id.clone();
+        }
         if let Some(device_id) = &payload.device_id {
-            self.device_id = device_id.clone();
+            if self.device_id.is_empty() {
+                self.device_id = device_id.clone();
+            }
         }
         match kind {
             VerificationFrameKind::Requested => {
@@ -767,6 +816,7 @@ pub(crate) struct InputState {
     pub(crate) recover_command_completion: Option<(String, usize)>,
     pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
+    pub(crate) verify_command_completion: Option<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -1273,6 +1323,7 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
+        self.input.verify_command_completion = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
@@ -1285,6 +1336,7 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
+        self.input.verify_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -1307,6 +1359,7 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
+        self.input.verify_command_completion = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -1356,6 +1409,7 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
+        self.input.verify_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -2101,7 +2155,9 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{AccountDto, AccountState, EmojiDto, MemberDto, VerificationFrameDto};
+    use crate::api::{
+        AccountDto, AccountState, EmojiDto, MemberDto, VerificationFrame, VerificationFrameDto,
+    };
     use crate::command::HELP_COMMANDS;
     use crate::config::TimeFormat;
     use crate::ui::{entry_status_text, popup_shortcuts_lines, popup_status_lines};
@@ -2110,6 +2166,7 @@ mod tests {
     fn outgoing_flow() -> VerificationFlow {
         VerificationFlow {
             account_id: Uuid::nil(),
+            user_id: "@self:example.com".to_owned(),
             device_id: "DEV".to_owned(),
             flow_id: Some("txn1".to_owned()),
             direction: VerificationDirection::Outgoing,
@@ -2122,6 +2179,7 @@ mod tests {
     fn sas_frame() -> VerificationFrameDto {
         VerificationFrameDto {
             flow_id: "txn1".to_owned(),
+            user_id: "@self:example.com".to_owned(),
             device_id: Some("DEV".to_owned()),
             emoji: Some(vec![EmojiDto {
                 symbol: "🐶".to_owned(),
@@ -2129,6 +2187,18 @@ mod tests {
             }]),
             decimals: Some([1, 2, 3]),
             reason: None,
+        }
+    }
+
+    fn flow_dto(flow_id: &str, user_id: &str, device_id: Option<&str>) -> FlowDto {
+        FlowDto {
+            flow_id: flow_id.to_owned(),
+            user_id: user_id.to_owned(),
+            device_id: device_id.map(str::to_owned),
+            stage: FlowStage::Requested,
+            emoji: None,
+            decimals: None,
+            cancel_reason: None,
         }
     }
 
@@ -2168,10 +2238,108 @@ mod tests {
     }
 
     #[test]
+    fn pending_outgoing_requested_frame_is_not_treated_as_unsolicited() {
+        let mut app = app_with_rooms(Vec::new());
+        app.display.accept_incoming_verification = false;
+        app.accounts.accounts = vec![account_with_id(
+            Uuid::nil(),
+            "@alice:example.com",
+            AccountState::Active,
+        )];
+        app.verification = Some(VerificationFlow {
+            account_id: Uuid::nil(),
+            user_id: "@bob:example.com".to_owned(),
+            device_id: String::new(),
+            flow_id: None,
+            direction: VerificationDirection::Outgoing,
+            stage: VerificationStage::Starting,
+            emoji: None,
+            decimals: None,
+        });
+
+        let action = app.handle_live_frame(LiveFrame::Verification(VerificationFrame {
+            account_id: Uuid::nil(),
+            kind: VerificationFrameKind::Requested,
+            payload: VerificationFrameDto {
+                flow_id: "server-flow".to_owned(),
+                user_id: "@bob:example.com".to_owned(),
+                device_id: None,
+                emoji: None,
+                decimals: None,
+                reason: None,
+            },
+        }));
+
+        assert_eq!(action, LiveFrameAction::None);
+        let flow = app.verification.as_ref().unwrap();
+        assert_eq!(flow.direction, VerificationDirection::Outgoing);
+        assert_eq!(flow.flow_id, None);
+        assert_eq!(flow.stage, VerificationStage::Starting);
+    }
+
+    #[test]
+    fn same_user_frame_does_not_bind_pending_outgoing_without_device_match() {
+        let mut app = app_with_rooms(Vec::new());
+        app.verification = Some(VerificationFlow {
+            account_id: Uuid::nil(),
+            user_id: "@bob:example.com".to_owned(),
+            device_id: String::new(),
+            flow_id: None,
+            direction: VerificationDirection::Outgoing,
+            stage: VerificationStage::Starting,
+            emoji: None,
+            decimals: None,
+        });
+
+        let action = app.handle_live_frame(LiveFrame::Verification(VerificationFrame {
+            account_id: Uuid::nil(),
+            kind: VerificationFrameKind::Sas,
+            payload: VerificationFrameDto {
+                flow_id: "other-flow".to_owned(),
+                user_id: "@bob:example.com".to_owned(),
+                device_id: None,
+                emoji: Some(vec![EmojiDto {
+                    symbol: "🐶".to_owned(),
+                    description: "Dog".to_owned(),
+                }]),
+                decimals: Some([1, 2, 3]),
+                reason: None,
+            },
+        }));
+
+        assert_eq!(action, LiveFrameAction::None);
+        let flow = app.verification.as_ref().unwrap();
+        assert_eq!(flow.flow_id, None);
+        assert_eq!(flow.emoji, None);
+        assert_eq!(flow.decimals, None);
+    }
+
+    #[tokio::test]
+    async fn discovered_cross_user_request_honors_incoming_suppression() {
+        let mut app = app_with_rooms(Vec::new());
+        app.display.accept_incoming_verification = false;
+        app.accounts.accounts = vec![account_with_id(
+            Uuid::nil(),
+            "@alice:example.com",
+            AccountState::Active,
+        )];
+
+        app.handle_lifecycle_outcome(LifecycleOutcome::VerifyDiscovered {
+            account_id: Uuid::nil(),
+            result: Ok(vec![flow_dto("flow1", "@bob:example.com", None)]),
+        })
+        .await;
+
+        assert!(app.verification.is_none());
+        assert_ne!(app.mode, Mode::Verification);
+    }
+
+    #[test]
     fn verification_apply_flow_maps_server_stage() {
         let mut flow = outgoing_flow();
         flow.apply_flow(&FlowDto {
             flow_id: "txn1".to_owned(),
+            user_id: "@self:example.com".to_owned(),
             device_id: Some("DEV".to_owned()),
             stage: FlowStage::KeysExchanged,
             emoji: Some(vec![EmojiDto {
@@ -2808,6 +2976,7 @@ mod tests {
             preview_warmup_count: 5,
             confirm_logout: true,
             search_wrap: true,
+            accept_incoming_verification: true,
             accounts_panel_width: 25,
             rooms_panel_width_adj: 0,
             pinned_rooms: Vec::new(),
@@ -5084,6 +5253,32 @@ mod tests {
             super::lifecycle::DeleteResolution::Match(AccountDto { account_id, .. })
                 if account_id == second_id
         ));
+    }
+
+    #[test]
+    fn verify_completion_matches_room_users_and_excludes_self() {
+        let r = room("!dm:example.com", None, Some("DM"));
+        let mut app = app_with_rooms(vec![r.clone()]);
+        app.rooms.selected = Some(0);
+        let mut names = HashMap::new();
+        // The own user (@alice, from room.account_user_id) must be excluded.
+        names.insert("@alice:example.com".to_owned(), "Alice".to_owned());
+        names.insert("@bob:example.com".to_owned(), "Bob".to_owned());
+        names.insert("@carol:example.com".to_owned(), "Carol".to_owned());
+        app.rooms.display_names.insert(RoomKey::from(&r), names);
+
+        // A localpart prefix resolves to the single matching user.
+        app.input.buffer = "/verify @bo".to_owned();
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/verify @bob:example.com");
+
+        // An empty target cycles through every room user except our own.
+        app.input.buffer = "/verify ".to_owned();
+        app.input.verify_command_completion = None;
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/verify @bob:example.com");
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/verify @carol:example.com");
     }
 
     #[test]
