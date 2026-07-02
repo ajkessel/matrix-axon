@@ -4,7 +4,7 @@ Axon is a self-hosted personal agent for [Matrix](https://matrix.org). It sits b
 
 Matrix's encrypted and decentralized architecture can make full client usability challenging. This "middle" layer aims to solve that challenge. It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user. Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
 
-See [`docs/mvp/prd.md`](docs/mvp/prd.md) for the full product description and [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture.
+See [`docs/mvp/prd.md`](docs/mvp/prd.md) for the full product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and https://axon.bostoncoop.net for the OpenAPI specification.
 
 ## Architecture overview
 
