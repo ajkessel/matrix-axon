@@ -7,15 +7,16 @@
 //!   (the same Matrix `event_id` can exist under two accounts).
 //! * `event_id` / `account_id` — stored (and indexed) so a hit can be hydrated
 //!   back to `(account_id, event_id)` and the query can filter by account.
-//! * `room_id` / `sender` — indexed keyword fields for exact-match filtering.
+//! * `room_id` / `sender` — indexed keyword fields; `room_id` uses exact-match
+//!   filtering and `sender` supports substring filtering over the whole MXID.
 //! * `origin_ts` — i64 milliseconds, indexed + fast for range filtering.
 //! * `body` — the message text, analyzed by [`BODY_TOKENIZER`].
 //!
-//! `account_id` / `room_id` / `sender` are exact-match keyword (`STRING`) fields
-//! rather than Tantivy *facets* (which the spec names): MVP filtering is flat
-//! equality, `STRING` fields are robust to the `!`/`:`/`@`/`/` characters in room
-//! ids and senders without facet-path escaping, and they double as stored
-//! retrieval fields. Hierarchical faceting (e.g. faceted counts) can revisit this.
+//! `account_id` / `room_id` / `sender` are keyword (`STRING`) fields rather than
+//! Tantivy *facets* (which the spec names): MVP filtering is flat, `STRING`
+//! fields are robust to the `!`/`:`/`@`/`/` characters in room ids and senders
+//! without facet-path escaping, and they double as stored retrieval fields.
+//! Hierarchical faceting (e.g. faceted counts) can revisit this.
 //! See the M9 search ADR.
 
 use axon_store::IndexableEvent;

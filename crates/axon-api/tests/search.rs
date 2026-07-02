@@ -224,7 +224,7 @@ async fn search_skips_hit_whose_row_is_gone() {
 
 #[tokio::test]
 #[ignore = "requires DATABASE_URL"]
-async fn search_missing_or_empty_query_is_400() {
+async fn search_missing_or_empty_query_is_400_without_filters() {
     let store = store().await;
     let stub = Arc::new(StubSearchQuery::returning(vec![], 0));
     let app = search_app(store.clone(), Some(stub.clone()));
@@ -238,6 +238,39 @@ async fn search_missing_or_empty_query_is_400() {
     let (status, _body) = get(&app, "/v1/search?q=%20%20").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "whitespace-only q");
 
+    assert!(stub.calls().is_empty(), "the port is never reached");
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn search_empty_query_is_allowed_with_a_filter() {
+    let store = store().await;
+    let stub = Arc::new(StubSearchQuery::returning(vec![], 0));
+    let app = search_app(store.clone(), Some(stub.clone()));
+
+    let (status, body) = get(&app, "/v1/search?sender=jamie").await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let calls = stub.calls();
+    assert_eq!(calls.len(), 1);
+    let p = &calls[0];
+    assert_eq!(p.text, "");
+    assert_eq!(p.sender.as_deref(), Some("jamie"));
+}
+
+#[tokio::test]
+#[ignore = "requires DATABASE_URL"]
+async fn search_empty_query_with_only_pagination_params_is_400() {
+    let store = store().await;
+    let stub = Arc::new(StubSearchQuery::returning(vec![], 0));
+    let app = search_app(store.clone(), Some(stub.clone()));
+
+    let (status, body) = get(&app, "/v1/search?q=&limit=25").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty query with no narrowing filter: {body}"
+    );
     assert!(stub.calls().is_empty(), "the port is never reached");
 }
 

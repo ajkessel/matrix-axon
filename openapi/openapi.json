@@ -2076,14 +2076,14 @@
         "tags": [
           "search"
         ],
-        "summary": "Full-text search across the index, BM25-ranked, paginated.",
-        "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nor a malformed `cursor` is a `400`. Results are the resolved read-API event\nview (latest edited body, redaction-masked) plus each hit's score.",
+        "summary": "Search across the index, BM25-ranked when a full-text query is present, paginated.",
+        "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nis allowed only with at least one narrowing filter (`account_id`, `room_id`,\n`sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is\na `400`. Results are the resolved read-API event view (latest edited body,\nredaction-masked) plus each hit's score.",
         "operationId": "search",
         "parameters": [
           {
             "name": "q",
             "in": "query",
-            "description": "The full-text query string (required, non-empty). Parsed against message\nbodies; all terms are required (AND).",
+            "description": "The full-text query string. Parsed against message bodies; all terms are\nrequired (AND). May be omitted when at least one narrowing filter is\npresent.",
             "required": false,
             "schema": {
               "type": "string"
@@ -2111,7 +2111,7 @@
           {
             "name": "sender",
             "in": "query",
-            "description": "Restrict to one sender (Matrix user id).",
+            "description": "Restrict to senders whose Matrix user id contains this substring,\ncase-insensitively.",
             "required": false,
             "schema": {
               "type": "string"

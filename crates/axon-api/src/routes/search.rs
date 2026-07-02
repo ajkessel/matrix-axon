@@ -20,6 +20,14 @@ use crate::extract::Query;
 use crate::response::{ApiError, ApiResponse};
 use crate::search::{SearchQuery, SearchQueryParams};
 
+const NARROWING_FILTERS: &[SearchFilter] = &[
+    SearchFilter::AccountId,
+    SearchFilter::RoomId,
+    SearchFilter::Sender,
+    SearchFilter::From,
+    SearchFilter::To,
+];
+
 /// Default page size when `limit` is omitted.
 const DEFAULT_LIMIT: i64 = 50;
 /// Hard cap on page size, regardless of the requested `limit`.
@@ -40,14 +48,16 @@ const MAX_FILL_ROUNDS: usize = 8;
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SearchQueryDto {
-    /// The full-text query string (required, non-empty). Parsed against message
-    /// bodies; all terms are required (AND).
+    /// The full-text query string. Parsed against message bodies; all terms are
+    /// required (AND). May be omitted when at least one narrowing filter is
+    /// present.
     pub q: Option<String>,
     /// Restrict to one account. Omit to search across all accounts.
     pub account_id: Option<Uuid>,
     /// Restrict to one room.
     pub room_id: Option<String>,
-    /// Restrict to one sender (Matrix user id).
+    /// Restrict to senders whose Matrix user id contains this substring,
+    /// case-insensitively.
     pub sender: Option<String>,
     /// Inclusive lower bound on `origin_server_ts`, Unix milliseconds.
     pub from: Option<i64>,
@@ -59,18 +69,21 @@ pub struct SearchQueryDto {
     pub cursor: Option<String>,
 }
 
-/// Full-text search across the index, BM25-ranked, paginated.
+/// Search across the index, BM25-ranked when a full-text query is present,
+/// paginated.
 ///
 /// `503` when search is disabled (`search.enabled = false`). A missing/empty `q`
-/// or a malformed `cursor` is a `400`. Results are the resolved read-API event
-/// view (latest edited body, redaction-masked) plus each hit's score.
+/// is allowed only with at least one narrowing filter (`account_id`, `room_id`,
+/// `sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is
+/// a `400`. Results are the resolved read-API event view (latest edited body,
+/// redaction-masked) plus each hit's score.
 #[utoipa::path(
     get,
     path = "/v1/search",
     params(SearchQueryDto),
     responses(
         (status = 200, description = "A page of ranked search results", body = ApiResponse<SearchPage>),
-        (status = 400, description = "Missing/empty query or malformed cursor", body = crate::response::ErrorResponse),
+        (status = 400, description = "Unbounded empty query or malformed cursor", body = crate::response::ErrorResponse),
         (status = 503, description = "Search is disabled", body = crate::response::ErrorResponse),
     ),
     tag = "search",
@@ -84,10 +97,12 @@ pub async fn search(
         return Err(ApiError::service_unavailable("search is disabled"));
     };
 
-    let text = q.q.unwrap_or_default();
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(ApiError::bad_request("q is required"));
+    let text = q.q.as_deref().unwrap_or_default().trim();
+    if text.is_empty() && !has_narrowing_filter(&q) {
+        return Err(ApiError::bad_request(format!(
+            "q is required unless at least one filter is present ({})",
+            narrowing_filter_names()
+        )));
     }
 
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT) as usize;
@@ -154,4 +169,51 @@ pub async fn search(
         total,
         next_cursor,
     }))
+}
+
+fn has_narrowing_filter(q: &SearchQueryDto) -> bool {
+    NARROWING_FILTERS.iter().any(|filter| filter.is_present(q))
+}
+
+fn narrowing_filter_names() -> String {
+    NARROWING_FILTERS
+        .iter()
+        .map(|filter| filter.query_name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SearchFilter {
+    AccountId,
+    RoomId,
+    Sender,
+    From,
+    To,
+}
+
+impl SearchFilter {
+    fn query_name(self) -> &'static str {
+        match self {
+            Self::AccountId => "account_id",
+            Self::RoomId => "room_id",
+            Self::Sender => "sender",
+            Self::From => "from",
+            Self::To => "to",
+        }
+    }
+
+    fn is_present(self, q: &SearchQueryDto) -> bool {
+        match self {
+            Self::AccountId => q.account_id.is_some(),
+            Self::RoomId => q.room_id.as_deref().is_some_and(nonempty),
+            Self::Sender => q.sender.as_deref().is_some_and(nonempty),
+            Self::From => q.from.is_some(),
+            Self::To => q.to.is_some(),
+        }
+    }
+}
+
+fn nonempty(value: &str) -> bool {
+    !value.trim().is_empty()
 }

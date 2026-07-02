@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use axon_store::Store;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
+};
 use tantivy::schema::{IndexRecordOption, Value};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use uuid::Uuid;
@@ -26,17 +28,21 @@ use crate::{SearchError, SCHEMA_VERSION};
 const SCHEMA_VERSION_FILE: &str = "axon_schema_version";
 
 /// Filters and pagination for a search. `text` is the user query; the rest narrow
-/// the result set. All filters are optional — omit `account_id` to search across
-/// every account (the index is one combined index).
+/// the result set. Empty `text` is allowed by this lower-level API so callers can
+/// run filter-only searches; HTTP handlers are responsible for rejecting
+/// unbounded empty searches. All filters are optional — omit `account_id` to
+/// search across every account (the index is one combined index).
 #[derive(Debug, Clone)]
 pub struct SearchParams<'a> {
-    /// The full-text query string (parsed against the `body` field).
+    /// The full-text query string (parsed against the `body` field). Empty means
+    /// "match every document, then apply filters".
     pub text: &'a str,
     /// Restrict to one account.
     pub account_id: Option<Uuid>,
     /// Restrict to one room.
     pub room_id: Option<&'a str>,
-    /// Restrict to one sender.
+    /// Restrict to senders whose Matrix user id contains this substring,
+    /// case-insensitively.
     pub sender: Option<&'a str>,
     /// Inclusive lower bound on `origin_ts` (ms since epoch).
     pub from_ts: Option<i64>,
@@ -175,18 +181,23 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Run a BM25 search. Returns the requested page of hits plus the total match
-    /// count. A malformed `text` query is a [`SearchError::BadQuery`].
+    /// Run a BM25 search, or a filter-only search when `text` is empty. Returns
+    /// the requested page of hits plus the total match count. A malformed `text`
+    /// query is a [`SearchError::BadQuery`].
     pub fn search(&self, params: &SearchParams<'_>) -> Result<SearchResults, SearchError> {
         let searcher = self.reader.searcher();
 
-        let mut parser = QueryParser::for_index(&self.index, vec![self.schema.body]);
-        parser.set_conjunction_by_default(); // all terms required (AND), the intuitive default
-        let text_query = parser
-            .parse_query(params.text)
-            .map_err(|e| SearchError::BadQuery(e.to_string()))?;
-
         // Combine the text query with the exact-match / range filters.
+        let text = params.text.trim();
+        let text_query: Box<dyn Query> = if text.is_empty() {
+            Box::new(AllQuery)
+        } else {
+            let mut parser = QueryParser::for_index(&self.index, vec![self.schema.body]);
+            parser.set_conjunction_by_default(); // all terms required (AND), the intuitive default
+            parser
+                .parse_query(text)
+                .map_err(|e| SearchError::BadQuery(e.to_string()))?
+        };
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(Occur::Must, text_query)];
         if let Some(account_id) = params.account_id {
             clauses.push((
@@ -197,8 +208,11 @@ impl SearchIndex {
         if let Some(room_id) = params.room_id {
             clauses.push((Occur::Must, self.term_query(self.schema.room_id, room_id)));
         }
-        if let Some(sender) = params.sender {
-            clauses.push((Occur::Must, self.term_query(self.schema.sender, sender)));
+        if let Some(sender) = params.sender.map(str::trim).filter(|v| !v.is_empty()) {
+            clauses.push((
+                Occur::Must,
+                self.substring_query(self.schema.sender, sender)?,
+            ));
         }
         if params.from_ts.is_some() || params.to_ts.is_some() {
             let lower = match params.from_ts {
@@ -251,6 +265,17 @@ impl SearchIndex {
         Box::new(TermQuery::new(term, IndexRecordOption::Basic))
     }
 
+    fn substring_query(
+        &self,
+        field: tantivy::schema::Field,
+        value: &str,
+    ) -> Result<Box<dyn Query>, SearchError> {
+        let pattern = format!("(?i).*{}.*", regex_escape(value));
+        RegexQuery::from_pattern(&pattern, field)
+            .map(|q| Box::new(q) as Box<dyn Query>)
+            .map_err(|e| SearchError::BadQuery(e.to_string()))
+    }
+
     /// Whether the index reader currently holds zero documents (test helper).
     #[cfg(test)]
     fn is_empty(&self) -> bool {
@@ -269,6 +294,20 @@ impl SearchIndex {
         writer.commit().expect("commit");
         self.reload().expect("reload");
     }
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 /// Whether the index directory must be (re)seeded from scratch: it is missing the
@@ -427,6 +466,83 @@ mod tests {
         let r = index.search(&p).unwrap();
         assert_eq!(r.total, 1);
         assert_eq!(r.hits[0].event_id, "$new");
+    }
+
+    #[test]
+    fn filter_only_search_uses_empty_text() {
+        let (index, _dir) = open_tmp();
+        let acct = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(acct, "$old", "!r", "@alice:x", 100, "old message"),
+            ev(acct, "$new", "!r", "@alice:x", 200, "new message"),
+            ev(acct, "$other", "!r", "@bob:x", 300, "other message"),
+        ]);
+
+        let mut p = params("");
+        p.sender = Some("alice");
+        p.from_ts = Some(150);
+        let r = index.search(&p).unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.hits[0].event_id, "$new");
+    }
+
+    #[test]
+    fn sender_filter_matches_substrings_case_insensitively() {
+        let (index, _dir) = open_tmp();
+        let acct = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(
+                acct,
+                "$jamie",
+                "!r",
+                "@Jamie:bostoncoop.net",
+                1,
+                "needle body",
+            ),
+            ev(
+                acct,
+                "$other",
+                "!r",
+                "@sam:bostoncoop.net",
+                2,
+                "needle body",
+            ),
+        ]);
+
+        let mut p = params("needle");
+        p.sender = Some("jamie");
+        let r = index.search(&p).unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.hits[0].event_id, "$jamie");
+    }
+
+    #[test]
+    fn regex_escape_escapes_regex_metacharacters() {
+        assert_eq!(
+            regex_escape(r"\.+*?()|[]{}^$"),
+            r"\\\.\+\*\?\(\)\|\[\]\{\}\^\$"
+        );
+        assert_eq!(regex_escape("@alice:example.org"), "@alice:example\\.org");
+    }
+
+    #[test]
+    fn substring_query_matches_literal_substrings_case_insensitively() {
+        let (index, _dir) = open_tmp();
+        let acct = Uuid::new_v4();
+        index.index_for_test(&[
+            ev(acct, "$literal", "!r", "@A+B:example.org", 1, "needle body"),
+            ev(acct, "$plain", "!r", "@AB:example.org", 2, "needle body"),
+        ]);
+
+        let query = index
+            .substring_query(index.schema.sender, "a+b")
+            .expect("substring query");
+        let total = index
+            .reader
+            .searcher()
+            .search(&*query, &Count)
+            .expect("query executes");
+        assert_eq!(total, 1);
     }
 
     #[test]

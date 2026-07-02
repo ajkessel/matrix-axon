@@ -14,9 +14,10 @@
 //!   durable outbox + a contiguous cursor mean no successful write goes unindexed).
 //!   Ingestion only pokes the actor with a best-effort [`IndexHandle::notify`]
 //!   hint; commits are batched.
-//! * **Read path** ([`SearchIndex::search`]): BM25 ranking over the `body` field,
-//!   filtered by `account_id` / `room_id` / `sender` and an `origin_ts` range.
-//!   Returns `(account_id, event_id)` hits the caller hydrates from Postgres.
+//! * **Read path** ([`SearchIndex::search`]): BM25 ranking over the `body` field
+//!   when text is present, with filter-only searches supported through
+//!   `account_id` / `room_id` / sender-substring / `origin_ts` filters. Returns
+//!   `(account_id, event_id)` hits the caller hydrates from Postgres.
 //!
 //! See `docs/mvp/implementation.md` §9 and the ADRs.
 

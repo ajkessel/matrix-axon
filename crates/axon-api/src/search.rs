@@ -13,18 +13,21 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-/// An owned full-text query plus its filters and offset pagination. All filters
-/// are optional; omit `account_id` to search across every account (the index is
-/// one combined index).
+/// An owned search query plus its filters and offset pagination. Empty `text`
+/// means a filter-only search; the HTTP handler rejects unbounded empty searches
+/// before this port is called. All filters are optional; omit `account_id` to
+/// search across every account (the index is one combined index).
 #[derive(Debug, Clone)]
 pub struct SearchQueryParams {
-    /// The full-text query string, parsed against the message `body`.
+    /// The full-text query string, parsed against the message `body`. Empty means
+    /// "match every document, then apply filters".
     pub text: String,
     /// Restrict to one account.
     pub account_id: Option<Uuid>,
     /// Restrict to one room.
     pub room_id: Option<String>,
-    /// Restrict to one sender.
+    /// Restrict to senders whose Matrix user id contains this substring,
+    /// case-insensitively.
     pub sender: Option<String>,
     /// Inclusive lower bound on `origin_ts` (ms since epoch).
     pub from_ts: Option<i64>,
@@ -81,12 +84,12 @@ impl From<SearchQueryError> for crate::response::ApiError {
     }
 }
 
-/// Runs full-text queries against the search index. Implemented outside this
+/// Runs queries against the search index. Implemented outside this
 /// crate; held in [`AppState`](crate::AppState) as `Option<Arc<dyn SearchQuery>>`,
 /// where `None` means search is disabled and `/v1/search` returns `503`.
 #[async_trait]
 pub trait SearchQuery: Send + Sync {
-    /// Run a BM25 search and return the requested page of hits plus the total
-    /// match count.
+    /// Run a BM25 search, or a filter-only search when `text` is empty, and
+    /// return the requested page of hits plus the total match count.
     async fn search(&self, params: &SearchQueryParams) -> Result<SearchHits, SearchQueryError>;
 }

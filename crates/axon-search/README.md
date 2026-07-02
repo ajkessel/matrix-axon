@@ -4,7 +4,7 @@ Tantivy full-text search index, populated on event ingestion.
 
 ## Responsibility
 
-Opens and manages the Tantivy index, indexes events as they are written by `axon-sync`, and answers full-text queries with BM25 ranking and account/room/sender/time-range filters (exposed over HTTP as `GET /v1/search` by `axon-api`). Filters are exact-match keyword fields, not Tantivy facets (ADR 0039).
+Opens and manages the Tantivy index, indexes events as they are written by `axon-sync`, and answers full-text queries with BM25 ranking plus filter-only queries narrowed by account, room, sender substring, or time range (exposed over HTTP as `GET /v1/search` by `axon-api`). Filters use keyword fields, not Tantivy facets (ADR 0039).
 
 ## Owns vs. consumes
 
@@ -15,9 +15,9 @@ Opens and manages the Tantivy index, indexes events as they are written by `axon
 
 - `SearchIndex::open` / `spawn_indexer` — open the index and start the single-writer
   indexing actor that drains the store's `search_outbox`.
-- `SearchIndex::search(&SearchParams) -> SearchResults` — BM25 query with keyword and
-  time-range filters, returning ranked `(account_id, event_id, score)` hits to hydrate
-  from Postgres.
+- `SearchIndex::search(&SearchParams) -> SearchResults` — BM25 query, or filter-only
+  query when text is empty, with keyword/time filters, returning `(account_id,
+  event_id, score)` hits to hydrate from Postgres.
 - `SearchIndex::mark_for_reseed` — clear the seed-completion marker so the next `open`
   rebuilds the corpus from `events` (the `axon search reindex` operator path).
 
