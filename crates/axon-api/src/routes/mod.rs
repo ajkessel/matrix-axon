@@ -6,4 +6,5 @@ pub mod media;
 pub mod messages;
 pub mod rooms;
 pub mod search;
+pub mod status;
 pub mod verify;

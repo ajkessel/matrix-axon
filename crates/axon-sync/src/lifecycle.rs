@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
+use crate::backfill::BackfillHealth;
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
@@ -313,6 +314,9 @@ pub struct AccountLifecycle {
     /// a deleted account's documents, and handed to a runtime-login account's
     /// supervised task so its events are indexed.
     index: Option<IndexHandle>,
+    /// Backfill disk-space health (M10), shared with the engine so a runtime-login
+    /// account's backfill task reports into the same handle the API reads.
+    backfill_health: BackfillHealth,
 }
 
 impl AccountLifecycle {
@@ -331,6 +335,7 @@ impl AccountLifecycle {
         locks: IdentityLocks,
         verifications: FlowRegistry,
         index: Option<IndexHandle>,
+        backfill_health: BackfillHealth,
     ) -> Self {
         Self {
             store,
@@ -344,6 +349,7 @@ impl AccountLifecycle {
             verifications,
             http: crate::discovery::http_client(),
             index,
+            backfill_health,
         }
     }
 
@@ -511,6 +517,7 @@ impl AccountLifecycle {
             self.locks.clone(),
             self.verifications.clone(),
             self.index.clone(),
+            self.backfill_health.clone(),
         );
         tracing::info!(%account_id, user_id = %username, "account logged in and supervised");
         Ok(account_id)
@@ -985,6 +992,7 @@ mod tests {
             account: None,
             timeline_limit: 1,
             live_event_buffer: 16,
+            ..SyncConfig::default()
         };
         let manager = ClientManager::new(store.clone(), config.clone());
         let (live_tx, _rx) = broadcast::channel(16);
@@ -999,6 +1007,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
             None,
+            crate::backfill::BackfillHealth::new(None),
         )
     }
 
@@ -1022,6 +1031,7 @@ mod tests {
             }),
             timeline_limit: 1,
             live_event_buffer: 16,
+            ..SyncConfig::default()
         };
         let manager = ClientManager::new(store.clone(), config.clone());
         let (live_tx, _rx) = broadcast::channel(16);
@@ -1036,6 +1046,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
             None,
+            crate::backfill::BackfillHealth::new(None),
         )
     }
 

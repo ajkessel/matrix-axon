@@ -260,6 +260,9 @@ impl Indexer {
         for entry in batch {
             if entry.is_purge() {
                 self.schema.delete_account(&self.writer, entry.account_id);
+            } else if let Some(room_id) = entry.room_purge() {
+                self.schema
+                    .delete_room(&self.writer, entry.account_id, room_id)?;
             } else if seen.insert((entry.account_id, entry.event_id.as_str())) {
                 self.apply_event(entry.account_id, &entry.event_id).await?;
             }

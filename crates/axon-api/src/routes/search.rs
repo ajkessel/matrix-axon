@@ -30,6 +30,11 @@ const MAX_LIMIT: i64 = 200;
 /// into large allocation/CPU. Cursors past this bound are rejected as a `400`
 /// rather than executed. At `MAX_LIMIT` per page this is still thousands of pages.
 const MAX_OFFSET: usize = 100_000;
+/// Max index pages fetched to fill one response page when the membership filter
+/// (ADR 0044) drops hits. Bounds the per-request index work so a query dominated
+/// by left-room matches can't turn one request into unbounded index paging; if the
+/// budget is hit the page is returned short (with a cursor) rather than empty.
+const MAX_FILL_ROUNDS: usize = 8;
 
 /// Query parameters for `GET /v1/search`.
 #[derive(Debug, Deserialize, IntoParams)]
@@ -92,7 +97,7 @@ pub async fn search(
         None => 0,
     };
 
-    let params = SearchQueryParams {
+    let mut params = SearchQueryParams {
         text: text.to_owned(),
         account_id: q.account_id,
         room_id: q.room_id,
@@ -102,30 +107,51 @@ pub async fn search(
         limit,
         offset,
     };
-    let found = search.search(&params).await?;
 
     // The index returns `(account_id, event_id)` keys; hydrate each from the store.
-    // A hit whose row was deleted between indexing and now is skipped, not a 500.
-    let mut results = Vec::with_capacity(found.hits.len());
-    for hit in &found.hits {
-        if let Some(row) = store.get_event(hit.account_id, &hit.event_id).await? {
-            results.push(SearchResultDto {
-                event: EventDto::from_row(hit.account_id, row),
-                score: hit.score,
-            });
+    // A hit whose row was deleted between indexing and now is skipped, not a 500,
+    // and `get_event_if_joined` also drops hits in rooms the account has left/been
+    // banned from (the M10 membership filter, ADR 0044). Because both can null out
+    // whole index pages, we *fill* the response page: fetch further index pages
+    // (bounded by `MAX_FILL_ROUNDS`) until we have `limit` surviving hits or the
+    // index is exhausted — so a query dominated by left-room matches returns a
+    // short-or-cursored page, never a run of empty ones.
+    let mut results: Vec<SearchResultDto> = Vec::with_capacity(limit);
+    let mut index_offset = offset;
+    let mut total = 0usize;
+    for _ in 0..MAX_FILL_ROUNDS {
+        let deficit = limit - results.len();
+        params.limit = deficit;
+        params.offset = index_offset;
+        let found = search.search(&params).await?;
+        total = found.total;
+        let got = found.hits.len();
+        for hit in &found.hits {
+            if let Some(row) = store
+                .get_event_if_joined(hit.account_id, &hit.event_id)
+                .await?
+            {
+                results.push(SearchResultDto {
+                    event: EventDto::from_row(hit.account_id, row),
+                    score: hit.score,
+                });
+            }
+        }
+        // Advance by the hits the index returned (pre-filter), so a dropped row
+        // doesn't desync paging.
+        index_offset = index_offset.saturating_add(got);
+        // Stop once the page is full or the index is exhausted (a short page).
+        if results.len() >= limit || got < deficit {
+            break;
         }
     }
 
-    // Advance by the number of hits the index returned (pre-hydration), so a
-    // skipped row doesn't desync paging. More pages remain while we're short of
-    // the total. Checked arithmetic so a near-`usize::MAX` offset can't wrap;
-    // `offset` is already bounded to `MAX_OFFSET`, so this never actually saturates.
-    let next_offset = offset.saturating_add(found.hits.len());
-    let next_cursor = (next_offset < found.total).then(|| cursor::encode_offset(next_offset));
+    // More pages remain while the consumed index offset is short of the total.
+    let next_cursor = (index_offset < total).then(|| cursor::encode_offset(index_offset));
 
     Ok(ApiResponse::new(SearchPage {
         results,
-        total: found.total,
+        total,
         next_cursor,
     }))
 }

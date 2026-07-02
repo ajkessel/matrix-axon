@@ -2208,10 +2208,86 @@
           }
         }
       }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [
+          "status"
+        ],
+        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress.",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "description": "Current server status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_StatusDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AccountBackfillDto": {
+        "type": "object",
+        "description": "One account's backfill progress (M10).",
+        "required": [
+          "account_id",
+          "events",
+          "rooms_total",
+          "rooms_backfilled",
+          "complete"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The account."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Whether every joined room is fully backfilled (nothing left to fetch)."
+          },
+          "events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total events stored for the account."
+          },
+          "rooms_backfilled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, how many are backfilled to the room's start."
+          },
+          "rooms_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Currently-joined rooms with any stored events."
+          }
+        }
+      },
       "AccountDto": {
         "type": "object",
         "description": "An account in the lifecycle read API (`GET /v1/accounts`,\n`GET /v1/accounts/{account_id}`). The encrypted access token is deliberately\nabsent — only public lifecycle facts are exposed, never a secret.",
@@ -2651,6 +2727,28 @@
               "flow_id": {
                 "type": "string",
                 "description": "The verification transaction id."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_StatusDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress.",
+            "required": [
+              "backfill"
+            ],
+            "properties": {
+              "backfill": {
+                "$ref": "#/components/schemas/BackfillStatusDto",
+                "description": "History-backfill engine status."
               }
             }
           }
@@ -3155,6 +3253,41 @@
                 ]
               }
             }
+          }
+        }
+      },
+      "BackfillStatusDto": {
+        "type": "object",
+        "description": "The history-backfill engine's status (M10). Backfill grows storage unbounded\n(\"to room start\"), so it pauses when free space is low; live sync is never\npaused.",
+        "required": [
+          "paused",
+          "free_bytes",
+          "accounts"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountBackfillDto"
+            },
+            "description": "Per-account backfill progress, so a client can tell whether history backfill\nis still running or done."
+          },
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Free bytes on the guarded filesystem, read live.",
+            "minimum": 0
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Whether backfill is currently paused because free disk space is low."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why backfill is paused, or `null` when it is not paused. Currently only\n`\"low_disk\"`."
           }
         }
       },
@@ -3780,6 +3913,19 @@
           }
         }
       },
+      "StatusDto": {
+        "type": "object",
+        "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress.",
+        "required": [
+          "backfill"
+        ],
+        "properties": {
+          "backfill": {
+            "$ref": "#/components/schemas/BackfillStatusDto",
+            "description": "History-backfill engine status."
+          }
+        }
+      },
       "ThreadSummaryDto": {
         "type": "object",
         "description": "One thread in the `GET …/rooms/{room_id}/threads` response (M8): a thread root\nwith its reply count and latest reply. The root event itself is fetched via\nthe single-event endpoint; the members are paged via the thread timeline.",
@@ -3965,6 +4111,10 @@
     {
       "name": "search",
       "description": "Full-text search across the index"
+    },
+    {
+      "name": "status",
+      "description": "Server health and backfill status"
     },
     {
       "name": "events",

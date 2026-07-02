@@ -7,6 +7,7 @@
 //! migration files on disk.
 
 mod accounts;
+mod backfill;
 mod error;
 mod events;
 mod migrations;
@@ -16,13 +17,17 @@ mod state;
 mod tokens;
 
 pub use accounts::{Account, AccountState};
+pub use backfill::{AccountBackfillProgress, RoomBackfillState};
 pub use error::StoreError;
 pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use rooms::RoomSummary;
-pub use search::{IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE};
+pub use search::{
+    room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,
+    SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
+};
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
 pub use tokens::{IssuedToken, Token};
 

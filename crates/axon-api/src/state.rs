@@ -15,6 +15,7 @@ use axum::extract::FromRef;
 use tokio::sync::broadcast;
 
 use crate::auth::TokenVerifier;
+use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
 use crate::search::SearchQuery;
@@ -73,6 +74,10 @@ pub struct AppState {
     /// `503`. The concrete implementation is an adapter over the `axon-search`
     /// Tantivy index, injected by the binary like the other ports.
     pub search: Option<Arc<dyn SearchQuery>>,
+    /// Backfill status port for `GET /v1/status` (M10). Defaults to a no-op
+    /// (always-healthy) provider; the binary injects an adapter over the sync
+    /// engine's `BackfillHealth` via [`with_backfill_status`](Self::with_backfill_status).
+    pub backfill_status: Arc<dyn BackfillStatusProvider>,
 }
 
 impl AppState {
@@ -103,6 +108,7 @@ impl AppState {
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
             media,
             search,
+            backfill_status: Arc::new(NoBackfillStatus),
         }
     }
 
@@ -111,6 +117,14 @@ impl AppState {
     /// socket without waiting the full default.
     pub fn with_ws_revalidation_interval(mut self, interval: Duration) -> Self {
         self.ws_revalidation_interval = interval;
+        self
+    }
+
+    /// Inject the backfill status provider (`GET /v1/status`). The binary calls
+    /// this with an adapter over the sync engine's `BackfillHealth`; tests that
+    /// don't care keep the default no-op provider.
+    pub fn with_backfill_status(mut self, provider: Arc<dyn BackfillStatusProvider>) -> Self {
+        self.backfill_status = provider;
         self
     }
 }
@@ -166,6 +180,12 @@ impl FromRef<AppState> for Arc<dyn MediaProxy> {
 impl FromRef<AppState> for Option<Arc<dyn SearchQuery>> {
     fn from_ref(state: &AppState) -> Option<Arc<dyn SearchQuery>> {
         state.search.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn BackfillStatusProvider> {
+    fn from_ref(state: &AppState) -> Arc<dyn BackfillStatusProvider> {
+        state.backfill_status.clone()
     }
 }
 

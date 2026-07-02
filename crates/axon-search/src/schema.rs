@@ -19,6 +19,7 @@
 //! See the M9 search ADR.
 
 use axon_store::IndexableEvent;
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED, STRING,
 };
@@ -137,5 +138,33 @@ impl SearchSchema {
     pub fn delete_account(&self, writer: &IndexWriter, account_id: Uuid) {
         let term = Term::from_field_text(self.account_id, &account_id.to_string());
         writer.delete_term(term);
+    }
+
+    /// Delete every document belonging to `account_id` in `room_id`. The index is
+    /// combined across accounts, so this is scoped by *both* fields — a room id can
+    /// be shared by two accounts (both joined the same room), and purging one
+    /// account's copy must not touch the other's. `delete_term` takes a single
+    /// term, so this uses `delete_query` with a conjunction of the two keyword
+    /// terms (both fields are indexed, so the query resolves to a term set).
+    pub fn delete_room(
+        &self,
+        writer: &IndexWriter,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> tantivy::Result<()> {
+        let account = TermQuery::new(
+            Term::from_field_text(self.account_id, &account_id.to_string()),
+            IndexRecordOption::Basic,
+        );
+        let room = TermQuery::new(
+            Term::from_field_text(self.room_id, room_id),
+            IndexRecordOption::Basic,
+        );
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(account) as Box<dyn Query>),
+            (Occur::Must, Box::new(room) as Box<dyn Query>),
+        ]);
+        writer.delete_query(Box::new(query))?;
+        Ok(())
     }
 }

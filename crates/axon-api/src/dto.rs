@@ -610,6 +610,73 @@ pub struct SearchPage {
     pub next_cursor: Option<String>,
 }
 
+/// Server status (`GET /v1/status`, M10): the backfill engine's disk-space health
+/// plus per-account backfill progress.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StatusDto {
+    /// History-backfill engine status.
+    pub backfill: BackfillStatusDto,
+}
+
+/// The history-backfill engine's status (M10). Backfill grows storage unbounded
+/// ("to room start"), so it pauses when free space is low; live sync is never
+/// paused.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BackfillStatusDto {
+    /// Whether backfill is currently paused because free disk space is low.
+    pub paused: bool,
+    /// Why backfill is paused, or `null` when it is not paused. Currently only
+    /// `"low_disk"`.
+    pub reason: Option<String>,
+    /// Free bytes on the guarded filesystem, read live.
+    pub free_bytes: u64,
+    /// Per-account backfill progress, so a client can tell whether history backfill
+    /// is still running or done.
+    pub accounts: Vec<AccountBackfillDto>,
+}
+
+/// One account's backfill progress (M10).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccountBackfillDto {
+    /// The account.
+    pub account_id: Uuid,
+    /// Total events stored for the account.
+    pub events: i64,
+    /// Currently-joined rooms with any stored events.
+    pub rooms_total: i64,
+    /// Of those, how many are backfilled to the room's start.
+    pub rooms_backfilled: i64,
+    /// Whether every joined room is fully backfilled (nothing left to fetch).
+    pub complete: bool,
+}
+
+impl From<axon_store::AccountBackfillProgress> for AccountBackfillDto {
+    fn from(p: axon_store::AccountBackfillProgress) -> Self {
+        AccountBackfillDto {
+            account_id: p.account_id,
+            events: p.events_total,
+            rooms_total: p.rooms_total,
+            rooms_backfilled: p.rooms_backfilled,
+            complete: p.rooms_total > 0 && p.rooms_backfilled == p.rooms_total,
+        }
+    }
+}
+
+impl BackfillStatusDto {
+    /// Assemble from the disk snapshot (port) and the per-account progress (store).
+    pub fn new(
+        snapshot: crate::backfill::BackfillStatusSnapshot,
+        accounts: Vec<axon_store::AccountBackfillProgress>,
+    ) -> Self {
+        BackfillStatusDto {
+            paused: snapshot.paused_low_disk,
+            reason: snapshot.paused_low_disk.then(|| "low_disk".to_owned()),
+            free_bytes: snapshot.free_bytes,
+            accounts: accounts.into_iter().map(AccountBackfillDto::from).collect(),
+        }
+    }
+}
+
 /// One emoji's tally in the `GET …/events/{event_id}/reactions` response (M8).
 /// The response body is a JSON object keyed by emoji — `{ "👍": { … }, "❤️":
 /// { … } }` — with this as each value, resolved over the event's reactions

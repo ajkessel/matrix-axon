@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
+use crate::backfill::{self, BackfillHealth, BackfillParams};
 use crate::client::matches_account;
 use crate::error::{sdk_err, SyncError};
 use crate::gateway::SdkGateway;
@@ -101,6 +102,9 @@ pub struct SyncEngine {
     /// so newly ingested events are indexed, and into the lifecycle port so a
     /// deleted account's documents are purged.
     index: Option<IndexHandle>,
+    /// Disk-space health of the M10 backfill engine, shared with every account's
+    /// backfill task (they write it) and the API status surface (which reads it).
+    backfill_health: BackfillHealth,
 }
 
 impl SyncEngine {
@@ -146,6 +150,11 @@ impl SyncEngine {
         // Shared by the verification port and every account's incoming-request
         // listener. Ephemeral — lives only as long as the engine.
         let verifications = new_registry();
+        // Shared disk-space health for the backfill engine (M10): one handle for
+        // the whole engine, cloned into each account's backfill task and exposed to
+        // the API status surface. Carries the guarded filesystem so `/v1/status`
+        // reads free space live.
+        let backfill_health = BackfillHealth::new(Some(backfill::guard_path(&config)));
 
         // Crash recovery (ADR 0024), before any account is brought online and
         // before the HTTP listener binds (`axon-server` serves only after `start`
@@ -163,6 +172,7 @@ impl SyncEngine {
             locks.clone(),
             verifications.clone(),
             index.clone(),
+            backfill_health.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
@@ -191,6 +201,7 @@ impl SyncEngine {
                 locks.clone(),
                 verifications.clone(),
                 index.clone(),
+                backfill_health.clone(),
             );
         }
 
@@ -214,6 +225,7 @@ impl SyncEngine {
             locks,
             verifications,
             index,
+            backfill_health,
         })
     }
 
@@ -255,7 +267,14 @@ impl SyncEngine {
             self.locks.clone(),
             self.verifications.clone(),
             self.index.clone(),
+            self.backfill_health.clone(),
         )
+    }
+
+    /// The backfill engine's disk-space health, for the API status surface
+    /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
+    pub fn backfill_health(&self) -> BackfillHealth {
+        self.backfill_health.clone()
     }
 
     /// The runtime device-verification port, for the API layer's verify routes.
@@ -321,6 +340,7 @@ pub(crate) fn spawn_supervised(
     locks: IdentityLocks,
     verifications: FlowRegistry,
     index: Option<IndexHandle>,
+    backfill_health: BackfillHealth,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -335,6 +355,7 @@ pub(crate) fn spawn_supervised(
         tracker.clone(),
         verifications,
         index,
+        backfill_health,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -361,6 +382,7 @@ async fn supervise_account(
     tracker: TaskTracker,
     verifications: FlowRegistry,
     index: Option<IndexHandle>,
+    backfill_health: BackfillHealth,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -380,6 +402,7 @@ async fn supervise_account(
             &tracker,
             &verifications,
             index.as_ref(),
+            &backfill_health,
         )
         .await
         {
@@ -409,17 +432,24 @@ async fn supervise_account(
     }
 }
 
-/// Shared context injected into the per-account event handler.
+/// Shared context injected into the per-account event handler. Also handed to the
+/// backfill task (M10), which persists paged events through the same path.
 #[derive(Clone)]
-struct PersistContext {
-    store: Store,
-    account_id: Uuid,
+pub(crate) struct PersistContext {
+    pub(crate) store: Store,
+    pub(crate) account_id: Uuid,
     /// Producer end of the live-event bus; [`persist_timeline_event`] publishes
     /// each freshly persisted event to it for `/v1/ws` fan-out.
-    live_tx: broadcast::Sender<LiveFrame>,
+    pub(crate) live_tx: broadcast::Sender<LiveFrame>,
     /// Search-index producer (M9), or `None` when search is disabled. Each
     /// persisted event is enqueued for (re)indexing from the resolved projection.
-    index: Option<IndexHandle>,
+    pub(crate) index: Option<IndexHandle>,
+    /// This account's own Matrix user id, so the room-state handler can recognize
+    /// a membership event that is *this user* leaving/being banned (M10 purge).
+    pub(crate) local_user_id: Arc<str>,
+    /// When set, a leave/ban of the local user destructively purges the room's
+    /// stored events + search documents (ADR 0044). Off by default.
+    pub(crate) purge_on_leave: bool,
 }
 
 /// Event handler: persist every synced timeline event to Postgres.
@@ -451,7 +481,80 @@ async fn persist_timeline_event(
             return;
         }
     };
+    // The live sync path: persist and emit the fresh event to `/v1/ws`.
+    persist_event_core(
+        &ctx,
+        &ev,
+        raw_val,
+        room.room_id().as_str(),
+        enc_info.as_ref(),
+        true,
+    )
+    .await;
+}
 
+/// Persist one event fetched by history backfill (M10). SDK back-pagination
+/// (`Room::messages`) does not dispatch through `add_event_handler`, so the
+/// backfill driver calls this to run each paged event through the same ingestion
+/// path as live sync — minus the live `/v1/ws` emit (see [`persist_event_core`]).
+/// A paged event that the SDK could not decrypt (keys not yet imported) arrives
+/// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
+/// once keys arrive.
+pub(crate) async fn persist_backfilled_event(
+    ctx: &PersistContext,
+    room: &Room,
+    tev: &matrix_sdk::deserialized_responses::TimelineEvent,
+) {
+    let raw = tev.raw();
+    let ev: AnySyncTimelineEvent = match raw.deserialize() {
+        Ok(ev) => ev,
+        Err(err) => {
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                error = %err,
+                "failed to deserialize backfilled event; skipping"
+            );
+            return;
+        }
+    };
+    let raw_val: serde_json::Value = match serde_json::from_str(raw.json().get()) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                error = %err,
+                "failed to parse backfilled raw event JSON; skipping"
+            );
+            return;
+        }
+    };
+    persist_event_core(
+        ctx,
+        &ev,
+        raw_val,
+        room.room_id().as_str(),
+        tev.encryption_info().map(|info| info.as_ref()),
+        false,
+    )
+    .await;
+}
+
+/// Persist one timeline event — live (`emit_live = true`) or backfilled
+/// (`emit_live = false`) — through the shared ingestion path: the hot columns,
+/// `upsert_event` (which transactionally appends the M8/M9 search-outbox
+/// obligation), and the crypto sibling rows. Only the live path emits a `/v1/ws`
+/// frame: replaying deep history through the live bus would flood subscribers
+/// with old events mislabeled as just-arrived, and backfilled history reaches
+/// clients through timeline reads (M8) and search (M9) instead — both driven by
+/// `upsert_event`, not the emit.
+async fn persist_event_core(
+    ctx: &PersistContext,
+    ev: &AnySyncTimelineEvent,
+    raw_val: serde_json::Value,
+    room_id: &str,
+    enc_info: Option<&EncryptionInfo>,
+    emit_live: bool,
+) {
     // Extract event_type as an owned String so raw_val can be moved into NewEvent below.
     let event_type: String = raw_val
         .get("type")
@@ -498,7 +601,7 @@ async fn persist_timeline_event(
     };
     let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
     let event_id = ev.event_id().as_str().to_owned();
-    let room_id = room.room_id().as_str().to_owned();
+    let room_id = room_id.to_owned();
     let state_key = raw_val
         .get("state_key")
         .and_then(serde_json::Value::as_str)
@@ -552,15 +655,14 @@ async fn persist_timeline_event(
     // (the `COALESCE`d snapshot), not the freshly-derived one — they diverge on a
     // duplicate delivery whose trust changed, and a live subscriber must see the
     // same immutable snapshot a later timeline read returns (ADR 0031).
-    let stored_trust =
-        persist_event_siblings(&ctx, &event_id, &room_id, ciphertext, enc_info.as_ref()).await;
+    let stored_trust = persist_event_siblings(ctx, &event_id, &room_id, ciphertext, enc_info).await;
 
     // Fan the event out to any live `/v1/ws` subscribers. Skip the work entirely
     // when nobody is listening (the common case for a headless server) so we
     // don't clone the content needlessly. `send` errors only when there are no
     // receivers — harmless to ignore (a receiver may have dropped between the
     // count check and the send), and never fatal to sync.
-    if ctx.live_tx.receiver_count() > 0 {
+    if emit_live && ctx.live_tx.receiver_count() > 0 {
         // The effective stored verdict, so a live subscriber and a subsequent
         // timeline read agree. `None` for UTDs (no `enc_info` yet) and unencrypted
         // events.
@@ -691,6 +793,36 @@ async fn persist_room_state_event(
     } else {
         tracing::debug!(account_id = %ctx.account_id, room_id = %room_id, event_type = event_type.as_str(), state_key = state_key.as_str(), "persisted room state");
     }
+
+    // M10 purge-on-leave (ADR 0044): when this state event is *this account*
+    // leaving or being banned and the operator enabled destructive purge, remove
+    // the room's stored events + search documents. Idempotent — a later re-join
+    // re-backfills. Off by default; when off, left rooms are retained and merely
+    // hidden from search by the membership filter.
+    if ctx.purge_on_leave
+        && event_type == "m.room.member"
+        && state_key.as_str() == &*ctx.local_user_id
+    {
+        let membership = raw_val
+            .get("content")
+            .and_then(|c| c.get("membership"))
+            .and_then(serde_json::Value::as_str);
+        if matches!(membership, Some("leave") | Some("ban")) {
+            match ctx.store.purge_room(ctx.account_id, &room_id).await {
+                Ok(()) => {
+                    // Wake the indexer so it applies the room-purge obligation
+                    // `purge_room` just enqueued.
+                    if let Some(index) = ctx.index.as_ref() {
+                        index.notify();
+                    }
+                    tracing::info!(account_id = %ctx.account_id, room_id = %room_id, "purged room on leave");
+                }
+                Err(err) => {
+                    tracing::warn!(account_id = %ctx.account_id, room_id = %room_id, error = %err, "failed to purge room on leave");
+                }
+            }
+        }
+    }
 }
 
 /// Event handler: per-room account data (fully-read markers, tags, …) → the
@@ -765,6 +897,7 @@ async fn run_account(
     tracker: &TaskTracker,
     verifications: &FlowRegistry,
     index: Option<&IndexHandle>,
+    backfill_health: &BackfillHealth,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -797,7 +930,12 @@ async fn run_account(
         account_id: account.account_id,
         live_tx: live_tx.clone(),
         index: index.cloned(),
+        local_user_id: Arc::from(account.user_id.as_str()),
+        purge_on_leave: config.purge_on_leave,
     };
+    // Clone before the handler context takes ownership: the backfill task persists
+    // paged events through the same path (M10), reusing this context.
+    let backfill_ctx = persist_ctx.clone();
     client.add_event_handler_context(persist_ctx);
     client.add_event_handler(persist_timeline_event);
     // Room state + account data (ADR 0016). These reuse the same PersistContext.
@@ -847,6 +985,24 @@ async fn run_account(
     // One sweep now that the service is up and `recover()` (if any) has imported
     // keys: keys already in the crypto store don't fire the arrival stream.
     redecrypt::sweep_pending_utds(&client, store, account.account_id, index).await;
+
+    // History backfill (M10): a continuous, throttled background task that pages
+    // each joined room's pre-existing history backward through the shared ingestion
+    // path. Same child-token + join-handle lifecycle as the re-decryption queue, so
+    // it ends with this run and is drained cleanly below. Gated by config; `None`
+    // when disabled so there is nothing to drain.
+    let backfill_cancel = cancel.child_token();
+    let backfill_handle = if config.backfill_enabled {
+        Some(tokio::spawn(backfill::run(
+            client.clone(),
+            backfill_ctx,
+            BackfillParams::from_config(config),
+            backfill_health.clone(),
+            backfill_cancel.clone(),
+        )))
+    } else {
+        None
+    };
 
     // Verification watcher (ADR 0026): keep the persisted `verified` flag tracking
     // the SDK's current cross-signing state. Same child-token + join-handle
@@ -903,6 +1059,16 @@ async fn run_account(
             error = %err,
             "re-decryption task did not shut down cleanly"
         );
+    }
+    backfill_cancel.cancel();
+    if let Some(handle) = backfill_handle {
+        if let Err(err) = handle.await {
+            tracing::warn!(
+                account_id = %account.account_id,
+                error = %err,
+                "backfill task did not shut down cleanly"
+            );
+        }
     }
     verify_cancel.cancel();
     if let Err(err) = verify_handle.await {

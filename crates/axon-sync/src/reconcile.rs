@@ -169,6 +169,7 @@ mod tests {
             account: None,
             timeline_limit: 1,
             live_event_buffer: 16,
+            ..SyncConfig::default()
         }
     }
 
@@ -186,6 +187,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             crate::verification::new_registry(),
             None,
+            crate::backfill::BackfillHealth::new(None),
         )
     }
 

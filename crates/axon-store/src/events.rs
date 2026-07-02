@@ -731,6 +731,38 @@ impl Store {
         Ok(row)
     }
 
+    /// Like [`get_event`](Self::get_event), but returns `None` when the local user
+    /// has *left or been banned* from the event's room — the membership filter that
+    /// keeps left-room content out of search results (M10, ADR 0044). Reuses the
+    /// same `NOT EXISTS(m.room.member = leave/ban)` predicate as
+    /// [`list_rooms`](Self::list_rooms) (ADR 0037), correlated to the account's own
+    /// `user_id`. Non-destructive and reversible: re-joining a room makes its events
+    /// hydrate again. A room with no definitive leave/ban row still hydrates, so
+    /// missing membership data never hides a joined room's hits.
+    pub async fn get_event_if_joined(
+        &self,
+        account_id: Uuid,
+        event_id: &str,
+    ) -> Result<Option<TimelineRow>, StoreError> {
+        let sql = format!(
+            "{} WHERE e.account_id = $1 AND e.event_id = $2 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM room_state rs \
+                     JOIN accounts ac ON ac.account_id = e.account_id \
+                     WHERE rs.account_id = e.account_id AND rs.room_id = e.room_id \
+                       AND rs.event_type = 'm.room.member' AND rs.state_key = ac.user_id \
+                       AND rs.content->>'membership' IN ('leave', 'ban') \
+               )",
+            TIMELINE_SELECT.as_str()
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, TimelineRow>(&sql)
+            .bind(account_id)
+            .bind(event_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
     /// Read the at-decrypt sender-trust snapshot for `(account_id, event_id)` —
     /// the event's `sender` plus, if the event was decrypted, the crypto
     /// sibling's recorded device keys and trust verdicts. Returns `None` only

@@ -107,8 +107,11 @@ pub struct SyncConfig {
     pub account: Option<AccountProvision>,
     /// Per-room timeline window the sliding-sync list requests (`n`). The SDK
     /// default is `1` (latest event only); we raise it so each room archives its
-    /// last N events, giving the timeline read real depth to paginate. Bounded
-    /// substitute for full history backfill (that is later work). Defaults to 20.
+    /// last N events, giving the timeline read real depth to paginate. Since M10
+    /// this is only a cold-start latency knob — the shallow window a room shows
+    /// the instant it syncs — not the history bound: the backfill engine extends
+    /// each room back toward its start in the background (ADR 0015, ADR 0043).
+    /// Defaults to 20.
     #[serde(default = "default_timeline_limit")]
     pub timeline_limit: u32,
     /// Capacity of the live-event broadcast bus that feeds the `/v1/ws`
@@ -119,6 +122,61 @@ pub struct SyncConfig {
     /// Defaults to 1024.
     #[serde(default = "default_live_event_buffer")]
     pub live_event_buffer: usize,
+    /// Enable the M10 history-backfill engine: a continuous, throttled background
+    /// task that pages each joined room's pre-existing history backward through
+    /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
+    #[serde(default = "default_backfill_enabled")]
+    pub backfill_enabled: bool,
+    /// Events requested per `/messages` page during backfill. Larger pages
+    /// backfill faster but hold the connection longer per request. Defaults to 100.
+    #[serde(default = "default_backfill_page_size")]
+    pub backfill_page_size: u32,
+    /// Per-room bound on how many events backfill pulls before stopping (without
+    /// marking the room complete, so raising the cap later resumes it). `0` means
+    /// "to room start" — unbounded — which is safe because backfill is continuous
+    /// and throttled. Defaults to 0.
+    #[serde(default)]
+    pub backfill_target_depth: u64,
+    /// Delay between backfill pages, in milliseconds — the throttle that keeps
+    /// backfill from starving live sync. Defaults to 1000.
+    #[serde(default = "default_backfill_throttle_ms")]
+    pub backfill_throttle_ms: u64,
+    /// Per-request timeout for a backfill `/messages` page, in seconds. Bounds a
+    /// hung homeserver request so it can't stall account teardown / server
+    /// shutdown (the drain awaits the backfill task). Defaults to 30.
+    #[serde(default = "default_backfill_page_timeout_secs")]
+    pub backfill_page_timeout_secs: u64,
+    /// When every joined room is complete or capped, how long backfill idles
+    /// before re-polling the room list, in seconds. This is how a newly joined or
+    /// re-joined room is picked up without a restart. Defaults to 45.
+    #[serde(default = "default_backfill_idle_poll_secs")]
+    pub backfill_idle_poll_secs: u64,
+    /// Filesystem the backfill disk-space valve watches (via `statvfs`). Defaults
+    /// to the sync `data_dir`. **Backfill's primary growth is the Postgres
+    /// `events` table**, whose free space axon cannot measure when Postgres is on
+    /// another host or a separate volume — point this at the filesystem holding
+    /// the Postgres data directory (or the search index) when it differs from
+    /// `data_dir`, or monitor that disk separately. On the common single-host /
+    /// single-volume deploy the default already reflects Postgres's free space.
+    #[serde(default)]
+    pub backfill_disk_guard_path: Option<PathBuf>,
+    /// Backfill pauses while free space on the guarded filesystem
+    /// (`backfill_disk_guard_path`) is below this many bytes — a safety valve so
+    /// unbounded backfill can't fill the disk. Live sync is unaffected. Defaults
+    /// to 2 GiB.
+    #[serde(default = "default_backfill_min_free_bytes")]
+    pub backfill_min_free_bytes: u64,
+    /// Backfill also pauses when free space is below this percentage of the
+    /// filesystem (checked alongside `backfill_min_free_bytes`; either triggers a
+    /// pause). Defaults to 5.0.
+    #[serde(default = "default_backfill_min_free_percent")]
+    pub backfill_min_free_percent: f64,
+    /// When `true`, leaving (or being banned from) a room destructively purges its
+    /// stored events, state, and search documents (ADR 0044). When `false` (the
+    /// default), left rooms are retained but hidden from search by the membership
+    /// filter; re-joining restores them.
+    #[serde(default)]
+    pub purge_on_leave: bool,
 }
 
 /// Full-text search (Tantivy) settings.
@@ -261,6 +319,34 @@ fn default_live_event_buffer() -> usize {
     1024
 }
 
+fn default_backfill_enabled() -> bool {
+    true
+}
+
+fn default_backfill_page_size() -> u32 {
+    100
+}
+
+fn default_backfill_throttle_ms() -> u64 {
+    1000
+}
+
+fn default_backfill_page_timeout_secs() -> u64 {
+    30
+}
+
+fn default_backfill_idle_poll_secs() -> u64 {
+    45
+}
+
+fn default_backfill_min_free_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+fn default_backfill_min_free_percent() -> f64 {
+    5.0
+}
+
 fn default_search_enabled() -> bool {
     true
 }
@@ -311,6 +397,16 @@ impl Default for SyncConfig {
             account: None,
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
+            backfill_enabled: default_backfill_enabled(),
+            backfill_page_size: default_backfill_page_size(),
+            backfill_target_depth: 0,
+            backfill_throttle_ms: default_backfill_throttle_ms(),
+            backfill_page_timeout_secs: default_backfill_page_timeout_secs(),
+            backfill_idle_poll_secs: default_backfill_idle_poll_secs(),
+            backfill_disk_guard_path: None,
+            backfill_min_free_bytes: default_backfill_min_free_bytes(),
+            backfill_min_free_percent: default_backfill_min_free_percent(),
+            purge_on_leave: false,
         }
     }
 }

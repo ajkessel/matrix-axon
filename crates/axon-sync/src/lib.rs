@@ -13,6 +13,7 @@
 //! `SyncConfig`, and a cancellation token; it supervises a task per account and
 //! restarts failed syncs with exponential backoff.
 
+mod backfill;
 mod client;
 mod discovery;
 mod engine;
@@ -27,6 +28,7 @@ mod redecrypt;
 mod trust;
 mod verification;
 
+pub use backfill::BackfillHealth;
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
 pub use gateway::SdkGateway;

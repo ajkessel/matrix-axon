@@ -34,6 +34,19 @@ const OUTBOX_CURSOR_KEY: &str = "outbox_cursor";
 /// Matrix event id is never empty, so this is unambiguous.
 pub const SEARCH_OUTBOX_PURGE: &str = "";
 
+/// Prefix marking a [`SearchOutboxEntry`] `event_id` as a *room* purge: "delete
+/// every document for this account in the given room" (written when a room is
+/// purged — see [`Store::purge_room`](crate::Store::purge_room)). The room id
+/// follows the prefix. A real Matrix event id starts with `$`, never the unit
+/// separator, so this is unambiguous — and distinct from the account-purge
+/// sentinel (`""`), which does not start with the prefix.
+pub const SEARCH_OUTBOX_ROOM_PURGE_PREFIX: &str = "\u{1f}room\u{1f}";
+
+/// Build the `search_outbox` `event_id` sentinel for a room purge of `room_id`.
+pub fn room_purge_sentinel(room_id: &str) -> String {
+    format!("{SEARCH_OUTBOX_ROOM_PURGE_PREFIX}{room_id}")
+}
+
 /// One message event resolved for indexing: the fields the Tantivy schema needs,
 /// with `body` already the resolved (latest-edit, non-redacted) text.
 ///
@@ -221,9 +234,18 @@ pub struct SearchOutboxEntry {
 }
 
 impl SearchOutboxEntry {
-    /// Whether this entry is the account-purge sentinel.
+    /// Whether this entry is the account-purge sentinel (delete every document
+    /// for the account).
     pub fn is_purge(&self) -> bool {
         self.event_id == SEARCH_OUTBOX_PURGE
+    }
+
+    /// If this entry is a *room* purge, the room id to purge (every document for
+    /// this account in that room); `None` otherwise. Distinct from
+    /// [`is_purge`](Self::is_purge): a room purge names one room, an account purge
+    /// removes everything.
+    pub fn room_purge(&self) -> Option<&str> {
+        self.event_id.strip_prefix(SEARCH_OUTBOX_ROOM_PURGE_PREFIX)
     }
 }
 

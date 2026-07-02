@@ -480,6 +480,7 @@ dependencies = [
  "axon-search",
  "axon-store",
  "axum",
+ "fs4",
  "futures-util",
  "matrix-sdk",
  "matrix-sdk-ui",

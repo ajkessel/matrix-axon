@@ -956,6 +956,7 @@ mod tests {
             account: None,
             timeline_limit: 1,
             live_event_buffer: 16,
+            ..SyncConfig::default()
         };
         let manager = ClientManager::new(store.clone(), config.clone());
         let (live_tx, _rx) = broadcast::channel(16);

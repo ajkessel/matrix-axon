@@ -51,6 +51,10 @@ chrono = { version = "0.4", default-features = false }
 # sqlx-sqlite out of the graph — see axon-store/Cargo.toml), so we embed here and
 # build a sqlx_core::migrate::Migrator ourselves.
 include_dir = { version = "0.7" }
+# Cross-platform filesystem free-space query (statvfs) for the M10 backfill
+# disk-space safety valve. Already in the graph transitively; named here so the
+# valve can call it directly. Default features (sync) are enough.
+fs4 = { version = "0.13" }
 
 # Matrix. Keep the SDK's default features (they carry its intended TLS/HTTP
 # stack — 0.18 exposes no standalone tls feature). Extra features are added at

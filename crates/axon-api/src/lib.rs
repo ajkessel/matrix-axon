@@ -11,6 +11,7 @@
 //! `{error}`) lives in [`response`]; the OpenAPI document is [`ApiDoc`].
 
 mod auth;
+mod backfill;
 mod cursor;
 mod dto;
 mod extract;
@@ -28,6 +29,7 @@ mod ws;
 
 pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, Relation};
+pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use media::{MediaContent, MediaError, MediaProxy};
 pub use openapi::ApiDoc;
@@ -97,6 +99,9 @@ pub fn router(state: AppState) -> Router {
         // Full-text search across the index (M9b). Cross-account by default;
         // narrowed by the query filters. Returns hydrated events + BM25 score.
         .route("/v1/search", get(routes::search::search))
+        // Server status (M10): the backfill engine's disk-space health, so a
+        // client can tell when backfill has paused.
+        .route("/v1/status", get(routes::status::get_status))
         .route("/v1/rooms", get(routes::rooms::list_rooms))
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/members",

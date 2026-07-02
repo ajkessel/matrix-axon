@@ -11,6 +11,7 @@ mod gateway;
 mod lifecycle;
 mod media;
 mod search;
+mod status;
 mod token;
 mod trust;
 mod verification;
@@ -139,17 +140,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
     let media = Arc::new(MediaProxyAdapter(sync_engine.media_proxy()));
-    let app = axon_api::router(axon_api::AppState::new(
-        store,
-        sync_engine.live_events(),
-        sender,
-        lifecycle,
-        verify,
-        trust,
-        verifier,
-        media,
-        search_port,
-    ));
+    let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
+    let app = axon_api::router(
+        axon_api::AppState::new(
+            store,
+            sync_engine.live_events(),
+            sender,
+            lifecycle,
+            verify,
+            trust,
+            verifier,
+            media,
+            search_port,
+        )
+        .with_backfill_status(backfill_status),
+    );
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
