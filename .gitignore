@@ -34,6 +34,9 @@ axon.toml
 .vscode/
 .idea/
 
+# Claude Code local tooling state (worktrees, local settings) — never tracked
+.claude/
+
 # Node / web client
 clients/web/node_modules/
 clients/web/dist/
