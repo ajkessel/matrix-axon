@@ -33,6 +33,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 fs4 = { workspace = true }
+# `MediaFetcher` (axon-media) is an async trait implemented by SdkMediaProxy.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 # DB-gated lifecycle tests: seed/clean account rows directly through the pool

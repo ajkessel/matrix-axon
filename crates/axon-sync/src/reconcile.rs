@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 
 use axon_core::SyncConfig;
+use axon_media::MediaCacheHandle;
 use axon_store::Store;
 use uuid::Uuid;
 
@@ -137,6 +138,23 @@ pub(crate) async fn prune_orphan_store_dirs(config: &SyncConfig, store: &Store) 
     }
 }
 
+/// Prune orphan media-cache dirs: a `<uuid>/` under the media `cache_dir` whose
+/// id matches **no** `accounts` row in any state (the M11 analogue of
+/// [`prune_orphan_store_dirs`], ADR 0024 step 5). The backstop for a deletion
+/// that happened while the media cache was disabled or a crash mid-purge. Keyed
+/// off row *existence*, never lifecycle state, for the same reason. The scan and
+/// stray-file discipline live in `axon-media`; never returns an error.
+pub(crate) async fn prune_orphan_media_dirs(media: &MediaCacheHandle, store: &Store) {
+    let known: HashSet<Uuid> = match store.list_all_account_ids().await {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(err) => {
+            tracing::error!(error = %err, "media orphan-GC: listing account ids failed; skipping");
+            return;
+        }
+    };
+    media.purge_orphans(&known).await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -173,9 +191,21 @@ mod tests {
         }
     }
 
-    fn lifecycle(store: Store, config: SyncConfig) -> AccountLifecycle {
+    async fn lifecycle(store: Store, config: SyncConfig) -> AccountLifecycle {
         let manager = ClientManager::new(store.clone(), config.clone());
         let (live_tx, _rx) = broadcast::channel(16);
+        let media = axon_media::MediaCache::open(&axon_core::MediaConfig {
+            enabled: true,
+            cache_dir: std::env::temp_dir()
+                .join(format!("axon-media-reconcile-{}", Uuid::new_v4())),
+            max_bytes: 1 << 20,
+            max_object_bytes: 1 << 20,
+            fetch_timeout_secs: 30,
+            max_concurrent_downloads: 8,
+        })
+        .await
+        .expect("open media cache")
+        .handle();
         AccountLifecycle::new(
             store,
             config,
@@ -188,6 +218,7 @@ mod tests {
             crate::verification::new_registry(),
             crate::verification::VerificationRooms::new(),
             None,
+            media,
             crate::backfill::BackfillHealth::new(None),
         )
     }
@@ -208,7 +239,7 @@ mod tests {
         let store = connect_store().await;
         let dir = temp_data_dir();
         let config = config(dir.clone());
-        let lc = lifecycle(store.clone(), config.clone());
+        let lc = lifecycle(store.clone(), config.clone()).await;
 
         let user = format!("@reconcile-{}:localhost", Uuid::new_v4());
         let acct = store
@@ -279,5 +310,49 @@ mod tests {
         delete_row(&store, live.account_id).await;
         delete_row(&store, deact.account_id).await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Media orphan-GC (M11): prunes a `<uuid>/` cache dir with no account row,
+    /// keeps one for a real (even deactivated) row, and never touches strays.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn media_orphan_gc_prunes_rowless_dirs_only() {
+        let store = connect_store().await;
+        let cache_dir = std::env::temp_dir().join(format!("axon-media-gc-{}", Uuid::new_v4()));
+        let media = axon_media::MediaCache::open(&axon_core::MediaConfig {
+            enabled: true,
+            cache_dir: cache_dir.clone(),
+            max_bytes: 1 << 20,
+            max_object_bytes: 1 << 20,
+            fetch_timeout_secs: 30,
+            max_concurrent_downloads: 8,
+        })
+        .await
+        .expect("open media cache");
+
+        let user = format!("@media-gc-{}:localhost", Uuid::new_v4());
+        let live = store
+            .upsert_account(&user, "https://hs.example.org")
+            .await
+            .unwrap();
+
+        let live_dir = cache_dir.join(live.account_id.to_string());
+        let orphan_dir = cache_dir.join(Uuid::new_v4().to_string()); // no row
+        let stray_file = cache_dir.join("not-a-uuid.txt");
+        for d in [&live_dir, &orphan_dir] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("deadbeef"), b"cached").unwrap();
+        }
+        std::fs::write(&stray_file, b"keep me").unwrap();
+
+        prune_orphan_media_dirs(&media.handle(), &store).await;
+
+        assert!(live_dir.exists(), "live account media dir kept");
+        assert!(!orphan_dir.exists(), "row-less orphan media dir pruned");
+        assert!(stray_file.exists(), "non-uuid file untouched");
+        assert!(cache_dir.join(".tmp").exists(), "temp dir untouched");
+
+        delete_row(&store, live.account_id).await;
+        let _ = std::fs::remove_dir_all(&cache_dir);
     }
 }

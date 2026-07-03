@@ -27,6 +27,13 @@ pub enum MediaError {
     NotConnected(String),
     /// The homeserver was unreachable or failed the request. → `502`.
     Upstream(String),
+    /// The object exceeds a configured size limit and is refused. A terminal
+    /// condition (retrying will not help). → `413`.
+    TooLarge(String),
+    /// An internal failure in the proxy/cache (e.g. local disk error). → `500`.
+    /// The caller is expected to log the detail (with `account_id`) before
+    /// converting, since the `500` body is generic.
+    Internal(String),
 }
 
 impl From<MediaError> for crate::response::ApiError {
@@ -37,33 +44,49 @@ impl From<MediaError> for crate::response::ApiError {
             MediaError::Forbidden(msg) => Self::forbidden(msg),
             MediaError::NotConnected(msg) => Self::service_unavailable(msg),
             MediaError::Upstream(msg) => Self::bad_gateway(msg),
+            MediaError::TooLarge(msg) => Self::payload_too_large(msg),
+            MediaError::Internal(_) => Self::internal(),
         }
     }
 }
 
-/// The downloaded bytes and their MIME type.
-pub struct MediaContent {
-    /// Raw media bytes.
-    pub data: Vec<u8>,
-    /// MIME type, e.g. `image/jpeg`. Falls back to `application/octet-stream`
-    /// when the homeserver does not supply a `Content-Type`.
-    pub content_type: String,
+/// A resolved media object, ready to serve. Holds an **open** file handle
+/// (the cache opens it) whose backing bytes survive a concurrent cache
+/// eviction/purge, so the handler can stream ranges from it without racing the
+/// cache. The MIME type is *not* carried here — the media handler derives it
+/// from the Matrix event content (the source of truth for `info.mimetype`),
+/// since the SDK download does not surface a `Content-Type`.
+pub struct MediaResource {
+    /// Open, read-only handle positioned at the start of the media bytes.
+    pub file: tokio::fs::File,
+    /// Total length in bytes.
+    pub len: u64,
+    /// A stable, content-addressed entity tag for `ETag` / `If-None-Match`.
+    /// MXC content is immutable, so this never changes for a given URI.
+    pub etag: String,
 }
 
-/// Fetches media from a homeserver on behalf of an account. Implemented outside
-/// this crate; held in [`AppState`](crate::AppState) as `Arc<dyn MediaProxy>`.
+/// Fetches media from a homeserver on behalf of an account (caching it on
+/// disk). Implemented outside this crate; held in [`AppState`](crate::AppState)
+/// as `Arc<dyn MediaProxy>`.
 #[async_trait]
 pub trait MediaProxy: Send + Sync {
-    /// Download the media identified by `mxc_url` (`mxc://server/media_id`)
-    /// using the given account's credentials. `encrypted_file` is the matching
-    /// `content.file` or `content.info.thumbnail_file` JSON object from the
-    /// Matrix event when the media is encrypted; the implementation uses it to
-    /// decrypt after downloading. Pass `None` for plain (unencrypted) media.
-    /// Returns decrypted bytes and MIME type on success.
+    /// Resolve the media identified by `mxc_url` (`mxc://server/media_id`) using
+    /// the given account's credentials, returning an open handle to the bytes.
+    /// `encrypted_file` is the matching `content.file` or
+    /// `content.info.thumbnail_file` JSON object from the Matrix event when the
+    /// media is encrypted; the implementation uses it to decrypt after
+    /// downloading. Pass `None` for plain (unencrypted) media.
     async fn get_media(
         &self,
         account_id: Uuid,
         mxc_url: &str,
         encrypted_file: Option<Value>,
-    ) -> Result<MediaContent, MediaError>;
+    ) -> Result<MediaResource, MediaError>;
+
+    /// The stable entity tag for `mxc_url`, computed **without** any download.
+    /// MXC content is immutable, so this is content-addressed (a hash of the
+    /// URI). The handler uses it to answer a conditional GET (`If-None-Match`)
+    /// with `304` before triggering a fetch on a cache miss.
+    fn etag(&self, mxc_url: &str) -> String;
 }

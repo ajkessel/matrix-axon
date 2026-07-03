@@ -1,9 +1,18 @@
 //! Media proxy with bounded LRU disk cache for MXC URLs.
 //!
-//! This crate provides MXC URI validation and is the planned home for a bounded
-//! on-disk cache. The actual authenticated download is done through the
-//! `axon-sync` SDK client (which carries the account's access token) and
-//! adapted onto the `axon-api` `MediaProxy` port by `axon-server`.
+//! This crate provides MXC URI validation ([`parse_mxc`]) and the bounded
+//! on-disk LRU [`MediaCache`]. The actual authenticated, decrypting download is
+//! done through the `axon-sync` SDK client (which carries the account's access
+//! token) behind the [`MediaFetcher`] trait, so this crate stays free of
+//! `matrix-sdk`; `axon-server` wires the cache in front of the fetcher and
+//! adapts the pair onto the `axon-api` `MediaProxy` port.
+
+mod cache;
+
+pub use cache::{
+    etag_for, FetchError, MediaCache, MediaCacheError, MediaCacheHandle, MediaFetcher,
+    MediaResource,
+};
 
 /// Validate and decompose an `mxc://` URI into `(server_name, media_id)`.
 ///

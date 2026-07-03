@@ -140,17 +140,29 @@ no parked waiters), under the map mutex so no waiter can appear between the chec
 and the removal; otherwise it leaves the entry (a tiny, bounded leak — correctness
 over reclaiming a slot).
 
-### Deferred: search-index and media-cache purge (M9 / M11)
+### Deferred at authoring, now landed: search-index and media-cache purge (M9 / M11)
 
 The spec orders a search-doc deletion (step 3) and a media-cache purge (step 5)
-into the teardown. Those subsystems do not exist yet — `axon-search` and
-`axon-media` are crate stubs — so there is nothing to delete, and this PR adds
-**no** code seam or no-op hook for them (an abstraction with one trivial caller
-and no implementation earns its keep only once the implementation exists). Their
-ordering slots are recorded here in prose; M9 and M11 each slot their step into
-`AccountLifecycle::delete` at the numbered position when they land, ahead of the
-row delete. The row-last invariant already guarantees a reconcile can re-find and
-re-run their cleanup, because the row outlives every external resource.
+into the teardown. When this ADR was written those subsystems did not exist —
+`axon-search` and `axon-media` were crate stubs — so it added **no** code seam or
+no-op hook for them (an abstraction with one trivial caller and no implementation
+earns its keep only once the implementation exists) and recorded their ordering
+slots here in prose. Both have since landed at their numbered positions, ahead of
+the row delete:
+
+- **Step 3 (search) — M9.** `delete_account_row` appends a durable account-purge
+  sentinel to `search_outbox` in the *same* statement that drops the row (no FK,
+  so it outlives the cascade); when the indexer is live the verb also `flush`es so
+  the documents are gone before it returns (ADR 0039).
+- **Step 5 (media) — M11.** `AccountLifecycle::delete` calls
+  `MediaCacheHandle::purge_account` between the SDK-store-dir removal and the row
+  delete: it drops the account's in-memory LRU entries and `remove_dir_all`s its
+  `cache_dir/<account_id>/` directory. A boot `prune_orphan_media_dirs` sweep (the
+  M11 analogue of `prune_orphan_store_dirs`) is the backstop for a purge that was
+  interrupted or happened while the cache was disabled (ADR 0045).
+
+The row-last invariant guarantees a reconcile can re-find and re-run either
+cleanup, because the row outlives every external resource.
 
 ## Consequences
 
@@ -182,4 +194,5 @@ re-run their cleanup, because the row outlives every external resource.
   Acceptable: it is rare and per-identity (different identities never contend).
 - **Scope:** `DELETE` is loopback-bound (a per-method layer, so the sibling `GET`
   on `/v1/accounts/{id}` stays open) until 7b's bearer gate lands, like the other
-  destructive/secret-bearing lifecycle verbs. Search/media purge land with M9/M11.
+  destructive/secret-bearing lifecycle verbs. (Search/media purge have since landed
+with M9/M11 — see the section above; the bearer gate landed in 7b.)

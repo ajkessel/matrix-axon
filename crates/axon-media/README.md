@@ -11,8 +11,19 @@ Resolves `mxc://` URIs against the upstream homeserver for the relevant account,
 - **Owns:** the media cache directory on disk.
 - **Consumes:** `axon-core` config; upstream homeserver HTTP.
 
-## Status
+## Design
 
-Preparatory route/decryption support is implemented by PR 70. The bounded
-on-disk LRU cache, range requests, cache headers, and resource bounds required
-for the complete Milestone 11 contract are tracked separately in #97.
+- **SDK-free leaf.** This crate depends only on `axon-core`. The authenticated,
+  decrypting download lives in `axon-sync` behind the `MediaFetcher` trait the
+  cache calls on a miss; `axon-server` composes the cache in front of the fetcher
+  and adapts the pair onto the `axon-api` `MediaProxy` port.
+- **Bounded LRU on disk.** Objects live at `cache_dir/<account_id>/<sha256(mxc)>`
+  under a global byte cap; an in-memory index (rebuilt from disk on boot) drives
+  LRU eviction. A per-object cap refuses oversized media.
+- **Serve via an open fd.** `get_or_fetch` returns an open `tokio::fs::File`; on
+  Linux the fd survives `unlink`, so eviction/purge never breaks an in-flight
+  serve. The `axon-api` handler streams ranges from it.
+- **Account-deletion purge + boot orphan-GC** for `cache_dir/<account_id>/`
+  (ADR 0024 step 5).
+
+See ADR 0045 for the full rationale.

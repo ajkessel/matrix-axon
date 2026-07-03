@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
+use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
 use matrix_sdk::deserialized_responses::EncryptionInfo;
@@ -115,6 +116,10 @@ pub struct SyncEngine {
     /// so newly ingested events are indexed, and into the lifecycle port so a
     /// deleted account's documents are purged.
     index: Option<IndexHandle>,
+    /// Handle to the bounded media cache (M11), cloned into the lifecycle port so
+    /// account-deletion teardown can purge a deleted account's cached media
+    /// (ADR 0024 step 5).
+    media: MediaCacheHandle,
     /// Disk-space health of the M10 backfill engine, shared with every account's
     /// backfill task (they write it) and the API status surface (which reads it).
     backfill_health: BackfillHealth,
@@ -128,6 +133,7 @@ impl SyncEngine {
         store: Store,
         config: SyncConfig,
         index: Option<IndexHandle>,
+        media: MediaCacheHandle,
     ) -> Result<Self, SyncError> {
         let cancel = CancellationToken::new();
         // The bus exists for the lifetime of the engine regardless of how many
@@ -188,10 +194,12 @@ impl SyncEngine {
             verifications.clone(),
             verification_rooms.clone(),
             index.clone(),
+            media.clone(),
             backfill_health.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
+        crate::reconcile::prune_orphan_media_dirs(&media, &store).await;
         // Explicit drop so the async state machine doesn't carry the IndexHandle
         // clone inside `lifecycle` across the remaining await points in this fn.
         drop(lifecycle);
@@ -243,6 +251,7 @@ impl SyncEngine {
             verifications,
             verification_rooms,
             index,
+            media,
             backfill_health,
         })
     }
@@ -254,11 +263,12 @@ impl SyncEngine {
         SdkGateway::new(self.manager.clone())
     }
 
-    /// An authenticated media proxy over the per-account clients, for the API
-    /// layer's `GET /v1/media/{account_id}/…` route. `axon-server` wraps this
-    /// in an adapter implementing its `MediaProxy` port.
-    pub fn media_proxy(&self) -> crate::media::SdkMediaProxy {
-        crate::media::SdkMediaProxy::new(self.manager.clone())
+    /// An authenticated media fetcher over the per-account clients, for the API
+    /// layer's `GET /v1/media/{account_id}/…` route. `axon-server` composes this
+    /// behind the `axon-media` disk cache and adapts the pair onto its
+    /// `MediaProxy` port. `fetch_timeout` bounds each upstream download.
+    pub fn media_fetcher(&self, fetch_timeout: std::time::Duration) -> crate::media::SdkMediaProxy {
+        crate::media::SdkMediaProxy::new(self.manager.clone(), fetch_timeout)
     }
 
     /// A producer handle for the live-event bus. The API layer holds this in its
@@ -286,6 +296,7 @@ impl SyncEngine {
             self.verifications.clone(),
             self.verification_rooms.clone(),
             self.index.clone(),
+            self.media.clone(),
             self.backfill_health.clone(),
         )
     }

@@ -1923,7 +1923,7 @@
           "media"
         ],
         "summary": "Proxy an `mxc://` download through the account's homeserver connection.",
-        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's primary or thumbnail media descriptor.\nThe response body is the raw media bytes. `Content-Type` is always\n`application/octet-stream` for now (the matrix-rust-sdk media API does not\nsurface the upstream header); callers should sniff magic bytes to determine\nthe actual media type.",
+        "description": "The `server_name` and `media_id` path segments form the `mxc://` URI that\nwas embedded in a Matrix event's primary or thumbnail media descriptor.\nThe response body is the raw media bytes, streamed from the on-disk cache\nwith range-request and conditional-GET support.",
         "operationId": "get_media",
         "parameters": [
           {
@@ -1957,7 +1957,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Media bytes; Content-Type is always `application/octet-stream` (sniff magic bytes for actual type)"
+            "description": "Full media bytes. `Content-Type` is derived from the event (inline-safe types only; else `application/octet-stream`), with `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`, and `ETag` set."
+          },
+          "206": {
+            "description": "Partial media bytes for a satisfiable `Range` request (with `Content-Range`)."
+          },
+          "304": {
+            "description": "The `If-None-Match` entity tag matched; body omitted."
           },
           "400": {
             "description": "Syntactically invalid MXC URI components",
@@ -1989,6 +1995,26 @@
           },
           "404": {
             "description": "Account not found, or media not found on the homeserver",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The media object exceeds the configured per-object cache limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).",
             "content": {
               "application/json": {
                 "schema": {

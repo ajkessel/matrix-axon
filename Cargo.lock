@@ -353,6 +353,7 @@ dependencies = [
  "sqlx-core",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tower",
  "tracing",
  "utoipa",
@@ -395,7 +396,15 @@ dependencies = [
 name = "axon-media"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axon-core",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -475,6 +484,7 @@ dependencies = [
 name = "axon-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axon-core",
  "axon-media",
  "axon-search",

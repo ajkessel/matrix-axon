@@ -41,6 +41,10 @@ pub struct Config {
     /// where it lives.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Media-proxy cache settings: whether the bounded on-disk LRU cache is
+    /// enabled, where it lives, and its size bounds.
+    #[serde(default)]
+    pub media: MediaConfig,
 }
 
 /// HTTP server bind settings.
@@ -221,6 +225,54 @@ pub struct SearchConfig {
     pub query_timeout_ms: u64,
 }
 
+/// Media-proxy cache settings.
+///
+/// The media proxy (`GET /v1/media/…`) downloads and decrypts MXC content
+/// through the account's homeserver connection and caches the plaintext bytes
+/// in a bounded LRU cache on local disk. The homeserver is the source of truth;
+/// this cache is a bounded convenience, never durable storage (there is
+/// deliberately no S3 backend — see the implementation spec).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MediaConfig {
+    /// Whether the on-disk cache is used. When `false`, media is still proxied
+    /// and served (each request fetches from the homeserver into a short-lived
+    /// temporary file, serves it — with range support — then deletes it), but
+    /// nothing is retained across requests. Defaults to `true`.
+    #[serde(default = "default_media_enabled")]
+    pub enabled: bool,
+    /// Directory holding the media cache, one subdirectory per account
+    /// (`<cache_dir>/<account_id>/`). Need not be durable — a lost cache simply
+    /// re-fetches from the homeserver. Defaults to `axon-data/media`.
+    #[serde(default = "default_media_cache_dir")]
+    pub cache_dir: PathBuf,
+    /// Total cache size cap, in bytes. When a fetch would push the cache over
+    /// this, least-recently-used entries are evicted until it fits. Defaults to
+    /// 5 GiB.
+    #[serde(default = "default_media_max_bytes")]
+    pub max_bytes: u64,
+    /// Per-object size cap, in bytes. A single media object larger than this is
+    /// never cached (and the request is refused rather than buffered), so one
+    /// object cannot blow the total cap or the process's memory. Defaults to
+    /// 100 MiB.
+    #[serde(default = "default_media_max_object_bytes")]
+    pub max_object_bytes: u64,
+    /// Per-request timeout for the upstream homeserver media download, in
+    /// seconds. Bounds a hung homeserver so a media request can't await
+    /// unbounded. **This bounds the entire download**, not just connection
+    /// setup (the SDK media API is a single call), so it must comfortably exceed
+    /// the time to transfer a `max_object_bytes` object over the operator's link
+    /// — raise it if large media over slow links is expected. Defaults to 60.
+    #[serde(default = "default_media_fetch_timeout_secs")]
+    pub fetch_timeout_secs: u64,
+    /// Maximum number of upstream media downloads in flight at once. Because the
+    /// media API is not streaming, each in-flight download buffers its whole
+    /// object in memory, so this caps aggregate download memory at roughly
+    /// `max_concurrent_downloads × max_object_bytes`; requests over the limit
+    /// queue rather than being rejected. Defaults to 16.
+    #[serde(default = "default_media_max_concurrent_downloads")]
+    pub max_concurrent_downloads: usize,
+}
+
 /// Provisioning details for a single Matrix account.
 ///
 /// Exactly one of [`password`](Self::password) or
@@ -371,6 +423,30 @@ fn default_search_query_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_media_enabled() -> bool {
+    true
+}
+
+fn default_media_cache_dir() -> PathBuf {
+    PathBuf::from("axon-data/media")
+}
+
+fn default_media_max_bytes() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+
+fn default_media_max_object_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+
+fn default_media_fetch_timeout_secs() -> u64 {
+    60
+}
+
+fn default_media_max_concurrent_downloads() -> usize {
+    16
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -421,6 +497,19 @@ impl Default for SearchConfig {
             writer_heap_mb: default_search_writer_heap_mb(),
             max_concurrent_queries: default_search_max_concurrent_queries(),
             query_timeout_ms: default_search_query_timeout_ms(),
+        }
+    }
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_media_enabled(),
+            cache_dir: default_media_cache_dir(),
+            max_bytes: default_media_max_bytes(),
+            max_object_bytes: default_media_max_object_bytes(),
+            fetch_timeout_secs: default_media_fetch_timeout_secs(),
+            max_concurrent_downloads: default_media_max_concurrent_downloads(),
         }
     }
 }
@@ -561,6 +650,7 @@ mod tests {
             log: LogConfig::default(),
             sync: SyncConfig::default(),
             search: SearchConfig::default(),
+            media: MediaConfig::default(),
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
     }
@@ -587,6 +677,36 @@ mod tests {
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             jail.set_env("AXON_SEARCH__ENABLED", "false");
             assert!(!Config::load(None).expect("load").search.enabled);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn media_defaults_when_absent() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            let config = Config::load(None).expect("load");
+            assert!(config.media.enabled);
+            assert_eq!(config.media.cache_dir, PathBuf::from("axon-data/media"));
+            assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
+            assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
+            assert_eq!(config.media.fetch_timeout_secs, 60);
+            assert_eq!(config.media.max_concurrent_downloads, 16);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn media_can_be_disabled_and_sized_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            jail.set_env("AXON_MEDIA__ENABLED", "false");
+            jail.set_env("AXON_MEDIA__MAX_BYTES", "1048576");
+            let config = Config::load(None).expect("load");
+            assert!(!config.media.enabled);
+            assert_eq!(config.media.max_bytes, 1_048_576);
             Ok(())
         });
     }

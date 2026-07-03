@@ -107,6 +107,24 @@ impl ApiError {
         Self::new(StatusCode::BAD_GATEWAY, "bad_gateway", message)
     }
 
+    /// `413 Payload Too Large` — the resource exceeds a configured size limit and
+    /// is refused. A terminal condition (retrying will not help).
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+    }
+
+    /// `416 Range Not Satisfiable` — the requested `Range` falls entirely
+    /// outside the resource's length. The caller still needs to attach a
+    /// `Content-Range: bytes */<len>` header (and the usual media headers) to
+    /// the returned response; this only builds the shared JSON body.
+    pub fn range_not_satisfiable(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "range_not_satisfiable",
+            message,
+        )
+    }
+
     /// `503 Service Unavailable` — the account isn't reachable right now (e.g. its
     /// homeserver is down); the caller should retry.
     pub fn service_unavailable(message: impl Into<String>) -> Self {

@@ -31,7 +31,7 @@ pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
-pub use media::{MediaContent, MediaError, MediaProxy};
+pub use media::{MediaError, MediaProxy, MediaResource};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};

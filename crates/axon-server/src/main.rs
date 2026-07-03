@@ -29,7 +29,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use crate::cli::{Cli, Command};
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
-use crate::media::MediaProxyAdapter;
+use crate::media::CachingMediaProxy;
 use crate::trust::TrustAdapter;
 use crate::verification::VerificationAdapter;
 
@@ -122,11 +122,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         (None, None, None, None)
     };
 
+    // Open the bounded on-disk media cache (M11). Its handle is threaded into
+    // the sync engine so account-deletion teardown can purge an account's cached
+    // media (ADR 0024 step 5). Opening it rebuilds the LRU index from disk and
+    // evicts down to the configured cap; failure is fatal since the media route
+    // depends on it.
+    let media_cache = axon_media::MediaCache::open(&config.media)
+        .await
+        .context("opening media cache")?;
+
     // Start the sync engine: it provisions the configured account and runs one
     // supervised Simplified Sliding Sync task per account.
-    let sync_engine = SyncEngine::start(store.clone(), config.sync.clone(), index_handle)
-        .await
-        .context("starting sync engine")?;
+    let sync_engine = SyncEngine::start(
+        store.clone(),
+        config.sync.clone(),
+        index_handle,
+        media_cache.handle(),
+    )
+    .await
+    .context("starting sync engine")?;
 
     // The API shares the sync engine's live-event bus so `/v1/ws` can fan out
     // events as they're persisted, its message gateway (adapted onto the API's
@@ -142,7 +156,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
-    let media = Arc::new(MediaProxyAdapter(sync_engine.media_proxy()));
+    let media = Arc::new(CachingMediaProxy::new(
+        media_cache,
+        sync_engine.media_fetcher(std::time::Duration::from_secs(
+            config.media.fetch_timeout_secs,
+        )),
+    ));
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
     let app = axon_api::router(
         axon_api::AppState::new(

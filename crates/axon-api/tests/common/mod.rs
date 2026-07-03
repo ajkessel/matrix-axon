@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, Formatted,
-    LoginError, LogoutError, MediaContent, MediaError, MediaProxy, MessageSender, RecoverError,
+    LoginError, LogoutError, MediaError, MediaProxy, MediaResource, MessageSender, RecoverError,
     Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
     SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
     VerifyError,
@@ -568,8 +568,30 @@ impl MediaProxy for StubMediaProxy {
         _account_id: Uuid,
         _mxc_url: &str,
         _encrypted_file: Option<serde_json::Value>,
-    ) -> Result<MediaContent, MediaError> {
+    ) -> Result<MediaResource, MediaError> {
         Err(MediaError::NotFound("stub: no media".to_owned()))
+    }
+
+    fn etag(&self, mxc_url: &str) -> String {
+        format!("stub-{mxc_url}")
+    }
+}
+
+/// Build a [`MediaResource`] backed by an open (then unlinked) temp file, the
+/// way the real cache hands the handler an fd whose bytes survive eviction.
+async fn media_resource_from(bytes: &[u8]) -> MediaResource {
+    use tokio::io::AsyncWriteExt;
+    let path = std::env::temp_dir().join(format!("axon-media-test-{}", Uuid::new_v4()));
+    let mut file = tokio::fs::File::create(&path).await.expect("create temp");
+    file.write_all(bytes).await.expect("write temp");
+    file.sync_all().await.expect("sync temp");
+    drop(file);
+    let file = tokio::fs::File::open(&path).await.expect("open temp");
+    let _ = std::fs::remove_file(&path); // fd stays valid after unlink
+    MediaResource {
+        file,
+        len: bytes.len() as u64,
+        etag: "test-etag".to_owned(),
     }
 }
 
@@ -622,20 +644,21 @@ impl MediaProxy for ConfiguredMediaProxy {
         account_id: Uuid,
         mxc_url: &str,
         encrypted_file: Option<serde_json::Value>,
-    ) -> Result<MediaContent, MediaError> {
+    ) -> Result<MediaResource, MediaError> {
         self.calls.lock().unwrap().push(MediaCall {
             account_id,
             mxc_url: mxc_url.to_owned(),
             encrypted_file,
         });
         match &self.outcome {
-            MediaOutcome::Ok(data) => Ok(MediaContent {
-                data: data.clone(),
-                content_type: "application/octet-stream".to_owned(),
-            }),
+            MediaOutcome::Ok(data) => Ok(media_resource_from(data).await),
             MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
             MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
         }
+    }
+
+    fn etag(&self, mxc_url: &str) -> String {
+        format!("configured-{mxc_url}")
     }
 }
 

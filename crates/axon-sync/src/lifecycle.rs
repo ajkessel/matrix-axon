@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axon_core::{LiveFrame, SyncConfig};
+use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{Account, AccountState, Store, StoreError};
 use matrix_sdk::encryption::recovery::RecoveryError;
@@ -318,6 +319,9 @@ pub struct AccountLifecycle {
     /// a deleted account's documents, and handed to a runtime-login account's
     /// supervised task so its events are indexed.
     index: Option<IndexHandle>,
+    /// Handle to the bounded media cache (M11). Used to purge a deleted account's
+    /// cached media at teardown (ADR 0024 step 5).
+    media: MediaCacheHandle,
     /// Backfill disk-space health (M10), shared with the engine so a runtime-login
     /// account's backfill task reports into the same handle the API reads.
     backfill_health: BackfillHealth,
@@ -340,6 +344,7 @@ impl AccountLifecycle {
         verifications: FlowRegistry,
         verification_rooms: VerificationRooms,
         index: Option<IndexHandle>,
+        media: MediaCacheHandle,
         backfill_health: BackfillHealth,
     ) -> Self {
         Self {
@@ -355,6 +360,7 @@ impl AccountLifecycle {
             verification_rooms,
             http: crate::discovery::http_client(),
             index,
+            media,
             backfill_health,
         }
     }
@@ -806,11 +812,11 @@ impl AccountLifecycle {
     ///    client *before* the cached one is taken — flip-before-take);
     /// 2. [`sever_session`](Self::sever_session) the live session;
     /// 3. remove the on-disk SDK store dir (and its staging backup);
-    /// 4. delete the row (FK cascade drops events/account_data/room_state).
+    /// 4. purge the account's entries from the media cache (M11, ADR 0024 step 5);
+    /// 5. delete the row (FK cascade drops events/account_data/room_state, and the
+    ///    same statement enqueues the search-index purge — ADR 0039).
     ///
-    /// Then the identity's lock-map entry is pruned (it is retired for good). Two
-    /// steps the spec orders in here — search-index doc deletion and media-cache
-    /// purge — are deferred until those subsystems exist; see ADR 0024.
+    /// Then the identity's lock-map entry is pruned (it is retired for good).
     ///
     /// Idempotent and resumable, keyed by id:
     /// - **`active` / `deactivated` row** → full teardown.
@@ -877,6 +883,13 @@ impl AccountLifecycle {
         // External resources before the row (the row is the reconcile's only handle
         // to them): the SDK store dir + its staging backup. Idempotent on a resume.
         crate::client::remove_account_store_dirs(&self.config, account_id).await?;
+
+        // Purge the account's media-cache directory + its LRU index entries (M11,
+        // ADR 0024 step 5). Keyed by id like the store dir, so it's another
+        // external resource cleared before the row; idempotent (a missing dir is
+        // fine), and the boot media orphan-GC is the backstop if this is
+        // interrupted or the account was deleted while a prior build had no cache.
+        self.media.purge_account(account_id).await;
 
         // Drop the row. The FK cascade removes events/account_data/room_state, and
         // the same statement appends a durable search-index purge obligation to
@@ -987,6 +1000,25 @@ impl AccountLifecycle {
 mod tests {
     use super::*;
 
+    /// A media-cache handle over a throwaway temp directory, for the lifecycle
+    /// tests (the delete path calls `purge_account`, which is a no-op when the
+    /// account has no cached media).
+    async fn test_media_handle() -> MediaCacheHandle {
+        let dir =
+            std::env::temp_dir().join(format!("axon-media-lifecycle-test-{}", Uuid::new_v4()));
+        axon_media::MediaCache::open(&axon_core::MediaConfig {
+            enabled: true,
+            cache_dir: dir,
+            max_bytes: 1 << 20,
+            max_object_bytes: 1 << 20,
+            fetch_timeout_secs: 30,
+            max_concurrent_downloads: 8,
+        })
+        .await
+        .expect("open media cache")
+        .handle()
+    }
+
     /// Build a lifecycle over the test DB. The branches exercised here all return
     /// before any homeserver/SDK contact, so the manager/data_dir are never used.
     async fn lifecycle() -> AccountLifecycle {
@@ -1015,6 +1047,7 @@ mod tests {
             crate::verification::new_registry(),
             crate::verification::VerificationRooms::new(),
             None,
+            test_media_handle().await,
             crate::backfill::BackfillHealth::new(None),
         )
     }
@@ -1055,6 +1088,7 @@ mod tests {
             crate::verification::new_registry(),
             crate::verification::VerificationRooms::new(),
             None,
+            test_media_handle().await,
             crate::backfill::BackfillHealth::new(None),
         )
     }

@@ -1,15 +1,20 @@
 //! Authenticated media download via the matrix-rust-sdk client.
 //!
-//! [`SdkMediaProxy`] is the concrete implementation of the media-fetch
-//! capability that `axon-api` defines as the [`MediaProxy`] trait. It resolves
-//! the account's live SDK client through the [`ClientManager`] (connecting if
-//! needed), then uses the SDK's built-in media API — which carries the
-//! account's Bearer token automatically — to download MXC content.
+//! [`SdkMediaProxy`] is the [`MediaFetcher`] the bounded on-disk media cache
+//! (`axon-media`) calls on a cache miss. It resolves the account's live SDK
+//! client through the [`ClientManager`] (connecting if needed), then uses the
+//! SDK's built-in media API — which carries the account's Bearer token
+//! automatically — to download (and, for encrypted attachments, decrypt) MXC
+//! content, returning the plaintext bytes.
 //!
-//! `axon-server` adapts this onto the `axon-api` `MediaProxy` port via the
-//! usual composition-root adapter newtype, so this crate stays free of
-//! `axon-api`.
+//! `axon-server` composes this fetcher behind the `axon-media` cache and adapts
+//! the pair onto the `axon-api` `MediaProxy` port, so neither `axon-api` nor
+//! `axon-media` depends on `matrix-sdk`.
 
+use std::time::Duration;
+
+use async_trait::async_trait;
+use axon_media::{FetchError, MediaFetcher};
 use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
 use matrix_sdk::ruma::{
     api::error::ErrorKind,
@@ -20,40 +25,32 @@ use uuid::Uuid;
 use crate::error::GatewayError;
 use crate::manager::ClientManager;
 
-/// Returned by [`SdkMediaProxy::get_media`] on success.
-pub struct SdkMediaContent {
-    /// Raw media bytes from the homeserver.
-    pub data: Vec<u8>,
-    /// MIME type. The matrix-rust-sdk media API does not surface the
-    /// `Content-Type` header, so this always returns `application/octet-stream`
-    /// for now; TUI renderers can fall back to magic-byte detection.
-    pub content_type: String,
-}
-
-/// Downloads MXC media through the account's live SDK client.
+/// Downloads MXC media through an account's live SDK client, on behalf of the
+/// `axon-media` cache.
 ///
-/// Cheap to [`Clone`] — holds only a [`ClientManager`].
+/// Cheap to [`Clone`] — holds only a [`ClientManager`] and the fetch timeout.
 #[derive(Clone)]
 pub struct SdkMediaProxy {
     manager: ClientManager,
+    fetch_timeout: Duration,
 }
 
 impl SdkMediaProxy {
-    pub fn new(manager: ClientManager) -> Self {
-        Self { manager }
+    pub fn new(manager: ClientManager, fetch_timeout: Duration) -> Self {
+        Self {
+            manager,
+            fetch_timeout,
+        }
     }
 
-    /// Download `mxc_url` using `account_id`'s authenticated SDK client.
-    ///
-    /// Errors use [`GatewayError`] so the composition-root adapter can map them
-    /// onto `axon-api`'s `MediaError` with the same translation it already uses
-    /// for other sync-layer errors.
-    pub async fn get_media(
+    /// Download `mxc_url` using `account_id`'s authenticated SDK client, bounded
+    /// by the configured fetch timeout so a hung homeserver can't await forever.
+    async fn download(
         &self,
         account_id: Uuid,
         mxc_url: &str,
         encrypted_file: Option<serde_json::Value>,
-    ) -> Result<SdkMediaContent, GatewayError> {
+    ) -> Result<Vec<u8>, GatewayError> {
         // Validate the MXC URI before doing any network work.
         axon_media::parse_mxc(mxc_url)
             .ok_or_else(|| GatewayError::Invalid(format!("invalid MXC URI: {mxc_url}")))?;
@@ -76,10 +73,19 @@ impl SdkMediaProxy {
             format: MediaFormat::File,
         };
 
-        let data = client
-            .media()
-            .get_media_content(&request, true)
+        // `false` disables the SDK's own media cache: axon-media is the cache of
+        // record, and letting the SDK also cache would double disk use with no
+        // benefit (and outside our LRU accounting).
+        let media = client.media();
+        let download = media.get_media_content(&request, false);
+        let data = tokio::time::timeout(self.fetch_timeout, download)
             .await
+            .map_err(|_| {
+                GatewayError::Upstream(format!(
+                    "media download timed out after {}s",
+                    self.fetch_timeout.as_secs()
+                ))
+            })?
             .map_err(|error| {
                 if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
                     GatewayError::MediaNotFound(mxc_url.to_owned())
@@ -88,22 +94,39 @@ impl SdkMediaProxy {
                 }
             })?;
 
-        // Temporary response-size guard until the bounded LRU cache (#97) adds
-        // streaming and proper resource limits. The SDK has already buffered
-        // the full response at this point, so this prevents forwarding oversized
-        // media but does not bound the peak-memory spike during download.
-        const MAX_MEDIA_BYTES: usize = 50 * 1024 * 1024;
-        if data.len() > MAX_MEDIA_BYTES {
-            return Err(GatewayError::Upstream(format!(
-                "media response too large ({} bytes); limit is {} bytes",
-                data.len(),
-                MAX_MEDIA_BYTES
-            )));
-        }
+        Ok(data)
+    }
+}
 
-        Ok(SdkMediaContent {
-            data,
-            content_type: "application/octet-stream".to_owned(),
-        })
+#[async_trait]
+impl MediaFetcher for SdkMediaProxy {
+    async fn fetch(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        encrypted_file: Option<serde_json::Value>,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.download(account_id, mxc_url, encrypted_file)
+            .await
+            .map_err(gateway_to_fetch)
+    }
+}
+
+/// Collapse the sync-layer [`GatewayError`] onto the cache-neutral
+/// [`FetchError`] the `axon-media` cache passes back to the API adapter.
+fn gateway_to_fetch(err: GatewayError) -> FetchError {
+    match err {
+        GatewayError::UnknownAccount(id) => {
+            FetchError::AccountNotFound(format!("no such account: {id}"))
+        }
+        GatewayError::AccountNotActive(id) => {
+            FetchError::AccountNotFound(format!("account not active: {id}"))
+        }
+        GatewayError::Invalid(msg) => FetchError::Invalid(msg),
+        GatewayError::MediaNotFound(msg) => FetchError::NotFound(format!("media not found: {msg}")),
+        GatewayError::RoomNotFound(msg) => FetchError::NotFound(format!("room not found: {msg}")),
+        GatewayError::Forbidden(msg) => FetchError::Forbidden(msg),
+        GatewayError::NotConnected(msg) => FetchError::NotConnected(msg),
+        GatewayError::Upstream(msg) => FetchError::Upstream(msg),
     }
 }
