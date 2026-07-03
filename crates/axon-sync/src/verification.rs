@@ -15,6 +15,7 @@
 //! lazily. See ADR 0011 and the M7a PR6 plan for the full crash/reconnect matrix.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -183,6 +184,8 @@ const CANDIDATE_TTL: Duration = Duration::from_secs(90);
 /// outruns device-key availability must keep its room subscribed for the protocol
 /// retry window.
 const REQUEST_TTL: Duration = Duration::from_secs(600);
+const DRIVER_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+const DRIVER_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a direct invite that failed the known-contact gate is remembered, so
 /// `join_candidate_invites` doesn't re-scan it (an `O(joined_rooms)` membership
@@ -548,6 +551,28 @@ fn remove_flow(registry: &FlowRegistry, key: &(Uuid, String)) {
     registry.lock().expect("flow registry poisoned").remove(key);
 }
 
+async fn cancel_verification_best_effort<F, E>(
+    account_id: Uuid,
+    flow_id: &str,
+    kind: &str,
+    cancel: F,
+) where
+    F: Future<Output = Result<(), E>>,
+{
+    if tokio::time::timeout(DRIVER_CANCEL_TIMEOUT, cancel)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            account_id = %account_id,
+            %flow_id,
+            kind,
+            timeout_secs = DRIVER_CANCEL_TIMEOUT.as_secs(),
+            "timed out cancelling verification during teardown"
+        );
+    }
+}
+
 /// Cancel the driver of every non-terminal flow belonging to `account_id`.
 /// Called from `engine::run_account` when a sync run tears down or is rebuilt, so
 /// a verification driver never keeps running against an evicted SDK client. Each
@@ -751,7 +776,8 @@ pub(crate) async fn on_incoming_request(
             account_id = %ctx.account_id, %flow_id, sender = %ev.sender,
             "ignoring non-self verification request (out of scope)"
         );
-        let _ = request.cancel().await;
+        cancel_verification_best_effort(ctx.account_id, &flow_id, "request", request.cancel())
+            .await;
         return;
     }
 
@@ -993,8 +1019,30 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     // the SDK default set (which includes QR) — so the peer can't steer the flow to
     // a method this driver doesn't implement.
     if !request.we_started() {
-        if let Err(err) = request.accept_with_methods(sas_only()).await {
-            tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept verification request");
+        match tokio::time::timeout(DRIVER_SEND_TIMEOUT, request.accept_with_methods(sas_only()))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept verification request");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    timeout_secs = DRIVER_SEND_TIMEOUT.as_secs(),
+                    "timed out accepting verification request"
+                );
+                cancel_verification_best_effort(
+                    ctx.account_id,
+                    &flow_id,
+                    "request",
+                    request.cancel(),
+                )
+                .await;
+                remove_flow(&ctx.registry, &key);
+                return;
+            }
         }
     }
 
@@ -1008,7 +1056,13 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                 // effort cancel upstream, then drop the entry — it has no terminal
                 // outcome to retain, and leaving it would leak (the TTL sweep only
                 // reclaims entries with `terminal_at` set).
-                let _ = request.cancel().await;
+                cancel_verification_best_effort(
+                    ctx.account_id,
+                    &flow_id,
+                    "request",
+                    request.cancel(),
+                )
+                .await;
                 remove_flow(&ctx.registry, &key);
                 return;
             }
@@ -1039,7 +1093,13 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
                             Some(sas) => break sas,
                             // QR (or any non-SAS) isn't supported here — cancel.
                             None => {
-                                let _ = request.cancel().await;
+                                cancel_verification_best_effort(
+                                    ctx.account_id,
+                                    &flow_id,
+                                    "request",
+                                    request.cancel(),
+                                )
+                                .await;
                             }
                         }
                     }
@@ -1090,8 +1150,22 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     {
         entry.sas = Some(sas.clone());
     }
-    if let Err(err) = sas.accept().await {
-        tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept SAS");
+    match tokio::time::timeout(DRIVER_SEND_TIMEOUT, sas.accept()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept SAS");
+        }
+        Err(_) => {
+            tracing::warn!(
+                account_id = %ctx.account_id,
+                %flow_id,
+                timeout_secs = DRIVER_SEND_TIMEOUT.as_secs(),
+                "timed out accepting SAS"
+            );
+            cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel()).await;
+            remove_flow(&ctx.registry, &key);
+            return;
+        }
     }
 
     drive_sas(sas, flow_id, ctx).await;
@@ -1109,7 +1183,8 @@ async fn drive_sas(sas: SasVerification, flow_id: String, ctx: FlowDriverCtx) {
             _ = ctx.cancel.cancelled() => {
                 // See drive_request: drop the entry rather than leak a non-terminal
                 // one the TTL sweep would never reclaim.
-                let _ = sas.cancel().await;
+                cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel())
+                    .await;
                 remove_flow(&ctx.registry, &key);
                 return;
             }

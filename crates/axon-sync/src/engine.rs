@@ -44,6 +44,11 @@ use crate::verification::{
 /// Backoff bounds for restarting a failed per-account task.
 const BACKOFF_START: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Outer process-shutdown budget for all tasks on the engine tracker. This is
+/// deliberately not the lifecycle per-account reap path: HTTP has already drained,
+/// so there are no lifecycle callers waiting on store-dir quiescence, and the
+/// tracker also includes non-account tasks such as verification flow drivers.
+const ENGINE_TRACKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A supervised task's stop handles: the per-account cancellation token plus
 /// the task's join handle. Both are needed because cancellation is cooperative —
@@ -318,15 +323,27 @@ impl SyncEngine {
         crate::trust::SenderTrustEngine::new(self.store.clone(), self.manager.clone())
     }
 
-    /// Cancel all per-account tasks and wait for them to finish. Safe to call
+    /// Cancel all tracked sync tasks and wait for them to finish. Safe to call
     /// without canceling the token first — this method cancels it internally.
-    pub async fn shutdown(self) {
+    /// Returns whether every tracked task drained within the shutdown budget.
+    pub async fn shutdown(self) -> bool {
         self.cancel.cancel();
         // Close the tracker so `wait` can complete; no new tasks are spawned after
         // shutdown begins (the lifecycle port would spawn onto a closed tracker,
         // which is a no-op-and-error it already guards against).
         self.tracker.close();
-        self.tracker.wait().await;
+        if tokio::time::timeout(ENGINE_TRACKER_DRAIN_TIMEOUT, self.tracker.wait())
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+
+        tracing::error!(
+            timeout_secs = ENGINE_TRACKER_DRAIN_TIMEOUT.as_secs(),
+            "sync engine tasks did not finish draining within the timeout; continuing process shutdown"
+        );
+        false
     }
 }
 

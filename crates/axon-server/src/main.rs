@@ -17,6 +17,7 @@ mod trust;
 mod verification;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axon_core::Config;
@@ -31,6 +32,8 @@ use crate::lifecycle::LifecycleAdapter;
 use crate::media::MediaProxyAdapter;
 use crate::trust::TrustAdapter;
 use crate::verification::VerificationAdapter;
+
+const SEARCH_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -171,8 +174,24 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // their SDK stores before exiting. This drops every `IndexHandle` the sync
     // engine held, closing the search actor's channel.
     tracing::info!("stopping sync engine");
-    sync_engine.shutdown().await;
+    let (sync_drained, search_drained) = tokio::join!(
+        sync_engine.shutdown(),
+        shutdown_search_indexer(index_cancel, index_join),
+    );
+    if !sync_drained || !search_drained {
+        anyhow::bail!(
+            "shutdown completed with timed-out tasks: sync_drained={sync_drained}, \
+             search_drained={search_drained}"
+        );
+    }
 
+    Ok(())
+}
+
+async fn shutdown_search_indexer(
+    index_cancel: Option<tokio_util::sync::CancellationToken>,
+    index_join: Option<tokio::task::JoinHandle<()>>,
+) -> bool {
     // The search actor normally exits once all IndexHandles are dropped (channel
     // close). However, the matrix-sdk keeps internal background tasks that hold an
     // Arc to the Client — and the PersistContext (with its IndexHandle) lives inside
@@ -181,12 +200,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if let Some(cancel) = index_cancel {
         cancel.cancel();
     }
-    if let Some(join) = index_join {
-        tracing::info!("stopping search indexer");
-        let _ = join.await;
-    }
+    let Some(join) = index_join else {
+        return true;
+    };
 
-    Ok(())
+    tracing::info!("stopping search indexer");
+    match tokio::time::timeout(SEARCH_SHUTDOWN_DRAIN_TIMEOUT, join).await {
+        Ok(_) => true,
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = SEARCH_SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+                "search indexer did not stop within the timeout; continuing shutdown"
+            );
+            false
+        }
+    }
 }
 
 /// Build the search indexer's tuning from config. The channel capacity and idle
