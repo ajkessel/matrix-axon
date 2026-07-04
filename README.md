@@ -192,8 +192,3 @@ Tokens are instance-scoped — one token grants access to all accounts on that A
 
 Axon serves plain HTTP. For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default). Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.
 
-## Status
-
-MVP in progress — **Milestone 2 of 12 complete** (config loader, Postgres pool + migrations, `/healthz`).
-
-Next: Milestone 3 — sync engine v0 (`accounts` table, matrix-rust-sdk client per account, Simplified Sliding Sync).
