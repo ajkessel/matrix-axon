@@ -2102,7 +2102,7 @@
         "tags": [
           "search"
         ],
-        "summary": "Search across the index, BM25-ranked when a full-text query is present, paginated.",
+        "summary": "Search across the index, BM25-ranked when a full-text query is present,\npaginated.",
         "description": "`503` when search is disabled (`search.enabled = false`). A missing/empty `q`\nis allowed only with at least one narrowing filter (`account_id`, `room_id`,\n`sender`, `from`, or `to`); an unbounded empty query or malformed `cursor` is\na `400`. Results are the resolved read-API event view (latest edited body,\nredaction-masked) plus each hit's score.",
         "operationId": "search",
         "parameters": [
@@ -2195,7 +2195,7 @@
             }
           },
           "400": {
-            "description": "Missing/empty query or malformed cursor",
+            "description": "Unbounded empty query or malformed cursor",
             "content": {
               "application/json": {
                 "schema": {
