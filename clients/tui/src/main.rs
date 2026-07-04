@@ -206,9 +206,7 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
         return None;
     }
     // Only meaningful against a real terminal on both ends.
-    let is_tty =
-        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 };
-    if !is_tty {
+    if !is_real_tty() {
         return None;
     }
     // Inside tmux, ask the outer terminal via passthrough; otherwise query directly.
@@ -232,9 +230,24 @@ fn detect_sixel_via_da1() -> Option<ProtocolType> {
     }
 }
 
+/// True if both stdin and stdout are connected to a real terminal. The DA1/XTWINOPS
+/// probes below only make sense against a real tty on both ends, and rely on raw
+/// POSIX fd APIs that don't exist on Windows, so there we just say no and every
+/// caller falls back to Halfblocks / non-query behavior.
+#[cfg(unix)]
+fn is_real_tty() -> bool {
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+#[cfg(not(unix))]
+fn is_real_tty() -> bool {
+    false
+}
+
 /// Send a DA1 query and collect the reply, polling the tty with a bounded deadline
 /// so a non-responding terminal (or a dropped tmux passthrough) can't stall
 /// startup. Returns the raw bytes read, or None if nothing arrived.
+#[cfg(unix)]
 fn read_terminal_response(query: &[u8], terminator: u8) -> Option<Vec<u8>> {
     use std::io::Write;
 
@@ -280,6 +293,11 @@ fn read_terminal_response(query: &[u8], terminator: u8) -> Option<Vec<u8>> {
     (!buf.is_empty()).then_some(buf)
 }
 
+#[cfg(not(unix))]
+fn read_terminal_response(_query: &[u8], _terminator: u8) -> Option<Vec<u8>> {
+    None
+}
+
 /// True if a DA1 reply (`ESC [ ? Ps ; Ps ; … c`) advertises Sixel, which is
 /// attribute `4` among the semicolon-separated parameters.
 fn sixel_in_da1(response: &[u8]) -> bool {
@@ -322,9 +340,7 @@ fn query_font_size() -> Option<FontSize> {
 }
 
 fn query_cell_size_via_xtwinops() -> Option<FontSize> {
-    let is_tty =
-        unsafe { libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1 };
-    if !is_tty {
+    if !is_real_tty() {
         return None;
     }
     let query: &[u8] = if inside_tmux() {
