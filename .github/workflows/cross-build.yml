@@ -108,6 +108,13 @@ jobs:
       group: binary-builder
       labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     steps:
+      - name: Add rustup/cargo home and local binaries to PATH
+        run: |
+          echo "RUSTUP_HOME=$HOME/.rustup-windows" >> $GITHUB_ENV
+          echo "CARGO_HOME=$HOME/.rustup-windows" >> $GITHUB_ENV
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+
       - name: checkout source code
         uses: actions/checkout@v7
 
@@ -158,14 +165,18 @@ jobs:
     runs-on:
       group: binary-builder
       labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
-    env:
-      RUSTUP_HOME: .rustup-macos
-      CARGO_HOME: .cargo-macos
     strategy:
       fail-fast: true
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
+      - name: Add rustup/cargo home and local binaries to PATH
+        run: |
+          echo "RUSTUP_HOME=$HOME/.rustup-macos" >> $GITHUB_ENV
+          echo "CARGO_HOME=$HOME/.rustup-macos" >> $GITHUB_ENV
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+
       - name: checkout source code
         uses: actions/checkout@v7
 
@@ -225,10 +236,14 @@ jobs:
     runs-on:
       group: binary-builder
       labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
-    env:
-      RUSTUP_HOME: .rustup-linux
-      CARGO_HOME: .cargo-linux
     steps:
+      - name: Add rustup/cargo home and local binaries to PATH
+        run: |
+          echo "RUSTUP_HOME=$HOME/.rustup-linux" >> $GITHUB_ENV
+          echo "CARGO_HOME=$HOME/.rustup-linux" >> $GITHUB_ENV
+          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+
       - name: checkout source code
         uses: actions/checkout@v7
 
