@@ -22,7 +22,7 @@ runs:
     - name: Assert Minimum Disk Space
       shell: bash
       run: |
-        AVAILABLE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+        AVAILABLE_GB=$(df -h . | awk 'NR==2 {print $4}' | sed 's/Gi*//')
         REQUIRED_GB=15
 
         echo "Available space: ${AVAILABLE_GB} GB"
