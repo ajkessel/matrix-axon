@@ -39,8 +39,8 @@ env:
   RELEASE_FLAG: ${{ (github.event.inputs.release != 'false') && '--release' || '' }}
 
 jobs:
-#  check-environment:
-#    uses: ./.github/workflows/check-environment.yml
+  check-environment:
+    uses: ./.github/workflows/check-environment.yml
 #    with:
 #      require-docker: true
 #  lint-fmt-test:
