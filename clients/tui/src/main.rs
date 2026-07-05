@@ -475,15 +475,21 @@ async fn run_app(
     let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     let (relations_tx, mut relations_rx) = mpsc::unbounded_channel();
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
+    let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_media_sender(media_tx);
     app.set_search_sender(search_tx);
     app.set_relations_sender(relations_tx);
     app.set_members_sender(members_tx);
+    app.set_drafts_sender(drafts_tx);
+    app.set_device_id(app::load_or_create_device_id(&app.config_path));
     app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
+    // Hydrate cross-device drafts (M12) once rooms/accounts are known, so the
+    // first room's draft is already in place.
+    app.refresh_drafts().await;
 
     let mut tick = time::interval(Duration::from_millis(100));
     let mut next_sixel_inline_refresh = Instant::now() + Duration::from_secs(5);
@@ -494,6 +500,8 @@ async fn run_app(
         tokio::select! {
             _ = tick.tick() => {
                 let now = Instant::now();
+                // Flush a settled draft change to the server (M12 debounce).
+                app.flush_due_draft_put(now);
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh
@@ -516,6 +524,9 @@ async fn run_app(
                 if app.handle_key(key).await {
                     break;
                 }
+                // A keystroke may have changed the compose buffer: (re)start
+                // the draft debounce if it diverged from the synced draft.
+                app.note_draft_activity();
                 if app.take_edit_config_request() {
                     // Pause the input thread so it does not compete with the
                     // editor for /dev/tty keystrokes while it has control.
@@ -556,12 +567,19 @@ async fn run_app(
                 }
             }
             Some(frame) = live_rx.recv() => {
+                // The lossy bus may have dropped device_state frames while the
+                // socket was down: on every (re)connect, re-read the merged
+                // draft view instead of assuming what was missed (ADR 0048).
+                let reconnected = matches!(frame, api::LiveFrame::Connected);
                 if app.handle_live_frame(frame) == LiveFrameAction::RefreshRooms {
                     let had_selection = app.selected_room().is_some();
                     app.refresh_rooms().await;
                     if !had_selection && app.selected_room().is_some() {
                         app.load_selected_timeline().await;
                     }
+                }
+                if reconnected {
+                    app.refresh_drafts().await;
                 }
             }
             Some(outcome) = lifecycle_rx.recv() => {
@@ -578,6 +596,9 @@ async fn run_app(
             }
             Some(outcome) = members_rx.recv() => {
                 app.apply_members_outcome(outcome);
+            }
+            Some(outcome) = drafts_rx.recv() => {
+                app.handle_draft_outcome(outcome);
             }
         }
     }

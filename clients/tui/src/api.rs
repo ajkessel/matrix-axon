@@ -187,6 +187,52 @@ impl AxonClient {
         self.send(read_request(request)).await
     }
 
+    /// Read one namespace of per-device state (M12): the server's last-write-
+    /// wins merged view across all the account's devices, tombstoned keys
+    /// absent. `device_id` names this client install; the merge is account-wide.
+    pub async fn get_device_state(
+        &self,
+        device_id: Uuid,
+        account_id: Uuid,
+        namespace: &str,
+    ) -> Result<DeviceStateDto, ApiError> {
+        let request = self
+            .http
+            .get(format!(
+                "{}/v1/devices/{device_id}/state/{}",
+                self.base_url,
+                path_segment(namespace)
+            ))
+            .query(&[("account_id", account_id)]);
+        self.send(read_request(request)).await
+    }
+
+    /// Merge-upsert per-device state (M12). Only the keys in `entries` are
+    /// touched; a `None` value deletes the key (a server-side tombstone so the
+    /// deletion wins the cross-device merge). The change fans out to sibling
+    /// devices as a `device_state.changed` WS frame carrying this `device_id`.
+    pub async fn put_device_state(
+        &self,
+        device_id: Uuid,
+        account_id: Uuid,
+        namespace: &str,
+        entries: &HashMap<String, Option<Value>>,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .put(format!(
+                "{}/v1/devices/{device_id}/state/{}",
+                self.base_url,
+                path_segment(namespace)
+            ))
+            .query(&[("account_id", account_id)])
+            .json(&serde_json::json!({ "entries": entries }));
+        // The response carries only the server's `updated_at`, which this
+        // client doesn't consume (server-clock LWW).
+        let _: Value = self.send(read_request(request)).await?;
+        Ok(())
+    }
+
     pub async fn room_members(
         &self,
         account_id: Uuid,
@@ -679,6 +725,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "device_state.changed" => {
+            let payload: DeviceStateChangedDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::DeviceState {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         _ => None,
     }
 }
@@ -705,6 +761,13 @@ pub enum LiveFrame {
     SenderTrustViolation {
         account_id: Uuid,
         payload: SenderTrustViolationDto,
+    },
+    /// A `device_state.changed` frame (M12, ADR 0048): another device wrote
+    /// drafts / read markers. Frames carrying this client's own `device_id`
+    /// are its own PUTs echoed back and must be ignored (echo suppression).
+    DeviceState {
+        account_id: Uuid,
+        payload: DeviceStateChangedDto,
     },
 }
 
@@ -766,6 +829,36 @@ pub struct SenderTrustViolationDto {
     pub user_id: String,
     #[serde(default)]
     pub verification_violation: bool,
+}
+
+/// The wire payload for a `device_state.changed` frame (M12): the originating
+/// device, the namespace, and the written entries — a JSON `null` value means
+/// the key was deleted on that device. The wire also carries `updated_at`,
+/// which this client doesn't consume (server-clock LWW needs no client-side
+/// timestamp comparison).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceStateChangedDto {
+    pub device_id: Uuid,
+    pub namespace: String,
+    #[serde(default)]
+    pub entries: HashMap<String, Value>,
+}
+
+/// One namespace of per-device state as returned by
+/// `GET /v1/devices/{device_id}/state/{namespace}` (M12): the merged
+/// last-write-wins view across all the account's devices. Only the fields
+/// this client consumes are declared; the wire also carries `namespace` and
+/// per-entry `device_id`/`updated_at`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceStateDto {
+    #[serde(default)]
+    pub entries: HashMap<String, DeviceStateEntryDto>,
+}
+
+/// One winning entry in a merged device-state read (M12).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceStateEntryDto {
+    pub value: Value,
 }
 
 #[derive(Debug, Deserialize)]

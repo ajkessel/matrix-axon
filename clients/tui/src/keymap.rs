@@ -712,6 +712,9 @@ impl App {
             let input = self.take_input_for_submit();
             self.mode = Mode::Compose;
             self.send_edit(&event_id, &input).await;
+            // Back in compose: restore the room's draft into the now-empty
+            // buffer the edit borrowed (M12).
+            self.restore_draft_into_buffer();
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_input_and_selection();
         } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
@@ -753,6 +756,9 @@ impl App {
             self.take_input_for_submit();
             self.mode = Mode::Compose;
             self.send_react(&event_id, &reaction_key).await;
+            // Back in compose: restore the room's draft into the now-empty
+            // buffer the reaction borrowed (M12).
+            self.restore_draft_into_buffer();
         } else if self.shortcuts.clear_input.matches(key) {
             self.clear_input_and_selection();
         } else if self.shortcuts.complete.matches(key) {
@@ -918,6 +924,9 @@ impl App {
             self.pending_search = None;
             self.search_results = None;
             self.mode = Mode::Compose;
+            // Back in compose: restore the room's draft into the buffer the
+            // transient mode borrowed and cleared (M12).
+            self.restore_draft_into_buffer();
         }
     }
 
@@ -1137,6 +1146,9 @@ impl App {
             KeyCode::Esc => {
                 self.clear_input_buffer();
                 self.mode = Mode::MessageList;
+                // Restore the room's draft into the buffer date entry borrowed
+                // and cleared (M12); the exit lands in MessageList, not Compose.
+                self.restore_draft_into_buffer();
                 self.status = Status::Info("jump cancelled".to_owned());
             }
             KeyCode::Enter => {
@@ -1145,6 +1157,9 @@ impl App {
                     Some(ts) => {
                         self.mode = Mode::MessageList;
                         self.clear_input_buffer();
+                        // Restore the room's draft into the buffer date entry
+                        // borrowed and cleared (M12).
+                        self.restore_draft_into_buffer();
                         self.jump_to_date(ts).await;
                     }
                     None => {
@@ -1199,6 +1214,9 @@ impl App {
 
     /// Enter DateJump mode (the `Shift+J` "jump to a date" prompt).
     fn start_date_jump(&mut self) {
+        // Settle the room's draft before the buffer is borrowed for date entry,
+        // so returning restores it instead of tombstoning it (M12).
+        self.flush_pending_draft_now();
         self.clear_input_buffer();
         self.status =
             Status::Info("Enter date (YYYY-MM-DD, M/D/YYYY, Jan 15 2025): Esc cancels".to_owned());

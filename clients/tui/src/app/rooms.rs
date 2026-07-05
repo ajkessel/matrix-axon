@@ -270,6 +270,10 @@ impl App {
                 }
             }
         }
+        // Entering a room swaps the compose buffer to that room's draft (M12),
+        // settling the previous room's pending draft first so a switch can't
+        // drop it or misattribute it.
+        self.sync_draft_on_room_change();
     }
 
     /// Fetch the next older page of history for the current room and prepend it

@@ -79,6 +79,10 @@ impl App {
                 account_id,
                 payload,
             } => self.handle_sender_trust_violation(account_id, payload),
+            LiveFrame::DeviceState {
+                account_id,
+                payload,
+            } => self.handle_device_state_frame(account_id, payload),
         }
     }
 

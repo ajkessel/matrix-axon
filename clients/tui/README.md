@@ -41,6 +41,7 @@ loopback default.
 - Own messages appear in a distinct configurable color.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
 - Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
+- Syncs per-room message drafts across devices through Axon's device-state API (M12): a draft typed here appears on the user's other clients within about a second, survives restarts, and clearing or sending it clears it everywhere. Each install mints a device UUID on first run, stored in `device-id` next to the config file.
 
 ## Not Yet Implemented
 

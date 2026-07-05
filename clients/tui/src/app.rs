@@ -21,6 +21,8 @@ use crate::search::{SearchFormState, SearchRequest, SearchResultsState};
 use ratatui::style::Modifier;
 use std::path::PathBuf;
 mod completion;
+mod drafts;
+pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
@@ -746,6 +748,25 @@ pub(crate) struct App {
     /// here so `thread_visible` lets it through and the user sees it inline.
     /// Cleared per-root when the thread panel opens for that root.
     pub(crate) promoted_thread_events: std::collections::HashSet<String>,
+    /// This install's device UUID (M12, ADR 0048), minted on first run and
+    /// persisted next to the config file. Names this client in device-state
+    /// PUTs; live frames carrying it back are our own echoes and are dropped.
+    pub(crate) device_id: Uuid,
+    /// Last known draft text per room (M12): the local mirror of the server's
+    /// merged `drafts` device-state namespace, updated by our own flushes and
+    /// by live frames from sibling devices.
+    pub(crate) drafts: HashMap<RoomKey, String>,
+    /// A compose-buffer change waiting out its debounce window before being
+    /// PUT (M12). At most one — newer changes replace it.
+    pub(crate) pending_draft_put: Option<drafts::PendingDraftPut>,
+    /// The room whose draft the compose buffer currently mirrors (M12). Tracks
+    /// the buffer across room switches and detours through other modes so a
+    /// draft is never dropped or misattributed to the wrong room; `None` before
+    /// the first room loads.
+    pub(crate) compose_room: Option<RoomKey>,
+    /// Sender for background draft-PUT failures. `None` until the main loop
+    /// wires it up (and in unit tests, where flushes stay local-only).
+    pub(crate) drafts_tx: Option<mpsc::UnboundedSender<DraftOutcome>>,
 }
 
 #[derive(Default)]
@@ -920,6 +941,11 @@ impl App {
             room_filter_before_input: None,
             pinned_rooms,
             room_titles: HashMap::new(),
+            device_id: Uuid::nil(),
+            drafts: HashMap::new(),
+            pending_draft_put: None,
+            compose_room: None,
+            drafts_tx: None,
         }
     }
 
@@ -1794,6 +1820,9 @@ impl App {
         }
         let event_id = event.event_id.clone();
         let body = event.display_body();
+        // Settle the room's draft before the buffer is repurposed for the edit,
+        // so returning to compose restores it instead of tombstoning it (M12).
+        self.flush_pending_draft_now();
         self.input.buffer = body;
         self.move_cursor_to_end();
         self.mode = Mode::Editing {

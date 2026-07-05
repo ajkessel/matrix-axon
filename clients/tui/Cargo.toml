@@ -21,7 +21,7 @@ toml_edit = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
-uuid = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde", "v4"] }
 zeroize = "1"
 ratatui = { workspace = true }
 crossterm = { workspace = true }

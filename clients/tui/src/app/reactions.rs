@@ -189,6 +189,9 @@ impl App {
             return;
         }
         let event_id = event.event_id.clone();
+        // Settle the room's draft before the buffer is cleared for the reaction,
+        // so returning to compose restores it instead of tombstoning it (M12).
+        self.flush_pending_draft_now();
         self.input.buffer.clear();
         self.input.cursor = 0;
         self.input.react_tab = None;
