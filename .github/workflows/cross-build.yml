@@ -62,7 +62,9 @@ jobs:
 
   lint-fmt-test:
     needs: check-environment
-    runs-on: [binary-builder]
+    runs-on:
+      group: binary-builder
+      labels: [self-hosted, linux]
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
       - name: checkout source code
@@ -93,9 +95,11 @@ jobs:
         run: cargo test --all
 
   windows:
-    needs: lint-fmt-test
+    needs: check-environment
     if: ${{ github.event.inputs.windows != 'false' }}
-    runs-on: [binary-builder]
+    runs-on:
+      group: binary-builder
+      labels: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v7
 
@@ -139,9 +143,11 @@ jobs:
           if-no-files-found: error
 
   macos:
-    needs: windows
+    needs: check-environment
     if: ${{ github.event.inputs.macos != 'false' }}
-    runs-on: [binary-builder]
+    runs-on:
+      group: binary-builder
+      labels: [self-hosted, linux]
     env:
       RUSTUP_HOME: .rustup-macos
       CARGO_HOME: .cargo-macos
@@ -185,9 +191,11 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: macos
+    needs: check-environment
     if: ${{ github.event.inputs.linux != 'false' }}
-    runs-on: [binary-builder]
+    runs-on:
+      group: binary-builder
+      labels: [self-hosted, linux]
     env:
       RUSTUP_HOME: .rustup-linux
       CARGO_HOME: .cargo-linux
@@ -222,8 +230,9 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: linux
-    runs-on: [binary-builder]
+    runs-on:
+      group: binary-builder
+      labels: [self-hosted, linux]
     if: github.ref_type == 'tag'
 
     permissions:
