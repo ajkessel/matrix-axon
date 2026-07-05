@@ -43,6 +43,7 @@ jobs:
     uses: ./.github/workflows/check-environment.yml
     with:
       require-docker: true
+
   lint-fmt-test:
     needs: check-environment
     runs-on: [binary-builder]
@@ -73,6 +74,7 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
   windows:
     needs: lint-fmt-test
     runs-on: [binary-builder]
@@ -108,13 +110,14 @@ jobs:
         # reachable by whichever user runs the Actions runner service.
         run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
+      - name: Zip binaries
+        run: zip -j target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip
+
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
           name: axon-x86_64-pc-windows-gnu
-          path: |
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe
+          path: target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip
           if-no-files-found: error
 
   macos:
@@ -152,13 +155,14 @@ jobs:
           rustup target add x86_64-apple-darwin
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
+      - name: Zip binaries
+        run: zip -j target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip
+
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
           name: axon-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
+          path: target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip
           if-no-files-found: error
 
   linux:
@@ -186,13 +190,14 @@ jobs:
       - name: Build workspace (native Linux)
         run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
 
+      - name: Zip binaries
+        run: zip -j target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip
+
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
           name: axon-x86_64-unknown-linux-gnu
-          path: |
-            target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon
-            target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
+          path: target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip
           if-no-files-found: error
 
   release:
@@ -211,7 +216,7 @@ jobs:
       - name: Download all compiled binaries
         uses: actions/download-artifact@v8
         with:
-          pattern: axon-*
+          pattern: axon*.zip
           path: release-binaries
           merge-multiple: true
 
