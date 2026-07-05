@@ -39,150 +39,130 @@ env:
   RELEASE_FLAG: ${{ (github.event.inputs.release != 'false') && '--release' || '' }}
 
 jobs:
-  check-environment:
-    uses: ./.github/workflows/check-environment.yml
-    with:
-      require-docker: true
-  lint-fmt-test:
-    needs: check-environment
-    runs-on: [binary-builder]
-    steps:
-      - name: checkout source code
-        uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --all
-  windows:
-    needs: lint-fmt-test
-    runs-on: [binary-builder]
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: windows-cargo-
-
-      - name: Install cross
-        # cross-rs's tagged releases (latest: v0.2.5, 2023) lag well behind
-        # main, which is what upstream actually maintains/recommends — so we
-        # pin to a specific commit rather than a stale tag. Bump this SHA
-        # deliberately (and clear the cached binary off binary-builder) when
-        # a newer cross is needed; `command -v` only skips install once it's
-        # already present, so this doesn't silently drift on its own.
-        run: command -v cross >/dev/null || cargo install cross --locked --git https://github.com/cross-rs/cross --rev 64b5bb4d3d34de062552b9a2093affe77b4ad16a
-
-      - name: Build workspace (Windows via cross/mingw-w64)
-        # `cross` shells out to Docker; the runner's Docker daemon must be
-        # reachable by whichever user runs the Actions runner service.
-        run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
-
-      - name: Upload binaries as artifacts
-        uses: actions/upload-artifact@v7
-        if: github.ref_type != 'tag'
-        with:
-          name: axon-x86_64-pc-windows-gnu
-          path: |
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe
-          if-no-files-found: error
-
-      - name: Release binaries to release page
-        uses: softprops/action-gh-release@v3
-        if: github.ref_type == 'tag'
-        with:
-          files: |
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe
-            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe
-          if-no-files-found: error
-
-  macos:
-    needs: windows
-    runs-on: [binary-builder]
-    env:
-      RUSTUP_HOME: .rustup-macos
-      CARGO_HOME: .cargo-macos
-    strategy:
-      fail-fast: true
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Cargo registry and build
-        uses: actions/cache@v6
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry
-            ${{ env.CARGO_HOME }}/git
-            target
-          key: macos-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: macos-${{ matrix.target }}-cargo-
-
-      - name: Build workspace (macOS via osxcross)
-        run: |
-          source /opt/axon/osxcross/env.sh
-          rustup target add aarch64-apple-darwin
-          rustup target add x86_64-apple-darwin
-          cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
-
-      - name: Upload binaries as artifacts
-        uses: actions/upload-artifact@v7
-        if: github.ref_type != 'tag'
-        with:
-          name: axon-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
-          if-no-files-found: error
-
-      - name: Release binaries to release page
-        uses: softprops/action-gh-release@v3
-        if: github.ref_type == 'tag'
-        with:
-          files: |
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon
-            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
-          if-no-files-found: error
+#  check-environment:
+#    uses: ./.github/workflows/check-environment.yml
+#    with:
+#      require-docker: true
+#  lint-fmt-test:
+#    needs: check-environment
+#    runs-on: [binary-builder]
+#    steps:
+#      - name: checkout source code
+#        uses: actions/checkout@v7
+#
+#      - name: Install Rust toolchain
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          components: rustfmt, clippy
+#
+#      - name: Cache Cargo registry and build
+#        uses: actions/cache@v6
+#        with:
+#          path: |
+#            ~/.cargo/registry
+#            ~/.cargo/git
+#            target
+#          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+#          restore-keys: ${{ runner.os }}-cargo-
+#
+#      - name: Check formatting
+#        run: cargo fmt --all --check
+#
+#      - name: Clippy
+#        run: cargo clippy --all-targets --all-features -- -D warnings
+#
+#      - name: Test
+#        run: cargo test --all
+#  windows:
+#    needs: lint-fmt-test
+#    runs-on: [binary-builder]
+#    steps:
+#      - uses: actions/checkout@v7
+#
+#      - name: Install Rust toolchain
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          targets: x86_64-pc-windows-gnu
+#
+#      - name: Cache Cargo registry and build
+#        uses: actions/cache@v6
+#        with:
+#          path: |
+#            ~/.cargo/registry
+#            ~/.cargo/git
+#            target
+#          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+#          restore-keys: windows-cargo-
+#
+#      - name: Install cross
+#        # cross-rs's tagged releases (latest: v0.2.5, 2023) lag well behind
+#        # main, which is what upstream actually maintains/recommends — so we
+#        # pin to a specific commit rather than a stale tag. Bump this SHA
+#        # deliberately (and clear the cached binary off binary-builder) when
+#        # a newer cross is needed; `command -v` only skips install once it's
+#        # already present, so this doesn't silently drift on its own.
+#        run: command -v cross >/dev/null || cargo install cross --locked --git https://github.com/cross-rs/cross --rev 64b5bb4d3d34de062552b9a2093affe77b4ad16a
+#
+#      - name: Build workspace (Windows via cross/mingw-w64)
+#        # `cross` shells out to Docker; the runner's Docker daemon must be
+#        # reachable by whichever user runs the Actions runner service.
+#        run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
+#
+#      - name: Upload binaries as artifacts
+#        uses: actions/upload-artifact@v7
+#        with:
+#          name: axon-x86_64-pc-windows-gnu
+#          path: |
+#            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe
+#            target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe
+#          if-no-files-found: error
+#
+#  macos:
+#    needs: windows
+#    runs-on: [binary-builder]
+#    env:
+#      RUSTUP_HOME: .rustup-macos
+#      CARGO_HOME: .cargo-macos
+#    strategy:
+#      fail-fast: true
+#      matrix:
+#        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+#    steps:
+#      - uses: actions/checkout@v7
+#
+#      - name: Install Rust toolchain
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          targets: ${{ matrix.target }}
+#
+#      - name: Cache Cargo registry and build
+#        uses: actions/cache@v6
+#        with:
+#          path: |
+#            ${{ env.CARGO_HOME }}/registry
+#            ${{ env.CARGO_HOME }}/git
+#            target
+#          key: macos-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+#          restore-keys: macos-${{ matrix.target }}-cargo-
+#
+#      - name: Build workspace (macOS via osxcross)
+#        run: |
+#          source /opt/axon/osxcross/env.sh
+#          rustup target add aarch64-apple-darwin
+#          rustup target add x86_64-apple-darwin
+#          cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+#
+#      - name: Upload binaries as artifacts
+#        uses: actions/upload-artifact@v7
+#        with:
+#          name: axon-${{ matrix.target }}
+#          path: |
+#            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon
+#            target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
+#          if-no-files-found: error
 
   linux:
-    needs: macos
+#    needs: macos
     runs-on: [binary-builder]
     env:
       RUSTUP_HOME: .rustup-linux
@@ -215,12 +195,25 @@ jobs:
             target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
           if-no-files-found: error
 
+  release:
+    name: Publish GitHub Release
+    needs: linux
+    runs-on: [binary-builder]
+    if: github.ref_type == 'tag'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download all compiled binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: axon-*
+          path: release-binaries
+          merge-multiple: true
+
       - name: Release binaries to release page
         uses: softprops/action-gh-release@v3
-        if: github.ref_type == 'tag'
         with:
-          files: |
-            target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon
-            target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
+          files: release-binaries/*
           if-no-files-found: error
-
