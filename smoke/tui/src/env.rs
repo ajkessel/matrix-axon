@@ -33,14 +33,14 @@ pub fn resolve_tui_bin() -> anyhow::Result<PathBuf> {
         bail!("cargo build -p axon-tui failed");
     }
 
-    let bin = target_dir()?.join("debug").join(bin_name());
+    let bin = resolve_workspace_bin(bin_name())?;
     if !bin.exists() {
         bail!("built axon-tui but did not find it at {}", bin.display());
     }
     Ok(bin)
 }
 
-fn env_cargo() -> String {
+pub fn env_cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned())
 }
 
@@ -58,6 +58,10 @@ fn target_dir() -> anyhow::Result<PathBuf> {
         return Ok(PathBuf::from(dir));
     }
     Ok(workspace_root()?.join("target"))
+}
+
+pub fn resolve_workspace_bin(name: &str) -> anyhow::Result<PathBuf> {
+    Ok(target_dir()?.join("debug").join(name))
 }
 
 /// Workspace root: two levels up from this crate (`smoke/tui`).

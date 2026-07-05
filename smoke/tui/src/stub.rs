@@ -19,8 +19,8 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use crate::wire::{
-    AccountDto, ApiResponse, EventDto, RoomDto, SendRequest, SendResultDto, TimelinePage,
-    WsEnvelope,
+    AccountDto, ApiResponse, EventDto, RoomDto, SendRequest, SendResultDto, ThreadSummaryDto,
+    TimelinePage, WsEnvelope,
 };
 
 /// One recorded HTTP request, for post-hoc journal assertions.
@@ -40,12 +40,19 @@ pub struct StubState {
     pub room_id: String,
     pub room_name: String,
     pub run_id: String,
+    pub extra_seed_bodies: Vec<String>,
+    /// Thread summaries returned by `GET .../rooms/{room_id}/threads`.
+    pub thread_summaries: Vec<ThreadSummaryDto>,
     journal: Arc<Mutex<Vec<JournalEntry>>>,
     ws_tx: broadcast::Sender<String>,
 }
 
 impl StubState {
-    fn new(run_id: String) -> Self {
+    fn new(
+        run_id: String,
+        extra_seed_bodies: Vec<String>,
+        thread_summaries: Vec<ThreadSummaryDto>,
+    ) -> Self {
         let (ws_tx, _) = broadcast::channel(64);
         Self {
             account_id: Uuid::new_v4(),
@@ -53,6 +60,8 @@ impl StubState {
             room_id: "!smoke:localhost".to_owned(),
             room_name: "Smoke Room".to_owned(),
             run_id,
+            extra_seed_bodies,
+            thread_summaries,
             journal: Arc::new(Mutex::new(Vec::new())),
             ws_tx,
         }
@@ -131,21 +140,45 @@ pub struct Stub {
 impl Stub {
     /// Bind an ephemeral loopback port and serve the stub until dropped.
     pub async fn start(run_id: &str) -> anyhow::Result<Self> {
-        let state = StubState::new(run_id.to_owned());
-        let app = Router::new()
-            .route("/v1/accounts", get(get_accounts))
-            .route("/v1/rooms", get(get_rooms))
-            .route(
-                "/v1/accounts/{account_id}/rooms/{room_id}/timeline",
-                get(get_timeline),
-            )
-            .route(
-                "/v1/accounts/{account_id}/rooms/{room_id}/send",
-                post(post_send),
-            )
-            .route("/v1/ws", get(ws_handler))
-            .with_state(state.clone());
+        Self::bind(StubState::new(run_id.to_owned(), vec![], vec![])).await
+    }
 
+    /// Like [`Stub::start`] but seeds additional message bodies into the
+    /// timeline response.
+    pub async fn start_with_seeds(
+        run_id: &str,
+        extra_seed_bodies: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        Self::bind(StubState::new(run_id.to_owned(), extra_seed_bodies, vec![])).await
+    }
+
+    /// Like [`Stub::start_with_seeds`] but also seeds thread summaries returned
+    /// by `GET .../rooms/{room_id}/threads`.  Each entry is `(root_event_id,
+    /// reply_count)`.  Thread summaries trigger `apply_relation_outcome` in the
+    /// TUI, which under the `scroll_follow_tail` fix must not advance the
+    /// viewport.
+    pub async fn start_with_seeds_and_threads(
+        run_id: &str,
+        extra_seed_bodies: Vec<String>,
+        thread_summaries: Vec<(String, i64)>,
+    ) -> anyhow::Result<Self> {
+        let summaries = thread_summaries
+            .into_iter()
+            .map(|(root_event_id, reply_count)| ThreadSummaryDto {
+                root_event_id,
+                reply_count,
+            })
+            .collect();
+        Self::bind(StubState::new(
+            run_id.to_owned(),
+            extra_seed_bodies,
+            summaries,
+        ))
+        .await
+    }
+
+    async fn bind(state: StubState) -> anyhow::Result<Self> {
+        let app = stub_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -156,7 +189,6 @@ impl Stub {
                 })
                 .await;
         });
-
         Ok(Self {
             addr,
             state,
@@ -177,6 +209,26 @@ impl Stub {
         }
         let _ = self.handle.await;
     }
+}
+
+fn stub_router(state: StubState) -> Router {
+    Router::new()
+        .route("/v1/accounts", get(get_accounts))
+        .route("/v1/rooms", get(get_rooms))
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/timeline",
+            get(get_timeline),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/threads",
+            get(get_threads),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/send",
+            post(post_send),
+        )
+        .route("/v1/ws", get(ws_handler))
+        .with_state(state)
 }
 
 async fn get_accounts(State(state): State<StubState>) -> impl IntoResponse {
@@ -206,11 +258,29 @@ async fn get_timeline(
         seed_event_id(&state.run_id),
         format!("smoke seed {}", state.run_id),
     );
+    let mut events = vec![seed];
+    for (i, body) in state.extra_seed_bodies.iter().enumerate() {
+        events.push(state.message_event(format!("$seed-extra-{i}-{}", state.run_id), body.clone()));
+    }
     Json(ApiResponse {
         data: TimelinePage {
-            events: vec![seed],
+            events,
             next_cursor: None,
         },
+    })
+}
+
+async fn get_threads(
+    State(state): State<StubState>,
+    Path((account_id, room_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    state.record(
+        "GET",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/threads"),
+        None,
+    );
+    Json(ApiResponse {
+        data: state.thread_summaries.clone(),
     })
 }
 

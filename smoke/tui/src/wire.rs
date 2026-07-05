@@ -87,3 +87,10 @@ pub struct WsEnvelope {
 pub struct SendRequest {
     pub body: String,
 }
+
+/// One entry in `GET .../rooms/{room_id}/threads`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreadSummaryDto {
+    pub root_event_id: String,
+    pub reply_count: i64,
+}

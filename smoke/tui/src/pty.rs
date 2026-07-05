@@ -271,6 +271,21 @@ impl PtyDriver {
         }
     }
 
+    /// Returns the character contents of every cell in `col` across all rows,
+    /// as `(row, contents)` pairs. Used to assert that a border column holds
+    /// only box-drawing chars and not overflowed text.
+    pub fn col_chars(&self, col: u16) -> Vec<(u16, String)> {
+        let parser = self.parser.lock().expect("parser lock");
+        let screen = parser.screen();
+        (0..screen.size().0)
+            .filter_map(|row| {
+                screen
+                    .cell(row, col)
+                    .map(|c| (row, c.contents().to_owned()))
+            })
+            .collect()
+    }
+
     /// Force-kill the process. Cleanup only — never a substitute for a clean exit.
     pub fn terminate(&mut self) {
         let _ = self.child.kill();

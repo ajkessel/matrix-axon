@@ -58,6 +58,7 @@ cargo run -p axon-smoke-tui -- --profile stub [--filter NAME]
 - `ctrl_c_exit` — the configured Ctrl-C shortcut exits cleanly.
 - `send_round_trip` — keystrokes submit a run-marked message, the journal
   records the send, and the WebSocket echo renders in the open room.
+- `border_integrity` — seeds messages with East Asian Ambiguous characters (`·` U+00B7, `■` U+25A0) and asserts that the rightmost terminal column contains only box-drawing characters after first paint, catching text-overflows-border regressions.
 
 Login, navigation, message actions, resilience, and the live-stack journey are
 S2 (see the plan).

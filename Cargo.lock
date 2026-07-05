@@ -448,6 +448,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "axon-smoke-local-stack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "axon-smoke-tui"
 version = "0.1.0"
 dependencies = [
