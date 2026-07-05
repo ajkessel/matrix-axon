@@ -28,6 +28,22 @@ on:
         description: "Build with --release (uncheck for a faster debug build)"
         type: boolean
         default: true
+      skip-lint:
+        description: "Perform linting and formatting checks"
+        type: boolean
+        default: true
+      macos:
+        description: "Build MacOS binaries"
+        type: boolean
+        default: true
+      windows:
+        description: "Build Windows binaries"
+        type: boolean
+        default: true
+      linux:
+        description: "Build Linux binaries"
+        type: boolean
+        default: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -47,6 +63,7 @@ jobs:
   lint-fmt-test:
     needs: check-environment
     runs-on: [binary-builder]
+    if: github.event.inputs.skip-lint != 'false'
     steps:
       - name: checkout source code
         uses: actions/checkout@v7
@@ -77,6 +94,7 @@ jobs:
 
   windows:
     needs: lint-fmt-test
+    if: github.event.inputs.windows != 'false'
     runs-on: [binary-builder]
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +129,7 @@ jobs:
         run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip
+        run: zip -j target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe 
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -122,6 +140,7 @@ jobs:
 
   macos:
     needs: windows
+    if: github.event.inputs.macos != 'false'
     runs-on: [binary-builder]
     env:
       RUSTUP_HOME: .rustup-macos
@@ -156,7 +175,7 @@ jobs:
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip
+        run: zip -j target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -167,6 +186,7 @@ jobs:
 
   linux:
     needs: macos
+    if: github.event.inputs.linux != 'false'
     runs-on: [binary-builder]
     env:
       RUSTUP_HOME: .rustup-linux
@@ -191,7 +211,7 @@ jobs:
         run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip
+        run: zip -j target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
