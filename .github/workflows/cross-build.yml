@@ -52,9 +52,9 @@ on:
         options:
           - self-hosted
           - server
-          - iMac
-          - BOSLB015672
-          - BOSLB015700
+          - imac
+          - boslb015672
+          - boslb015700
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
