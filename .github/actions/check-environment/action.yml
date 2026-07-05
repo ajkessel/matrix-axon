@@ -11,9 +11,11 @@ runs:
   using: "composite"
   steps:
     - name: test environment
+      shell: bash
       run: whoami
 
     - name: Docker access check
+      shell: bash
       if: inputs.require-docker
       run: docker run --rm hello-world
 
