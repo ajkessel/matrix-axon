@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::api::{EventDto, MemberDto, RoomDto};
+use crate::api::{ApiError, AxonClient, EventDto, MemberDto, RoomDto, TimelinePage};
 use crate::config::TuiConfig;
 
 use super::{
@@ -546,59 +546,16 @@ impl App {
         pivot: i64,
         want_after: usize,
     ) -> Option<crate::api::TimelinePage> {
-        const DAY_MS: i64 = 86_400_000;
-        let now = chrono::Utc::now().timestamp_millis();
-        let want_after = want_after.clamp(1, TIMELINE_LIMIT / 2);
-
-        let mut chosen: Option<crate::api::TimelinePage> = None;
-        let mut window = DAY_MS;
-        for _ in 0..32 {
-            let at_ts = pivot.saturating_add(window).min(now);
-            let page = self
-                .client
-                .room_timeline(
-                    room.account_id,
-                    &room.room_id,
-                    None,
-                    Some(at_ts),
-                    TIMELINE_LIMIT,
-                )
-                .await
-                .ok()?;
-            if page.events.is_empty() {
-                // No messages before at_ts yet — expand the window forward.
-                // If we've already reached the present, the room is empty.
-                if at_ts >= now {
-                    break;
-                }
-                window = window.saturating_mul(2);
-                continue;
-            }
-            // Events are newest-first: last is oldest, first is newest.
-            let oldest = page.events.last().map(|e| e.origin_ts).unwrap_or(pivot);
-            let after_count = page.events.iter().filter(|e| e.origin_ts > pivot).count();
-            let full = page.events.len() == TIMELINE_LIMIT;
-            // A page that reaches back to `pivot` carries earlier context above it.
-            let has_earlier = oldest <= pivot;
-
-            // A full page that lost earlier context means `pivot` is denser than
-            // one page: getting more later messages would push `pivot` itself out.
-            // Keep the previous (straddling) page rather than scrolling past it.
-            if !has_earlier && full && chosen.is_some() {
-                break;
-            }
-            chosen = Some(page);
-            // Stop once the lower half is filled, we reach the present (no later
-            // messages can exist), or — when there is no earlier history to keep —
-            // a full page caps how much more we can load in one request. A short
-            // page is never a stop signal on its own: it only means no *older*
-            // history exists, which says nothing about later messages still wanted.
-            if after_count >= want_after || at_ts >= now || (!has_earlier && full) {
-                break;
-            }
-            window = window.saturating_mul(2);
-        }
-        chosen
+        fetch_straddling_timeline_page(
+            self.client.clone(),
+            room.account_id,
+            room.room_id.clone(),
+            pivot,
+            TIMELINE_LIMIT,
+            want_after,
+        )
+        .await
+        .ok()
     }
 
     /// Fetch the next *newer* page of history and append it to the in-memory
@@ -1027,6 +984,62 @@ impl App {
     }
 }
 
+pub(super) async fn fetch_straddling_timeline_page(
+    client: AxonClient,
+    account_id: Uuid,
+    room_id: String,
+    pivot: i64,
+    limit: usize,
+    want_after: usize,
+) -> Result<TimelinePage, ApiError> {
+    const DAY_MS: i64 = 86_400_000;
+    let now = chrono::Utc::now().timestamp_millis();
+    let want_after = want_after.clamp(1, (limit / 2).max(1));
+
+    let mut chosen: Option<TimelinePage> = None;
+    let mut window = DAY_MS;
+    for _ in 0..32 {
+        let at_ts = pivot.saturating_add(window).min(now);
+        let page = client
+            .room_timeline(account_id, &room_id, None, Some(at_ts), limit)
+            .await?;
+        if page.events.is_empty() {
+            if at_ts >= now {
+                break;
+            }
+            window = window.saturating_mul(2);
+            continue;
+        }
+
+        let oldest = page
+            .events
+            .last()
+            .map(|event| event.origin_ts)
+            .unwrap_or(pivot);
+        let after_count = page
+            .events
+            .iter()
+            .filter(|event| event.origin_ts > pivot)
+            .count();
+        let full = page.events.len() == limit;
+        let has_earlier = oldest <= pivot;
+
+        if !has_earlier && full && chosen.is_some() {
+            break;
+        }
+        chosen = Some(page);
+        if after_count >= want_after || at_ts >= now || (!has_earlier && full) {
+            break;
+        }
+        window = window.saturating_mul(2);
+    }
+
+    Ok(chosen.unwrap_or(TimelinePage {
+        events: Vec::new(),
+        next_cursor: None,
+    }))
+}
+
 /// Whether a room is *likely* a DM (ADR 0042). Interim heuristic: a room with no
 /// `name` and no `canonical_alias` is treated as an unnamed/direct room. This is
 /// imperfect (a named two-person room reads as a group, an unnamed small group
@@ -1208,7 +1221,7 @@ fn member_display(member: &MemberDto) -> String {
         })
 }
 
-fn apply_edits(events: &mut Vec<EventDto>) {
+pub(crate) fn apply_edits(events: &mut Vec<EventDto>) {
     // Collect all edit relations, tracking whether each target is present on
     // this page. An edit whose target lives on an older (not-yet-loaded) page
     // must NOT be removed: suppressing it would make the edit invisible.

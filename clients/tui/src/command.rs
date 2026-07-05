@@ -25,6 +25,7 @@ pub enum Command {
     Event(String),
     Whoami,
     Whereami,
+    Search(crate::search::SearchCommandInput),
     React(Option<String>),
     Unreact,
     Reply,
@@ -111,6 +112,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/event", true),
     SlashCommand::supported("/whoami", false),
     SlashCommand::supported("/whereami", false),
+    SlashCommand::supported("/search", true),
     SlashCommand::supported("/react", true),
     SlashCommand::supported("/unreact", false),
     SlashCommand::supported("/reply", false),
@@ -254,6 +256,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         description: "show room information",
     },
     // ── Message actions ──────────────────────────────────────────────────────
+    HelpCommand {
+        label: "/search [field:value...] <query>",
+        insert_text: "/search ",
+        description: "search indexed history; bare /search opens a field form; /search ? shows syntax",
+    },
     HelpCommand {
         label: "/react [emoji]",
         insert_text: "/react ",
@@ -411,6 +418,7 @@ pub fn parse(input: &str) -> Command {
         "event" => Command::Invalid("/event requires an event id".to_owned()),
         "whoami" => Command::Whoami,
         "whereami" => Command::Whereami,
+        "search" => Command::Search(crate::search::parse_search_command_arg(arg)),
         "react" => Command::React((!arg.is_empty()).then(|| arg.to_owned())),
         "unreact" => Command::Unreact,
         "reply" => Command::Reply,
@@ -579,7 +587,7 @@ fn month_name_to_number(name: &str) -> Option<u32> {
     }
 }
 
-fn ymd_hm_to_ms(y: i64, m: u32, d: u32, h: u32, min: u32) -> Option<i64> {
+pub(crate) fn ymd_hm_to_ms(y: i64, m: u32, d: u32, h: u32, min: u32) -> Option<i64> {
     if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) || h > 23 || min > 59 {
         return None;
     }
@@ -787,6 +795,28 @@ mod tests {
     #[test]
     fn parses_whereami() {
         assert_eq!(parse("/whereami"), Command::Whereami);
+    }
+
+    #[test]
+    fn parses_search_forms() {
+        assert_eq!(
+            parse("/search"),
+            Command::Search(crate::search::SearchCommandInput::OpenForm)
+        );
+        assert_eq!(
+            parse("/search ?"),
+            Command::Search(crate::search::SearchCommandInput::Help)
+        );
+        assert_eq!(
+            parse("/search help"),
+            Command::Search(crate::search::SearchCommandInput::Run("help".to_owned()))
+        );
+        assert_eq!(
+            parse("/search room:* backup key"),
+            Command::Search(crate::search::SearchCommandInput::Run(
+                "room:* backup key".to_owned()
+            ))
+        );
     }
 
     #[test]

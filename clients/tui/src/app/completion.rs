@@ -535,9 +535,17 @@ impl App {
     }
 
     pub(super) fn resolve_room_target(&self, target: &str) -> RoomTargetResolution {
+        self.resolve_room_target_in_account(target, self.active_account_filter())
+    }
+
+    pub(super) fn resolve_room_target_in_account(
+        &self,
+        target: &str,
+        account_filter: Option<uuid::Uuid>,
+    ) -> RoomTargetResolution {
         let target = target.trim();
         if let Ok(n) = target.parse::<usize>() {
-            let visible = self.visible_room_indices();
+            let visible = self.visible_room_indices_for_account(account_filter);
             return n
                 .checked_sub(1)
                 .and_then(|vis_pos| visible.get(vis_pos).copied())
@@ -545,7 +553,7 @@ impl App {
                 .unwrap_or(RoomTargetResolution::Missing);
         }
         let target_lower = target.to_lowercase();
-        let exact = self.matching_room_indices(|room| {
+        let exact = self.matching_room_indices_for_account(account_filter, |room| {
             room.room_id == target
                 || room.canonical_alias.as_deref() == Some(target)
                 || room.name.as_deref().map(str::to_lowercase).as_deref()
@@ -556,7 +564,7 @@ impl App {
         }
 
         if let Some(alias) = room_alias_with_hash(target) {
-            let matches = self.matching_room_indices(|room| {
+            let matches = self.matching_room_indices_for_account(account_filter, |room| {
                 room.canonical_alias.as_deref() == Some(alias.as_str())
             });
             if let Some(resolution) = self.classify_room_matches(target, matches) {
@@ -565,7 +573,7 @@ impl App {
         }
 
         if let Some(target_local) = incomplete_matrix_room_name(target) {
-            let local_matches = self.matching_room_indices(|room| {
+            let local_matches = self.matching_room_indices_for_account(account_filter, |room| {
                 room.canonical_alias
                     .as_deref()
                     .and_then(matrix_room_local_name)
@@ -578,16 +586,36 @@ impl App {
             }
         }
 
-        let prefix_matches =
-            self.matching_room_indices(|room| room_matches_completion(room, target));
+        let prefix_matches = self.matching_room_indices_for_account(account_filter, |room| {
+            room_matches_completion(room, target)
+        });
         self.classify_room_matches(target, prefix_matches)
             .unwrap_or(RoomTargetResolution::Missing)
     }
 
-    fn matching_room_indices(&self, predicate: impl Fn(&RoomDto) -> bool) -> Vec<usize> {
-        self.visible_room_indices()
+    fn matching_room_indices_for_account(
+        &self,
+        account_filter: Option<uuid::Uuid>,
+        predicate: impl Fn(&RoomDto) -> bool,
+    ) -> Vec<usize> {
+        self.visible_room_indices_for_account(account_filter)
             .into_iter()
             .filter(|index| self.rooms.rooms.get(*index).is_some_and(&predicate))
+            .collect()
+    }
+
+    fn visible_room_indices_for_account(&self, account_filter: Option<uuid::Uuid>) -> Vec<usize> {
+        self.rooms
+            .rooms
+            .iter()
+            .enumerate()
+            .filter(|(_, room)| {
+                account_filter.is_none_or(|account_id| room.account_id == account_id)
+            })
+            .filter(|(index, room)| {
+                self.rooms.selected == Some(*index) || self.room_passes_filter(room)
+            })
+            .map(|(index, _)| index)
             .collect()
     }
 

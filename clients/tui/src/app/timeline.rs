@@ -881,6 +881,7 @@ impl App {
             &relations,
             self.display.message_density,
             self.display.time_format,
+            self.display.highlight_selected_line,
         )
         .ranges
     }

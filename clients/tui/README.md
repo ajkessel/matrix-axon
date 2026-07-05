@@ -126,6 +126,19 @@ When focus is on the **Room List** or **Message List**, the focused pane border 
 | `v` | In Message List, open a larger preview of the selected image message. |
 | `Enter` or `Esc` | Return focus to Input. |
 
+When the **Search Results** popup is open:
+
+| Shortcut | Behavior |
+| --- | --- |
+| `Up` / `Down` | Select the previous or next result. |
+| `PageUp` / `PageDown` | Page through results. |
+| `Home` / `End` | Jump to the first or last result. |
+| `s` | Toggle newest-first or oldest-first ordering. |
+| `g` | Toggle straight time ordering or room grouping. |
+| `Enter` | Jump to the selected result in the room timeline. |
+| `r` | Reply to the selected result, after jumping to it. |
+| `t` | Start a thread from the selected result, after jumping to it. |
+
 When focus is on the **Input** pane:
 
 | Shortcut | Behavior |

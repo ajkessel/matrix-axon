@@ -8,16 +8,22 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::{FontSize, Image, Resize};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    account_localpart, format_time, message_layout, AccountSelection, App, ImageState,
-    ImageThumbRows, MediaKey, Mode, PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey,
-    SearchKind, VerificationDirection, VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
+    account_localpart, date_separator_line, format_date, format_time, message_layout,
+    selected_line_style, AccountSelection, App, ImageState, ImageThumbRows, MediaKey, Mode,
+    PopupKind, ProtocolKey, ProtocolState, RoomFilter, RoomKey, SearchKind, VerificationDirection,
+    VerificationFlow, VerificationStage, IMAGE_THUMB_ROWS,
 };
 use ratatui_image::picker::ProtocolType;
 
+use crate::api::RoomDto;
 use crate::command::{HELP_COMMANDS, HELP_COMMAND_GROUPS};
 use crate::config::Shortcuts;
+use crate::search::{
+    SearchContextKey, SearchFormField, SearchGrouping, SearchResultsState, SearchScope,
+};
 use crate::wrap::{plain_rich_lines, wrap_rich_lines};
 
 /// Percentage of the screen (both axes) used for the media-preview popup.
@@ -133,6 +139,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             (None, None, outer[0])
         }
     };
+    let command_response_will_popup =
+        app.pending_command_response
+            .as_deref()
+            .is_some_and(|response| {
+                let inner_width = outer[1].width.saturating_sub(2);
+                let prefix_width = command_response_prefix_width(app);
+                command_response_line_count(response, inner_width, prefix_width)
+                    > usize::from(app.display.input_lines)
+            });
 
     // Accounts panel
     if let Some(accounts_area) = accounts_area {
@@ -192,6 +207,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     Span::raw(format!("{marker} ")),
                     Span::styled(label.clone(), style),
                 ]))
+                .style(selected_line_style(
+                    &app.colors,
+                    is_sel,
+                    app.display.highlight_selected_line,
+                ))
             })
             .collect();
 
@@ -348,6 +368,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         ]),
                     ])
                 }
+                .style(selected_line_style(
+                    &app.colors,
+                    is_selected,
+                    app.display.highlight_selected_line,
+                ))
             };
             room_items.push(item);
         }
@@ -432,6 +457,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         &relations,
         app.display.message_density,
         app.display.time_format,
+        app.display.highlight_selected_line,
     );
     let total_lines = layout
         .ranges
@@ -693,6 +719,43 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ]);
             (Text::from(line), "Confirm logout".to_owned(), None)
         }
+        Mode::SearchForm => {
+            let line = Line::from(vec![
+                Span::raw("> "),
+                Span::styled(
+                    app.search_form
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "fill search fields".to_owned()),
+                    Style::default()
+                        .fg(app.colors.status)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+            (Text::from(line), "Search".to_owned(), None)
+        }
+        Mode::SearchResults => {
+            let mut status = app.search_result_status();
+            let entry_status = entry_status_text(app);
+            if !entry_status.is_empty() && entry_status != status {
+                if status.is_empty() {
+                    status = entry_status;
+                } else {
+                    status.push_str("  ");
+                    status.push_str(&entry_status);
+                }
+            }
+            let line = Line::from(vec![
+                Span::raw("> "),
+                Span::styled(
+                    status,
+                    Style::default()
+                        .fg(app.colors.status)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+            (Text::from(line), "Search Results".to_owned(), None)
+        }
         _ => {
             let in_search_list = matches!(
                 app.mode,
@@ -708,18 +771,32 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 Span::raw(mask_login_command(&app.input.buffer))
             };
+            let status_text = if command_response_will_popup
+                || matches!(app.mode, Mode::Popup(PopupKind::CommandResponse))
+            {
+                String::new()
+            } else {
+                entry_status_text(app)
+            };
             let status_span = Span::styled(
-                entry_status_text(app),
+                status_text,
                 Style::default()
                     .fg(app.colors.status)
                     .add_modifier(Modifier::ITALIC),
             );
-            let search_hint = in_search_list.then(|| {
-                Span::styled(
+            let mut trailing_hints = Vec::new();
+            if in_search_list {
+                trailing_hints.push(Span::styled(
                     "  n: next match  N: prev match",
                     Style::default().fg(app.colors.input_hint),
-                )
-            });
+                ));
+            }
+            if let Some(hint) = search_command_entry_hint(&app.input.buffer) {
+                trailing_hints.push(Span::styled(
+                    format!("  {hint}"),
+                    Style::default().fg(app.colors.input_hint),
+                ));
+            }
             // A multi-line compose buffer (Shift+Enter) renders one row per hard
             // line: the first carries the "> " prompt, continuations a "  " indent
             // to stay aligned, and the trailing status sits after the last line.
@@ -727,7 +804,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let is_help = app.show_input_help && app.input.buffer.is_empty();
             let text = if is_help || !masked.contains('\n') {
                 let mut spans = vec![Span::raw("> "), input_text, Span::raw("  "), status_span];
-                spans.extend(search_hint);
+                spans.extend(trailing_hints);
                 Text::from(Line::from(spans))
             } else {
                 let segments: Vec<&str> = masked.split('\n').collect();
@@ -741,7 +818,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                         if i == last {
                             spans.push(Span::raw("  "));
                             spans.push(status_span.clone());
-                            spans.extend(search_hint.clone());
+                            spans.extend(trailing_hints.clone());
                         }
                         Line::from(spans)
                     })
@@ -783,6 +860,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
             | Mode::Unreacting { .. }
             | Mode::Search(_, _)
             | Mode::DateJump
+            | Mode::SearchForm
+            | Mode::SearchResults
     );
     let input_border = if input_active {
         Style::default()
@@ -809,20 +888,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .border_style(input_border),
         )
         .wrap(Wrap { trim: false });
-    if app.mode == Mode::Compose {
-        if let Some(response) = app.pending_command_response.as_deref() {
-            let inner_width = outer[1].width.saturating_sub(2);
-            let prefix_width = command_response_prefix_width(app);
-            let response_overflows =
-                command_response_line_count(response, inner_width, prefix_width)
-                    > usize::from(app.display.input_lines);
-            if response_overflows {
-                app.mode = Mode::Popup(PopupKind::CommandResponse);
-                app.popup_scroll = 0;
-                cursor_col = None;
-            } else {
-                app.pending_command_response = None;
-            }
+    if app.mode == Mode::Compose && app.pending_command_response.is_some() {
+        if command_response_will_popup {
+            app.mode = Mode::Popup(PopupKind::CommandResponse);
+            app.popup_scroll = 0;
+            cursor_col = None;
+        } else {
+            app.pending_command_response = None;
         }
     }
     if let Some(col) = cursor_col {
@@ -855,6 +927,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
         ));
     } else {
         frame.render_widget(input, outer[1]);
+    }
+
+    if app.mode == Mode::SearchResults
+        || (app.mode == Mode::SearchForm && app.search_results.is_some())
+    {
+        render_search_results(frame, app, outer[0]);
+    }
+
+    if app.mode == Mode::SearchForm {
+        render_search_form(frame, app, frame.area());
     }
 
     if app.mode == Mode::Verification {
@@ -976,6 +1058,566 @@ fn clear_image_ghosts(frame: &mut Frame<'_>, prev: &[Rect], current: &[Rect]) {
             }
         }
     }
+}
+
+fn render_search_form(frame: &mut Frame<'_>, app: &App, screen: Rect) {
+    let lines = search_form_lines(app);
+    let caption = search_form_caption();
+    let area = search_form_area(&lines, &caption, screen);
+    frame.render_widget(Clear, area);
+    let popup = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .style(Style::default().bg(app.colors.popup_background))
+                .title("Search")
+                .title_bottom(caption)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.colors.selected_room)),
+        )
+        .style(Style::default().bg(app.colors.popup_background))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(popup, area);
+}
+
+fn search_form_area(lines: &[Line<'static>], caption: &Line<'static>, screen: Rect) -> Rect {
+    let content_width = lines
+        .iter()
+        .map(line_width)
+        .chain(std::iter::once(line_width(caption)))
+        .max()
+        .unwrap_or(40);
+    let max_width = screen.width.saturating_sub(2).max(1) as usize;
+    let min_width = 42.min(max_width);
+    let width = content_width.saturating_add(2).clamp(min_width, max_width) as u16;
+    let height = (lines.len() as u16)
+        .saturating_add(2)
+        .min(screen.height.saturating_sub(2).max(3));
+    centered_size(width.min(screen.width), height, screen)
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.width()
+}
+
+fn search_form_caption() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" Tab/Down ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("next  "),
+        Span::styled(
+            " Shift+Tab/Up ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("previous  "),
+        Span::styled(
+            " Left/Right/Space ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("scope  "),
+        Span::styled(" Enter ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("search  "),
+        Span::styled(" Esc ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("cancel "),
+    ])
+}
+
+fn search_form_lines(app: &App) -> Vec<Line<'static>> {
+    let form = &app.search_form;
+    let mut lines = vec![search_form_field_line(
+        "Query",
+        form.query.as_str(),
+        "optional with filters",
+        form.field == SearchFormField::Query,
+        true,
+        app,
+    )];
+    lines.push(search_scope_line(
+        &form.scope,
+        form.field == SearchFormField::Scope,
+        app,
+    ));
+    if form.field_is_visible(&SearchFormField::Room) {
+        lines.push(search_form_field_line(
+            "Room",
+            form.room.as_str(),
+            "room name or id",
+            form.field == SearchFormField::Room,
+            true,
+            app,
+        ));
+    }
+    if form.field_is_visible(&SearchFormField::Account) {
+        let placeholder = match form.scope {
+            SearchScope::SpecificRoom => "optional account filter",
+            SearchScope::SpecificAccount => "account name or id",
+            SearchScope::CurrentRoom | SearchScope::CurrentAccount | SearchScope::All => "",
+        };
+        lines.push(search_form_field_line(
+            "Account",
+            form.account.as_str(),
+            placeholder,
+            form.field == SearchFormField::Account,
+            true,
+            app,
+        ));
+    }
+    lines.extend([
+        search_form_field_line(
+            "Sender",
+            form.sender.as_str(),
+            "any sender",
+            form.field == SearchFormField::Sender,
+            true,
+            app,
+        ),
+        search_form_field_line(
+            "Date",
+            form.date.as_str(),
+            "any date or range",
+            form.field == SearchFormField::Date,
+            true,
+            app,
+        ),
+        search_form_field_line(
+            "After",
+            form.after.as_str(),
+            "no lower bound",
+            form.field == SearchFormField::After,
+            true,
+            app,
+        ),
+        search_form_field_line(
+            "Before",
+            form.before.as_str(),
+            "no upper bound",
+            form.field == SearchFormField::Before,
+            true,
+            app,
+        ),
+        search_form_field_line(
+            "Limit",
+            form.limit.as_str(),
+            "result limit",
+            form.field == SearchFormField::Limit,
+            true,
+            app,
+        ),
+    ]);
+    if let Some(error) = form.error.as_deref() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            error.to_owned(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines
+}
+
+fn search_form_field_line(
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    active: bool,
+    editable: bool,
+    app: &App,
+) -> Line<'static> {
+    let marker = if active { ">" } else { " " };
+    let label_style = if active {
+        Style::default()
+            .fg(app.colors.selected_room)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut spans = vec![
+        Span::raw(format!("{marker} ")),
+        Span::styled(format!("{label:<8} "), label_style),
+    ];
+    if value.is_empty() {
+        if active && editable {
+            spans.push(Span::styled(
+                "▌",
+                Style::default()
+                    .fg(app.colors.selected_room)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled(
+            placeholder.to_owned(),
+            Style::default().fg(app.colors.input_hint),
+        ));
+    } else {
+        spans.push(Span::raw(value.to_owned()));
+        if active && editable {
+            spans.push(Span::styled(
+                "▌",
+                Style::default()
+                    .fg(app.colors.selected_room)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn search_scope_line(scope: &SearchScope, active: bool, app: &App) -> Line<'static> {
+    let marker = if active { ">" } else { " " };
+    let label_style = if active {
+        Style::default()
+            .fg(app.colors.selected_room)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut spans = vec![
+        Span::raw(format!("{marker} ")),
+        Span::styled("Search in ", label_style),
+    ];
+    for (index, candidate) in [
+        SearchScope::CurrentRoom,
+        SearchScope::CurrentAccount,
+        SearchScope::All,
+        SearchScope::SpecificRoom,
+        SearchScope::SpecificAccount,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        }
+        let selected = *scope == candidate;
+        let style = if selected {
+            Style::default()
+                .fg(app.colors.selected_room)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.colors.input_hint)
+        };
+        let label = if selected {
+            format!("[{}]", search_scope_label(&candidate))
+        } else {
+            search_scope_label(&candidate).to_owned()
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
+}
+
+fn search_scope_label(scope: &SearchScope) -> &'static str {
+    match scope {
+        SearchScope::CurrentRoom => "current room",
+        SearchScope::CurrentAccount => "this account",
+        SearchScope::All => "all accounts",
+        SearchScope::SpecificRoom => "specific room",
+        SearchScope::SpecificAccount => "specific account",
+    }
+}
+
+fn render_search_results(frame: &mut Frame<'_>, app: &App, screen: Rect) {
+    let area = screen;
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let lines = search_results_lines(
+        app,
+        area.width.saturating_sub(2) as usize,
+        area.height.saturating_sub(2) as usize,
+    );
+    let popup = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .style(Style::default().bg(app.colors.popup_background))
+                .title("Search Results")
+                .title_bottom(search_results_caption(app))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.colors.selected_room)),
+        )
+        .style(Style::default().bg(app.colors.popup_background))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(popup, area);
+}
+
+fn search_results_caption(app: &App) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!(" {} ", app.shortcuts.submit.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("jump  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.search_sort.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("sort  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.search_group.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("group  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.search_edit.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("edit  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.reply.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("reply  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.thread.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("thread  "),
+        Span::styled(
+            format!(" {} ", app.shortcuts.clear_input.label()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("close "),
+    ])
+}
+
+fn search_request_label(request: &crate::search::SearchRequest) -> String {
+    if request.q.trim().is_empty() {
+        "filter-only search  ".to_owned()
+    } else {
+        format!("\"{}\"  ", request.q)
+    }
+}
+
+fn search_results_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
+    let Some(state) = app.search_results.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            search_request_label(&state.request),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(app.search_result_status(), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!(
+                "  sort: {}  group: {}",
+                state.sort_order.label(),
+                state.grouping.label()
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    if state.results.is_empty() {
+        lines.push(Line::from("No results."));
+        return lines;
+    }
+
+    let ordered = state.ordered_indices();
+    let selected_position = ordered
+        .iter()
+        .position(|index| *index == state.selected)
+        .unwrap_or(0);
+    let blocks = search_result_blocks(app, state, width, &ordered);
+    let content_budget = height.saturating_sub(2).max(1);
+    let (start, end) = search_visible_result_range(&blocks, selected_position, content_budget);
+    for block in blocks[start..end].iter().cloned() {
+        lines.extend(block);
+    }
+    if state.loading {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Loading more results...",
+            Style::default().fg(Color::Gray),
+        )));
+    }
+    lines
+}
+
+fn search_result_blocks(
+    app: &App,
+    state: &SearchResultsState,
+    width: usize,
+    ordered: &[usize],
+) -> Vec<Vec<Line<'static>>> {
+    let mut blocks = Vec::with_capacity(ordered.len());
+    let mut previous_date = None;
+    let mut previous_room = None;
+    for (position, result_index) in ordered.iter().copied().enumerate() {
+        let mut block = Vec::new();
+        let result = &state.results[result_index];
+        let selected = result_index == state.selected;
+        let event = &result.event;
+        let room_key = (event.account_id, event.room_id.clone());
+        if state.grouping == SearchGrouping::Room && previous_room.as_ref() != Some(&room_key) {
+            previous_room = Some(room_key);
+            previous_date = None;
+            block.push(Line::from(vec![
+                Span::styled("Room: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    search_event_room_label(app, event),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        let date = format_date(event.origin_ts);
+        if previous_date.as_deref() != Some(date.as_str()) {
+            previous_date = Some(date.clone());
+            block.push(date_separator_line(&date, width, &app.colors));
+        }
+        let marker = if selected { ">" } else { " " };
+        let title_style = if selected {
+            Style::default()
+                .fg(app.colors.selected_room)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        block.push(
+            Line::from(vec![
+                Span::raw(format!("{marker} {:>3}. ", position + 1)),
+                Span::styled(
+                    format_time(event.origin_ts, app.display.time_format),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::raw(" "),
+                Span::styled(search_event_room_label(app, event), title_style),
+                Span::raw(" "),
+                Span::styled(app.sender_label(event), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("  {:.2}", result.score),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+            .style(selected_line_style(
+                &app.colors,
+                selected,
+                app.display.highlight_selected_line,
+            )),
+        );
+
+        if selected {
+            let key = SearchContextKey::from_event(event);
+            if let Some(context) = state.context_cache.get(&key) {
+                for context_event in &context.events {
+                    let is_hit = context_event.event_id == event.event_id;
+                    let prefix = if is_hit { "    > " } else { "      " };
+                    let style = if is_hit {
+                        Style::default().fg(app.colors.selected_room)
+                    } else {
+                        Style::default()
+                    };
+                    let body_width = width.saturating_sub(prefix.len()).max(20);
+                    let body = truncate_chars(&context_event.display_body(), body_width);
+                    block.push(
+                        Line::from(vec![
+                            Span::styled(prefix, style),
+                            Span::styled(
+                                format_time(context_event.origin_ts, app.display.time_format),
+                                Style::default().fg(Color::Gray),
+                            ),
+                            Span::raw(" "),
+                            Span::styled(
+                                app.sender_label(context_event),
+                                Style::default().fg(Color::Gray),
+                            ),
+                            Span::raw(": "),
+                            Span::styled(body, style),
+                        ])
+                        .style(selected_line_style(
+                            &app.colors,
+                            is_hit,
+                            app.display.highlight_selected_line,
+                        )),
+                    );
+                }
+            } else {
+                block.push(Line::from(Span::styled(
+                    "      loading context...",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        } else {
+            let body_width = width.saturating_sub(8).max(20);
+            block.push(Line::from(vec![
+                Span::raw("      "),
+                Span::raw(truncate_chars(&event.display_body(), body_width)),
+            ]));
+        }
+        blocks.push(block);
+    }
+    blocks
+}
+
+fn search_visible_result_range(
+    blocks: &[Vec<Line<'static>>],
+    selected_position: usize,
+    budget: usize,
+) -> (usize, usize) {
+    if blocks.is_empty() {
+        return (0, 0);
+    }
+    let selected_position = selected_position.min(blocks.len() - 1);
+    let mut start = selected_position;
+    let mut end = selected_position + 1;
+    let mut used = blocks[selected_position].len().max(1);
+    while start > 0 {
+        let prev_len = blocks[start - 1].len().max(1);
+        if used + prev_len > budget {
+            break;
+        }
+        start -= 1;
+        used += prev_len;
+    }
+    while end < blocks.len() {
+        let next_len = blocks[end].len().max(1);
+        if used + next_len > budget {
+            break;
+        }
+        end += 1;
+        used += next_len;
+    }
+    (start, end)
+}
+
+fn search_event_room_label(app: &App, event: &crate::api::EventDto) -> String {
+    app.rooms
+        .rooms
+        .iter()
+        .find(|room| room.account_id == event.account_id && room.room_id == event.room_id)
+        .map(RoomDto::title)
+        .unwrap_or(event.room_id.as_str())
+        .to_owned()
+}
+
+fn truncate_chars(value: &str, max_width: usize) -> String {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if display_width(&value) <= max_width {
+        return value;
+    }
+    if max_width <= 3 {
+        return take_display_width(&value, max_width);
+    }
+    let mut out = take_display_width(&value, max_width - 3);
+    out.push_str("...");
+    out
+}
+
+fn display_width(value: &str) -> usize {
+    value.chars().map(|ch| ch.width_cjk().unwrap_or(1)).sum()
+}
+
+fn take_display_width(value: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in value.chars() {
+        let ch_width = ch.width_cjk().unwrap_or(1);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        out.push(ch);
+    }
+    out
 }
 
 fn image_thumbnail_spec(
@@ -1895,6 +2537,30 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             "open thread, or start one (Esc to exit)",
         ),
         Row::Blank,
+        Row::Section("Search results:"),
+        Row::Kv("Up / Down".to_owned(), "previous / next result"),
+        Row::Kv(
+            format!(
+                "{} / {}",
+                shortcuts.message_page_up.label(),
+                shortcuts.message_page_down.label()
+            ),
+            "page up / down",
+        ),
+        Row::Kv("Home / End".to_owned(), "first / last result"),
+        Row::Kv(
+            shortcuts.search_sort.label(),
+            "toggle newest-first / oldest-first sort",
+        ),
+        Row::Kv(
+            shortcuts.search_group.label(),
+            "toggle time / room grouping",
+        ),
+        Row::Kv(shortcuts.search_edit.label(), "edit search"),
+        Row::Kv(shortcuts.submit.label(), "jump to selected result"),
+        Row::Kv(shortcuts.reply.label(), "reply to selected result"),
+        Row::Kv(shortcuts.thread.label(), "thread from selected result"),
+        Row::Blank,
         Row::Section("Input:"),
         Row::Kv(shortcuts.submit.label(), "send message"),
         Row::Kv(
@@ -1970,6 +2636,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
 
 pub(crate) fn entry_status_text(app: &App) -> String {
     app.status.text(app.display.debug)
+}
+
+fn search_command_entry_hint(buffer: &str) -> Option<&'static str> {
+    let rest = buffer.strip_prefix("/search")?;
+    (rest.is_empty() || rest.chars().all(char::is_whitespace))
+        .then_some("? for syntax help; type search query now or hit enter for interactive search")
 }
 
 fn command_response_prefix_width(app: &App) -> usize {
@@ -2107,7 +2779,7 @@ fn command_response_popup_area(response: &str, terminal: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{EventDto, RoomDto};
+    use crate::api::{EventDto, RoomDto, SearchResultDto};
     use crate::app::Status;
     use crate::config::TuiConfig;
     use ratatui::backend::TestBackend;
@@ -2320,6 +2992,167 @@ mod tests {
     }
 
     #[test]
+    fn search_command_entry_hint_only_shows_before_arguments() {
+        assert_eq!(
+            search_command_entry_hint("/search"),
+            Some("? for syntax help; type search query now or hit enter for interactive search")
+        );
+        assert_eq!(
+            search_command_entry_hint("/search "),
+            Some("? for syntax help; type search query now or hit enter for interactive search")
+        );
+        assert_eq!(search_command_entry_hint("/search ?"), None);
+        assert_eq!(search_command_entry_hint("/search help"), None);
+        assert_eq!(search_command_entry_hint("/status"), None);
+    }
+
+    #[test]
+    fn search_results_lines_use_available_height() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let account_id = Uuid::nil();
+        let results = (0..20)
+            .map(|i| SearchResultDto {
+                event: EventDto {
+                    account_id,
+                    event_id: format!("${i}:example.org"),
+                    room_id: "!room:example.org".to_owned(),
+                    sender: "@alice:example.org".to_owned(),
+                    state_key: None,
+                    origin_ts: i,
+                    event_type: "m.room.message".to_owned(),
+                    content: None,
+                    body: Some(format!("result {i}")),
+                    relates_to: None,
+                    redacted: false,
+                    redaction_event_id: None,
+                    reactions: None,
+                    sender_trust: None,
+                },
+                score: 1.0,
+            })
+            .collect::<Vec<_>>();
+        app.search_results = Some(crate::search::SearchResultsState {
+            request: crate::search::SearchRequest {
+                q: "result".to_owned(),
+                account_id: None,
+                room_id: None,
+                sender: None,
+                from: None,
+                to: None,
+                limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                cursor: None,
+            },
+            edit_form: crate::search::SearchFormState::from_parsed(
+                &crate::search::parse_search_terms("result").unwrap(),
+            ),
+            results,
+            total: 20,
+            next_cursor: None,
+            selected: 0,
+            loading: false,
+            sort_order: crate::search::SearchSortOrder::NewestFirst,
+            grouping: crate::search::SearchGrouping::None,
+            context_cache: Default::default(),
+        });
+
+        let rendered = search_results_lines(&app, 100, 30);
+        let rendered_result_headers = rendered
+            .iter()
+            .map(line_text)
+            .filter(|line| line.contains(". ") && line.contains("!room:example.org"))
+            .count();
+
+        assert!(
+            rendered_result_headers > 10,
+            "a tall results pane should render beyond the old fixed 10-result cap"
+        );
+    }
+
+    #[test]
+    fn search_results_lines_scroll_with_selection() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        let account_id = Uuid::nil();
+        let results = (0..20)
+            .map(|i| SearchResultDto {
+                event: EventDto {
+                    account_id,
+                    event_id: format!("${i}:example.org"),
+                    room_id: "!room:example.org".to_owned(),
+                    sender: "@alice:example.org".to_owned(),
+                    state_key: None,
+                    origin_ts: i,
+                    event_type: "m.room.message".to_owned(),
+                    content: None,
+                    body: Some(format!("result {i}")),
+                    relates_to: None,
+                    redacted: false,
+                    redaction_event_id: None,
+                    reactions: None,
+                    sender_trust: None,
+                },
+                score: 1.0,
+            })
+            .collect::<Vec<_>>();
+        app.search_results = Some(crate::search::SearchResultsState {
+            request: crate::search::SearchRequest {
+                q: "result".to_owned(),
+                account_id: None,
+                room_id: None,
+                sender: None,
+                from: None,
+                to: None,
+                limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                cursor: None,
+            },
+            edit_form: crate::search::SearchFormState::from_parsed(
+                &crate::search::parse_search_terms("result").unwrap(),
+            ),
+            results,
+            total: 20,
+            next_cursor: None,
+            selected: 2,
+            loading: false,
+            sort_order: crate::search::SearchSortOrder::OldestFirst,
+            grouping: crate::search::SearchGrouping::None,
+            context_cache: Default::default(),
+        });
+
+        let top_text = search_results_lines(&app, 100, 10)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.search_results.as_mut().unwrap().selected = 12;
+        let scrolled_text = search_results_lines(&app, 100, 10)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(top_text.contains("result 0"));
+        assert!(!top_text.contains("result 12"));
+        assert!(!scrolled_text.contains("result 0"));
+        assert!(scrolled_text.contains(">  13."));
+    }
+
+    #[test]
+    fn truncate_chars_respects_cjk_display_width() {
+        assert_eq!(truncate_chars("abc", 3), "abc");
+        assert_eq!(truncate_chars("漢字abc", 7), "漢字abc");
+        assert_eq!(truncate_chars("漢字abc", 6), "漢...");
+    }
+
+    #[test]
     fn overflowing_command_response_opens_popup() {
         let mut app = App::new(
             crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
@@ -2340,6 +3173,18 @@ mod tests {
 
         assert_eq!(app.mode, Mode::Popup(PopupKind::CommandResponse));
         assert_eq!(app.pending_command_response.as_deref(), Some(response));
+        let buffer = terminal.backend().buffer();
+        let input_rows = buffer.area.height.saturating_sub(3)..buffer.area.height;
+        let input_text = input_rows
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(move |x| buffer.cell((x, y)).map(|c| c.symbol().to_owned()))
+            })
+            .collect::<String>();
+        assert!(
+            !input_text.contains("This command response"),
+            "overflowing command response should render in the popup, not the input bar"
+        );
     }
 
     #[test]
@@ -2588,5 +3433,12 @@ mod tests {
         assert!(text.contains("Topic: Daily operations"));
         assert!(text.contains("Alice  @alice:example.com  (join)"));
         assert!(text.contains("Encryption: unavailable"));
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 }

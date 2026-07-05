@@ -16,6 +16,7 @@ use crate::command::Command;
 use crate::config::MessageDensity;
 use crate::config::{ColorScheme, DisplayOptions, Shortcuts, TuiConfig};
 use crate::html::{markdown_to_html_if_detected, rainbow_html, spoiler_html, strip_html_to_plain};
+use crate::search::{SearchFormState, SearchRequest, SearchResultsState};
 #[cfg(test)]
 use ratatui::style::Modifier;
 use std::path::PathBuf;
@@ -31,14 +32,16 @@ mod reactions;
 mod relations;
 mod render;
 mod rooms;
+mod search_flow;
 mod timeline;
 
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
-    display_body_with_sender, format_time, message_index_at_line, message_layout, ImageThumbRows,
-    RelationContext, ReplyPreview, ThreadBadge, IMAGE_THUMB_ROWS,
+    date_separator_line, display_body_with_sender, format_date, format_time, message_index_at_line,
+    message_layout, selected_line_style, ImageThumbRows, RelationContext, ReplyPreview,
+    ThreadBadge, IMAGE_THUMB_ROWS,
 };
-pub(crate) use rooms::{account_localpart, dm_title_from_members};
+pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
 
@@ -70,6 +73,8 @@ pub(crate) enum Mode {
     AccountList,
     MessageList,
     Search(SearchKind, String),
+    SearchForm,
+    SearchResults,
     Editing {
         event_id: String,
     },
@@ -612,6 +617,15 @@ pub(crate) struct App {
     pub(crate) help_selection: usize,
     pub(crate) last_search: Option<String>,
     pub(crate) last_jump_ts: Option<i64>,
+    pub(crate) search_form: SearchFormState,
+    pub(crate) search_results: Option<SearchResultsState>,
+    /// Sender for completed `/v1/search` calls spawned off the event loop.
+    /// `None` until the main loop wires up the channel (and in unit tests).
+    pub(crate) search_tx: Option<mpsc::UnboundedSender<search_flow::SearchOutcome>>,
+    /// Last submitted search request whose background response should still be
+    /// applied. Stale responses are ignored so quick successive searches cannot
+    /// replace newer results.
+    pub(crate) pending_search: Option<SearchRequest>,
     pub(crate) show_input_help: bool,
     pub(crate) status: Status,
     /// A completed slash-command response waiting for the renderer to decide
@@ -863,6 +877,10 @@ impl App {
             help_selection: 0,
             last_search: None,
             last_jump_ts: None,
+            search_form: SearchFormState::default(),
+            search_results: None,
+            search_tx: None,
+            pending_search: None,
             show_input_help: true,
             status: Status::Info(config_status),
             pending_command_response: None,
@@ -913,6 +931,14 @@ impl App {
     /// Wire up the channel the main loop drains for completed image downloads.
     pub(crate) fn set_media_sender(&mut self, tx: mpsc::Sender<MediaResult>) {
         self.media_tx = Some(tx);
+    }
+
+    /// Wire up the channel the main loop drains for completed search requests.
+    pub(crate) fn set_search_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<search_flow::SearchOutcome>,
+    ) {
+        self.search_tx = Some(tx);
     }
 
     /// Wire up the channel the main loop drains for completed relation refreshes.
@@ -1092,6 +1118,8 @@ impl App {
                     | Mode::Unreacting { .. }
                     | Mode::Search(..)
                     | Mode::DateJump
+                    | Mode::SearchForm
+                    | Mode::SearchResults
                     | Mode::Verification
             )
     }
@@ -1502,6 +1530,7 @@ impl App {
             Command::Event(event_id) => self.show_event(&event_id).await,
             Command::Whoami => self.show_whoami(),
             Command::Whereami => self.show_whereami(),
+            Command::Search(input) => self.open_or_run_search(input).await,
             Command::React(None) => {
                 self.select_most_recent_message_if_needed();
                 self.start_react_to_selected_message();
@@ -2156,8 +2185,10 @@ pub(super) fn sniff_format(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::api::{
-        AccountDto, AccountState, EmojiDto, MemberDto, VerificationFrame, VerificationFrameDto,
+        AccountDto, AccountState, EmojiDto, MemberDto, TimelinePage, VerificationFrame,
+        VerificationFrameDto,
     };
+    use crate::app::search_flow::{SearchJumpAction, SearchJumpThreadLoad, SearchOutcome};
     use crate::command::HELP_COMMANDS;
     use crate::config::TimeFormat;
     use crate::ui::{entry_status_text, popup_shortcuts_lines, popup_status_lines};
@@ -2974,6 +3005,7 @@ mod tests {
             input_lines: 1,
             max_input_lines: None,
             preview_warmup_count: 5,
+            highlight_selected_line: false,
             confirm_logout: true,
             search_wrap: true,
             accept_incoming_verification: true,
@@ -3309,10 +3341,42 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Dense,
             TimeFormat::H24,
+            false,
         )
         .lines;
 
         assert_eq!(lines[1].spans[2].style.fg, Some(colors.own_message_sender));
+    }
+
+    #[test]
+    fn selected_message_background_applies_only_to_first_line_when_enabled() {
+        let colors = TuiConfig::test_default().colors;
+        let event = event_with_id(
+            "$message:example.com",
+            "m.room.message",
+            Some("hello"),
+            serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+        );
+        let sender_labels = vec!["@alice:example.com".to_owned()];
+        let lines = message_layout(
+            &[&event],
+            sender_labels.as_slice(),
+            Some("$message:example.com"),
+            &colors,
+            80,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ImageThumbRows::new(),
+            &RelationContext::default(),
+            MessageDensity::Normal,
+            TimeFormat::H24,
+            true,
+        )
+        .lines;
+
+        assert_eq!(lines[1].style.bg, Some(colors.selection_background));
+        assert_eq!(lines[1].width(), 80);
+        assert_eq!(lines[2].style.bg, None);
     }
 
     #[tokio::test]
@@ -3467,6 +3531,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Dense,
             TimeFormat::H24,
+            false,
         )
         .lines;
 
@@ -3514,6 +3579,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Dense,
             TimeFormat::H24,
+            false,
         )
         .lines;
 
@@ -3554,6 +3620,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Dense,
             TimeFormat::H24,
+            false,
         );
 
         assert_eq!(layout.image_body_rows.get(&key), Some(&2));
@@ -3583,6 +3650,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Normal,
             TimeFormat::H24,
+            false,
         );
 
         // Header row carries the sender but no body; the body is a separate row.
@@ -3632,6 +3700,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Normal,
             TimeFormat::H24,
+            false,
         );
 
         // Same 2 caption rows + 2 thumbnail rows as the dense case, but the
@@ -3674,6 +3743,7 @@ mod tests {
             &RelationContext::default(),
             MessageDensity::Normal,
             TimeFormat::H24,
+            false,
         );
 
         // header(1) + reply line(1) + caption(2) = 4 rows above the thumbnail.
@@ -4250,6 +4320,54 @@ mod tests {
         assert_eq!(app.messages.selection.as_deref(), Some("$root:example.com"));
         // Idempotent: a second Esc in the main timeline is not consumed here.
         assert!(!app.close_thread_panel());
+    }
+
+    #[test]
+    fn search_jump_merges_fetched_thread_before_opening_panel() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+
+        let mut root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        root.origin_ts = 100;
+        let mut hit = thread_event("$hit:example.com", "$root:example.com", "search hit");
+        hit.origin_ts = 200;
+        let mut fetched_member =
+            thread_event("$fetched:example.com", "$root:example.com", "older context");
+        fetched_member.origin_ts = 300;
+
+        app.handle_search_outcome(SearchOutcome::Jump {
+            hit: hit.clone(),
+            action: SearchJumpAction::View,
+            room_refresh: None,
+            result: Ok(TimelinePage {
+                events: vec![hit],
+                next_cursor: None,
+            }),
+            thread_load: Some(Box::new(SearchJumpThreadLoad {
+                timeline: Ok(TimelinePage {
+                    events: vec![fetched_member],
+                    next_cursor: None,
+                }),
+                root_event: Ok(root),
+            })),
+        });
+
+        assert_eq!(app.thread_panel.as_deref(), Some("$root:example.com"));
+        assert_eq!(app.messages.selection.as_deref(), Some("$hit:example.com"));
+        assert_eq!(
+            ids(&app.selected_events()),
+            vec![
+                "$root:example.com",
+                "$hit:example.com",
+                "$fetched:example.com"
+            ]
+        );
     }
 
     #[test]
@@ -5773,6 +5891,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dismissing_search_help_popup_clears_entry_status() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "stale".to_owned();
+        app.input.cursor = app.input.buffer.len();
+        app.status = Status::Info(crate::search::SEARCH_HELP_TEXT.to_owned());
+        app.pending_command_response = Some(crate::search::SEARCH_HELP_TEXT.to_owned());
+        app.mode = Mode::Popup(PopupKind::CommandResponse);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.status.text(false), "");
+        assert!(app.pending_command_response.is_none());
+        assert!(app.input.buffer.is_empty());
+        assert_eq!(app.input.cursor, 0);
+    }
+
+    #[tokio::test]
     async fn help_popup_selects_command_into_input() {
         let mut app = app_with_rooms(Vec::new());
         app.handle_command(Command::Help).await;
@@ -5889,6 +6025,76 @@ mod tests {
         assert_eq!(app.input.buffer, "");
         assert_eq!(app.input.cursor, 0);
         assert_eq!(app.status, "no rooms to switch");
+    }
+
+    #[tokio::test]
+    async fn search_results_edit_key_reopens_existing_query_form() {
+        let mut app = app_with_rooms(Vec::new());
+        let edit_form = crate::search::SearchFormState {
+            scope: crate::search::SearchScope::SpecificAccount,
+            query: "backup key".to_owned(),
+            account: "@alice:example.org".to_owned(),
+            sender: "@bob:example.org".to_owned(),
+            ..Default::default()
+        };
+        app.search_results = Some(crate::search::SearchResultsState {
+            request: crate::search::SearchRequest {
+                q: "backup key".to_owned(),
+                account_id: None,
+                room_id: None,
+                sender: Some("@bob:example.org".to_owned()),
+                from: None,
+                to: None,
+                limit: crate::search::DEFAULT_SEARCH_LIMIT,
+                cursor: None,
+            },
+            edit_form: edit_form.clone(),
+            results: Vec::new(),
+            total: 0,
+            next_cursor: None,
+            selected: 0,
+            loading: false,
+            sort_order: crate::search::SearchSortOrder::NewestFirst,
+            grouping: crate::search::SearchGrouping::None,
+            context_cache: Default::default(),
+        });
+        app.mode = Mode::SearchResults;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e'))).await;
+
+        assert_eq!(app.mode, Mode::SearchForm);
+        assert_eq!(app.search_form, edit_form);
+        assert_eq!(app.status, "edit search");
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).await;
+
+        assert_eq!(app.mode, Mode::SearchResults);
+        assert!(app.search_results.is_some());
+    }
+
+    #[tokio::test]
+    async fn search_form_current_account_requires_concrete_account() {
+        let mut app = app_with_rooms(Vec::new());
+        app.accounts.accounts = vec![
+            account_with_id(
+                Uuid::from_u128(1),
+                "@alice:example.com",
+                AccountState::Active,
+            ),
+            account_with_id(Uuid::from_u128(2), "@bob:example.com", AccountState::Active),
+        ];
+        app.accounts.selected = AccountSelection::All;
+        app.search_form.scope = crate::search::SearchScope::CurrentAccount;
+        app.search_form.query = "needle".to_owned();
+
+        app.submit_search_form().await;
+
+        assert_eq!(app.mode, Mode::SearchForm);
+        assert_eq!(
+            app.search_form.error.as_deref(),
+            Some("select an account or choose all accounts")
+        );
+        assert_eq!(app.status, "select an account or choose all accounts");
     }
 
     #[test]
@@ -6169,6 +6375,35 @@ mod tests {
         assert_eq!(
             app.resolve_room_target("axon"),
             RoomTargetResolution::Ambiguous(vec!["test".to_owned(), "dev".to_owned()])
+        );
+    }
+
+    #[test]
+    fn room_resolution_can_be_scoped_to_account() {
+        let account_a = Uuid::from_u128(1);
+        let account_b = Uuid::from_u128(2);
+        let mut first = room("!one:example.com", None, Some("General"));
+        first.account_id = account_a;
+        let mut second = room("!two:example.com", None, Some("General"));
+        second.account_id = account_b;
+        let mut app = app_with_rooms(vec![first, second]);
+        app.accounts.accounts = vec![
+            account_with_id(account_a, "@alice:example.com", AccountState::Active),
+            account_with_id(account_b, "@bob:example.com", AccountState::Active),
+        ];
+        app.accounts.selected = AccountSelection::Account(0);
+
+        assert_eq!(
+            app.resolve_room_target("General"),
+            RoomTargetResolution::Match(0)
+        );
+        assert_eq!(
+            app.resolve_room_target_in_account("General", None),
+            RoomTargetResolution::Ambiguous(vec!["General".to_owned(), "General".to_owned()])
+        );
+        assert_eq!(
+            app.resolve_room_target_in_account("General", Some(account_b)),
+            RoomTargetResolution::Match(1)
         );
     }
 

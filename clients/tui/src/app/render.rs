@@ -117,7 +117,7 @@ fn date_day(origin_ts: i64) -> Option<NaiveDate> {
 }
 
 /// Formats `origin_ts` as "Thursday, 25 June 2026".
-fn format_date(origin_ts: i64) -> String {
+pub(crate) fn format_date(origin_ts: i64) -> String {
     Local
         .timestamp_millis_opt(origin_ts)
         .single()
@@ -127,7 +127,11 @@ fn format_date(origin_ts: i64) -> String {
 
 /// A full-width horizontal rule with the date centered, e.g.:
 /// `──────── Thursday, 25 June 2026 ────────`
-fn date_separator_line(date_str: &str, width: usize, colors: &ColorScheme) -> Line<'static> {
+pub(crate) fn date_separator_line(
+    date_str: &str,
+    width: usize,
+    colors: &ColorScheme,
+) -> Line<'static> {
     let label = format!(" {date_str} ");
     let label_len = label.chars().count();
     let fill = width.saturating_sub(label_len);
@@ -162,6 +166,7 @@ pub(crate) fn message_layout(
     relations: &RelationContext,
     density: MessageDensity,
     time_format: TimeFormat,
+    highlight_selected_line: bool,
 ) -> MessageLayout {
     let reaction_style = Style::default().fg(colors.input_hint);
     let relation_style = Style::default()
@@ -186,6 +191,8 @@ pub(crate) fn message_layout(
             last_date_day = event_day;
         }
         let is_selected = selected_message == Some(event.event_id.as_str());
+        let selected_line_style = selected_line_style(colors, is_selected, highlight_selected_line);
+        let unselected_line_style = Style::default();
         let is_own = own_senders.get(&event.account_id) == Some(&event.sender);
         let marker = if is_selected { "> " } else { "  " };
         let time_style = if is_selected {
@@ -355,7 +362,12 @@ pub(crate) fn message_layout(
                 header.extend(first);
             }
         }
-        lines.push(Line::from(header));
+        lines.push(selected_message_header_line(
+            header,
+            width,
+            selected_line_style,
+            is_selected && highlight_selected_line,
+        ));
 
         // Helper: wrap a single-style text to continuation_body_width and push
         // each resulting row with a "  " indent.  This prevents reply context,
@@ -381,7 +393,7 @@ pub(crate) fn message_layout(
         for body in body_iter {
             let mut spans = vec![Span::raw(body_indent.clone())];
             spans.extend(body);
-            lines.push(Line::from(spans));
+            lines.push(Line::from(spans).style(unselected_line_style));
         }
 
         if let Some(badge) = relations.thread_badges.get(event.event_id.as_str()) {
@@ -405,6 +417,37 @@ pub(crate) fn message_layout(
         lines,
         ranges,
         image_body_rows,
+    }
+}
+
+fn selected_message_header_line(
+    mut spans: Vec<Span<'static>>,
+    width: usize,
+    style: Style,
+    highlight: bool,
+) -> Line<'static> {
+    let mut line = Line::from(spans);
+    if highlight {
+        let fill = width.saturating_sub(line.width());
+        if fill > 0 {
+            spans = line.spans;
+            spans.push(Span::styled(" ".repeat(fill), style));
+            line = Line::from(spans);
+        }
+        line = line.style(style);
+    }
+    line
+}
+
+pub(crate) fn selected_line_style(
+    colors: &ColorScheme,
+    selected: bool,
+    highlight_selected_line: bool,
+) -> Style {
+    if selected && highlight_selected_line {
+        Style::default().bg(colors.selection_background)
+    } else {
+        Style::default()
     }
 }
 

@@ -14,6 +14,8 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
+use crate::search::SearchRequest;
+
 const LIVE_RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const LIVE_RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Timeout for read-only / probe requests (list calls, timeline fetches, etc.).
@@ -152,9 +154,35 @@ impl AxonClient {
         if let Some(cursor) = cursor {
             request = request.query(&[("cursor", cursor)]);
         }
-        if let Some(ts) = at_ts {
-            let ts = ts.to_string();
-            request = request.query(&[("at_ts", ts.as_str())]);
+        if let Some(at_ts) = at_ts {
+            let at_ts = at_ts.to_string();
+            request = request.query(&[("at_ts", at_ts.as_str())]);
+        }
+        self.send(read_request(request)).await
+    }
+
+    pub async fn search(&self, params: &SearchRequest) -> Result<SearchPage, ApiError> {
+        let mut request = self.http.get(format!("{}/v1/search", self.base_url));
+        request = request.query(&[("q", params.q.as_str())]);
+        if let Some(account_id) = params.account_id {
+            request = request.query(&[("account_id", account_id)]);
+        }
+        if let Some(room_id) = params.room_id.as_deref() {
+            request = request.query(&[("room_id", room_id)]);
+        }
+        if let Some(sender) = params.sender.as_deref() {
+            request = request.query(&[("sender", sender)]);
+        }
+        if let Some(from) = params.from {
+            request = request.query(&[("from", from)]);
+        }
+        if let Some(to) = params.to {
+            request = request.query(&[("to", to)]);
+        }
+        let limit = params.limit.to_string();
+        request = request.query(&[("limit", limit.as_str())]);
+        if let Some(cursor) = params.cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
         }
         self.send(read_request(request)).await
     }
@@ -885,6 +913,19 @@ pub struct ThreadSummaryDto {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct SearchPage {
+    pub results: Vec<SearchResultDto>,
+    pub total: usize,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchResultDto {
+    pub event: EventDto,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct EventDto {
     pub account_id: Uuid,
     pub event_id: String,
@@ -1167,6 +1208,10 @@ impl ApiError {
     /// server no longer has a record of (ADR 0028 §3).
     pub fn is_not_found(&self) -> bool {
         matches!(self, ApiError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
+
+    pub fn is_service_unavailable(&self) -> bool {
+        matches!(self, ApiError::Status { status, .. } if *status == StatusCode::SERVICE_UNAVAILABLE)
     }
 }
 

@@ -8,6 +8,7 @@ use crate::app::{
 };
 use crate::command;
 use crate::command::HELP_COMMANDS;
+use crate::search::{SearchFormField, SEARCH_HELP_TEXT};
 
 impl App {
     pub(crate) async fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -105,6 +106,8 @@ impl App {
                 Mode::AccountList => self.handle_account_list_key(key).await,
                 Mode::MessageList => self.handle_message_list_key(key).await,
                 Mode::Search(kind, query) => self.handle_search_key(key, kind, query).await,
+                Mode::SearchForm => self.handle_search_form_key(key).await,
+                Mode::SearchResults => self.handle_search_results_key(key).await,
                 Mode::Editing { event_id } => self.handle_editing_key(key, event_id).await,
                 Mode::Reacting { event_id } => self.handle_reacting_key(key, event_id).await,
                 Mode::Unreacting {
@@ -167,6 +170,8 @@ impl App {
 
     fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
         if self.shortcuts.clear_input.matches(key) {
+            let was_search_help = kind == PopupKind::CommandResponse
+                && self.pending_command_response.as_deref() == Some(SEARCH_HELP_TEXT);
             if kind == PopupKind::MediaPreview {
                 self.mode = Mode::MessageList;
                 // Signal draw() to clear the former popup area.  Sixel/iTerm2
@@ -180,6 +185,10 @@ impl App {
             self.help_selection = 0;
             if kind == PopupKind::CommandResponse {
                 self.pending_command_response = None;
+                if was_search_help {
+                    self.status = Status::Info(String::new());
+                    self.clear_input_buffer();
+                }
             }
         } else if kind == PopupKind::Help {
             self.handle_help_popup_key(key);
@@ -213,6 +222,87 @@ impl App {
             self.mode = Mode::Compose;
             self.popup_scroll = 0;
             self.status = format!("selected command: {}", command.label).into();
+        }
+    }
+
+    async fn handle_search_results_key(&mut self, key: KeyEvent) {
+        if self.shortcuts.clear_input.matches(key) {
+            self.clear_search_results();
+        } else if self.shortcuts.submit.matches(key) {
+            self.jump_to_selected_search_result().await;
+        } else if key.code == KeyCode::Up {
+            self.move_search_result_selection(-1).await;
+        } else if key.code == KeyCode::Down {
+            self.move_search_result_selection(1).await;
+        } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
+            self.page_search_result_selection(-1).await;
+        } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
+            self.page_search_result_selection(1).await;
+        } else if key.code == KeyCode::Home {
+            self.jump_to_search_result_edge(false).await;
+        } else if key.code == KeyCode::End {
+            self.jump_to_search_result_edge(true).await;
+        } else if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+            self.move_search_result_selection(1).await;
+        } else if key.code == KeyCode::Char('N') && key.modifiers == KeyModifiers::SHIFT {
+            self.move_search_result_selection(-1).await;
+        } else if self.shortcuts.search_sort.matches(key) {
+            self.toggle_search_result_sort_order().await;
+        } else if self.shortcuts.search_group.matches(key) {
+            self.toggle_search_result_grouping().await;
+        } else if self.shortcuts.search_edit.matches(key) {
+            self.edit_current_search();
+        } else if self.shortcuts.reply.matches(key) {
+            self.reply_to_selected_search_result().await;
+        } else if self.shortcuts.thread.matches(key) {
+            self.thread_from_selected_search_result().await;
+        }
+    }
+
+    async fn handle_search_form_key(&mut self, key: KeyEvent) {
+        if self.shortcuts.clear_input.matches(key) {
+            self.pending_search = None;
+            self.mode = if self.search_results.is_some() {
+                Mode::SearchResults
+            } else {
+                Mode::Compose
+            };
+            self.search_form.error = None;
+            self.status = Status::from(String::new());
+        } else if self.shortcuts.submit.matches(key) {
+            self.submit_search_form().await;
+        } else if self.shortcuts.complete.matches(key)
+            || (key.code == KeyCode::Down && key.modifiers.is_empty())
+        {
+            self.search_form.next_field(false);
+        } else if key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Up && key.modifiers.is_empty())
+        {
+            self.search_form.next_field(true);
+        } else if self.search_form.field == SearchFormField::Scope
+            && key.code == KeyCode::Left
+            && key.modifiers.is_empty()
+        {
+            self.search_form.cycle_scope(true);
+        } else if self.search_form.field == SearchFormField::Scope
+            && (key.code == KeyCode::Right || key.code == KeyCode::Char(' '))
+            && key.modifiers.is_empty()
+        {
+            self.search_form.cycle_scope(false);
+        } else if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
+            self.search_form.cycle_scope(true);
+        } else if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {
+            self.search_form.cycle_scope(false);
+        } else if self.shortcuts.backspace.matches(key) || key.code == KeyCode::Delete {
+            self.search_form_backspace();
+        } else if key.code == KeyCode::Char('u') && key.modifiers == KeyModifiers::CONTROL {
+            if let Some(buffer) = self.search_form.edit_buffer_mut() {
+                buffer.clear();
+            }
+        } else if let KeyCode::Char(ch) = key.code {
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                self.search_form_insert(ch);
+            }
         }
     }
 
@@ -820,9 +910,13 @@ impl App {
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
                 | Mode::DateJump
+                | Mode::SearchForm
+                | Mode::SearchResults
         ) {
             self.clear_input_buffer();
             self.input.react_tab = None;
+            self.pending_search = None;
+            self.search_results = None;
             self.mode = Mode::Compose;
         }
     }
@@ -909,6 +1003,8 @@ impl App {
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
+                | Mode::SearchForm
+                | Mode::SearchResults
         ) {
             self.abandon_transient_input_mode();
             return;
@@ -965,6 +1061,8 @@ impl App {
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
+                | Mode::SearchForm
+                | Mode::SearchResults
         ) {
             self.abandon_transient_input_mode();
             return;

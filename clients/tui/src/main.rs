@@ -5,6 +5,7 @@ mod command;
 mod config;
 mod html;
 mod keymap;
+mod search;
 mod ui;
 mod wrap;
 
@@ -471,11 +472,13 @@ async fn run_app(
 
     let (lifecycle_tx, mut lifecycle_rx) = mpsc::unbounded_channel();
     let (media_tx, mut media_rx) = mpsc::channel(app::MEDIA_WORKERS * 2);
+    let (search_tx, mut search_rx) = mpsc::unbounded_channel();
     let (relations_tx, mut relations_rx) = mpsc::unbounded_channel();
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_media_sender(media_tx);
+    app.set_search_sender(search_tx);
     app.set_relations_sender(relations_tx);
     app.set_members_sender(members_tx);
     app.refresh_accounts().await;
@@ -566,6 +569,9 @@ async fn run_app(
             }
             Some(result) = media_rx.recv() => {
                 app.handle_media_result(result);
+            }
+            Some(outcome) = search_rx.recv() => {
+                app.handle_search_outcome(outcome);
             }
             Some(outcome) = relations_rx.recv() => {
                 app.apply_relation_outcome(outcome);

@@ -48,6 +48,9 @@ media_preview = "v"
 newline = "alt-enter"
 reply = "r"
 thread = "t"
+search_sort = "s"
+search_group = "g"
+search_edit = "e"
 edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
@@ -76,6 +79,8 @@ room_sort_alpha = "alt-2"
 # Select one theme by leaving its lines uncommented; comment out all others.
 # Named foreground colors: border, selected_room, unread_count, message_sender,
 #   own_message_sender, input_hint, status
+# Selection background used when display.highlight_selected_line is enabled:
+#   selection_background
 # Per-pane base foreground (uncolored text) and background:
 #   accounts_foreground, rooms_foreground, messages_foreground, input_foreground
 #   accounts_background, rooms_background, messages_background, input_background
@@ -94,6 +99,7 @@ own_message_sender = "light-cyan"
 input_hint = "dark-gray"
 status = "cyan"
 background = "default"
+selection_background = "dark-gray"
 
 # ── Dracula ───────────────────────────────────────────────────────────────────
 # border = "light-magenta"
@@ -157,6 +163,7 @@ time_format = "24h"
 input_lines = 1
 max_input_lines = 10
 # preview_warmup_count = 5
+highlight_selected_line = false
 confirm_logout = true
 search_wrap = true
 room_sort = "recent"
@@ -336,6 +343,9 @@ pub struct Shortcuts {
     pub newline: KeyBinding,
     pub reply: KeyBinding,
     pub thread: KeyBinding,
+    pub search_sort: KeyBinding,
+    pub search_group: KeyBinding,
+    pub search_edit: KeyBinding,
     pub edit_message: KeyBinding,
     pub redact_message: KeyBinding,
     pub react_message: KeyBinding,
@@ -381,6 +391,7 @@ pub struct ColorScheme {
     pub messages_background: Color,
     pub input_background: Color,
     pub popup_background: Color,
+    pub selection_background: Color,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +403,7 @@ pub struct DisplayOptions {
     pub input_lines: u16,
     pub max_input_lines: Option<u16>,
     pub preview_warmup_count: usize,
+    pub highlight_selected_line: bool,
     pub confirm_logout: bool,
     pub search_wrap: bool,
     /// Whether to surface unsolicited incoming cross-user verification requests
@@ -542,6 +554,9 @@ impl RawConfig {
                 newline: "alt-enter".to_owned(),
                 reply: "r".to_owned(),
                 thread: "t".to_owned(),
+                search_sort: "s".to_owned(),
+                search_group: "g".to_owned(),
+                search_edit: "e".to_owned(),
                 edit_message: "e".to_owned(),
                 redact_message: "d".to_owned(),
                 react_message: "shift-r".to_owned(),
@@ -576,6 +591,7 @@ impl RawConfig {
                 input_hint: "dark-gray".to_owned(),
                 status: "cyan".to_owned(),
                 background: "default".to_owned(),
+                selection_background: "dark-gray".to_owned(),
                 accounts_foreground: None,
                 rooms_foreground: None,
                 messages_foreground: None,
@@ -594,6 +610,7 @@ impl RawConfig {
                 input_lines: 1,
                 max_input_lines: Some(10),
                 preview_warmup_count: None,
+                highlight_selected_line: false,
                 confirm_logout: true,
                 search_wrap: true,
                 accept_incoming_verification: true,
@@ -670,6 +687,10 @@ impl RawConfig {
             if let Some(v) = self.display.preview_warmup_count {
                 s.push_str(&format!("preview_warmup_count = {v}\n"));
             }
+            s.push_str(&format!(
+                "highlight_selected_line = {}\n",
+                self.display.highlight_selected_line
+            ));
             if let Some(w) = self.display.accounts_panel_width {
                 s.push_str(&format!("accounts_panel_width = {w}\n"));
             }
@@ -754,6 +775,9 @@ media_preview = "{media_preview}"
 newline = "{newline}"
 reply = "{reply}"
 thread = "{thread}"
+search_sort = "{search_sort}"
+search_group = "{search_group}"
+search_edit = "{search_edit}"
 edit_message = "{edit_message}"
 redact_message = "{redact_message}"
 react_message = "{react_message}"
@@ -782,6 +806,8 @@ room_sort_alpha = "{room_sort_alpha}"
 # Select one theme by leaving its lines uncommented; comment out all others.
 # Named foreground colors: border, selected_room, unread_count, message_sender,
 #   own_message_sender, input_hint, status
+# Selection background used when display.highlight_selected_line is enabled:
+#   selection_background
 # Per-pane base foreground (uncolored text) and background:
 #   accounts_foreground, rooms_foreground, messages_foreground, input_foreground
 #   accounts_background, rooms_background, messages_background, input_background
@@ -799,6 +825,7 @@ own_message_sender = "{own_message_sender}"
 input_hint = "{input_hint}"
 status = "{status}"
 background = "{background}"
+selection_background = "{selection_background}"
 {pane_bg_lines}
 # ── Dracula ───────────────────────────────────────────────────────────────────
 # border = "light-magenta"
@@ -887,6 +914,9 @@ accept_incoming_verification = {accept_incoming_verification}
             newline = self.shortcuts.newline,
             reply = self.shortcuts.reply,
             thread = self.shortcuts.thread,
+            search_sort = self.shortcuts.search_sort,
+            search_group = self.shortcuts.search_group,
+            search_edit = self.shortcuts.search_edit,
             edit_message = self.shortcuts.edit_message,
             redact_message = self.shortcuts.redact_message,
             react_message = self.shortcuts.react_message,
@@ -919,6 +949,7 @@ accept_incoming_verification = {accept_incoming_verification}
             input_hint = self.colors.input_hint,
             status = self.colors.status,
             background = self.colors.background,
+            selection_background = self.colors.selection_background,
             pane_bg_lines = pane_bg_lines,
             debug = self.display.debug,
             show_state_events = self.display.show_state_events,
@@ -1076,6 +1107,9 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "message_page_down"
                 | "reply"
                 | "thread"
+                | "search_sort"
+                | "search_group"
+                | "search_edit"
                 | "edit_message"
                 | "redact_message"
                 | "react_message"
@@ -1111,6 +1145,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "input_hint"
                 | "status"
                 | "background"
+                | "selection_background"
                 | "accounts_foreground"
                 | "rooms_foreground"
                 | "messages_foreground"
@@ -1130,6 +1165,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "input_lines"
                 | "max_input_lines"
                 | "preview_warmup_count"
+                | "highlight_selected_line"
                 | "confirm_logout"
                 | "search_wrap"
                 | "accept_incoming_verification"
@@ -1183,6 +1219,9 @@ struct RawShortcuts {
     newline: String,
     reply: String,
     thread: String,
+    search_sort: String,
+    search_group: String,
+    search_edit: String,
     edit_message: String,
     redact_message: String,
     react_message: String,
@@ -1250,6 +1289,9 @@ impl RawShortcuts {
         );
         assign_or_flag(&mut self.reply, partial.reply, &mut missing);
         assign_or_flag(&mut self.thread, partial.thread, &mut missing);
+        assign_or_flag(&mut self.search_sort, partial.search_sort, &mut missing);
+        assign_or_flag(&mut self.search_group, partial.search_group, &mut missing);
+        assign_or_flag(&mut self.search_edit, partial.search_edit, &mut missing);
         assign_or_flag(&mut self.edit_message, partial.edit_message, &mut missing);
         assign_or_flag(
             &mut self.redact_message,
@@ -1368,6 +1410,9 @@ impl RawShortcuts {
             newline: parse_key_binding("shortcuts.newline", &self.newline)?,
             reply: parse_key_binding("shortcuts.reply", &self.reply)?,
             thread: parse_key_binding("shortcuts.thread", &self.thread)?,
+            search_sort: parse_key_binding("shortcuts.search_sort", &self.search_sort)?,
+            search_group: parse_key_binding("shortcuts.search_group", &self.search_group)?,
+            search_edit: parse_key_binding("shortcuts.search_edit", &self.search_edit)?,
             edit_message: parse_key_binding("shortcuts.edit_message", &self.edit_message)?,
             redact_message: parse_key_binding("shortcuts.redact_message", &self.redact_message)?,
             react_message: parse_key_binding("shortcuts.react_message", &self.react_message)?,
@@ -1450,6 +1495,9 @@ struct PartialRawShortcuts {
     newline: Option<String>,
     reply: Option<String>,
     thread: Option<String>,
+    search_sort: Option<String>,
+    search_group: Option<String>,
+    search_edit: Option<String>,
     edit_message: Option<String>,
     redact_message: Option<String>,
     react_message: Option<String>,
@@ -1486,6 +1534,7 @@ struct RawColorScheme {
     input_hint: String,
     status: String,
     background: String,
+    selection_background: String,
     accounts_foreground: Option<String>,
     rooms_foreground: Option<String>,
     messages_foreground: Option<String>,
@@ -1519,6 +1568,11 @@ impl RawColorScheme {
         assign_or_flag(&mut self.input_hint, partial.input_hint, &mut missing);
         assign_or_flag(&mut self.status, partial.status, &mut missing);
         assign_or_flag(&mut self.background, partial.background, &mut missing);
+        assign_or_flag(
+            &mut self.selection_background,
+            partial.selection_background,
+            &mut missing,
+        );
         if let Some(v) = partial.accounts_foreground {
             self.accounts_foreground = Some(v);
         }
@@ -1622,6 +1676,10 @@ impl RawColorScheme {
             messages_background,
             input_background,
             popup_background,
+            selection_background: parse_color(
+                "colors.selection_background",
+                &self.selection_background,
+            )?,
         })
     }
 }
@@ -1636,6 +1694,7 @@ struct PartialRawColorScheme {
     input_hint: Option<String>,
     status: Option<String>,
     background: Option<String>,
+    selection_background: Option<String>,
     accounts_foreground: Option<String>,
     rooms_foreground: Option<String>,
     messages_foreground: Option<String>,
@@ -1656,6 +1715,7 @@ struct RawDisplayOptions {
     input_lines: u16,
     max_input_lines: Option<u16>,
     preview_warmup_count: Option<u8>,
+    highlight_selected_line: bool,
     confirm_logout: bool,
     search_wrap: bool,
     accept_incoming_verification: bool,
@@ -1704,6 +1764,11 @@ impl RawDisplayOptions {
         }
         if let Some(v) = partial.preview_warmup_count {
             self.preview_warmup_count = Some(v);
+        } else {
+            missing = true;
+        }
+        if let Some(highlight_selected_line) = partial.highlight_selected_line {
+            self.highlight_selected_line = highlight_selected_line;
         } else {
             missing = true;
         }
@@ -1764,6 +1829,7 @@ impl RawDisplayOptions {
             input_lines,
             max_input_lines,
             preview_warmup_count: self.preview_warmup_count.unwrap_or(5) as usize,
+            highlight_selected_line: self.highlight_selected_line,
             confirm_logout: self.confirm_logout,
             search_wrap: self.search_wrap,
             accept_incoming_verification: self.accept_incoming_verification,
@@ -1787,6 +1853,7 @@ struct PartialDisplayOptions {
     input_lines: Option<u16>,
     max_input_lines: Option<u16>,
     preview_warmup_count: Option<u8>,
+    highlight_selected_line: Option<bool>,
     confirm_logout: Option<bool>,
     search_wrap: Option<bool>,
     accept_incoming_verification: Option<bool>,
@@ -1859,7 +1926,7 @@ fn parse_key_binding(field: &'static str, value: &str) -> Result<KeyBinding, Con
                 return Err(ConfigError::InvalidKey {
                     field,
                     value: value.to_owned(),
-                })
+                });
             }
         }
     }
@@ -2078,10 +2145,12 @@ bearer_token = "secret-token"
         assert!(repaired.contains("focus_next = \"f6\""));
         assert!(repaired.contains("focus_prev = \"ctrl-f6\""));
         assert!(repaired.contains("own_message_sender = \"light-cyan\""));
+        assert!(repaired.contains("selection_background = \"dark-gray\""));
         assert!(repaired.contains("[display]"));
         assert!(repaired.contains("debug = false"));
         assert!(repaired.contains("show_state_events = false"));
         assert!(repaired.contains("message_density = \"normal\""));
+        assert!(repaired.contains("highlight_selected_line = false"));
         assert!(repaired.contains("confirm_logout = true"));
         assert!(repaired.contains("base_url = \"https://axon.example.com\""));
         assert!(repaired.contains("bearer_token = \"secret-token\""));
@@ -2388,5 +2457,27 @@ input_lines = "one"
             parse_color("colors.status", "dark_gray").unwrap(),
             Color::DarkGray
         );
+    }
+
+    #[test]
+    fn selected_line_highlight_defaults_off_and_uses_configured_background() {
+        let config = TuiConfig::test_default();
+        assert!(!config.display.highlight_selected_line);
+        assert_eq!(config.colors.selection_background, Color::DarkGray);
+
+        let raw = RawConfig::load_with_defaults(
+            r#"[colors]
+selection_background = "blue"
+
+[display]
+highlight_selected_line = true
+"#,
+        )
+        .expect("custom config parses")
+        .0;
+        let colors = raw.colors.into_color_scheme().expect("colors parse");
+        let display = raw.display.into_display_options().expect("display parses");
+        assert!(display.highlight_selected_line);
+        assert_eq!(colors.selection_background, Color::Blue);
     }
 }
