@@ -44,6 +44,17 @@ on:
         description: "Build Linux binaries"
         type: boolean
         default: true
+      runner:
+        description: "Select a specific runner"
+        required: false
+        type: choice
+        default: self-hosted
+        options:
+          - self-hosted
+          - server
+          - iMac
+          - BOSLB015672
+          - BOSLB015700
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -58,7 +69,7 @@ jobs:
   lint-fmt-test:
     runs-on:
       group: binary-builder
-      labels: [self-hosted]
+      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
       - name: checkout source code
@@ -95,7 +106,7 @@ jobs:
     if: ${{ github.event.inputs.windows != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted]
+      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     steps:
       - name: checkout source code
         uses: actions/checkout@v7
@@ -146,7 +157,7 @@ jobs:
     if: ${{ github.event.inputs.macos != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted]
+      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     env:
       RUSTUP_HOME: .rustup-macos
       CARGO_HOME: .cargo-macos
@@ -213,7 +224,7 @@ jobs:
     if: ${{ github.event.inputs.linux != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted]
+      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     env:
       RUSTUP_HOME: .rustup-linux
       CARGO_HOME: .cargo-linux
@@ -264,7 +275,7 @@ jobs:
     needs: [windows, macos, linux]
     runs-on:
       group: binary-builder
-      labels: [self-hosted]
+      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
 
     permissions:
