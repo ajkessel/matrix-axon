@@ -65,7 +65,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: check-environment
-        uses: ./.github/workflows/check-environment.yml
+        uses: ./.github/actions/check-environment
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -101,7 +101,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: check-environment
-        uses: ./.github/workflows/check-environment.yml
+        uses: ./.github/actions/check-environment
         with:
           require-docker: true
 
@@ -160,8 +160,8 @@ jobs:
       - name: checkout source code
         uses: actions/checkout@v7
 
-      - name: check environment
-        uses: ./.github/workflows/check-environment.yml
+      - name: check-environment
+        uses: ./.github/actions/check-environment
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -224,7 +224,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: check-environment
-        uses: ./.github/workflows/check-environment.yml
+        uses: ./.github/actions/check-environment
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
