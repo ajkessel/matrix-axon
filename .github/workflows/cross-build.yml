@@ -61,11 +61,11 @@ jobs:
       labels: [self-hosted]
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
-      - name: check-environment
-        uses: ./.github/workflows/check-environment.yml
-
       - name: checkout source code
         uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/workflows/check-environment.yml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -97,12 +97,13 @@ jobs:
       group: binary-builder
       labels: [self-hosted]
     steps:
+      - name: checkout source code
+        uses: actions/checkout@v7
+
       - name: check-environment
         uses: ./.github/workflows/check-environment.yml
         with:
           require-docker: true
-
-      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -156,10 +157,11 @@ jobs:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
+      - name: checkout source code
+        uses: actions/checkout@v7
+
       - name: check-environment
         uses: ./.github/workflows/check-environment.yml
-
-      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -218,10 +220,11 @@ jobs:
       RUSTUP_HOME: .rustup-linux
       CARGO_HOME: .cargo-linux
     steps:
+      - name: checkout source code
+        uses: actions/checkout@v7
+
       - name: check-environment
         uses: ./.github/workflows/check-environment.yml
-
-      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
