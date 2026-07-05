@@ -7,6 +7,12 @@ name: Check environment
 # across every workflow that uses `binary-builder`.
 
 on:
+  workflow_dispatch:
+    inputs:
+      require-docker:
+        description: "Also verify the runner's Docker daemon is reachable"
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       require-docker:

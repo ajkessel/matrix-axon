@@ -160,7 +160,7 @@ jobs:
       - name: checkout source code
         uses: actions/checkout@v7
 
-      - name: check-environment
+      - name: check environment
         uses: ./.github/workflows/check-environment.yml
 
       - name: Install Rust toolchain
