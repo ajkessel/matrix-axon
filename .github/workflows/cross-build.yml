@@ -201,6 +201,9 @@ jobs:
     runs-on: [binary-builder]
     if: github.ref_type == 'tag'
 
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -212,8 +215,7 @@ jobs:
           path: release-binaries
           merge-multiple: true
 
-      - name: Release binaries to release page
+      - name: Publish binaries
         uses: softprops/action-gh-release@v3
         with:
           files: release-binaries/*
-          if-no-files-found: error
