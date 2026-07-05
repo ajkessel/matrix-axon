@@ -43,7 +43,7 @@ matrix-axon/
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
-  .github/workflows/        # all manual-dispatch only (workflow_dispatch) — no automatic push/PR runs
+  .github/workflows/        # self-hosted-runner workflows may trigger on push; GitHub-hosted-runner workflows are manual-dispatch only (workflow_dispatch)
     lint-and-test.yml        # cargo fmt + clippy + test
     integration.yml          # E2EE re-decryption test (Synapse + Postgres)
     smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 adds the server gate)
@@ -88,7 +88,7 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 * Make sure to fix any clippy issues `cargo clippy` on the code you modified after making changes
 * Don't ignore any linting warning or add comments like "#[allow(clippy::too_many_arguments)]". The user can override a clippy warning but the agent should not do so on its own.
 * More complete formatting and clippy checks can run before committing/pushing
-**CI no longer runs automatically on push or PR.** We exhausted our free GitHub Actions usage, so the workflows are manual `workflow_dispatch` only — nothing runs these checks for you on push anymore. The local hooks are now the safety net. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
+**CI only runs automatically on push for workflows that run entirely on our self-hosted runners (`binary-builder`, `api-builder`) — everything else is manual `workflow_dispatch` only.** We exhausted our free GitHub Actions usage, so any workflow (or job within one) that runs on a GitHub-hosted runner (e.g. `ubuntu-latest`) must stay manual-dispatch-only to avoid burning those minutes; self-hosted runners have unlimited minutes, so `lint-and-clippy.yml` and `cross-build.yml` trigger automatically on push since they run entirely on `binary-builder`. Don't add a `push`/`pull_request` trigger to a workflow that touches a GitHub-hosted runner. The local hooks are still the safety net for anything that isn't covered by an automatic run. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
 
 ```bash
 cargo fmt --all -- --check

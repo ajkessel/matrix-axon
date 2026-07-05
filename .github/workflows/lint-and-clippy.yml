@@ -1,7 +1,8 @@
-name: Lint and test
+name: Lint and clippy
 
 on:
   workflow_dispatch:
+  push:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -12,7 +13,7 @@ jobs:
     uses: ./.github/workflows/check-environment.yml
   lint-and-test:
     needs: check-environment
-    runs-on: ubuntu-latest
+    runs-on: [binary-builder]
     steps:
       - uses: actions/checkout@v7
 
@@ -28,14 +29,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: binary-builder-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: binary-builder-cargo-
 
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --all

@@ -1,0 +1,40 @@
+name: Check environment
+
+# Shared runner-sanity gate for the binary-builder self-hosted runner: confirms
+# who's running, optionally that Docker is reachable, and that there's enough
+# disk space for a build. Called via `workflow_call` so the disk-space
+# threshold and check logic live in one place instead of being copy-pasted
+# across every workflow that uses `binary-builder`.
+
+on:
+  workflow_call:
+    inputs:
+      require-docker:
+        description: "Also verify the runner's Docker daemon is reachable"
+        type: boolean
+        default: false
+
+jobs:
+  check-environment:
+    runs-on: [binary-builder]
+    steps:
+      - name: test environment
+        run: whoami
+
+      - name: Docker access check
+        if: inputs.require-docker
+        run: docker run --rm hello-world
+
+      - name: Assert Minimum Disk Space
+        run: |
+          AVAILABLE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+          REQUIRED_GB=15
+
+          echo "Available space: ${AVAILABLE_GB} GB"
+          echo "Required space: ${REQUIRED_GB} GB"
+
+          if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
+            echo "❌ Error: Insufficient disk space available on the runner."
+            exit 1
+          fi
+          echo "✅ Sufficient disk space verified."
