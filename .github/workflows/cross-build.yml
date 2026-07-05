@@ -55,18 +55,15 @@ env:
   RELEASE_FLAG: ${{ (github.event.inputs.release != 'false') && '--release' || '' }}
 
 jobs:
-  check-environment:
-    uses: ./.github/workflows/check-environment.yml
-    with:
-      require-docker: true
-
   lint-fmt-test:
-    needs: check-environment
     runs-on:
       group: binary-builder
-      labels: [self-hosted, linux]
+      labels: [self-hosted]
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
+      - name: check-environment
+        uses: ./.github/workflows/check-environment.yml
+
       - name: checkout source code
         uses: actions/checkout@v7
 
@@ -95,12 +92,16 @@ jobs:
         run: cargo test --all
 
   windows:
-    needs: check-environment
     if: ${{ github.event.inputs.windows != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted, linux]
+      labels: [self-hosted]
     steps:
+      - name: check-environment
+        uses: ./.github/workflows/check-environment.yml
+        with:
+          require-docker: true
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
@@ -143,11 +144,10 @@ jobs:
           if-no-files-found: error
 
   macos:
-    needs: check-environment
     if: ${{ github.event.inputs.macos != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted, linux]
+      labels: [self-hosted]
     env:
       RUSTUP_HOME: .rustup-macos
       CARGO_HOME: .cargo-macos
@@ -156,6 +156,9 @@ jobs:
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
+      - name: check-environment
+        uses: ./.github/workflows/check-environment.yml
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
@@ -173,9 +176,25 @@ jobs:
           key: macos-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: macos-${{ matrix.target }}-cargo-
 
+      - name: Check osxcross (macOS via osxcross)
+        if: runner.os != 'macOS'
+        run: |
+          if [ ! -e /opt/axon/osxcross/env.sh ]; then
+            echo 'osxcross not found, see scripts/setup-macos-cross.sh for more information'
+            exit 1
+          fi
+
       - name: Build workspace (macOS via osxcross)
+        if: runner.os != 'macOS'
         run: |
           source /opt/axon/osxcross/env.sh
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+          cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
+
+      - name: Build workspace (macOS native)
+        if: runner.os == 'macOS'
+        run: |
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
@@ -191,15 +210,17 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: check-environment
     if: ${{ github.event.inputs.linux != 'false' }}
     runs-on:
       group: binary-builder
-      labels: [self-hosted, linux]
+      labels: [self-hosted]
     env:
       RUSTUP_HOME: .rustup-linux
       CARGO_HOME: .cargo-linux
     steps:
+      - name: check-environment
+        uses: ./.github/workflows/check-environment.yml
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
@@ -233,7 +254,7 @@ jobs:
     needs: [windows, macos, linux]
     runs-on:
       group: binary-builder
-      labels: [self-hosted, linux]
+      labels: [self-hosted]
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
 
     permissions:
