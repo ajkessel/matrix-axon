@@ -230,10 +230,11 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    needs: [windows, macos, linux]
     runs-on:
       group: binary-builder
       labels: [self-hosted, linux]
-    if: github.ref_type == 'tag'
+    if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
 
     permissions:
       contents: write
