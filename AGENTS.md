@@ -96,6 +96,21 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all
 ```
 
+Smoke gates are manual because they may require Docker and a true-local Synapse
+stack. Use `scripts/smoke-gate.sh <mode>` before pushing component changes that
+cross process/network boundaries:
+
+| Changed area | Smoke gate |
+|---|---|
+| `smoke/tui` or terminal rendering in `clients/tui` | `scripts/smoke-gate.sh tui` |
+| TUI changes that depend on real Axon/local-stack behavior | `scripts/smoke-gate.sh tui-true-local` |
+| `smoke/server`, `crates/axon-server`, `crates/axon-api`, `crates/axon-sync`, or `crates/axon-store` API/sync behavior | `scripts/smoke-gate.sh server` |
+| `smoke/local-stack` or shared smoke harness behavior | `scripts/smoke-gate.sh all` |
+
+The pre-push hook does not run Docker-backed smoke by default. Opt in with
+`RUN_SMOKE=tui`, `RUN_SMOKE=server`, `RUN_SMOKE=tui-true-local`, or
+`RUN_SMOKE=all`.
+
 ## Current state
 
 **M9 (search) complete; M10 (history backfill) landing** — M6 (mutations) is complete and the post-M6 sequence was rethought (see `docs/mvp/implementation.md` "Milestone resequencing" + ADR 0022). **M7** is account lifecycle & auth, in three phases: **7a** the Matrix-account lifecycle (login/verify/recover/logout/delete) — which also folds in the interactive SAS verification deferred from M5 (the old "5c") as its *last* PR; **7b** the client↔axon bearer-token gate (was M8); **7c** sender-device trust. 7a's interactive-verification work landed in `axon-sync` (not `axon-crypto` — that crate stays a stub). **M8** moves relation aggregation (edits/reactions/replies/threads — and subsumes the old standalone Threads milestone) server-side, in two PRs: **8a** the store-layer backend, **8b** the API surface. **M9** adds the `axon-search` Tantivy full-text index, in two PRs: **9a** the indexing engine (schema/analyzer, the single-writer actor draining a transactional `search_outbox`, corpus seed from `events`, config), **9b** the `GET /v1/search` API + `axon search reindex` CLI. See ADR 0039. **M10** is history backfill — a continuous, throttled background task that pages each joined room's pre-existing history backward through the same ingestion path as live sync, plus a disk-space safety valve and left-room search semantics. See ADR 0043, ADR 0044.

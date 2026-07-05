@@ -1,9 +1,8 @@
 name: smoke
 
-# S1 black-box smoke coverage. PR 1 (this) runs the TUI PTY suite against an
-# in-process Axum stub. PR 2 expands this same `smoke` job into the full S1 gate
-# (server boot/login/inbound/outbound/shutdown against managed Postgres +
-# Synapse) and makes it a required check.
+# S1 black-box smoke coverage. This manual workflow runs the same gate as
+# `scripts/smoke-gate.sh all`: TUI PTY smoke against the in-process stub, TUI
+# PTY smoke against the true-local stack, then server smoke against true-local.
 
 on:
   workflow_dispatch:
@@ -30,25 +29,13 @@ jobs:
           key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-smoke-
 
-      - name: Enforce smoke black-box boundary (no axon-* deps)
-        run: ./scripts/check-smoke-isolation.sh axon-smoke-tui
-
-      - name: Build axon-tui (binary under test)
-        run: cargo build -p axon-tui
-
-      - name: Build axon-smoke-tui (harness)
-        run: cargo build -p axon-smoke-tui
-
-      - name: Run TUI smoke suite
-        env:
-          # Use the binary we just built; skip the in-harness rebuild.
-          AXON_TUI_BIN: target/debug/axon-tui
-        run: cargo run -p axon-smoke-tui -- --profile stub
+      - name: Run smoke gate
+        run: ./scripts/smoke-gate.sh all
 
       - name: Upload failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: tui-smoke-artifacts
+          name: smoke-artifacts
           path: smoke-artifacts/
           if-no-files-found: ignore

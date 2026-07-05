@@ -4,4 +4,7 @@ echo "Running pre-push checks..."
 cargo fmt --all -- --check
 cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all
+if [ -n "${RUN_SMOKE:-}" ]; then
+  ./scripts/smoke-gate.sh "$RUN_SMOKE"
+fi
 echo "All checks passed!"
