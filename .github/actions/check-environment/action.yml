@@ -4,7 +4,7 @@ description: "Checks for disk space and optionally docker"
 inputs:
   require-docker:
     description: "Also verify the runner's Docker daemon is reachable"
-    type: boolean
+    required: false
     default: false
 
 runs:
@@ -16,7 +16,7 @@ runs:
 
     - name: Docker access check
       shell: bash
-      if: inputs.require-docker
+      if: ${{ inputs.require-docker == 'true' }}
       run: docker run --rm hello-world
 
     - name: Assert Minimum Disk Space

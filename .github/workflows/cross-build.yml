@@ -102,8 +102,6 @@ jobs:
 
       - name: check-environment
         uses: ./.github/actions/check-environment
-        with:
-          require-docker: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -135,13 +133,13 @@ jobs:
         run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe 
+        run: zip -j target/axon-windows.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe 
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: axon-x86_64-pc-windows-gnu
-          path: target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-axon-x86_64-pc-windows-gnu.zip
+          name: axon-windows.zip
+          path: target/axon-windows.zip
           if-no-files-found: error
 
   macos:
@@ -202,13 +200,13 @@ jobs:
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
+        run: zip -j target/axon-macos.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: axon-${{ matrix.target }}
-          path: target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-${{ matrix.target }}.zip
+          name: axon-macos.zip
+          path: target/axon-macos.zip
           if-no-files-found: error
 
   linux:
@@ -252,13 +250,13 @@ jobs:
         run: cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
+        run: zip -j target/axon-linux.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: axon-x86_64-unknown-linux-gnu
-          path: target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-x86_64-unknown-linux-gnu.zip
+          name: axon-linux.zip
+          path: target/axon-linux.zip
           if-no-files-found: error
 
   release:
