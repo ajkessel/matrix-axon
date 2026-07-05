@@ -8,12 +8,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check-environment:
-    uses: ./.github/workflows/check-environment.yml
   lint-and-test:
-    needs: check-environment
     runs-on: ubuntu-latest
+
     steps:
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
