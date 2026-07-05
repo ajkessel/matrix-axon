@@ -63,7 +63,7 @@ jobs:
   lint-fmt-test:
     needs: check-environment
     runs-on: [binary-builder]
-    if: ${{ inputs.checks != 'false' }}
+    if: ${{ github.event.inputs.checks != 'false' }}
     steps:
       - name: checkout source code
         uses: actions/checkout@v7
@@ -94,7 +94,7 @@ jobs:
 
   windows:
     needs: lint-fmt-test
-    if: ${{ inputs.windows != 'false' }}
+    if: ${{ github.event.inputs.windows != 'false' }}
     runs-on: [binary-builder]
     steps:
       - uses: actions/checkout@v7
@@ -140,7 +140,7 @@ jobs:
 
   macos:
     needs: windows
-    if: ${{ inputs.macos != 'false' }}
+    if: ${{ github.event.inputs.macos != 'false' }}
     runs-on: [binary-builder]
     env:
       RUSTUP_HOME: .rustup-macos
@@ -186,7 +186,7 @@ jobs:
 
   linux:
     needs: macos
-    if: ${{ inputs.linux != 'false' }}
+    if: ${{ github.event.inputs.linux != 'false' }}
     runs-on: [binary-builder]
     env:
       RUSTUP_HOME: .rustup-linux
