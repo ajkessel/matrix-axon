@@ -39,7 +39,7 @@ and outbound message testing.
 
 Add two Rust binary packages as workspace members:
 
-- `smoke/server`, package `axon-server-smoke`
+- `smoke/server`, package `axon-smoke-server`
 - `smoke/tui`, package `axon-smoke-tui`
 
 They depend on neither product `axon-*` crates nor each other. They may use
@@ -55,7 +55,7 @@ excluding the smoke package itself.
 Each package is a sequential scenario runner rather than a `#[test]` suite:
 
 ```sh
-cargo run -p axon-server-smoke -- --profile local [--filter NAME]
+cargo run -p axon-smoke-server -- --profile true-local [--filter NAME]
 cargo run -p axon-smoke-tui    -- --profile stub  [--filter NAME]
 ```
 
@@ -116,7 +116,7 @@ terminal-restoration regression.
 
 ### PR 2: managed local server smoke
 
-`axon-server-smoke --profile local` owns its environment:
+`axon-smoke-server --profile true-local` owns its environment:
 
 - Start the existing Compose Postgres and Synapse services under a unique
   Compose project name.

@@ -462,6 +462,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "axon-smoke-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "uuid",
+]
+
+[[package]]
 name = "axon-smoke-tui"
 version = "0.1.0"
 dependencies = [

@@ -4,7 +4,7 @@
 
 Stand up black-box smoke coverage for the two shipped binaries:
 
-- **`smoke/server`** (package `axon-server-smoke`): boots the real
+- **`smoke/server`** (package `axon-smoke-server`): boots the real
   `axon-server` binary against real Postgres and Synapse, then exercises its
   public HTTP API and `/v1/ws` stream end to end.
 - **`smoke/tui`** (package `axon-smoke-tui`): runs the real `axon-tui` binary
@@ -90,7 +90,7 @@ Given that, Rust wins the remaining tradeoffs:
 **Harness shape.** Each smoke package is a binary, not a `#[test]` suite:
 
 ```sh
-cargo run -p axon-server-smoke -- --profile local [--filter NAME]
+cargo run -p axon-smoke-server -- --profile true-local [--filter NAME]
 cargo run -p axon-smoke-tui    -- --profile stub  [--filter NAME]
 ```
 
@@ -118,7 +118,7 @@ artifacts — no JUnit machinery.
   journal, WS frames, PTY transcript and final rendered screen, with
   configured secrets redacted.
 
-## Server smoke (`axon-server-smoke`)
+## Server smoke (`axon-smoke-server`)
 
 ### Profiles
 

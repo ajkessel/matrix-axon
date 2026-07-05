@@ -1,0 +1,27 @@
+[package]
+name = "axon-smoke-server"
+description = "Black-box HTTP/WebSocket smoke harness for the axon-server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# This crate is a black-box smoke harness: it exercises the shipped
+# `axon-server` binary through HTTP, WebSocket, and Matrix Client-Server API
+# calls against axon-smoke-local-stack. It must NEVER depend on any `axon-*`
+# product crate or another smoke crate; all wire types are handwritten from the
+# checked-in OpenAPI contract and local-stack manifest.
+
+[[bin]]
+name = "axon-smoke-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+futures-util = { workspace = true, features = ["sink", "std"] }
+reqwest = { workspace = true, features = ["json", "query", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio-tungstenite = { workspace = true, features = ["connect"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
