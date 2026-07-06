@@ -232,7 +232,6 @@ impl App {
             }
             let thread_root = event.thread_relation().map(str::to_owned);
             let account_id = event.account_id;
-            let origin_ts = event.origin_ts;
             // A live message from a sender we have no name for (e.g. someone who
             // joined after the last full load) would render as a raw MXID until
             // the next room reload. Kick off a debounced /members refresh so it
@@ -262,9 +261,6 @@ impl App {
             if should_follow_tail {
                 self.messages.scroll = usize::MAX;
             }
-            // The room is on screen, so the live event counts as read — the
-            // same rule that keeps its unread badge clear below (M12).
-            self.note_room_read(key.clone(), &event_id, origin_ts);
             if should_select {
                 self.messages.selection = Some(event_id);
             }

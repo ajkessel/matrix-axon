@@ -353,36 +353,20 @@ impl App {
         self.compose_room = selected;
     }
 
-    /// Route a live `device_state.changed` frame to its namespace's handler.
-    /// Our own frames (matching `device_id`) are echoes of our own PUTs and
-    /// are dropped here for every namespace; namespaces this client doesn't
-    /// consume are ignored (forward-compatibility).
+    /// Apply a live `device_state.changed` frame. Our own frames (matching
+    /// `device_id`) are echoes of our own PUTs and are dropped; non-draft
+    /// namespaces are ignored (forward-compatibility). The visible compose
+    /// buffer is updated only when it holds nothing the user could lose —
+    /// empty, or exactly the draft value being replaced.
     pub(crate) fn handle_device_state_frame(
         &mut self,
         account_id: Uuid,
         payload: DeviceStateChangedDto,
     ) -> LiveFrameAction {
-        if payload.device_id == self.device_id {
+        if payload.device_id == self.device_id || payload.namespace != DRAFTS_NAMESPACE {
             return LiveFrameAction::None;
         }
-        match payload.namespace.as_str() {
-            DRAFTS_NAMESPACE => self.handle_draft_frame(account_id, payload.entries),
-            super::read_markers::READ_MARKERS_NAMESPACE => {
-                self.handle_read_marker_frame(account_id, payload.entries)
-            }
-            _ => LiveFrameAction::None,
-        }
-    }
-
-    /// Apply a live `drafts` entry map from a sibling device. The visible
-    /// compose buffer is updated only when it holds nothing the user could
-    /// lose — empty, or exactly the draft value being replaced.
-    fn handle_draft_frame(
-        &mut self,
-        account_id: Uuid,
-        entries: HashMap<String, Value>,
-    ) -> LiveFrameAction {
-        for (room_id, value) in entries {
+        for (room_id, value) in payload.entries {
             let key = RoomKey {
                 account_id,
                 room_id,

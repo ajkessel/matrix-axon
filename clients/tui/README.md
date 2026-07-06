@@ -42,7 +42,6 @@ loopback default.
 - Renders Matrix `formatted_body` HTML for timeline messages when present, with sanitized support for common inline and block formatting.
 - Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
 - Syncs per-room message drafts across devices through Axon's device-state API (M12): a draft typed here appears on the user's other clients within about a second, survives restarts, and clearing or sending it clears it everywhere. Each install mints a device UUID on first run, stored in `device-id` next to the config file.
-- Syncs per-room read markers across devices through the same API: reading a room here clears its unread badge on the user's other clients, and rooms with activity newer than their marker show as unread again after a restart (rooms never marked read are left alone). Markers only move forward — a stale marker from an offline device never resurrects a cleared badge.
 
 ## Not Yet Implemented
 

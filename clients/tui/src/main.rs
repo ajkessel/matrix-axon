@@ -487,12 +487,8 @@ async fn run_app(
     app.refresh_accounts().await;
     app.refresh_rooms().await;
     app.load_selected_timeline().await;
-    // Hydrate cross-device drafts and read markers (M12) once rooms/accounts
-    // are known, so the first room's draft and the unread badges that survived
-    // the restart are already in place. Markers first: the initial
-    // load_selected_timeline above armed a marker for the first room, and
-    // hydration must merge under it, not race it.
-    app.refresh_read_markers().await;
+    // Hydrate cross-device drafts (M12) once rooms/accounts are known, so the
+    // first room's draft is already in place.
     app.refresh_drafts().await;
 
     let mut tick = time::interval(Duration::from_millis(100));
@@ -504,10 +500,8 @@ async fn run_app(
         tokio::select! {
             _ = tick.tick() => {
                 let now = Instant::now();
-                // Flush settled draft / read-marker changes to the server
-                // (M12 debounce).
+                // Flush a settled draft change to the server (M12 debounce).
                 app.flush_due_draft_put(now);
-                app.flush_due_marker_put(now);
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh
@@ -585,7 +579,6 @@ async fn run_app(
                     }
                 }
                 if reconnected {
-                    app.refresh_read_markers().await;
                     app.refresh_drafts().await;
                 }
             }
