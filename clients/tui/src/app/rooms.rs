@@ -252,7 +252,22 @@ impl App {
                     }
                 }
                 self.reseed_display_names(&room, &page.events).await;
+                // Thread replies newer than the read marker made this room
+                // unread while hidden behind their roots' badges — promote
+                // them so what caused the badge is visible (M12). Collected
+                // against the *pre-advance* marker, so this must precede
+                // note_room_read; the root fetches run after the page is
+                // installed so in-slice roots aren't re-fetched.
+                let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
+                // Opening the room reads it up to its newest loaded event (M12).
+                if let Some(newest) = page.events.last() {
+                    let (event_id, origin_ts) = (newest.event_id.clone(), newest.origin_ts);
+                    self.note_room_read(key.clone(), &event_id, origin_ts);
+                }
                 self.messages.events.insert(key.clone(), page.events);
+                for (account_id, root) in unseen_thread_roots {
+                    self.spawn_live_thread_root_fetch(account_id, &key, &root);
+                }
                 self.rooms.unread.remove(&key);
                 self.thread_panel = None;
                 self.spawn_relations_refresh(&room);

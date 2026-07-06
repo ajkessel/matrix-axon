@@ -24,6 +24,7 @@ mod completion;
 mod drafts;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
+mod read_markers;
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
 pub(crate) use media::{
@@ -767,6 +768,12 @@ pub(crate) struct App {
     /// Sender for background draft-PUT failures. `None` until the main loop
     /// wires it up (and in unit tests, where flushes stay local-only).
     pub(crate) drafts_tx: Option<mpsc::UnboundedSender<DraftOutcome>>,
+    /// Last known read marker per room (M12): the local mirror of the merged
+    /// `read_markers` device-state namespace. Advances monotonically only.
+    pub(crate) read_markers: HashMap<RoomKey, read_markers::ReadMarker>,
+    /// A read-marker advance waiting out its debounce window before being PUT
+    /// (M12). One slot; arming for a different room flushes the old one.
+    pub(crate) pending_marker_put: Option<read_markers::PendingMarkerPut>,
 }
 
 #[derive(Default)]
@@ -946,6 +953,8 @@ impl App {
             pending_draft_put: None,
             compose_room: None,
             drafts_tx: None,
+            read_markers: HashMap::new(),
+            pending_marker_put: None,
         }
     }
 
