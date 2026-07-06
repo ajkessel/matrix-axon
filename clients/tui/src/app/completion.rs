@@ -8,20 +8,6 @@ use super::{
     Status,
 };
 
-const FILTER_ARGUMENTS: &[&str] = &[
-    "all",
-    "dms",
-    "dm",
-    "people",
-    "groups",
-    "group",
-    "rooms",
-    "unread",
-    "fav",
-    "favs",
-    "favorites",
-];
-
 impl App {
     pub(crate) fn complete_input(&mut self) {
         self.complete_input_in_direction(false);
@@ -50,49 +36,10 @@ impl App {
         if self.complete_verify_command_input(reverse) {
             return;
         }
-        if self.complete_filter_command_input(reverse) {
-            return;
-        }
         if self.complete_command_input() {
             return;
         }
         self.complete_room_input(reverse);
-    }
-
-    pub(crate) fn complete_filter_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = filter_target_prefix(&self.input.buffer) else {
-            return false;
-        };
-        let query = self
-            .input
-            .filter_command_completion
-            .as_ref()
-            .map(|(query, _)| query.clone())
-            .unwrap_or_else(|| target.to_owned());
-        let candidates = filter_argument_candidates(&query);
-        if candidates.is_empty() {
-            self.input.filter_command_completion = None;
-            return true;
-        }
-
-        let selected = if let Some((_, current)) = self.input.filter_command_completion.as_ref() {
-            cycle_index(*current, candidates.len(), reverse)
-        } else if reverse {
-            candidates.len() - 1
-        } else {
-            0
-        };
-        let argument = candidates[selected];
-        self.input.buffer = format!("/filter {argument}");
-        self.move_cursor_to_end();
-        self.input.filter_command_completion = Some((query, selected));
-        self.status = Status::Info(format!(
-            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to filter",
-            selected + 1,
-            candidates.len(),
-            argument
-        ));
-        true
     }
 
     pub(crate) fn complete_recover_command_input(&mut self, reverse: bool) -> bool {
@@ -778,27 +725,6 @@ fn verify_target_prefix(input: &str) -> Option<&str> {
         .next()
         .is_some_and(char::is_whitespace)
         .then(|| rest.trim_start())
-}
-
-fn filter_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/filter")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
-        .filter(|target| !target.chars().any(char::is_whitespace))
-}
-
-fn filter_argument_candidates(target: &str) -> Vec<&'static str> {
-    let target = target.to_lowercase();
-    FILTER_ARGUMENTS
-        .iter()
-        .copied()
-        .filter(|argument| argument.starts_with(&target))
-        .collect()
 }
 
 fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {

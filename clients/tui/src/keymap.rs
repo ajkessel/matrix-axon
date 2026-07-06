@@ -84,8 +84,6 @@ impl App {
             } else {
                 RoomSort::AlphaAsc
             });
-        } else if self.shortcuts.unread_threads.matches(key) && !self.is_mid_command() {
-            self.open_unread_threads_picker();
         } else if self.shortcuts.refresh.matches(key) && !self.is_mid_command() {
             self.refresh_rooms().await;
         } else {
@@ -121,7 +119,7 @@ impl App {
                         .await
                 }
                 Mode::Verification => self.handle_verification_key(key),
-                Mode::Popup(kind) => self.handle_popup_key(key, kind).await,
+                Mode::Popup(kind) => self.handle_popup_key(key, kind),
                 Mode::DateJump => self.handle_date_jump_key(key).await,
             }
         }
@@ -170,7 +168,7 @@ impl App {
         self.status = Status::Info(String::new());
     }
 
-    async fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
+    fn handle_popup_key(&mut self, key: KeyEvent, kind: PopupKind) {
         if self.shortcuts.clear_input.matches(key) {
             let was_search_help = kind == PopupKind::CommandResponse
                 && self.pending_command_response.as_deref() == Some(SEARCH_HELP_TEXT);
@@ -194,8 +192,6 @@ impl App {
             }
         } else if kind == PopupKind::Help {
             self.handle_help_popup_key(key);
-        } else if kind == PopupKind::UnreadThreads {
-            self.handle_unread_threads_popup_key(key).await;
         } else if key.code == KeyCode::Up {
             self.popup_scroll = self.popup_scroll.saturating_sub(1);
         } else if key.code == KeyCode::Down {
@@ -204,20 +200,6 @@ impl App {
             self.popup_scroll = self.popup_scroll.saturating_sub(8);
         } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
             self.popup_scroll = self.popup_scroll.saturating_add(8);
-        }
-    }
-
-    async fn handle_unread_threads_popup_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Up {
-            self.move_unread_thread_selection(-1);
-        } else if key.code == KeyCode::Down {
-            self.move_unread_thread_selection(1);
-        } else if key.code == KeyCode::PageUp || self.shortcuts.message_page_up.matches(key) {
-            self.move_unread_thread_selection(-8);
-        } else if key.code == KeyCode::PageDown || self.shortcuts.message_page_down.matches(key) {
-            self.move_unread_thread_selection(8);
-        } else if self.shortcuts.submit.matches(key) {
-            self.open_selected_unread_thread().await;
         }
     }
 
@@ -872,7 +854,6 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
-        self.input.filter_command_completion = None;
         input
     }
 
@@ -903,7 +884,6 @@ impl App {
         self.input.recover_command_completion = None;
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
-        self.input.filter_command_completion = None;
     }
 
     fn clear_input_and_selection(&mut self) {

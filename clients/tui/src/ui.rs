@@ -24,7 +24,7 @@ use crate::config::Shortcuts;
 use crate::search::{
     SearchContextKey, SearchFormField, SearchGrouping, SearchResultsState, SearchScope,
 };
-use crate::wrap::{plain_rich_lines, rich_lines_to_spans, wrap_rich_lines};
+use crate::wrap::{plain_rich_lines, wrap_rich_lines};
 
 /// Percentage of the screen (both axes) used for the media-preview popup.
 /// Kept as a single constant so `preview_target_size` (which determines the
@@ -981,26 +981,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 "Shortcuts  (Esc to close)",
                 popup_shortcuts_lines(&app.shortcuts),
             ),
-            PopupKind::UnreadThreads => {
-                let (lines, ranges) =
-                    popup_unread_thread_lines(app, usize::from(area.width.saturating_sub(2)));
-                let entries_len = ranges.len();
-                if entries_len == 0 {
-                    app.unread_thread_selection = 0;
-                } else {
-                    app.unread_thread_selection = app
-                        .unread_thread_selection
-                        .min(entries_len.saturating_sub(1));
-                }
-                if let Some(range) = ranges.get(app.unread_thread_selection) {
-                    if range.start < app.popup_scroll {
-                        app.popup_scroll = range.start;
-                    } else if range.end > app.popup_scroll.saturating_add(page_size) {
-                        app.popup_scroll = range.end.saturating_sub(page_size);
-                    }
-                }
-                ("Unread Threads  (Enter to open, Esc to close)", lines)
-            }
             PopupKind::RoomInfo => (
                 "Room Info  (Esc to close, Up/Down scroll)",
                 popup_room_info_lines(app)
@@ -2142,123 +2122,6 @@ fn popup_help_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-const UNREAD_THREAD_PREVIEW_LINES: usize = 3;
-
-fn popup_unread_thread_lines(app: &App, width: usize) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
-    let entries = app.unread_thread_entries();
-    if entries.is_empty() {
-        return (
-            vec![Line::from(Span::styled(
-                "No unread threads",
-                Style::default().fg(app.colors.input_hint),
-            ))],
-            Vec::new(),
-        );
-    }
-    let mut lines = Vec::with_capacity(entries.len().saturating_mul(2));
-    let mut ranges = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        let start = lines.len();
-        let selected = index == app.unread_thread_selection;
-        let marker = if selected { ">" } else { " " };
-        let marker_style = if selected {
-            Style::default()
-                .fg(app.colors.selected_room)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let unread_style = Style::default()
-            .fg(app.colors.unread_count)
-            .add_modifier(Modifier::BOLD);
-        let root = entry
-            .root_snippet
-            .as_deref()
-            .filter(|snippet| !snippet.trim().is_empty())
-            .map(|snippet| format!(" — {}", compact_popup_text(snippet, 54)))
-            .unwrap_or_default();
-        lines.push(Line::from(vec![
-            Span::styled(format!("{marker} "), marker_style),
-            Span::styled(
-                compact_popup_text(&entry.room_title, 34),
-                if selected {
-                    Style::default()
-                        .fg(app.colors.selected_room)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
-                },
-            ),
-            Span::styled(format!("  {} new", entry.unread_count), unread_style),
-            Span::styled(root, Style::default().fg(app.colors.input_hint)),
-        ]));
-        let previews = if entry.recent.is_empty() {
-            vec![(entry.latest_sender.as_str(), entry.latest_body.as_str())]
-        } else {
-            entry
-                .recent
-                .iter()
-                .map(|preview| (preview.sender.as_str(), preview.body.as_str()))
-                .collect::<Vec<_>>()
-        };
-        let mut remaining = UNREAD_THREAD_PREVIEW_LINES;
-        let mut preview_groups: Vec<Vec<Line<'static>>> = Vec::new();
-        for (sender, body) in previews {
-            if remaining == 0 {
-                break;
-            }
-            let wrapped =
-                popup_preview_lines(sender, body, width, remaining, app.colors.input_hint);
-            remaining = remaining.saturating_sub(wrapped.len());
-            preview_groups.push(wrapped);
-        }
-        for group in preview_groups.into_iter().rev() {
-            lines.extend(group);
-        }
-        ranges.push(start..lines.len());
-    }
-    (lines, ranges)
-}
-
-fn popup_preview_lines(
-    sender: &str,
-    body: &str,
-    width: usize,
-    limit: usize,
-    style: Color,
-) -> Vec<Line<'static>> {
-    let text = format!(
-        "  {}: {}",
-        compact_popup_text(sender, 24),
-        body.replace(['\n', '\r'], " ")
-    );
-    rich_lines_to_spans(wrap_rich_lines(
-        plain_rich_lines(&text),
-        width.max(1),
-        width.max(1),
-    ))
-    .into_iter()
-    .take(limit)
-    .map(|spans| {
-        let text = spans
-            .into_iter()
-            .map(|span| span.content.into_owned())
-            .collect::<String>();
-        Line::from(Span::styled(text, Style::default().fg(style)))
-    })
-    .collect()
-}
-
-fn compact_popup_text(text: &str, max: usize) -> String {
-    let flattened = text.replace(['\n', '\r'], " ");
-    let trimmed = flattened.trim();
-    if trimmed.chars().count() <= max {
-        return trimmed.to_owned();
-    }
-    let head: String = trimmed.chars().take(max).collect();
-    format!("{}…", head.trim_end())
-}
-
 pub(crate) fn popup_room_info_lines(app: &App) -> Vec<String> {
     let Some(room) = app.selected_room() else {
         return vec!["No room selected.".to_owned()];
@@ -2572,6 +2435,10 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             shortcuts.toggle_rooms_panel.label(),
             "show/hide Rooms panel",
         ),
+        Row::Kv(
+            shortcuts.toggle_unread_filter.label(),
+            "filter Rooms to unread (toggle)",
+        ),
         Row::Kv(shortcuts.refresh.label(), "refresh rooms and redraw"),
         Row::Blank,
         Row::Section("Room list sort & filter:"),
@@ -2582,10 +2449,6 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv(
             shortcuts.room_sort_cycle.label(),
             "cycle sort (recent / oldest / A–Z / Z–A)",
-        ),
-        Row::Kv(
-            shortcuts.toggle_unread_filter.label(),
-            "filter to unread (/filter unread)",
         ),
         Row::Kv(
             shortcuts.room_filter_dms.label(),
@@ -2667,10 +2530,6 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             "react to message (type emoji name, Tab to cycle)",
         ),
         Row::Kv(shortcuts.unreact_message.label(), "withdraw your reaction"),
-        Row::Kv(
-            shortcuts.unread_threads.label(),
-            "open unread thread picker (/unreadthreads)",
-        ),
         Row::Kv(shortcuts.media_preview.label(), "open image preview"),
         Row::Kv(shortcuts.reply.label(), "reply to selected message"),
         Row::Kv(
@@ -2703,6 +2562,7 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         Row::Kv(shortcuts.thread.label(), "thread from selected result"),
         Row::Blank,
         Row::Section("Input:"),
+        Row::Kv(shortcuts.submit.label(), "send message"),
         Row::Kv(
             shortcuts.newline.label(),
             "insert a line break (multi-line message)",
@@ -2713,7 +2573,7 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
         ),
         Row::Kv(
             "/literal <text>".to_owned(),
-            "send text as plaintext (skip markdown parsing)",
+            "send text as plaintext (skip markdown auto-convert)",
         ),
         Row::Kv(
             "/rainbow <text>".to_owned(),
@@ -2740,6 +2600,12 @@ pub(crate) fn popup_shortcuts_lines(shortcuts: &Shortcuts) -> Vec<Line<'static>>
             ),
             "select previous / next message",
         ),
+        Row::Blank,
+        Row::Section("Device verification (/verify or auto-opens on incoming request):"),
+        Row::Kv("y".to_owned(), "confirm emoji match"),
+        Row::Kv("n".to_owned(), "reject (cancel the flow)"),
+        Row::Kv("r".to_owned(), "resync state from server"),
+        Row::Kv("Esc".to_owned(), "cancel / dismiss"),
     ];
 
     let key_col = rows
@@ -2914,19 +2780,11 @@ fn command_response_popup_area(response: &str, terminal: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::api::{EventDto, RoomDto, SearchResultDto};
-    use crate::app::{Status, UnreadThread, UnreadThreadPreview};
+    use crate::app::Status;
     use crate::config::TuiConfig;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::collections::HashMap;
     use uuid::Uuid;
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
 
     #[test]
     fn compose_layout_single_line() {
@@ -3040,136 +2898,6 @@ mod tests {
         // If backing up to fill the bottom row would bring the divider back into
         // view and clip the selected room, keep the selected room visible.
         assert_eq!(divider_aware_room_scroll(0, 19, 5, 20, 16), 16);
-    }
-
-    #[test]
-    fn unread_thread_popup_uses_three_preview_lines_per_thread() {
-        let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
-            None,
-            TuiConfig::test_default(),
-            ratatui_image::picker::Picker::halfblocks(),
-        );
-        let room = RoomDto {
-            account_id: Uuid::nil(),
-            account_user_id: Some("@alice:example.com".to_owned()),
-            room_id: "!room:example.com".to_owned(),
-            name: Some("Room".to_owned()),
-            topic: None,
-            avatar_url: None,
-            canonical_alias: Some("#room:example.com".to_owned()),
-            last_activity_ts: 0,
-            last_event_id: None,
-        };
-        let key = RoomKey::from(&room);
-        app.rooms.rooms.push(room);
-        app.unread_threads.insert(
-            key,
-            HashMap::from([(
-                "$root:example.com".to_owned(),
-                UnreadThread {
-                    root_event_id: "$root:example.com".to_owned(),
-                    unread_count: 4,
-                    latest_event_id: "$reply4:example.com".to_owned(),
-                    latest_sender: "@long:example.com".to_owned(),
-                    latest_body: "one two three four five six seven eight nine ten".to_owned(),
-                    latest_ts: 4,
-                    counted: std::collections::HashSet::new(),
-                    recent: vec![
-                        UnreadThreadPreview {
-                            event_id: "$reply4:example.com".to_owned(),
-                            sender: "@long:example.com".to_owned(),
-                            body: "one two three four five six seven eight nine ten".to_owned(),
-                            origin_ts: 4,
-                        },
-                        UnreadThreadPreview {
-                            event_id: "$reply3:example.com".to_owned(),
-                            sender: "@short:example.com".to_owned(),
-                            body: "older should not render".to_owned(),
-                            origin_ts: 3,
-                        },
-                    ],
-                },
-            )]),
-        );
-
-        let (lines, ranges) = popup_unread_thread_lines(&app, 28);
-        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
-
-        assert_eq!(ranges, vec![0..4]);
-        assert_eq!(lines.len(), 4);
-        assert!(text.contains("@long:example.com"));
-        assert!(!text.contains("@short:example.com"));
-    }
-
-    #[test]
-    fn unread_thread_popup_puts_newest_preview_at_bottom() {
-        let mut app = App::new(
-            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
-            None,
-            TuiConfig::test_default(),
-            ratatui_image::picker::Picker::halfblocks(),
-        );
-        let room = RoomDto {
-            account_id: Uuid::nil(),
-            account_user_id: Some("@alice:example.com".to_owned()),
-            room_id: "!room:example.com".to_owned(),
-            name: Some("Room".to_owned()),
-            topic: None,
-            avatar_url: None,
-            canonical_alias: Some("#room:example.com".to_owned()),
-            last_activity_ts: 0,
-            last_event_id: None,
-        };
-        let key = RoomKey::from(&room);
-        app.rooms.rooms.push(room);
-        app.unread_threads.insert(
-            key,
-            HashMap::from([(
-                "$root:example.com".to_owned(),
-                UnreadThread {
-                    root_event_id: "$root:example.com".to_owned(),
-                    unread_count: 3,
-                    latest_event_id: "$reply3:example.com".to_owned(),
-                    latest_sender: "@newest:example.com".to_owned(),
-                    latest_body: "newest".to_owned(),
-                    latest_ts: 3,
-                    counted: std::collections::HashSet::new(),
-                    recent: vec![
-                        UnreadThreadPreview {
-                            event_id: "$reply3:example.com".to_owned(),
-                            sender: "@newest:example.com".to_owned(),
-                            body: "newest".to_owned(),
-                            origin_ts: 3,
-                        },
-                        UnreadThreadPreview {
-                            event_id: "$reply2:example.com".to_owned(),
-                            sender: "@middle:example.com".to_owned(),
-                            body: "middle".to_owned(),
-                            origin_ts: 2,
-                        },
-                        UnreadThreadPreview {
-                            event_id: "$reply1:example.com".to_owned(),
-                            sender: "@oldest:example.com".to_owned(),
-                            body: "oldest".to_owned(),
-                            origin_ts: 1,
-                        },
-                    ],
-                },
-            )]),
-        );
-
-        let (lines, ranges) = popup_unread_thread_lines(&app, 80);
-        let preview_lines = lines
-            .iter()
-            .skip(ranges[0].start + 1)
-            .take(3)
-            .map(line_text)
-            .collect::<Vec<_>>();
-
-        assert!(preview_lines[0].contains("@oldest:example.com"));
-        assert!(preview_lines[1].contains("@middle:example.com"));
-        assert!(preview_lines[2].contains("@newest:example.com"));
     }
 
     #[test]
@@ -3705,5 +3433,12 @@ mod tests {
         assert!(text.contains("Topic: Daily operations"));
         assert!(text.contains("Alice  @alice:example.com  (join)"));
         assert!(text.contains("Encryption: unavailable"));
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 }
