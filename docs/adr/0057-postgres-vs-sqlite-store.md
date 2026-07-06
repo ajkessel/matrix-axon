@@ -1,4 +1,4 @@
-# ADR 0042 - Archive store backend: keep Postgres for MVP, reassess SQLite only as a full switch
+# ADR 0057 - Archive store backend: keep Postgres for MVP, reassess SQLite only as a full switch
 
 ## Status
 

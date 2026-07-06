@@ -67,7 +67,7 @@ touch is `database.url`, and only because Postgres is a genuine external depende
 
 ### 4. The one thing init cannot conjure: Postgres
 
-Postgres is a hard dependency (ADR 0006 / 0042 ruled out embedded SQLite). `axon init`
+Postgres is a hard dependency (ADR 0006 / 0057 ruled out embedded SQLite). `axon init`
 writes the *config* but does not start or create a database, and cannot `CREATE
 DATABASE`/`ROLE` without admin credentials. The binary deliberately stays **decoupled from
 Docker** — bringing up the bundled compose Postgres remains `run.sh`'s job. Init's

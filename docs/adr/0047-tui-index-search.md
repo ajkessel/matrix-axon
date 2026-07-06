@@ -1,4 +1,4 @@
-# ADR 0045: TUI indexed search
+# ADR 0047: TUI indexed search
 
 ## Status
 
