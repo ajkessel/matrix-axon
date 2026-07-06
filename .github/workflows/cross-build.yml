@@ -17,9 +17,9 @@ name: Cross-platform build
 # native toolchain per platform.
 
 on:
-  push:
-    branches:
-      - main
+#  push:
+#    branches:
+#      - main
     tags:
       - 'v*' 
   workflow_dispatch:
