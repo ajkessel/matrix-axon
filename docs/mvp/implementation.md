@@ -451,7 +451,7 @@ Mirrors the PRD non-goals and out-of-scope items; the agent should not drift int
 - No admin API.
 - No bridge metadata normalization.
 - No importers from existing clients.
-- No full OAuth 2.0 server. Bearer tokens via CLI only.
+- No full OAuth 2.0 server. Bearer tokens via CLI only. *(Post-MVP: revisited by M14 — ADR 0054 proposes axon become its own OAuth 2.0 authorization server behind the existing `TokenVerifier` seam; in design, no code landed.)*
 - No advanced search UI (faceted, semantic). Backend ships; a minimal search input in `axon-tui` ships; rich UI does not.
 - No S3 / object-store media backend. Local disk LRU cache only.
 - No spaces-specific endpoints. Events flow through.

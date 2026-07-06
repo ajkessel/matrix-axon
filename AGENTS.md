@@ -15,7 +15,7 @@ Axon is a self-hosted personal agent for Matrix: a persistent state layer (sync,
 
 ## Directory layout
 
-```
+```text
 matrix-axon/
   Cargo.toml                 # workspace
   AGENTS.md                  # this file
@@ -39,15 +39,37 @@ matrix-axon/
   docs/
     mvp/                     # PRD, tech spec, implementation spec (frozen at MVP ship)
     adr/                     # architecture decision records
-    self-hosting.md          # produced in Milestone 12
+    self-hosting.md          # produced in Milestone 13 (deployment docs; still pending)
   docker-compose.yml         # Postgres 16 for dev; Synapse under `integration` profile
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
-  .github/workflows/        # self-hosted-runner workflows may trigger on push; GitHub-hosted-runner workflows are manual-dispatch only (workflow_dispatch)
+  .github/workflows/         # self-hosted-runner workflows may trigger on push or release (via new tag); GitHub-hosted-runner workflows are manual-dispatch only (workflow_dispatch)
+    api-docs.yml             # generate HTML version of API at https://axon.bostoncoop.net on updates
+    check-environment.yml    # local-runner environment check 
+    cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows (can manually select subset if desired)
+    lint-and-clippy.yml      # cargo fmt + clippy (faster than lint-and-test)
     lint-and-test.yml        # cargo fmt + clippy + test
     integration.yml          # E2EE re-decryption test (Synapse + Postgres)
-    smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 adds the server gate)
+    smoke.yml                # S1 black-box smoke (PR 1: TUI PTY suite; PR 2 added the server gate)
+  .github/actions/           # actions relied on by the workflows
+    check-environment/       # check environment on local runners before proceeding
 ```
+
+## Crates
+
+Each crate's own `Cargo.toml` `description` is the source of truth; this table is the orientation copy.
+
+| Crate | Purpose |
+|---|---|
+| `axon-core` | Shared types, errors, and configuration. |
+| `axon-store` | Postgres-backed event store, room state, and account data. |
+| `axon-sync` | matrix-rust-sdk sync-engine wrapper (Simplified Sliding Sync); owns verification and all crypto-adjacent logic. |
+| `axon-crypto` | Reserved stub — stays empty; verification lives in `axon-sync` (ADR 0027; see the "`axon-crypto` stays a stub" convention below). |
+| `axon-search` | Tantivy full-text search index, populated on event ingestion. |
+| `axon-media` | Media proxy with a bounded on-disk LRU cache for `mxc://` URLs. |
+| `axon-api` | axum HTTP + WebSocket handlers; OpenAPI spec via utoipa. |
+| `axon-server` | The `axon` binary — wires the crates together and owns the process. |
+| `axon-itest` | Dev-only end-to-end integration-test seeder (plays a verified Matrix client). |
 
 ## Key conventions
 
@@ -62,14 +84,21 @@ matrix-axon/
 - **Errors:** `thiserror` in libraries; `anyhow` only at the `axon-server` binary boundary.
 - **Logging:** `tracing` with structured fields — always include `account_id`, `room_id`, `event_id` where applicable.
 - **OpenAPI:** the spec is the source of truth. Handler types must compile against it (utoipa). Drift between spec and generated stubs is a bug.
-- **Component separation:** the code is separated into three silos: `crates/` (server-side infrastructure), `clients/` (client-side infrastructure), and `smoke/` (testing infrastructure). Commits and pull requests should **not** change multiple silos at once. Each PR should be limited to its own silo. The user can override this rule, but the agent should never do this on its own.
+- **Component separation:** the code is separated into three silos: `crates/` (server-side infrastructure), `clients/` (client-side infrastructure), and `smoke/` (testing infrastructure). Commits and pull requests should **not** change multiple silos at once. Each PR should be limited to its own silo. Files can be added to `docs/` combined with other silos where they are directly related to the change in that silo. The user can override this rule, but the agent should never do this on its own.
+- **`axon-crypto` stays a stub.** Verification and all crypto-adjacent logic live in `axon-sync` — the engine can't be thin, it needs `ClientManager`, the per-identity locks, and supervision (ADR 0027). Do not add logic to `axon-crypto`; it remains a reserved stub.
 - **Pull requests:** every PR body includes, by default, a **Verification guide** (prereqs + copy-pasteable, end-to-end steps that exercise real behavior — not just `cargo check`) and a **Code review guide** (a suggested file-by-file review order, dependencies first, plus a "where to keep a close eye" section calling out correctness, security, and lifetime concerns). Match the format of PRs #6 and #7. Scope both guides to the PR's actual diff. Subsequent changes to code in PR's should be impelmented as additional commits and pushes so that responsive comments can identify the precise commit that addresses the issue. Generally, the commits in a PR will all be squashed at merge time, subject to developer approval.
 - **Pushes:** we normally do not push anything directly to `main`. Code is incorpoarted into `main` when PRs are merged. Any exception should be approved by a developer.git force-push should only be used to fix an error in branch history and not without developer approval.
 - **Stacked PRs and branch deletion:** GitHub **silently closes** any open PR whose *base* branch is deleted out-of-band (`git push --delete`, `jj git push --deleted`, remote pruning). Only deleting the branch through GitHub's own "Delete branch" button on the merged PR retargets stacked children to the merged PR's base instead of closing them. So: before deleting a merged PR's branch, check for open PRs based on it (`gh pr list --base <branch>`) and either retarget them first (`gh pr edit <n> --base main`) or delete the branch via the GitHub UI. This has already cost us real work once — a feature PR was auto-closed this way and went unnoticed until live testing rediscovered the gap it addressed — so treat a nonzero `gh pr list --base` result as a hard stop.
+- **Restack dependent PRs when a base changes shared files.** When a base PR's review fixes touch files a stacked child also edits, rebase the child and resolve conflicts immediately — don't leave reviewers staring at GitHub's conflict state.
 - **`#N` is a GitHub autolink — never use it for anything else.** GitHub renders `#<number>` (in PR/issue bodies, comments, and commit messages) as a link to the issue or pull request with that number. Only write `#` immediately before a number when you mean a link to that exact, existing issue or PR. For every other numbered thing — review-comment indices, milestone phases, list items, ordinals, counts, versions — omit the `#` (write "comment 4", "step 3", "milestone 7a", "v2") so prose never sprouts bogus cross-links to unrelated issues.
 - **Robustness at boundaries.** Every place axon crosses a network or process boundary — a client calling `/v1/`, axon-server calling a homeserver, the TUI calling axon — is a "what could go wrong?" checkpoint. Before merging code that crosses one, account for: (1) **Timeouts** — every outbound call gets one; never `await` a remote unbounded. (2) **Bounded resources** — a fixed pool (workers, connections, semaphore permits) must be paired with timeouts and/or cancellation, so one slow/hung peer can't permanently consume it. (3) **Hostile input** — validate size and shape *before* allocating from it; cap bodies/images/list lengths; never size a buffer or allocation directly from a number the peer controls. (4) **Concurrency** — name the shared mutable state and the lock/owner guarding it (the cold-connect gate vs. live-task severing in 7a is the model), and state which lost-update/reconnect race is closed and how. (5) **Partial failure** — one account/room/event failing is logged and skipped, never fatal to the loop (the established "best-effort, never fatal to sync" philosophy).
-- **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend, no OAuth server — see `docs/mvp/implementation.md` "What not to build" for the full list.
-- **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours").
+- **Secrets never reach logs, errors, or disk.** No log line, error message, or file may contain a password, access token, recovery key, or bearer token. The one sanctioned exception is a value the *developer* explicitly surfaces for the end user to consume once — `axon token issue` printing the raw bearer token to stdout, or `axon init` emitting a generated secret — and even then only at the moment of issue, never re-logged afterward. Secret-bearing inputs (login password, 4S recovery key) are consumed once and dropped, never persisted (ADR 0008, 0026).
+- **Crash-safe multistep flows.** Axon or a client can be killed, crash, or lose power at any point in a non-atomic flow. Any multistep flow must leave the system in a state it can reconcile on the next boot — never a wedged resting state that can't recover on resume. The `deleting` teardown breadcrumb + boot reconcile (7a-4) and the transactional `search_outbox` (9a) are the models: write a durable intent, make the completion idempotent, heal on resume.
+- **No duplicate code.** Before landing duplicate or near-duplicate logic, extract a shared helper or refactor. Duplicated implementations drift apart, and each copy becomes a place a fix can be forgotten — the shared `TIMELINE_SELECT` projection, the config-discovery rules, and the TUI parsers are all single-source-of-truth for exactly this reason.
+- **Docs track code.** A change to behavior that end-user docs (`README.md`) or agent instructions (`AGENTS.md`, subtree `AGENTS.md`s) describe must update those docs in the same PR — they must reflect the project's state once the PR merges. Stale docs are a review finding.
+- **OSS Rust conventions + simple dependencies.** Follow idiomatic open-source Rust unless there's a specific reason to deviate. Keep the dependency graph simple and prefer indirection (a consumer-owned port + composition-root adapter, ADR 0021) over tight coupling. When an ADR justifies a dependency choice against an alternative already in the graph, explain the *behavioral* difference, not just a library preference.
+- **What not to build:** no push (APNs/FCM), no admin API, no multi-human-per-process, no federation, no S3 media backend — see `docs/mvp/implementation.md` "What not to build" for the full list.
+- **Spelling:** U.S. English throughout all source files, comments, and docs (e.g. "initialize" not "initialise", "honors" not "honours"). Note that the Matrix spec itself uses some Britishisms (`m.tag` `favourite`), in which case the standard should be used in code.
 - **Version control:** some developers who contribute to this repo use [jj (Jujutsu)](https://github.com/jj-vcs/jj) in colocated mode alongside git (both `.jj/` and `.git/` are present). *If the developer has jj in their local environment*, prefer jj commands for committing and branching; git commands still work but are not the primary workflow. Key operations:
   - Commit message: `jj describe -m "..."`  
   - New commit on top of current: `jj new`  
@@ -82,13 +111,45 @@ matrix-axon/
 
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
+## Bootstrap and configuration
+
+`axon init` (M13, ADR 0051) is the first-run bootstrap — it owns starter-config generation, secret generation, and local-service setup. Config precedence and discovery are described in the Milestone 2 notes below (figment: defaults < TOML < `DATABASE_URL` < `AXON_`-prefixed env).
+
+- **Bootstrap has one owner.** `axon init` owns config/secret generation and first-run setup; helper and launcher scripts must not reimplement it. Scripts stay as source-checkout developer scaffolding.
+- **Shell scripts must not reimplement config precedence.** Anything that exports `AXON_*` outranks the TOML file and can silently clobber user/platform config. Prefer the Rust config APIs over shell/PowerShell copies of the discovery rules.
+- **Explicit config paths are promises.** `--config <path>` and `AXON_CONFIG=<path>` must fail loudly when the file is missing. Silent absence is acceptable *only* for convention-based discovery (`./axon.toml`, the platform config dir).
+- **"No config found" ≠ "config is broken."** First-run prompts fire only when no config file exists *and* no config env is set. A parse error, a missing explicit path, or invalid env must fail with the real error, never silently drop into first-run.
+- **Launcher behavior stays boring.** A run/launcher script does root-relative paths, `.env` loading, Cargo invocation, and optional dev Postgres — nothing more. No secret generation, config-file writing, or storage-location overrides unless the script's stated purpose *is* bootstrap.
+- **Fallbacks that look like data loss must be observable.** If platform data/config/cache dirs can't be resolved and axon falls back to CWD-relative paths (ADR 0050), log a warning — a silent fallback hides where state landed.
+
+## Testing and documentation
+
+- **Isolate platform-default state in tests and docs.** Any integration test, smoke guide, or manual repro that expects throwaway state must set `AXON_SYNC__DATA_DIR`, `AXON_SEARCH__INDEX_PATH`, and `AXON_MEDIA__CACHE_DIR` explicitly — otherwise it reads and writes the real platform dirs (ADR 0050) and leaks state between runs.
+
+## Design guardrails
+
+Recurring failure modes distilled from M1–M13 review. They apply across crates and clients.
+
+1. **Encode invariants in types, not comments.** Shared mutable state guarded only by a doc-comment is a latent bug — make the type system enforce it (the 7a per-identity lock and run-scoped verification tokens are the model, ADR 0022 / 0027).
+2. **Store the key next to shared-but-partitioned state.** Whenever there is one physical slot with N logical owners, keep the owner's key beside the value — *or* flush/commit the slot on every key change. A single global slot keyed by "current context" silently drops concurrent work when the context switches mid-operation (the PR 192 draft-compose case: a per-room compose buffer and its pending queue must carry the room key or flush on room switch, never live in one "current room" slot).
+3. **Bracket every borrow of shared state.** A borrow should be save-on-enter / restore-on-exit — ideally structurally via a scope guard, not by remembering to add restore calls at each exit path.
+4. **Never infer intent from an incidental value shape.** When multiple code paths can produce the same value, that value can't carry semantics on its own — use explicit sentinels (the `search_outbox` account-purge sentinel, 9a), not shape-guessing.
+5. **Reconciliation must handle absence, not just presence.** Prune-on-reconcile is half the job of any lossy / eventually-consistent sync; a reconcile that only adds and never removes is incomplete (the deferred config-drop half of #24, ADR 0024).
+6. **In a single-threaded loop, fan out independent I/O.** Don't serialize independent remote calls behind one another when they could run concurrently.
+
+**When implementing a new feature:**
+
+- A feature that touches shared state implicitly interacts with *every* existing path that touches that state. The audit surface is all readers/writers of the shared field, not just the diff.
+- Test the transitions, not just the core operation. Boundaries and state transitions are where invariants break.
+
 ## Instructions after making changes
 
-* Make sure to run `cargo fmt` on the code you modified after finishing making changes; limit the scope to the code you changed
-* Make sure to fix any clippy issues `cargo clippy` on the code you modified after making changes
-* Don't ignore any linting warning or add comments like "#[allow(clippy::too_many_arguments)]". The user can override a clippy warning but the agent should not do so on its own.
-* More complete formatting and clippy checks can run before committing/pushing
-**CI only runs automatically on push for workflows that run entirely on our self-hosted runners (`binary-builder`, `api-builder`) — everything else is manual `workflow_dispatch` only.** We exhausted our free GitHub Actions usage, so any workflow (or job within one) that runs on a GitHub-hosted runner (e.g. `ubuntu-latest`) must stay manual-dispatch-only to avoid burning those minutes; self-hosted runners have unlimited minutes, so `lint-and-clippy.yml` and `cross-build.yml` trigger automatically on push since they run entirely on `binary-builder`. Don't add a `push`/`pull_request` trigger to a workflow that touches a GitHub-hosted runner. The local hooks are still the safety net for anything that isn't covered by an automatic run. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
+- Make sure to run `cargo fmt` on the code you modified after finishing making changes; limit the scope to the code you changed
+- Make sure to fix any clippy issues `cargo clippy` on the code you modified after making changes
+- Don't ignore any linting warning or add comments like "#[allow(clippy::too_many_arguments)]". The user can override a clippy warning but the agent should not do so on its own.
+- **A docs-only commit may skip the full pre-push gate.** If a commit changes *only* documentation (`docs/`, `AGENTS.md`, `CLAUDE.md`, `README.md`, subtree `AGENTS.md`s — and no source, config, migration, workflow, or CI file), the fmt/clippy/test gate exercises nothing in the diff, so pushing past the hook (`git push --no-verify`) is acceptable. Any commit that touches code stays subject to the full gate below.
+- More complete formatting and clippy checks can run before committing/pushing
+**CI only runs automatically on push for workflows that run entirely on our self-hosted runners (`binary-builder`, `api-builder`) — everything else is manual `workflow_dispatch` only.** We have limited monthly free GitHub Actions usage, so any workflow (or job within one) that runs on a GitHub-hosted runner (e.g. `ubuntu-latest`) must stay manual-dispatch-only to avoid burning those minutes; self-hosted runners have unlimited minutes, so `lint-and-clippy.yml` and `cross-build.yml` trigger automatically on push since they run entirely on `binary-builder`. Don't add a `push`/`pull_request` trigger to a workflow that touches a GitHub-hosted runner. The local hooks are still the safety net for anything that isn't covered by an automatic run. Before pushing, either install the tracked hooks once per clone with `./scripts/setup-hooks.sh` (sets `core.hooksPath = .githooks`; `.githooks/pre-push` runs the full gate), or, if you haven't, run it by hand:
 
 ```bash
 cargo fmt --all -- --check
@@ -113,11 +174,18 @@ The pre-push hook does not run Docker-backed smoke by default. Opt in with
 
 ## Current state
 
-**M9 (search) complete; M10 (history backfill) landing** — M6 (mutations) is complete and the post-M6 sequence was rethought (see `docs/mvp/implementation.md` "Milestone resequencing" + ADR 0022). **M7** is account lifecycle & auth, in three phases: **7a** the Matrix-account lifecycle (login/verify/recover/logout/delete) — which also folds in the interactive SAS verification deferred from M5 (the old "5c") as its *last* PR; **7b** the client↔axon bearer-token gate (was M8); **7c** sender-device trust. 7a's interactive-verification work landed in `axon-sync` (not `axon-crypto` — that crate stays a stub). **M8** moves relation aggregation (edits/reactions/replies/threads — and subsumes the old standalone Threads milestone) server-side, in two PRs: **8a** the store-layer backend, **8b** the API surface. **M9** adds the `axon-search` Tantivy full-text index, in two PRs: **9a** the indexing engine (schema/analyzer, the single-writer actor draining a transactional `search_outbox`, corpus seed from `events`, config), **9b** the `GET /v1/search` API + `axon search reindex` CLI. See ADR 0039. **M10** is history backfill — a continuous, throttled background task that pages each joined room's pre-existing history backward through the same ingestion path as live sync, plus a disk-space safety valve and left-room search semantics. See ADR 0043, ADR 0044.
+**Through M13 (deployment) landed; M14 (OAuth) in design.** M1–M10 are complete; M11 (media proxy), M12 (drafts), and M13 (deployment scaffolding) have merged, and M14 (an OAuth authorization server) is in design review. See "Since M10" immediately below for those; the older per-milestone notes follow. M6 (mutations) is complete and the post-M6 sequence was rethought (see `docs/mvp/implementation.md` "Milestone resequencing" + ADR 0022). **M7** is account lifecycle & auth, in three phases: **7a** the Matrix-account lifecycle (login/verify/recover/logout/delete) — which also folds in the interactive SAS verification deferred from M5 (the old "5c") as its *last* PR; **7b** the client↔axon bearer-token gate (was M8); **7c** sender-device trust. 7a's interactive-verification work landed in `axon-sync`, not `axon-crypto` (see the "`axon-crypto` stays a stub" convention). **M8** moves relation aggregation (edits/reactions/replies/threads — and subsumes the old standalone Threads milestone) server-side, in two PRs: **8a** the store-layer backend, **8b** the API surface. **M9** adds the `axon-search` Tantivy full-text index, in two PRs: **9a** the indexing engine (schema/analyzer, the single-writer actor draining a transactional `search_outbox`, corpus seed from `events`, config), **9b** the `GET /v1/search` API + `axon search reindex` CLI. See ADR 0039. **M10** is history backfill — a continuous, throttled background task that pages each joined room's pre-existing history backward through the same ingestion path as live sync, plus a disk-space safety valve and left-room search semantics. See ADR 0043, ADR 0044.
+
+**Since M10:**
+
+- **M11 — media proxy (PR 197, ADR 0045-media).** `axon-media` resolves `mxc://` URLs against the owning account's homeserver behind `GET /v1/media/{account_id}/{server}/{media_id}`, with range-request support and a bounded on-disk LRU cache (default 5 GB) purged on eviction and account deletion. No S3 backend — the homeserver is the durable source of truth (see "What not to build").
+- **M12 — drafts and per-device read state (partial).** The server-side `device_state` store, its `GET`/`PUT /v1/devices/{device_id}/state/{namespace}` route, and the `device_state.changed` WS fan-out — keyed `(account_id, device_id, namespace, key)`, last-write-wins by server clock (PR 191, ADR 0048) — were **dropped from `main` by a post-merge force-push** and restored in PR 226; verify they're present before building on them. The TUI's cross-device *draft* sync that consumes them landed (PR 192). Cross-device **read markers** (PR 196) were merged and then **reverted** (`116b3cb`), so read-marker state is not currently in `main` — treat that surface as unlanded until it returns.
+- **M13 — deployment scaffolding.** Platform-convention data/config/cache dirs (PR 206, ADR 0050); the `axon init` first-run config bootstrap that generates a starter config + `store_key` (PR 207/208, ADR 0051); and the Docker deployment framework (ADR 0052, PR 213 — **docs-only so far: the ADR is a proposal, no `Dockerfile` has landed, and `docker-compose.yml` is still the dev-only Postgres/Synapse stack**). `README.md` documents `axon init` and deployment; the full `docs/self-hosting.md` walkthrough and the tagged-release single-binary artifacts are still pending (#221).
+- **M14 — OAuth authorization server (design; PR 216, ADR 0054).** Proposed: axon becomes its own minimal OAuth 2.0 authorization server for its own public clients (PKCE mandatory) *and* an OIDC relying party to Apple/Google/Microsoft, purely to verify the bound owner (upstream tokens never leave the process). Planned as a 5-PR sequence (M14a ADR → M14b architecture/schema → M14c Apple → M14d Google → M14e Microsoft), built on the deferred iOS client-server prerequisites (ADR 0053, PR 214). It preserves ADR 0029's `TokenVerifier` seam exactly — four new nullable `tokens` columns, no change to the `Authorization` wire contract. Docs-only so far; no code has landed.
 
 Landed in 7a: PR 1 (the account state machine), PR 2 (runtime login, `POST /v1/accounts/login`), PR 3 (logout, `POST /v1/accounts/{id}/logout`), PR 3a (server-side homeserver discovery), PR 4 (DELETE teardown + boot reconcile + orphan-dir GC, #61), PR 5 (recovery-key key acquisition, `POST /v1/accounts/{id}/recover`, + `verified`-flag derivation), and PR 6 (interactive SAS verification, `…/verify` + `verification.*` WS frames, #76).
 
-7b (this PR) puts a bearer-token gate in front of the whole `/v1/` surface — see the 7b note below and ADR 0029.
+7b put a bearer-token gate in front of the whole `/v1/` surface — see the 7b note below and ADR 0029.
 
 Non-obvious choices made in 7a (state machine — see ADR 0022; discovery — ADR 0023):
 
