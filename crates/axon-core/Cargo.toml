@@ -10,7 +10,9 @@ license.workspace = true
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 figment    = { workspace = true, features = ["toml", "env"] }
+directories = { workspace = true }
 thiserror  = { workspace = true }
+tracing    = { workspace = true }
 uuid       = { workspace = true }
 
 [dev-dependencies]

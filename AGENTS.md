@@ -239,7 +239,7 @@ Non-obvious choices made in 3a (see ADRs 0006–0008, 0010, 0011):
 
 Non-obvious choices made in Milestone 2 (see ADRs 0002–0003):
 
-- **Config:** figment (TOML + env). Precedence low→high: defaults < TOML file < `DATABASE_URL` < `AXON_`-prefixed env (`__` = nesting, e.g. `AXON_SERVER__PORT`). File resolved from `$AXON_CONFIG`, else `./axon.toml`, else env-only. Sample at `axon.toml.example`.
+- **Config:** figment (TOML + env). Precedence low→high: defaults < TOML file < `DATABASE_URL` < `AXON_`-prefixed env (`__` = nesting, e.g. `AXON_SERVER__PORT`). File resolved from an explicit `--config`/`Config::load_from` path, else `$AXON_CONFIG`, else `./axon.toml`, else `<platform config dir>/axon.toml`, else env-only. Sample at `axon.toml.example`.
 - **Defaults:** bind `127.0.0.1:8080`; pool `max_connections = 5`; log `info` (overridable by `RUST_LOG`).
 - **Store:** sqlx with `tls-rustls` (no OpenSSL); migrations embedded via `sqlx::migrate!`. `Store` is a `Clone` handle over `PgPool`, shared into `axon-api` as router state.
 - **Migrations:** baseline migration only enables `pgcrypto` (no tables until M3–4). Timestamp-prefixed filenames — see ADR 0004.

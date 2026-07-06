@@ -1,4 +1,5 @@
-# Start axon-server: check prerequisites, configure environment, and run.
+# Start axon from a source checkout: check prerequisites, start a local
+# developer Postgres when needed, and run Cargo.
 # Uses a local Postgres instance if one is reachable; otherwise starts one via
 # Docker Compose and tears it down on exit.
 
@@ -27,17 +28,10 @@ function Test-LocalPostgres([string]$host, [int]$port) {
     }
 }
 
-function New-RandomHex([int]$byteCount) {
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $bytes = New-Object byte[] $byteCount
-    $rng.GetBytes($bytes)
-    $rng.Dispose()
-    return ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''
-}
-
 # --- Determine target early ---
 
 $target = if ($args.Count -gt 0) { $args[0] } else { 'server' }
+$extraArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
 $package = switch ($target) {
     'server' { 'axon-server' }
     'tui'    { 'axon-tui' }
@@ -68,7 +62,6 @@ if ($package -ne 'clean') {
 
 $loadedVars = @{}
 $envFile = Join-Path $PSScriptRoot '.env'
-$envExample = Join-Path $PSScriptRoot '.env.example'
 if (Test-Path $envFile) {
     Get-Content $envFile | ForEach-Object {
         if ($_ -match '^\s*#' -or $_ -match '^\s*$') { return }
@@ -111,47 +104,6 @@ if (-not $localPg -and ($package -eq 'axon-server' -or $package -eq 'clean')) {
         Write-Host "Error: Docker is installed but Docker Desktop is not running."
         Write-Host ""
         Write-Host "Start Docker Desktop from the Start menu or system tray and try again."
-        exit 1
-    }
-}
-
-# --- Offer guided configuration when no other database config exists ---
-
-$configFile = if ($env:AXON_CONFIG) {
-    $env:AXON_CONFIG
-} else {
-    Join-Path $PSScriptRoot 'axon.toml'
-}
-
-if ($package -eq 'axon-server' -and
-    -not (Test-Path $envFile) -and (Test-Path $envExample) -and
-    -not $env:DATABASE_URL -and -not $env:AXON_DATABASE__URL -and
-    -not (Test-Path $configFile)) {
-    $answer = Read-Host "No database configuration found. Create .env from .env.example now? [y/N]"
-    if ($answer -match '^[yY]') {
-        $storeKey = New-RandomHex 32
-        $pgPass = New-RandomHex 16
-        $content = Get-Content $envExample -Raw
-        $content = $content -replace 'AXON_SYNC__STORE_KEY=change-me', "AXON_SYNC__STORE_KEY=$storeKey"
-        $content = $content -replace '(?m)^POSTGRES_PASSWORD=.*', "POSTGRES_PASSWORD=$pgPass"
-        $content = $content -replace '(?m)^(DATABASE_URL=postgres://[^:]+:)[^@]+(@)', ('${1}' + $pgPass + '${2}')
-        [System.IO.File]::WriteAllText(
-            $envFile,
-            $content,
-            [System.Text.UTF8Encoding]::new($false)
-        )
-        Write-Host "Created .env with generated database and store keys."
-        $editor = if ($env:EDITOR) { $env:EDITOR } else { 'notepad' }
-        Write-Host "Opening in $editor to complete configuration. Save and close when done."
-        if ($env:EDITOR) {
-            & $env:EDITOR $envFile
-        } else {
-            Start-Process notepad $envFile -Wait
-        }
-        & $PSCommandPath @args
-        exit $LASTEXITCODE
-    } else {
-        Write-Host "Aborted. Configure the database in .env, axon.toml, or the environment, then re-run."
         exit 1
     }
 }
@@ -250,7 +202,7 @@ try {
         }
     }
 
-    & cargo run --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') -p $package
+    & cargo run --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') -p $package -- @extraArgs
     $exitCode = $LASTEXITCODE
 } finally {
     if ($package -eq 'axon-server' -and -not $localPg) {

@@ -10,6 +10,19 @@
 //!    (e.g. `AXON_SERVER__PORT=9090` sets `server.port`).
 //!
 //! Later layers override earlier ones.
+//!
+//! ## On-disk locations
+//!
+//! The durable SDK store ([`SyncConfig::data_dir`]) and search index
+//! ([`SearchConfig::index_path`]) default under the platform **data** directory,
+//! the disposable media cache ([`MediaConfig::cache_dir`]) under the platform
+//! **cache** directory, and the config file is discovered from the platform
+//! **config** directory (see [`Config::discover_config_path`]). These follow OS
+//! conventions — XDG on Linux, `~/Library` on macOS, Known Folders on Windows —
+//! via the `directories` crate (ADR 0050). Any of them can be overridden by its
+//! config key or the matching `AXON_*` env var. When no home directory is
+//! discoverable (e.g. a stripped-environment container), each falls back to a
+//! CWD-relative `axon-data/…` path.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -195,7 +208,7 @@ pub struct SearchConfig {
     /// Directory holding the Tantivy index. Must be durable; lives on the same
     /// disk as Postgres and inherits the operator's filesystem-level encryption
     /// (the index holds decrypted message text — see the tech spec). Defaults to
-    /// `axon-data/search`.
+    /// the platform data directory's `axon/search`.
     #[serde(default = "default_search_index_path")]
     pub index_path: PathBuf,
     /// Rows streamed per batch by the indexer — both the corpus seed and the
@@ -242,7 +255,8 @@ pub struct MediaConfig {
     pub enabled: bool,
     /// Directory holding the media cache, one subdirectory per account
     /// (`<cache_dir>/<account_id>/`). Need not be durable — a lost cache simply
-    /// re-fetches from the homeserver. Defaults to `axon-data/media`.
+    /// re-fetches from the homeserver. Defaults to the platform cache
+    /// directory's `axon/media`.
     #[serde(default = "default_media_cache_dir")]
     pub cache_dir: PathBuf,
     /// Total cache size cap, in bytes. When a fetch would push the cache over
@@ -359,8 +373,19 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// The platform's Axon directory set — data / config / cache roots following OS
+/// conventions (XDG on Linux, `~/Library` on macOS, Known Folders on Windows).
+///
+/// `None` when no home directory is discoverable (e.g. a stripped-environment
+/// container); callers fall back to a CWD-relative path in that case.
+fn project_dirs() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "", "axon")
+}
+
 fn default_sync_data_dir() -> PathBuf {
-    PathBuf::from("axon-data/sync")
+    project_dirs()
+        .map(|d| d.data_dir().join("sync"))
+        .unwrap_or_else(|| cwd_relative_fallback("sync"))
 }
 
 fn default_timeline_limit() -> u32 {
@@ -404,7 +429,9 @@ fn default_search_enabled() -> bool {
 }
 
 fn default_search_index_path() -> PathBuf {
-    PathBuf::from("axon-data/search")
+    project_dirs()
+        .map(|d| d.data_dir().join("search"))
+        .unwrap_or_else(|| cwd_relative_fallback("search"))
 }
 
 fn default_search_index_batch_size() -> i64 {
@@ -428,7 +455,18 @@ fn default_media_enabled() -> bool {
 }
 
 fn default_media_cache_dir() -> PathBuf {
-    PathBuf::from("axon-data/media")
+    project_dirs()
+        .map(|d| d.cache_dir().join("media"))
+        .unwrap_or_else(|| cwd_relative_fallback("media"))
+}
+
+fn cwd_relative_fallback(child: &str) -> PathBuf {
+    let path = PathBuf::from("axon-data").join(child);
+    tracing::warn!(
+        path = %path.display(),
+        "could not resolve platform Axon directories; falling back to CWD-relative storage"
+    );
+    path
 }
 
 fn default_media_max_bytes() -> u64 {
@@ -547,19 +585,58 @@ impl Config {
 
     /// Resolve a config file path, then [`load`](Config::load).
     ///
-    /// The file is taken from the `AXON_CONFIG` environment variable if set,
-    /// otherwise `./axon.toml` if it exists, otherwise no file layer is used.
+    /// The file is discovered from (see [`Config::discover_config_path`]): the `AXON_CONFIG`
+    /// environment variable, else `./axon.toml`, else
+    /// `<platform config dir>/axon.toml`, else no file layer.
     pub fn load_default() -> Result<Config, ConfigError> {
-        let path = Self::resolve_path();
+        Self::load_from(None)
+    }
+
+    /// Load configuration, preferring an explicitly-supplied config file path
+    /// (e.g. from the `--config` CLI flag) over environment/convention discovery.
+    ///
+    /// `Some(path)` uses that file directly; `None` falls back to
+    /// [`discover_config_path`](Config::discover_config_path).
+    pub fn load_from(explicit: Option<&Path>) -> Result<Config, ConfigError> {
+        let path = match explicit {
+            Some(path) => {
+                if !path.exists() {
+                    return Err(ConfigError::MissingConfigFile(path.to_path_buf()));
+                }
+                Some(path.to_path_buf())
+            }
+            None => Self::discover_config_path()?,
+        };
         Config::load(path.as_deref())
     }
 
-    fn resolve_path() -> Option<PathBuf> {
+    /// Discover the config file path when none is passed explicitly:
+    /// `AXON_CONFIG` if set, else `./axon.toml` if it exists, else
+    /// `<platform config dir>/axon.toml` if it exists, else `None`.
+    ///
+    /// A `None` here is what tells the binary "no configuration is in place" — the
+    /// signal `axon init` (ADR 0051) keys its first-run offer on.
+    pub fn discover_config_path() -> Result<Option<PathBuf>, ConfigError> {
         if let Ok(explicit) = std::env::var("AXON_CONFIG") {
-            return Some(PathBuf::from(explicit));
+            let path = PathBuf::from(explicit);
+            if !path.exists() {
+                return Err(ConfigError::MissingConfigFile(path));
+            }
+            return Ok(Some(path));
         }
-        let default = PathBuf::from("axon.toml");
-        default.exists().then_some(default)
+        let cwd = PathBuf::from("axon.toml");
+        if cwd.exists() {
+            return Ok(Some(cwd));
+        }
+        Ok(Self::platform_config_path().filter(|p| p.exists()))
+    }
+
+    /// The platform config-dir target for a generated config
+    /// (`<platform config dir>/axon.toml`), regardless of whether it exists yet —
+    /// the default write location for `axon init` (ADR 0051). `None` when no home
+    /// directory is discoverable.
+    pub fn platform_config_path() -> Option<PathBuf> {
+        project_dirs().map(|d| d.config_dir().join("axon.toml"))
     }
 
     /// The socket address to bind, derived from `server.host` and `server.port`.
@@ -660,9 +737,15 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // Pin the platform data root so the default resolves deterministically
+            // regardless of the test runner's HOME/XDG.
+            jail.set_env("XDG_DATA_HOME", "/xdg/data");
             let config = Config::load(None).expect("load");
             assert!(config.search.enabled);
-            assert_eq!(config.search.index_path, PathBuf::from("axon-data/search"));
+            assert_eq!(
+                config.search.index_path,
+                PathBuf::from("/xdg/data/axon/search")
+            );
             assert_eq!(config.search.index_batch_size, 1000);
             assert_eq!(config.search.build_throttle_ms, 0);
             assert_eq!(config.search.writer_heap_mb, 50);
@@ -686,9 +769,15 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // Disposable cache defaults under the platform cache root, not the
+            // data root; pin it so the assertion is runner-independent.
+            jail.set_env("XDG_CACHE_HOME", "/xdg/cache");
             let config = Config::load(None).expect("load");
             assert!(config.media.enabled);
-            assert_eq!(config.media.cache_dir, PathBuf::from("axon-data/media"));
+            assert_eq!(
+                config.media.cache_dir,
+                PathBuf::from("/xdg/cache/axon/media")
+            );
             assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
             assert_eq!(config.media.fetch_timeout_secs, 60);
@@ -716,8 +805,10 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            // Durable state defaults under the platform data root.
+            jail.set_env("XDG_DATA_HOME", "/xdg/data");
             let config = Config::load(None).expect("load");
-            assert_eq!(config.sync.data_dir, PathBuf::from("axon-data/sync"));
+            assert_eq!(config.sync.data_dir, PathBuf::from("/xdg/data/axon/sync"));
             assert!(config.sync.store_key.is_none());
             assert!(config.sync.account.is_none());
             Ok(())
@@ -783,5 +874,84 @@ mod tests {
                 device_id: Some("DEV")
             })
         ));
+    }
+
+    // The XDG mapping (the Linux branch CI exercises; macOS/Windows are
+    // documented in ADR 0050) is asserted by the `_defaults_when_absent` tests
+    // above, which pin `XDG_DATA_HOME` / `XDG_CACHE_HOME`. The tests below cover
+    // config-file discovery from the platform config dir and CLI-path precedence.
+
+    #[test]
+    fn config_file_discovered_from_platform_config_dir() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            // Point the XDG config root inside the jail so we can seed a file at
+            // <config dir>/axon/axon.toml and prove `discover_config_path` finds it when
+            // neither AXON_CONFIG nor ./axon.toml is present.
+            let cfg_home = jail.directory().join("cfg");
+            jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
+            jail.create_dir("cfg/axon")?;
+            jail.create_file(
+                "cfg/axon/axon.toml",
+                r#"
+                    [database]
+                    url = "postgres://cfgdir@localhost/db"
+                "#,
+            )?;
+            let config = Config::load_default().expect("load");
+            assert_eq!(config.database.url, "postgres://cfgdir@localhost/db");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn explicit_path_beats_env_and_convention() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            // AXON_CONFIG points at one file; the explicit arg at another.
+            jail.create_file(
+                "env.toml",
+                r#"
+                    [database]
+                    url = "postgres://env@localhost/db"
+                "#,
+            )?;
+            jail.create_file(
+                "explicit.toml",
+                r#"
+                    [database]
+                    url = "postgres://explicit@localhost/db"
+                "#,
+            )?;
+            jail.set_env("AXON_CONFIG", "env.toml");
+            let config = Config::load_from(Some(Path::new("explicit.toml"))).expect("load");
+            assert_eq!(config.database.url, "postgres://explicit@localhost/db");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn explicit_missing_config_path_is_an_error() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let err = Config::load_from(Some(Path::new("missing.toml"))).expect_err("missing");
+            assert!(
+                matches!(err, ConfigError::MissingConfigFile(path) if path == Path::new("missing.toml"))
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn axon_config_missing_path_is_an_error() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("AXON_CONFIG", "missing-env.toml");
+            let err = Config::load_default().expect_err("missing");
+            assert!(
+                matches!(err, ConfigError::MissingConfigFile(path) if path == Path::new("missing-env.toml"))
+            );
+            Ok(())
+        });
     }
 }

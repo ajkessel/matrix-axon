@@ -137,6 +137,9 @@ BIN=$PWD/target/debug/axon
 mkdir -p /tmp/axon-smoke && cd /tmp/axon-smoke
 DATABASE_URL=postgres://axon:axon@127.0.0.1:5433/axon \
 AXON_SERVER__PORT=18080 \
+AXON_SYNC__DATA_DIR=/tmp/axon-smoke/axon-data/sync \
+AXON_SEARCH__INDEX_PATH=/tmp/axon-smoke/axon-data/search \
+AXON_MEDIA__CACHE_DIR=/tmp/axon-smoke/axon-data/media \
 AXON_SYNC__STORE_KEY=local-smoke-key \
 AXON_SYNC__ACCOUNT__USER_ID=@alice:localhost \
 AXON_SYNC__ACCOUNT__HOMESERVER_URL=http://localhost:8008 \
@@ -180,9 +183,10 @@ SEED_MESSAGE_COUNT=3 \
 Grab the `recovery_key` and `room_id` from that JSON, then:
 
 1. **Fresh axon device, no recovery key** — run axon as in step 3 but wipe its
-   SDK store first so it starts unverified. Historical messages persist as UTDs:
+   pinned SDK/search/media paths first so it starts unverified and leaves no
+   platform-dir state behind. Historical messages persist as UTDs:
    ```sh
-   rm -rf /tmp/axon-smoke/axon-data   # force a fresh, unverified device
+   rm -rf /tmp/axon-smoke/axon-data   # force a fresh, isolated device
    # …run axon (no AXON_SYNC__ACCOUNT__RECOVERY_KEY)…
    docker exec matrix-axon-postgres-1 psql -U axon -d axon -tAc \
      "SELECT event_type, content IS NOT NULL AS decrypted, megolm_session_id IS NOT NULL AS has_session, count(*) \

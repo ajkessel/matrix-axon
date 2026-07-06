@@ -64,12 +64,20 @@ fs4 = { version = "0.13" }
 matrix-sdk    = { version = "0.18" }
 matrix-sdk-ui = { version = "0.18" }
 
+# Platform-standard data/config/cache directory resolution (XDG on Linux,
+# ~/Library on macOS, Known Folders on Windows) for the on-disk store defaults.
+directories = { version = "6" }
+
 # Config + serialization
 figment    = { version = "0.10" }
 serde      = { version = "1" }
 serde_json = { version = "1" }
 toml       = { version = "0.8" }
 toml_edit  = { version = "0.22" }
+# URL parsing — `axon init` (ADR 0051) derives Postgres credentials from the
+# database URL it writes, to start a matching local Docker container.
+url        = { version = "2" }
+percent-encoding = { version = "2" }
 base64     = { version = "0.22" }
 mime       = { version = "0.3" }
 reqwest    = { version = "0.13", default-features = false }

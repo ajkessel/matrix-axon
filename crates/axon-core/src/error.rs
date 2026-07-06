@@ -8,6 +8,7 @@
 //! crate dependency graph acyclic. `anyhow` is used only at the `axon-server`
 //! binary boundary, never in libraries.
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Top-level error for the Axon workspace.
@@ -36,6 +37,10 @@ pub enum ConfigError {
     /// `Result` carrying it.
     #[error("failed to load configuration: {0}")]
     Figment(#[from] Box<figment::Error>),
+
+    /// A caller requested a specific config file path, but it does not exist.
+    #[error("configuration file does not exist: {0}")]
+    MissingConfigFile(PathBuf),
 
     /// Configuration parsed but failed a semantic check (e.g. an account
     /// supplied neither or both of `password` / `access_token`). Validated

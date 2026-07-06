@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
-# Start axon-server: check prerequisites, configure environment, and run.
+# Start axon from a source checkout: check prerequisites, start a local
+# developer Postgres when needed, and run Cargo.
 # Uses a local Postgres instance if one is reachable; otherwise starts one via
 # Docker Compose and tears it down on exit.
 
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || exit 1
 env_file="$script_dir/.env"
-env_example="$script_dir/.env.example"
 
 compose() {
 	docker compose --project-directory "$script_dir" \
@@ -127,40 +127,6 @@ You will need to start Docker Desktop from Applications after installing, and ke
 		fi
 		exit 1
 	fi
-fi
-
-# --- Offer guided configuration when no other database config exists ---
-
-config_file=${AXON_CONFIG:-"$script_dir/axon.toml"}
-if [ "$_pkg" = "axon-server" ] && [ ! -f "$env_file" ] && [ -f "$env_example" ] &&
-	[ -z "${DATABASE_URL:-}" ] && [ -z "${AXON_DATABASE__URL:-}" ] &&
-	[ ! -f "$config_file" ]; then
-	printf "No database configuration found. Create .env from .env.example now? [y/N] "
-	read -r answer
-	case "$answer" in
-	[yY] | [yY][eE][sS])
-		if command -v openssl >/dev/null 2>&1; then
-			store_key="$(openssl rand -hex 32)"
-			pg_pass="$(openssl rand -hex 16)"
-		else
-			store_key="$(od -vN 32 -An -tx1 /dev/urandom | tr -d ' \n')"
-			pg_pass="$(od -vN 16 -An -tx1 /dev/urandom | tr -d ' \n')"
-		fi
-		sed \
-			-e "s/AXON_SYNC__STORE_KEY=change-me/AXON_SYNC__STORE_KEY=$store_key/" \
-			-e "s/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$pg_pass/" \
-			-e "s|DATABASE_URL=postgres://\([^:]*\):[^@]*@|DATABASE_URL=postgres://\1:${pg_pass}@|" \
-			"$env_example" >"$env_file"
-		echo "Created .env with generated database and store keys."
-		echo "Opening in ${EDITOR:-vi} to complete configuration. Save and close when done."
-		"${EDITOR:-vi}" "$env_file"
-		exec "$0" "$@"
-		;;
-	*)
-		echo "Aborted. Configure the database in .env, axon.toml, or the environment, then re-run."
-		exit 1
-		;;
-	esac
 fi
 
 # --- Run ---

@@ -128,8 +128,9 @@ USER_ID="@${LOCALPART}:localhost"
 PASSWORD="pass-${SUFFIX}"
 # Isolated run dir: axon loads .env via dotenvy from cwd upward, and the project
 # .env points at a *remote* account. Running from here keeps us off it, and the
-# SDK store (axon-data/sync) is created fresh under here so device B starts
-# unverified. The same dir is reused on restart so the device persists.
+# SDK/search/media paths are pinned under here so device B starts unverified and
+# the run leaves no platform-dir state behind. The same dir is reused on restart
+# so the device persists.
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/axon-itest.XXXXXX")"
 AXON_PID=""
 MEDIA_FIXTURE="${RUN_DIR}/media-verification.png"
@@ -233,6 +234,9 @@ run_axon() {
     local -a envs=(
         DATABASE_URL="$DATABASE_URL"
         AXON_SERVER__PORT=18080
+        AXON_SYNC__DATA_DIR="${RUN_DIR}/axon-data/sync"
+        AXON_SEARCH__INDEX_PATH="${RUN_DIR}/axon-data/search"
+        AXON_MEDIA__CACHE_DIR="${RUN_DIR}/axon-data/media"
         AXON_SYNC__STORE_KEY="itest-store-key"
         AXON_SYNC__ACCOUNT__USER_ID="$USER_ID"
         AXON_SYNC__ACCOUNT__HOMESERVER_URL="$HS_URL"

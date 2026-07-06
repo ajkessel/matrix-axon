@@ -3,11 +3,13 @@
 //! With no subcommand it runs the server. Boot sequence: load config, initialize
 //! tracing, connect the store (running migrations), build the router, then serve
 //! until a shutdown signal arrives. The `token` subcommand (M7b) is a short-lived
-//! DB-only path for managing client bearer tokens — see [`token`].
+//! DB-only path for managing client bearer tokens — see [`token`]. The `init`
+//! subcommand (M13) generates a starter config on first run — see [`init`].
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
 mod cli;
 mod gateway;
+mod init;
 mod lifecycle;
 mod media;
 mod search;
@@ -16,6 +18,7 @@ mod token;
 mod trust;
 mod verification;
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,14 +47,56 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Config first, so we know how to configure logging.
-    let config = Config::load_default().context("loading configuration")?;
+    // `init` (M13, ADR 0051) generates the config, so it must run *before* — and
+    // without — a successful config load; it's the one path that works with no
+    // configuration in place.
+    if let Some(Command::Init(args)) = &cli.command {
+        return init::run(args, cli.config.as_deref()).await;
+    }
+
+    // Config first, so we know how to configure logging. A `--config` flag (if
+    // given) takes precedence over `AXON_CONFIG` / convention discovery.
+    let config = match Config::load_from(cli.config.as_deref()) {
+        Ok(config) => config,
+        Err(err) => {
+            // First-run sugar: bare `axon` with no configuration anywhere, on an
+            // interactive terminal, offers to generate one (delegating to the same
+            // `init` routine). Every other case — a subcommand, an explicit
+            // `--config`, a config file present but broken, or no TTY — fails fast,
+            // and never blocks a headless boot on a prompt (ADR 0051).
+            let discovered = match Config::discover_config_path() {
+                Ok(path) => path,
+                Err(_) => return Err(err).context("loading configuration"),
+            };
+            let first_run = cli.command.is_none()
+                && cli.config.is_none()
+                && discovered.is_none()
+                && !config_env_present()
+                && std::io::stdin().is_terminal();
+            if first_run {
+                match init::offer_on_first_run(cli.config.as_deref()).await? {
+                    Some(config) => config,
+                    None => return Err(err).context("loading configuration"),
+                }
+            } else if discovered.is_none() && cli.config.is_none() && !config_env_present() {
+                return Err(err).context(
+                    "no configuration found. Run `axon init` to create one, or set the database \
+                     URL via DATABASE_URL / AXON_DATABASE__URL. See axon.toml.example for the \
+                     full reference.",
+                );
+            } else {
+                return Err(err).context("loading configuration");
+            }
+        }
+    };
 
     init_tracing(&config.log.level);
 
     match cli.command {
         Some(Command::Token { action }) => token::run(action, &config).await,
         Some(Command::Search { action }) => search::run(action, &config),
+        // Handled above, before config load.
+        Some(Command::Init(_)) => unreachable!("init runs before config load"),
         None => serve(config).await,
     }
 }
@@ -263,6 +308,14 @@ fn init_tracing(level: &str) {
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
+
+fn config_env_present() -> bool {
+    std::env::var_os("DATABASE_URL").is_some()
+        || std::env::vars_os().any(|(key, _)| {
+            key.to_str()
+                .is_some_and(|key| key.starts_with("AXON_") && key != "AXON_CONFIG")
+        })
 }
 
 /// Resolve when the process receives Ctrl-C or (on Unix) SIGTERM, so the server

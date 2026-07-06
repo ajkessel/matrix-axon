@@ -31,7 +31,14 @@ See [ADR 0031](docs/adr/0031-client-strategy.md) for the client strategy and seq
 
 Prerequisites: Rust (stable). Docker is only needed if you don't have a local Postgres instance.
 
-Once prerequisites are installed, the quickest path is:
+Once prerequisites are installed, generate a starter config once:
+
+```bash
+cargo run -p axon-server -- init
+```
+
+`axon init` writes a minimal config with a generated `store_key` and Postgres URL.
+After that, run from the source checkout with:
 
 ```bash
 ./run.sh          # macOS / Linux / WSL  — starts axon-server (default)
@@ -42,10 +49,10 @@ Once prerequisites are installed, the quickest path is:
 .\run.ps1 clean   # destroys Postgres data volume and exits (no rebuild)
 ```
 
-The run script handles the rest automatically: validates that required
-environment variables are set (offering to create `.env` from `.env.example`
-if neither exists), runs the chosen target, and tears down any containers it
-started on exit — whether by Ctrl-C, SIGTERM, or any other cause.
+The run script is source-checkout developer scaffolding: it loads `.env` if one
+exists, runs the chosen target, and tears down any containers it started on exit
+— whether by Ctrl-C, SIGTERM, or any other cause. First-run config and secret
+generation live in `axon init`, not in the shell scripts.
 
 **Postgres:** if a Postgres instance is already reachable at
 `POSTGRES_HOST:POSTGRES_PORT` (defaulting to `127.0.0.1:5432`) when the
@@ -116,12 +123,20 @@ SQL
 ### 3. Configure
 
 ```bash
-cp .env.example .env
+cargo run -p axon-server -- init
 ```
 
-The server loads `.env` automatically on startup. The defaults in `.env.example` match the docker-compose settings; adjust `DATABASE_URL` if your Postgres is configured differently.
+`axon init` writes the generated config to the platform config directory by
+default (or to `--config <PATH>` if you pass one). It generates a real
+`sync.store_key`; do not use the `change-me` placeholder from the example file
+for a live instance.
 
-> **Local Postgres detected automatically.** If you already have Postgres running on `127.0.0.1:5432` (Homebrew, Postgres.app, a system package, etc.), `run.sh`/`run.ps1` will detect it and skip Docker entirely. Just make sure the role and database exist (see the "Without Docker" step above) and that `DATABASE_URL` in your `.env` points to it. To use a different host or port, set `POSTGRES_HOST` and `POSTGRES_PORT` in `.env`.
+The server also loads `.env` automatically on startup. `.env.example` remains a
+manual reference for development or CI environments that prefer environment
+variables; if you copy it, replace `AXON_SYNC__STORE_KEY=change-me` with a real
+secret and adjust `DATABASE_URL` if your Postgres is configured differently.
+
+> **Local Postgres detected automatically.** If you already have Postgres running on `127.0.0.1:5432` (Homebrew, Postgres.app, a system package, etc.), `run.sh`/`run.ps1` will detect it and skip Docker entirely. Just make sure the role and database exist (see the "Without Docker" step above) and that `database.url` in your generated config points to it. For the manual env-var path, set `DATABASE_URL` in `.env`; to use a different host or port for launcher detection, set `POSTGRES_HOST` and `POSTGRES_PORT` in `.env` or your shell.
 >
 > **macOS + Docker note:** `localhost` can resolve to IPv6 (`::1`) on macOS, but Docker only binds to IPv4. The examples use `127.0.0.1` explicitly to avoid this.
 
