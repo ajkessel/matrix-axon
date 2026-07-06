@@ -12,5 +12,8 @@ pub mod message;
 
 pub use config::{AccountProvision, Config, Credential, MediaConfig, SearchConfig, SyncConfig};
 pub use error::{ConfigError, Error, Result};
-pub use live::{LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
+pub use live::{
+    DeviceStateFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
+    VerificationFrameKind,
+};
 pub use message::{Formatted, Relation};

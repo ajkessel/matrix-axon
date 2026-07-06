@@ -1917,6 +1917,194 @@
         }
       }
     },
+    "/v1/devices/{device_id}/state/{namespace}": {
+      "get": {
+        "tags": [
+          "device-state"
+        ],
+        "summary": "Read one namespace of per-device state: the last-write-wins **merged view\nacross all the account's devices** (per key, the newest write wins; deleted\nkeys are absent). A namespace never written is an empty map, not a `404`.\nThe `device_id` names the calling device; the merge is account-wide.",
+        "operationId": "get_device_state",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "description": "The calling device (client-supplied UUID)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The state namespace, e.g. `drafts`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "The Axon account this state belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The merged namespace state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_DeviceStateDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing account_id or malformed device_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "device-state"
+        ],
+        "summary": "Write per-device state: a **merge-upsert** of the supplied entries under the\ncalling device. Only the keys present are touched; a `null` value deletes\nthe key (a tombstone, so the deletion wins the cross-device merge).\nLast-write-wins on the server clock — the returned `updated_at` is the\nordering all devices share. A successful write with at least one entry fans\nout a `device_state.changed` frame over `/v1/ws` carrying this `device_id`,\nwhich sibling devices apply and the originator ignores.",
+        "operationId": "put_device_state",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "description": "The writing device (client-supplied UUID; first PUT registers it)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The state namespace, e.g. `drafts`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "account_id",
+            "in": "query",
+            "description": "The Axon account this state belongs to.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutDeviceStateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The write's server timestamp",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_PutDeviceStateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing account_id, malformed device_id, empty entries, or an over-limit write (more than 64 entries, a value over 64 KiB, a key over 512 bytes, or a namespace over 64 bytes)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/media/{account_id}/{server_name}/{media_id}": {
       "get": {
         "tags": [
@@ -2487,6 +2675,39 @@
           }
         }
       },
+      "ApiResponse_DeviceStateDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left.",
+            "required": [
+              "namespace",
+              "entries"
+            ],
+            "properties": {
+              "entries": {
+                "type": "object",
+                "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/DeviceStateEntryDto"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "namespace": {
+                "type": "string",
+                "description": "The namespace read, e.g. `drafts`."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_EventDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -2678,6 +2899,28 @@
               "user_id": {
                 "type": "string",
                 "description": "The user being verified — the account's own user id for self-verification,\nor the peer's user id for cross-user verification (ADR 0040)."
+              }
+            }
+          }
+        }
+      },
+      "ApiResponse_PutDeviceStateResponse": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response of `PUT /v1/devices/{device_id}/state/{namespace}` (M12).",
+            "required": [
+              "updated_at"
+            ],
+            "properties": {
+              "updated_at": {
+                "type": "string",
+                "description": "When the write landed (server clock), RFC 3339 — the last-write-wins\nordering all devices share."
               }
             }
           }
@@ -3384,6 +3627,53 @@
           }
         }
       },
+      "DeviceStateDto": {
+        "type": "object",
+        "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left.",
+        "required": [
+          "namespace",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "object",
+            "description": "The merged entries, keyed by the client-chosen key (e.g. a room id).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DeviceStateEntryDto"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "namespace": {
+            "type": "string",
+            "description": "The namespace read, e.g. `drafts`."
+          }
+        }
+      },
+      "DeviceStateEntryDto": {
+        "type": "object",
+        "description": "One winning entry in a merged device-state read (M12).",
+        "required": [
+          "value",
+          "device_id",
+          "updated_at"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The device that wrote the winning value."
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "When the winning value was written (server clock), RFC 3339."
+          },
+          "value": {
+            "description": "The opaque value the winning device wrote. Axon never interprets it."
+          }
+        }
+      },
       "EditRequest": {
         "type": "object",
         "description": "Request body for editing a message (`PUT …/events/{event_id}`). Replaces the\ntarget event's text via an `m.replace` relation.\n\nLike [`SendMessageRequest`], `format` + `formatted_body` are optional and must\nbe supplied together to set rich text on the replacement.",
@@ -3704,6 +3994,36 @@
           "user_id": {
             "type": "string",
             "description": "Matrix user ID (the `m.room.member` state key)."
+          }
+        }
+      },
+      "PutDeviceStateRequest": {
+        "type": "object",
+        "description": "Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.\nOnly the keys present are touched — other keys in the namespace are left\nalone — and a `null` value deletes the key (stored as a tombstone so the\ndeletion wins the cross-device merge).",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "object",
+            "description": "The entries to write, keyed by the client-chosen key. `null` deletes.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PutDeviceStateResponse": {
+        "type": "object",
+        "description": "Response of `PUT /v1/devices/{device_id}/state/{namespace}` (M12).",
+        "required": [
+          "updated_at"
+        ],
+        "properties": {
+          "updated_at": {
+            "type": "string",
+            "description": "When the write landed (server clock), RFC 3339 — the last-write-wins\nordering all devices share."
           }
         }
       },
@@ -4185,6 +4505,10 @@
     {
       "name": "media",
       "description": "Authenticated MXC media proxy"
+    },
+    {
+      "name": "device-state",
+      "description": "Per-device client state: drafts, read markers"
     }
   ]
 }

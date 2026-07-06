@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use axon_store::{Account, AccountState, ReactionTally, RoomSummary, ThreadSummary, TimelineRow};
+use axon_store::{
+    Account, AccountState, DeviceStateRow, ReactionTally, RoomSummary, ThreadSummary, TimelineRow,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -746,4 +748,58 @@ impl From<ThreadSummary> for ThreadSummaryDto {
             latest_reply_ts: s.latest_reply_ts,
         }
     }
+}
+
+/// One namespace of per-device client state (M12, ADR 0048), as the merged
+/// last-write-wins view across *all* the account's devices: per key, the newest
+/// write wins and deleted keys are absent. This is what
+/// `GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting
+/// client sees the state its sibling devices left.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeviceStateDto {
+    /// The namespace read, e.g. `drafts`.
+    pub namespace: String,
+    /// The merged entries, keyed by the client-chosen key (e.g. a room id).
+    pub entries: BTreeMap<String, DeviceStateEntryDto>,
+}
+
+/// One winning entry in a merged device-state read (M12).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeviceStateEntryDto {
+    /// The opaque value the winning device wrote. Axon never interprets it.
+    pub value: Value,
+    /// The device that wrote the winning value.
+    pub device_id: Uuid,
+    /// When the winning value was written (server clock), RFC 3339.
+    pub updated_at: String,
+}
+
+impl From<DeviceStateRow> for DeviceStateEntryDto {
+    fn from(row: DeviceStateRow) -> Self {
+        DeviceStateEntryDto {
+            // The merged store read drops tombstone winners, so a row here
+            // always carries a value.
+            value: row.value.unwrap_or(Value::Null),
+            device_id: row.device_id,
+            updated_at: row.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.
+/// Only the keys present are touched — other keys in the namespace are left
+/// alone — and a `null` value deletes the key (stored as a tombstone so the
+/// deletion wins the cross-device merge).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutDeviceStateRequest {
+    /// The entries to write, keyed by the client-chosen key. `null` deletes.
+    pub entries: BTreeMap<String, Option<Value>>,
+}
+
+/// Response of `PUT /v1/devices/{device_id}/state/{namespace}` (M12).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PutDeviceStateResponse {
+    /// When the write landed (server clock), RFC 3339 — the last-write-wins
+    /// ordering all devices share.
+    pub updated_at: String,
 }

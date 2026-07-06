@@ -8,6 +8,7 @@
 
 mod accounts;
 mod backfill;
+mod device_state;
 mod error;
 mod events;
 mod migrations;
@@ -18,6 +19,7 @@ mod tokens;
 
 pub use accounts::{Account, AccountState};
 pub use backfill::{AccountBackfillProgress, RoomBackfillState};
+pub use device_state::{DeviceStateRow, DeviceStateUpsert};
 pub use error::StoreError;
 pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,

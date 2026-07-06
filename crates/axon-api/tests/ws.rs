@@ -319,3 +319,100 @@ async fn ws_socket_closes_when_token_is_revoked() {
 
     server.abort();
 }
+
+/// M12: a `PUT /v1/devices/…/state/…` fans out one `device_state.changed`
+/// frame carrying the originator device (for client-side echo suppression),
+/// the namespace, and the written entries — including `null` for a deleted key.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ws_streams_device_state_changes() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@ws-devstate-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+
+    let (live, _) = broadcast::channel::<LiveFrame>(16);
+    let app = axon_api::router(AppState::new(
+        store,
+        live.clone(),
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
+        None,
+    ));
+    // Both clones share the same AppState (and live bus): one is served for the
+    // WebSocket, the other drives the PUT via oneshot.
+    let http_app = app.clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    let url = format!("ws://{addr}/v1/ws");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(authed_request(&url))
+        .await
+        .expect("ws connect");
+
+    // PUT one draft and one deletion through the real handler.
+    let device_id = Uuid::new_v4();
+    let body = json!({ "entries": {
+        "!room:localhost": { "text": "hello from A" },
+        "!cleared:localhost": null,
+    }});
+    let req = axum::http::Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/v1/devices/{device_id}/state/drafts?account_id={account_id}"
+        ))
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    use tower::ServiceExt;
+    let resp = http_app.oneshot(req).await.expect("PUT");
+    assert_eq!(resp.status(), 200);
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a frame within the timeout")
+        .expect("stream still open")
+        .expect("a websocket message");
+    let text = match frame {
+        Message::Text(text) => text,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
+    assert_eq!(envelope["type"], "device_state.changed");
+    assert_eq!(envelope["account_id"], account_id.to_string());
+    assert_eq!(envelope["payload"]["device_id"], device_id.to_string());
+    assert_eq!(envelope["payload"]["namespace"], "drafts");
+    assert_eq!(
+        envelope["payload"]["entries"]["!room:localhost"]["text"],
+        "hello from A"
+    );
+    // The deletion rides as an explicit null so receivers clear the key.
+    assert!(envelope["payload"]["entries"]["!cleared:localhost"].is_null());
+    assert!(envelope["payload"]["updated_at"].is_string());
+
+    ws.close(None).await.ok();
+    server.abort();
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}

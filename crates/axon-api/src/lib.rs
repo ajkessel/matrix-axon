@@ -158,6 +158,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
             post(routes::messages::react),
         )
+        // Per-device client state (M12): drafts / read markers, GET the merged
+        // cross-device view and PUT a merge-upsert that fans out over /v1/ws.
+        .route(
+            "/v1/devices/{device_id}/state/{namespace}",
+            get(routes::device_state::get_device_state).put(routes::device_state::put_device_state),
+        )
         // Media proxy. Authenticated download of an `mxc://` resource through
         // the account's live homeserver connection. Returns raw bytes, not the
         // JSON envelope, so it is not expressible cleanly in the same response

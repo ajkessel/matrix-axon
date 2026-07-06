@@ -33,7 +33,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axon_core::{LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
+use axon_core::{
+    DeviceStateFrame, LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind,
+};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -102,6 +104,38 @@ impl From<SenderTrustFrame> for SenderTrustFramePayload {
         Self {
             user_id: frame.user_id,
             verification_violation: frame.verification_violation,
+        }
+    }
+}
+
+/// The `type` tag for a per-device state change frame (M12).
+const DEVICE_STATE_CHANGED: &str = "device_state.changed";
+
+/// The wire payload for a `device_state.changed` frame: the originating device,
+/// the namespace, and the written entries (`null` = the key was deleted).
+/// Receivers whose own device id matches `device_id` drop the frame (echo
+/// suppression); on reconnect clients re-read the merged view over HTTP rather
+/// than assuming the frames they missed.
+#[derive(Debug, Serialize)]
+struct DeviceStateFramePayload {
+    device_id: Uuid,
+    namespace: String,
+    entries: serde_json::Map<String, serde_json::Value>,
+    /// RFC 3339, matching the read API's timestamp shape.
+    updated_at: String,
+}
+
+impl From<DeviceStateFrame> for DeviceStateFramePayload {
+    fn from(frame: DeviceStateFrame) -> Self {
+        Self {
+            device_id: frame.device_id,
+            namespace: frame.namespace,
+            entries: frame
+                .entries
+                .into_iter()
+                .map(|(key, value)| (key, value.unwrap_or(serde_json::Value::Null)))
+                .collect(),
+            updated_at: frame.updated_at.to_rfc3339(),
         }
     }
 }
@@ -201,6 +235,11 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             kind: SENDER_TRUST_VIOLATION,
             account_id: frame.account_id,
             payload: SenderTrustFramePayload::from(frame),
+        }),
+        LiveFrame::DeviceState(frame) => serde_json::to_string(&WsEnvelope {
+            kind: DEVICE_STATE_CHANGED,
+            account_id: frame.account_id,
+            payload: DeviceStateFramePayload::from(frame),
         }),
     }
 }
@@ -380,6 +419,33 @@ mod tests {
             outcome: None,
         }));
         assert_eq!(done["type"], "verification.done");
+    }
+
+    #[test]
+    fn device_state_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let v = decode(LiveFrame::DeviceState(DeviceStateFrame {
+            account_id,
+            device_id,
+            namespace: "drafts".to_owned(),
+            entries: vec![
+                (
+                    "!r:localhost".to_owned(),
+                    Some(serde_json::json!({"text": "hi"})),
+                ),
+                ("!gone:localhost".to_owned(), None),
+            ],
+            updated_at: chrono::Utc::now(),
+        }));
+        assert_eq!(v["type"], "device_state.changed");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["device_id"], device_id.to_string());
+        assert_eq!(v["payload"]["namespace"], "drafts");
+        assert_eq!(v["payload"]["entries"]["!r:localhost"]["text"], "hi");
+        // A deletion rides as an explicit null, not an absent key.
+        assert!(v["payload"]["entries"]["!gone:localhost"].is_null());
+        assert!(v["payload"]["updated_at"].is_string());
     }
 
     #[test]

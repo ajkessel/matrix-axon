@@ -1885,3 +1885,196 @@ async fn unreact_uses_aggregated_reaction_ids_from_timeline() {
         .await
         .expect("cleanup");
 }
+
+/// M12 device-state (`/v1/devices/{device_id}/state/{namespace}`): PUT
+/// merge-upserts and GET returns the cross-device LWW-merged view; `null`
+/// tombstones a key; parameter errors are readable 400s/404s.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn device_state_put_get_merge_and_tombstone() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@devstate-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let app = read_app(store.clone());
+    let device_a = Uuid::new_v4();
+    let device_b = Uuid::new_v4();
+    let uri = |device: Uuid| format!("/v1/devices/{device}/state/drafts?account_id={account_id}");
+
+    // A namespace never written reads as an empty map, not a 404.
+    let (status, body) = get(&app, &uri(device_a)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["namespace"], "drafts");
+    assert_eq!(body["data"]["entries"], json!({}));
+
+    // Device A writes two room drafts in one merge-upsert.
+    let (status, body) = request(
+        &app,
+        "PUT",
+        &uri(device_a),
+        Some(json!({ "entries": {
+            "!one:localhost": { "text": "draft one" },
+            "!two:localhost": { "text": "draft two" },
+        }})),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["updated_at"].is_string());
+
+    // Device B overwrites one key later; the merged GET shows B's value winning
+    // and A's untouched key surviving (merge, not replace).
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &uri(device_b),
+        Some(json!({ "entries": { "!one:localhost": { "text": "B wins" } } })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = get(&app, &uri(device_a)).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = &body["data"]["entries"];
+    assert_eq!(entries["!one:localhost"]["value"]["text"], "B wins");
+    assert_eq!(entries["!one:localhost"]["device_id"], device_b.to_string());
+    assert_eq!(entries["!two:localhost"]["value"]["text"], "draft two");
+    assert_eq!(entries["!two:localhost"]["device_id"], device_a.to_string());
+
+    // A null entry tombstones the key: gone from the merged view even though
+    // device A's older row still exists underneath.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &uri(device_b),
+        Some(json!({ "entries": { "!two:localhost": null } })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = get(&app, &uri(device_a)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["data"]["entries"].get("!two:localhost").is_none());
+
+    // Parameter errors: missing account_id → 400; unknown account → 404;
+    // malformed device UUID → 400; empty entries → 400; no token → 401.
+    let (status, body) = get(&app, &format!("/v1/devices/{device_a}/state/drafts")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    let unknown = Uuid::new_v4();
+    let (status, body) = get(
+        &app,
+        &format!("/v1/devices/{device_a}/state/drafts?account_id={unknown}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let (status, _) = get(
+        &app,
+        &format!("/v1/devices/not-a-uuid/state/drafts?account_id={account_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = request(
+        &app,
+        "PUT",
+        &uri(device_a),
+        Some(json!({ "entries": {} })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    let (status, _) = request(&app, "GET", &uri(device_a), None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+/// M12 device-state write caps (ADR 0048): values are opaque, so the handler
+/// bounds size, not shape — oversized values/keys/namespaces and over-long
+/// entry lists are readable 400s, and boundary-sized writes still land.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn device_state_put_rejects_oversized_writes() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@devstate-caps-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let app = read_app(store.clone());
+    let device_id = Uuid::new_v4();
+    let uri = format!("/v1/devices/{device_id}/state/drafts?account_id={account_id}");
+    let auth = bearer();
+    let put = |body: Value| request(&app, "PUT", &uri, Some(body), Some(auth.as_str()));
+
+    // A value over 64 KiB serialized is refused…
+    let big = "x".repeat(64 * 1024 + 1);
+    let (status, body) = put(json!({ "entries": { "!r:hs": { "text": big } } })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    // …while a comfortably large draft still lands.
+    let fits = "x".repeat(32 * 1024);
+    let (status, _) = put(json!({ "entries": { "!r:hs": { "text": fits } } })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // More than 64 entries in one merge-upsert is refused; 64 is accepted.
+    let too_many: serde_json::Map<String, Value> = (0..65)
+        .map(|i| (format!("!room-{i}:hs"), json!({ "text": "x" })))
+        .collect();
+    let (status, _) = put(json!({ "entries": too_many })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let at_cap: serde_json::Map<String, Value> = (0..64)
+        .map(|i| (format!("!room-{i}:hs"), json!({ "text": "x" })))
+        .collect();
+    let (status, _) = put(json!({ "entries": at_cap })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A key over 512 bytes is refused.
+    let long_key = format!("!{}:hs", "k".repeat(513));
+    let (status, _) = put(json!({ "entries": { long_key: { "text": "x" } } })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A namespace over 64 bytes is refused on write (reads stay unrestricted —
+    // an unknown namespace is just an empty map).
+    let long_ns = "n".repeat(65);
+    let ns_uri = format!("/v1/devices/{device_id}/state/{long_ns}?account_id={account_id}");
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &ns_uri,
+        Some(json!({ "entries": { "!r:hs": { "text": "x" } } })),
+        Some(&bearer()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = get(&app, &ns_uri).await;
+    assert_eq!(status, StatusCode::OK);
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}

@@ -32,6 +32,9 @@ pub enum LiveFrame {
     /// per-event snapshot: it names the affected sender so clients re-evaluate
     /// (re-read the bundle / timeline), it does not carry per-event diffs.
     SenderTrustChanged(SenderTrustFrame),
+    /// Per-device client state changed (M12) — a device PUT drafts / read
+    /// markers, and sibling devices should apply the change.
+    DeviceState(DeviceStateFrame),
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -50,6 +53,35 @@ impl From<SenderTrustFrame> for LiveFrame {
     fn from(frame: SenderTrustFrame) -> Self {
         LiveFrame::SenderTrustChanged(frame)
     }
+}
+
+impl From<DeviceStateFrame> for LiveFrame {
+    fn from(frame: DeviceStateFrame) -> Self {
+        LiveFrame::DeviceState(frame)
+    }
+}
+
+/// A per-device state change (M12, ADR 0048), ready to fan out over the
+/// live-event bus. Carries the written entries themselves so sibling devices
+/// apply the change without a read-back; the bus is lossy, so a reconnecting
+/// client re-reads the merged view via `GET …/state/{namespace}` instead of
+/// assuming the frames it missed. `device_id` names the *originator*: the bus
+/// is a single global broadcast, so clients drop frames carrying their own
+/// device id (echo suppression), exactly as they already self-filter by
+/// `account_id`.
+#[derive(Debug, Clone)]
+pub struct DeviceStateFrame {
+    /// Axon account this state belongs to.
+    pub account_id: Uuid,
+    /// The device that wrote the change (client-supplied UUID) — receivers
+    /// matching this id ignore the frame.
+    pub device_id: Uuid,
+    /// The namespace the entries were written under, e.g. `drafts`.
+    pub namespace: String,
+    /// The written `(key, value)` pairs; a `None` value is a deletion.
+    pub entries: Vec<(String, Option<Value>)>,
+    /// Server-clock write time (the last-write-wins ordering).
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A change in a *sender's* current device trust (M7c), ready to fan out over the

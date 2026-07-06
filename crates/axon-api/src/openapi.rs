@@ -120,6 +120,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::routes::verify::confirm,
         crate::routes::verify::cancel,
         crate::routes::media::get_media,
+        crate::routes::device_state::get_device_state,
+        crate::routes::device_state::put_device_state,
     ),
     components(schemas(
         crate::dto::AccountDto,
@@ -149,6 +151,10 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::VerificationBundleDto,
         crate::dto::TrustSnapshotDto,
         crate::dto::CurrentTrustDto,
+        crate::dto::DeviceStateDto,
+        crate::dto::DeviceStateEntryDto,
+        crate::dto::PutDeviceStateRequest,
+        crate::dto::PutDeviceStateResponse,
         crate::response::ErrorBody,
         crate::response::ErrorResponse,
     )),
@@ -161,6 +167,7 @@ fn unauthorized_response() -> RefOr<Response> {
         (name = "messages", description = "Sending, editing, redacting, and reacting"),
         (name = "verification", description = "Interactive SAS device verification"),
         (name = "media", description = "Authenticated MXC media proxy"),
+        (name = "device-state", description = "Per-device client state: drafts, read markers"),
     ),
 )]
 pub struct ApiDoc;

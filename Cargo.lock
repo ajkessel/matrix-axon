@@ -348,6 +348,7 @@ dependencies = [
  "axon-store",
  "axum",
  "base64",
+ "chrono",
  "futures-util",
  "serde",
  "serde_json",
@@ -365,6 +366,7 @@ dependencies = [
 name = "axon-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "directories",
  "figment",
  "serde",
