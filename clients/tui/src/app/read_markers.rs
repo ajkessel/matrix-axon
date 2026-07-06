@@ -74,6 +74,14 @@ impl App {
     /// *before* [`App::note_room_read`] advances the marker; a room with no
     /// marker yet keeps today's behavior (nothing to measure "unseen"
     /// against).
+    ///
+    /// The same past-the-marker replies also feed the unread-thread attention
+    /// markers (ADR 0049): live observation alone misses replies that arrived
+    /// while this client was down, but the read marker knows exactly what was
+    /// never seen, so those replies count toward their root's badge and the
+    /// `/unreadthreads` picker too (own messages excepted, matching the live
+    /// path). Thread-unread state still clears only when the thread panel
+    /// opens, not on room entry.
     pub(crate) fn collect_unseen_thread_promotions(
         &mut self,
         room: &RoomKey,
@@ -84,11 +92,14 @@ impl App {
         };
         let mut roots: Vec<(Uuid, String)> = Vec::new();
         for event in events.iter().filter(|e| e.origin_ts > marker_ts) {
-            let Some(root) = event.thread_relation() else {
+            let Some(root) = event.thread_relation().map(str::to_owned) else {
                 continue;
             };
             self.promoted_thread_events.insert(event.event_id.clone());
-            let entry = (event.account_id, root.to_owned());
+            if !self.is_own_event(event) {
+                self.mark_thread_unread_from_event(room, &root, event);
+            }
+            let entry = (event.account_id, root);
             if !roots.contains(&entry) {
                 roots.push(entry);
             }
@@ -464,6 +475,19 @@ mod tests {
         assert_eq!(app.read_markers.get(&key("!b:x")).unwrap().origin_ts, 200);
     }
 
+    fn timeline_event_from(
+        sender: &str,
+        event_id: &str,
+        origin_ts: i64,
+        thread_root: Option<&str>,
+    ) -> EventDto {
+        let mut event = timeline_event(event_id, origin_ts, thread_root);
+        event.sender = sender.to_owned();
+        event
+    }
+
+    /// An event from the account's own user (`test_room` sets
+    /// `account_user_id` to this sender).
     fn timeline_event(event_id: &str, origin_ts: i64, thread_root: Option<&str>) -> EventDto {
         EventDto {
             account_id: Uuid::nil(),
@@ -501,10 +525,10 @@ mod tests {
             timeline_event("$old-reply", 150, Some("$root-a")),
             timeline_event("$at-marker", 200, Some("$root-a")),
             // Unseen thread replies — promoted; two on one root dedupe to one
-            // root fetch.
+            // root fetch. Own messages promote but never count as unread.
             timeline_event("$new-reply-1", 300, Some("$root-a")),
-            timeline_event("$new-reply-2", 400, Some("$root-a")),
-            timeline_event("$other-thread", 450, Some("$root-b")),
+            timeline_event_from("@bob:example.com", "$new-reply-2", 400, Some("$root-a")),
+            timeline_event_from("@bob:example.com", "$other-thread", 450, Some("$root-b")),
             // Unseen but not a thread member — nothing to promote.
             timeline_event("$plain", 500, None),
         ];
@@ -531,6 +555,24 @@ mod tests {
             None,
             &app.promoted_thread_events,
         ));
+
+        // Unseen replies from *others* also feed the thread-attention markers
+        // (ADR 0049) — the load path covers what live observation missed while
+        // this client was down. Own replies are promoted but never counted.
+        let threads = app.unread_threads.get(&k).expect("thread markers");
+        assert_eq!(threads.get("$root-a").map(|t| t.unread_count), Some(1));
+        assert_eq!(threads.get("$root-b").map(|t| t.unread_count), Some(1));
+        assert_eq!(
+            threads.get("$root-a").map(|t| t.latest_event_id.as_str()),
+            Some("$new-reply-2")
+        );
+
+        // Observing the same replies again (a reload while they are still past
+        // the marker, or live-then-load) must not inflate the counts.
+        app.collect_unseen_thread_promotions(&k, &page);
+        let threads = app.unread_threads.get(&k).expect("thread markers");
+        assert_eq!(threads.get("$root-a").map(|t| t.unread_count), Some(1));
+        assert_eq!(threads.get("$root-b").map(|t| t.unread_count), Some(1));
     }
 
     #[test]

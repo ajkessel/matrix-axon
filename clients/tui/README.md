@@ -43,6 +43,7 @@ loopback default.
 - Renders image and sticker thumbnails inline, with an explicit larger preview for the selected image.
 - Syncs per-room message drafts across devices through Axon's device-state API (M12): a draft typed here appears on the user's other clients within about a second, survives restarts, and clearing or sending it clears it everywhere. Each install mints a device UUID on first run, stored in `device-id` next to the config file.
 - Syncs per-room read markers across devices through the same API: reading a room here clears its unread badge on the user's other clients, and rooms with activity newer than their marker show as unread again after a restart (rooms never marked read are left alone). Markers only move forward — a stale marker from an offline device never resurrects a cleared badge.
+- Tracks unread threads: thread roots show a bold `N new` count with a latest-reply preview, and the `/unreadthreads` picker (`Alt-T`) lists every thread with unseen replies across rooms and jumps straight into its panel. Opening the thread panel is what marks a thread read; unseen replies are found both live and, via the room read marker, on room entry after a restart.
 
 ## Not Yet Implemented
 
@@ -72,6 +73,7 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/unreact` | Withdraw one of your reactions from the selected or most recent displayed message. A sole reaction is withdrawn immediately; Tab cycles when several exist. |
 | `/reply` | Reply to the selected or most recent displayed message; pending Axon API support. |
 | `/thread` | Start a thread from the selected or most recent displayed message; pending Axon API support. |
+| `/unreadthreads`, `/ut` | Open the unread-thread picker: threads with unseen replies across all rooms, with sender/body previews. `Enter` jumps to the thread and opens its panel; `Esc` closes. Also on the `unread_threads` shortcut (default `Alt-T`). |
 | `/shortcuts` | Show active keyboard shortcuts from the config file. |
 | `/help`, `/?` | Show available slash commands. |
 | `/refresh` (`/rooms` alias) | Refresh the room list and redraw the terminal display. |
@@ -112,6 +114,7 @@ Defaults:
 | `Alt-N` | Next account filter when multiple accounts are active. |
 | `Alt-P` | Previous account filter when multiple accounts are active. |
 | `Alt-U` | Toggle unread filter: show only rooms with unread messages. The Rooms pane heading changes to `Rooms (Unread)` while active. |
+| `Alt-T` | Open the unread-thread picker (same as `/unreadthreads`). |
 | `Ctrl-J` | Next displayed message (always active). |
 | `Ctrl-K` | Previous displayed message (always active). |
 | `Ctrl-C` | Quit. |
@@ -207,6 +210,7 @@ edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
 unreact_message = "shift-u"
+unread_threads = "alt-t"
 focus_next = "ctrl-tab"
 
 [colors]

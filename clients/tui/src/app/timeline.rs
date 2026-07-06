@@ -15,13 +15,15 @@ use super::relations::thread_visible;
 use super::{
     collect_reactions, match_status, message_index_at_line, message_layout, next_match_index,
     selected_message_target_index, App, ConnectionState, ImageState, ImageThumbRows,
-    LiveFrameAction, MediaKey, RoomKey, RoomSort, Status, IMAGE_THUMB_ROWS,
+    LiveFrameAction, MediaKey, RoomKey, RoomSort, Status, UnreadThread, UnreadThreadPreview,
+    IMAGE_THUMB_ROWS,
 };
 
 /// Minimum interval between background `/members` refreshes for a single room,
 /// triggered by live messages from senders whose display name we don't yet know.
 /// Collapses bursts of unknown senders into one fetch per room per window.
 const MEMBERS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+const UNREAD_THREAD_PREVIEW_LIMIT: usize = 3;
 
 /// Result of a background `/members` refresh ([`App::spawn_members_refresh`]),
 /// drained by the main loop and applied via [`App::apply_members_outcome`].
@@ -231,6 +233,10 @@ impl App {
                 return LiveFrameAction::None;
             }
             let thread_root = event.thread_relation().map(str::to_owned);
+            let should_mark_thread_unread = thread_root.is_some()
+                && should_show_event(&event, &self.display)
+                && self.thread_panel.as_deref() != thread_root.as_deref()
+                && !self.is_own_event(&event);
             let account_id = event.account_id;
             let origin_ts = event.origin_ts;
             // A live message from a sender we have no name for (e.g. someone who
@@ -251,6 +257,9 @@ impl App {
             }
             if let Some(root) = thread_root.as_deref() {
                 self.apply_live_thread_member(&key, root);
+                if should_mark_thread_unread {
+                    self.mark_thread_unread(&key, root, &event_id);
+                }
                 // If the thread panel is not open for this root, promote the
                 // new event so it appears in the main timeline. This ensures
                 // the user sees new thread replies even when the panel is closed.
@@ -272,6 +281,11 @@ impl App {
             LiveFrameAction::None
         } else {
             if should_show_event(&event, &self.display) {
+                if let Some(root) = event.thread_relation().map(str::to_owned) {
+                    if !self.is_own_event(&event) {
+                        self.mark_thread_unread_from_event(&key, &root, &event);
+                    }
+                }
                 *self.rooms.unread.entry(key).or_default() += 1;
             }
             if known_room {
@@ -280,6 +294,83 @@ impl App {
                 LiveFrameAction::RefreshRooms
             }
         }
+    }
+
+    pub(crate) fn is_own_event(&self, event: &EventDto) -> bool {
+        if self.live.own_senders.get(&event.account_id) == Some(&event.sender) {
+            return true;
+        }
+        self.rooms
+            .rooms
+            .iter()
+            .find(|room| room.account_id == event.account_id && room.room_id == event.room_id)
+            .and_then(|room| room.account_user_id.as_deref())
+            == Some(event.sender.as_str())
+    }
+
+    pub(crate) fn mark_thread_unread(&mut self, key: &RoomKey, root: &str, event_id: &str) {
+        let Some(event) = self
+            .messages
+            .events
+            .get(key)
+            .and_then(|events| events.iter().find(|event| event.event_id == event_id))
+            .cloned()
+        else {
+            return;
+        };
+        self.mark_thread_unread_from_event(key, root, &event);
+    }
+
+    pub(crate) fn mark_thread_unread_from_event(
+        &mut self,
+        key: &RoomKey,
+        root: &str,
+        event: &EventDto,
+    ) {
+        let sender = self.sender_label(event);
+        let body = event.display_body();
+        let entry = self
+            .unread_threads
+            .entry(key.clone())
+            .or_default()
+            .entry(root.to_owned())
+            .or_insert_with(|| UnreadThread {
+                root_event_id: root.to_owned(),
+                unread_count: 0,
+                latest_event_id: event.event_id.clone(),
+                latest_sender: sender.clone(),
+                latest_body: body.clone(),
+                latest_ts: event.origin_ts,
+                recent: Vec::new(),
+                counted: std::collections::HashSet::new(),
+            });
+        // A reply can be observed twice — live, then again by a timeline load
+        // while it is still past the read marker. Count each id once.
+        if !entry.counted.insert(event.event_id.clone()) {
+            return;
+        }
+        entry.unread_count = entry.unread_count.saturating_add(1);
+        if event.origin_ts >= entry.latest_ts {
+            entry.latest_event_id = event.event_id.clone();
+            entry.latest_sender = sender.clone();
+            entry.latest_body = body.clone();
+            entry.latest_ts = event.origin_ts;
+        }
+        entry
+            .recent
+            .retain(|preview| preview.event_id != event.event_id);
+        entry.recent.push(UnreadThreadPreview {
+            event_id: event.event_id.clone(),
+            sender,
+            body,
+            origin_ts: event.origin_ts,
+        });
+        entry.recent.sort_by(|a, b| {
+            b.origin_ts
+                .cmp(&a.origin_ts)
+                .then_with(|| b.event_id.cmp(&a.event_id))
+        });
+        entry.recent.truncate(UNREAD_THREAD_PREVIEW_LIMIT);
     }
 
     pub(crate) fn rebuild_display_names(&mut self, room: &RoomDto, events: &[EventDto]) {

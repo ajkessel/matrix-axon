@@ -55,6 +55,7 @@ edit_message = "e"
 redact_message = "d"
 react_message = "shift-r"
 unreact_message = "shift-u"
+unread_threads = "alt-t"
 focus_next = "f6"
 focus_prev = "ctrl-f6"
 find = "ctrl-f"
@@ -350,6 +351,7 @@ pub struct Shortcuts {
     pub redact_message: KeyBinding,
     pub react_message: KeyBinding,
     pub unreact_message: KeyBinding,
+    pub unread_threads: KeyBinding,
     pub focus_next: KeyBinding,
     pub focus_prev: KeyBinding,
     pub find: KeyBinding,
@@ -561,6 +563,7 @@ impl RawConfig {
                 redact_message: "d".to_owned(),
                 react_message: "shift-r".to_owned(),
                 unreact_message: "shift-u".to_owned(),
+                unread_threads: "alt-t".to_owned(),
                 focus_next: "f6".to_owned(),
                 focus_prev: "ctrl-f6".to_owned(),
                 find: "ctrl-f".to_owned(),
@@ -782,6 +785,7 @@ edit_message = "{edit_message}"
 redact_message = "{redact_message}"
 react_message = "{react_message}"
 unreact_message = "{unreact_message}"
+unread_threads = "{unread_threads}"
 focus_next = "{focus_next}"
 focus_prev = "{focus_prev}"
 find = "{find}"
@@ -921,6 +925,7 @@ accept_incoming_verification = {accept_incoming_verification}
             redact_message = self.shortcuts.redact_message,
             react_message = self.shortcuts.react_message,
             unreact_message = self.shortcuts.unreact_message,
+            unread_threads = self.shortcuts.unread_threads,
             focus_next = self.shortcuts.focus_next,
             focus_prev = self.shortcuts.focus_prev,
             find = self.shortcuts.find,
@@ -1114,6 +1119,7 @@ fn is_valid_option(section: Option<&str>, key: &str) -> bool {
                 | "redact_message"
                 | "react_message"
                 | "unreact_message"
+                | "unread_threads"
                 | "focus_next"
                 | "focus_prev"
                 | "find"
@@ -1226,6 +1232,7 @@ struct RawShortcuts {
     redact_message: String,
     react_message: String,
     unreact_message: String,
+    unread_threads: String,
     focus_next: String,
     focus_prev: String,
     find: String,
@@ -1302,6 +1309,11 @@ impl RawShortcuts {
         assign_or_flag(
             &mut self.unreact_message,
             partial.unreact_message,
+            &mut missing,
+        );
+        assign_or_flag(
+            &mut self.unread_threads,
+            partial.unread_threads,
             &mut missing,
         );
         assign_or_flag(&mut self.focus_next, partial.focus_next, &mut missing);
@@ -1417,6 +1429,7 @@ impl RawShortcuts {
             redact_message: parse_key_binding("shortcuts.redact_message", &self.redact_message)?,
             react_message: parse_key_binding("shortcuts.react_message", &self.react_message)?,
             unreact_message: parse_key_binding("shortcuts.unreact_message", &self.unreact_message)?,
+            unread_threads: parse_key_binding("shortcuts.unread_threads", &self.unread_threads)?,
             focus_next: parse_key_binding("shortcuts.focus_next", &self.focus_next)?,
             focus_prev: parse_key_binding("shortcuts.focus_prev", &self.focus_prev)?,
             find: parse_key_binding("shortcuts.find", &self.find)?,
@@ -1502,6 +1515,7 @@ struct PartialRawShortcuts {
     redact_message: Option<String>,
     react_message: Option<String>,
     unreact_message: Option<String>,
+    unread_threads: Option<String>,
     focus_next: Option<String>,
     focus_prev: Option<String>,
     find: Option<String>,
