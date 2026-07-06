@@ -21,16 +21,24 @@ Several constraints shape the decision:
   WebSocket upgrade, so the server accepts `Sec-WebSocket-Protocol:
   bearer.<token>` from browser clients (ADR 0029). Web and Tauri clients must
   use this path.
-- **Push notifications are P0 post-MVP.** APNs (iOS) → FCM (Android) → web
-  push. Mobile clients must be designed to register push tokens from day one,
-  even if the server-side push router isn't wired yet.
+- **Push notifications (APNs/FCM/web push) are out of scope for the iOS
+  MVP**, not a day-one client concern — see ADR 0053, which corrects this
+  bullet's original framing. No device-token endpoint or push router is
+  commissioned until a dedicated future ADR scopes it.
 - **OpenAPI spec is the contract.** The spec is checked into the repo and is
-  the source of truth for every `/v1/` operation. Generated SDK stubs for Swift
-  already ship as part of the MVP build; other platforms should follow the same
-  pattern.
+  the source of truth for every `/v1/` operation. No Swift SDK stubs exist
+  yet as of ADR 0053 — this bullet's original claim that they "already ship
+  as part of the MVP build" was inaccurate; standing up Swift codegen is
+  part of the iOS client's own (separate, later) roadmap ADR.
 - **Media proxy contract.** The in-flight media proxy work (`matrix-api-media-proxy`
   branch) fixes the media URL shape. Clients must not assume direct homeserver
   media URLs; all media is served through the axon `/v1/` surface.
+
+See ADR 0053 for the current inventory of server-side prerequisites for the
+iOS client (OAuth 2.0 + PKCE, a device-listing endpoint, and the ADR 0030
+`sync_state` implementation), which corrects the push and Swift-stub
+assumptions above. A separate iOS client MVP roadmap ADR, covering the
+client-side milestone sequence, is still to come.
 
 ## Decision
 
@@ -41,11 +49,11 @@ lowest-common-denominator abstractions. The trade-off is three separate
 codebases rather than one; the OpenAPI-generated stubs are the mechanism that
 keeps them consistent with the server contract without hand-rolling HTTP calls.
 
-**iOS client: SwiftUI, targeting iOS 17+.** The OpenAPI-generated Swift stubs
-shipped as part of the MVP form the networking layer. APNs push-token
-registration is a day-one concern in the client architecture even before the
-server-side push router exists. Directory: `clients/apple/` (see macOS entry
-below).
+**iOS client: SwiftUI, targeting iOS 17+.** OpenAPI-generated Swift stubs
+form the networking layer (codegen tooling does not exist yet; standing it
+up is part of the iOS roadmap, not something already shipped). Push-token
+registration is deferred, not a day-one concern — see ADR 0053. Directory:
+`clients/apple/` (see macOS entry below).
 
 **macOS (desktop): SwiftUI multiplatform, sharing the iOS Swift Package.** The
 iOS project is structured as a Swift Package with a shared `axon-core` library
