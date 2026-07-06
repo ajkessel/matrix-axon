@@ -440,6 +440,7 @@ dependencies = [
  "axon-sync",
  "axum",
  "clap",
+ "crossterm",
  "dotenvy",
  "percent-encoding",
  "rand 0.9.4",

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use axon_core::Config;
 use axon_store::Store;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled};
 use percent_encoding::percent_decode_str;
 use sqlx_postgres::PgPoolOptions;
 use tokio::process::Command;
@@ -848,11 +849,34 @@ fn prompt_yes_no(question: &str, default_yes: bool) -> anyhow::Result<bool> {
 }
 
 fn prompt_line(prompt: &str) -> anyhow::Result<String> {
+    let _raw_mode = suspend_raw_mode_for_prompt()?;
     print!("{prompt}");
     io::stdout().flush()?;
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line)
+}
+
+fn suspend_raw_mode_for_prompt() -> anyhow::Result<RawModeGuard> {
+    let was_enabled = is_raw_mode_enabled()?;
+    if was_enabled {
+        disable_raw_mode()?;
+    }
+    Ok(RawModeGuard {
+        restore: was_enabled,
+    })
+}
+
+struct RawModeGuard {
+    restore: bool,
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            let _ = enable_raw_mode();
+        }
+    }
 }
 
 #[cfg(test)]

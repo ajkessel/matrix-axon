@@ -37,6 +37,7 @@ toml_edit = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
 sqlx-postgres = { workspace = true }
+crossterm = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 dotenvy = { workspace = true }
