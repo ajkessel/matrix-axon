@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::api::{EventDto, RoomDto, ThreadSummaryDto};
 
 use super::{
-    App, Mode, RelationContext, ReplyPreview, RoomKey, Status, ThreadBadge, TIMELINE_LIMIT,
+    App, Mode, RelationContext, ReplyPreview, RoomKey, Status, ThreadBadge, UnreadThreadEntry,
+    UnreadThreadSelection, TIMELINE_LIMIT,
 };
 
 /// Maximum cross-window replied-to events fetched per room load, bounding the
@@ -37,6 +38,71 @@ pub(crate) struct RelationOutcome {
 }
 
 impl App {
+    pub(crate) fn open_unread_threads_picker(&mut self) {
+        let entries = self.unread_thread_entries();
+        if entries.is_empty() {
+            self.unread_thread_selection = 0;
+            self.unread_thread_selected = None;
+            self.status = Status::from("no unread threads".to_owned());
+            return;
+        }
+        self.sync_unread_thread_selection(&entries);
+        self.popup_scroll = 0;
+        self.mode = Mode::Popup(super::PopupKind::UnreadThreads);
+        self.status = Status::Info(String::new());
+    }
+
+    pub(crate) fn move_unread_thread_selection(&mut self, delta: isize) {
+        let entries = self.unread_thread_entries();
+        let len = entries.len();
+        if len == 0 {
+            self.unread_thread_selection = 0;
+            self.unread_thread_selected = None;
+            return;
+        }
+        self.sync_unread_thread_selection(&entries);
+        let current = self.unread_thread_selection.min(len.saturating_sub(1));
+        let next = match delta.cmp(&0) {
+            std::cmp::Ordering::Less => current.saturating_sub(delta.unsigned_abs()),
+            std::cmp::Ordering::Equal => current,
+            std::cmp::Ordering::Greater => current.saturating_add(delta as usize).min(len - 1),
+        };
+        self.set_unread_thread_selection(&entries, next);
+    }
+
+    pub(crate) async fn open_selected_unread_thread(&mut self) {
+        let entries = self.unread_thread_entries();
+        self.sync_unread_thread_selection(&entries);
+        let Some(entry) = entries.get(self.unread_thread_selection).cloned() else {
+            self.mode = Mode::Compose;
+            self.unread_thread_selected = None;
+            self.status = Status::from("no unread threads".to_owned());
+            return;
+        };
+        let Some(room_index) = self
+            .rooms
+            .rooms
+            .iter()
+            .position(|room| RoomKey::from(room) == entry.room_key)
+        else {
+            self.mode = Mode::Compose;
+            self.unread_thread_selected = None;
+            self.status = Status::from("unread thread room is no longer available".to_owned());
+            return;
+        };
+        let already_selected = self.rooms.selected == Some(room_index);
+        self.mode = Mode::Compose;
+        self.popup_scroll = 0;
+        self.unread_thread_selection = 0;
+        self.unread_thread_selected = None;
+        self.rooms.selected = Some(room_index);
+        if !already_selected {
+            self.load_selected_timeline().await;
+        }
+        self.open_thread_panel(entry.room_key.account_id, entry.root_event_id)
+            .await;
+    }
+
     /// Build the per-render relation context for the supplied displayed events.
     /// Reply previews are resolved for every replying event; thread badges are
     /// added to roots only in the main timeline (the panel labels its own root).
@@ -75,6 +141,33 @@ impl App {
             }
         }
         ctx
+    }
+
+    pub(crate) fn sync_unread_thread_selection(&mut self, entries: &[UnreadThreadEntry]) {
+        if entries.is_empty() {
+            self.unread_thread_selection = 0;
+            self.unread_thread_selected = None;
+            return;
+        }
+        if let Some(selected) = &self.unread_thread_selected {
+            if let Some(index) = entries.iter().position(|entry| {
+                entry.room_key == selected.room_key && entry.root_event_id == selected.root_event_id
+            }) {
+                self.unread_thread_selection = index;
+                return;
+            }
+        }
+        let index = self
+            .unread_thread_selection
+            .min(entries.len().saturating_sub(1));
+        self.set_unread_thread_selection(entries, index);
+    }
+
+    fn set_unread_thread_selection(&mut self, entries: &[UnreadThreadEntry], index: usize) {
+        self.unread_thread_selection = index.min(entries.len().saturating_sub(1));
+        self.unread_thread_selected = entries
+            .get(self.unread_thread_selection)
+            .map(UnreadThreadSelection::from);
     }
 
     /// Resolve the replied-to event for a reply-context line. Looks in the
@@ -279,6 +372,7 @@ impl App {
             return;
         };
         let key = RoomKey::from(&room);
+        self.clear_unread_thread(&key, &root);
         if let Ok(mut page) = self
             .client
             .thread_timeline(account_id, &room.room_id, &root, None, TIMELINE_LIMIT)
@@ -336,6 +430,18 @@ impl App {
             "[in thread] {} reply(ies) — Esc to exit",
             count.saturating_sub(1)
         ));
+    }
+
+    pub(crate) fn clear_unread_thread(&mut self, key: &RoomKey, root: &str) {
+        let clear_room = if let Some(threads) = self.unread_threads.get_mut(key) {
+            threads.remove(root);
+            threads.is_empty()
+        } else {
+            false
+        };
+        if clear_room {
+            self.unread_threads.remove(key);
+        }
     }
 
     /// Close the thread panel and return to the main timeline. Returns `true`
@@ -403,11 +509,67 @@ impl App {
         }
         let count = server_count.unwrap_or(members.len() as i64);
         let latest = members.iter().max_by_key(|member| member.origin_ts);
+        let unread_count = self
+            .selected_room()
+            .map(RoomKey::from)
+            .and_then(|key| self.unread_threads.get(&key))
+            .and_then(|threads| threads.get(&event.event_id))
+            .map(|thread| thread.unread_count)
+            .unwrap_or_default();
         Some(ThreadBadge {
             count,
+            unread_count,
             latest_sender: latest.map(|member| self.sender_label(member)),
             latest_snippet: latest.map(|member| member.display_body()),
         })
+    }
+
+    pub(crate) fn unread_thread_entries(&self) -> Vec<UnreadThreadEntry> {
+        let mut entries = Vec::new();
+        for (room_key, threads) in &self.unread_threads {
+            let Some(room) = self
+                .rooms
+                .rooms
+                .iter()
+                .find(|room| RoomKey::from(*room) == *room_key)
+            else {
+                continue;
+            };
+            for thread in threads.values() {
+                let root_snippet = self
+                    .messages
+                    .events
+                    .get(room_key)
+                    .and_then(|events| {
+                        events
+                            .iter()
+                            .find(|event| event.event_id == thread.root_event_id)
+                    })
+                    .or_else(|| {
+                        self.reply_targets
+                            .get(&(room_key.account_id, thread.root_event_id.clone()))
+                    })
+                    .map(|event| event.display_body());
+                entries.push(UnreadThreadEntry {
+                    room_key: room_key.clone(),
+                    room_title: self.room_list_title(room),
+                    root_event_id: thread.root_event_id.clone(),
+                    root_snippet,
+                    unread_count: thread.unread_count,
+                    latest_sender: thread.latest_sender.clone(),
+                    latest_body: thread.latest_body.clone(),
+                    latest_ts: thread.latest_ts,
+                    recent: thread.recent.clone(),
+                });
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.latest_ts
+                .cmp(&a.latest_ts)
+                .then_with(|| a.room_title.cmp(&b.room_title))
+                .then_with(|| a.root_event_id.cmp(&b.root_event_id))
+        });
+        entries
     }
 }
 

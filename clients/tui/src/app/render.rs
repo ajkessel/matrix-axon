@@ -38,6 +38,7 @@ pub(crate) struct ReplyPreview {
 /// from the loaded slice.
 pub(crate) struct ThreadBadge {
     pub(crate) count: i64,
+    pub(crate) unread_count: usize,
     pub(crate) latest_sender: Option<String>,
     pub(crate) latest_snippet: Option<String>,
 }
@@ -81,6 +82,9 @@ pub(crate) fn snippet(text: &str, max: usize) -> String {
 pub(crate) fn thread_badge_text(badge: &ThreadBadge) -> String {
     let noun = if badge.count == 1 { "reply" } else { "replies" };
     let mut text = format!("↳ {} {noun}", badge.count);
+    if badge.unread_count > 0 {
+        text.push_str(&format!(" · {} new", badge.unread_count));
+    }
     if let (Some(sender), Some(body)) = (&badge.latest_sender, &badge.latest_snippet) {
         text.push_str(&format!(
             " · latest: {sender}: \"{}\"",
@@ -172,6 +176,9 @@ pub(crate) fn message_layout(
     let relation_style = Style::default()
         .fg(colors.input_hint)
         .add_modifier(Modifier::ITALIC);
+    let unread_relation_style = Style::default()
+        .fg(colors.unread_count)
+        .add_modifier(Modifier::BOLD);
     let mut lines = Vec::new();
     let mut ranges = Vec::with_capacity(events.len());
     let mut image_body_rows = HashMap::new();
@@ -397,7 +404,12 @@ pub(crate) fn message_layout(
         }
 
         if let Some(badge) = relations.thread_badges.get(event.event_id.as_str()) {
-            push_wrapped(&mut lines, thread_badge_text(badge), relation_style);
+            let style = if badge.unread_count > 0 {
+                unread_relation_style
+            } else {
+                relation_style
+            };
+            push_wrapped(&mut lines, thread_badge_text(badge), style);
         }
 
         if let Some(event_reactions) = reactions.get(&event.event_id) {
@@ -546,6 +558,7 @@ mod tests {
     fn thread_badge_text_renders_count_and_latest() {
         let badge = ThreadBadge {
             count: 3,
+            unread_count: 0,
             latest_sender: Some("bob".to_owned()),
             latest_snippet: Some("I think we should wait".to_owned()),
         };
@@ -559,10 +572,25 @@ mod tests {
     fn thread_badge_text_singular_and_no_latest() {
         let badge = ThreadBadge {
             count: 1,
+            unread_count: 0,
             latest_sender: None,
             latest_snippet: None,
         };
         assert_eq!(thread_badge_text(&badge), "↳ 1 reply");
+    }
+
+    #[test]
+    fn thread_badge_text_renders_unread_count() {
+        let badge = ThreadBadge {
+            count: 3,
+            unread_count: 2,
+            latest_sender: Some("bob".to_owned()),
+            latest_snippet: Some("I think we should wait".to_owned()),
+        };
+        assert_eq!(
+            thread_badge_text(&badge),
+            "↳ 3 replies · 2 new · latest: bob: \"I think we should wait\""
+        );
     }
 
     #[test]

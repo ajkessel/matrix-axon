@@ -30,6 +30,7 @@ pub enum Command {
     Unreact,
     Reply,
     Thread,
+    UnreadThreads,
     /// Start an outgoing SAS verification. The argument is either a device ID
     /// (self-verification, ADR 0028) or a `@user:server` (cross-user, ADR 0040).
     Verify(Option<String>),
@@ -117,6 +118,8 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/unreact", false),
     SlashCommand::supported("/reply", false),
     SlashCommand::supported("/thread", false),
+    SlashCommand::supported("/unreadthreads", false),
+    SlashCommand::supported("/ut", false),
     SlashCommand::supported("/verify", true),
     SlashCommand::supported("/bundle", true),
     SlashCommand::supported("/help", false),
@@ -142,12 +145,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
 pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
     (0, "Messaging"),
     (7, "Navigation"),
-    (12, "Account management"),
-    (16, "Information"),
-    (20, "Message actions"),
-    (24, "Verification"),
-    (26, "System"),
-    (32, "Pending"),
+    (13, "Account management"),
+    (17, "Information"),
+    (21, "Message actions"),
+    (25, "Verification"),
+    (27, "System"),
+    (33, "Pending"),
 ];
 
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
@@ -212,6 +215,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/account <account>",
         insert_text: "/account ",
         description: "filter by account (user ID, localpart, number, or \"all\")",
+    },
+    HelpCommand {
+        label: "/unreadthreads, /ut",
+        insert_text: "/unreadthreads",
+        description: "open the unread thread picker",
     },
     // ── Account management ───────────────────────────────────────────────────
     HelpCommand {
@@ -423,6 +431,7 @@ pub fn parse(input: &str) -> Command {
         "unreact" => Command::Unreact,
         "reply" => Command::Reply,
         "thread" => Command::Thread,
+        "unreadthreads" | "ut" => Command::UnreadThreads,
         "verify" => {
             let mut tokens = arg.split_whitespace();
             let target = tokens.next().map(str::to_owned);
@@ -779,6 +788,12 @@ mod tests {
     #[test]
     fn parses_shortcuts() {
         assert_eq!(parse("/shortcuts"), Command::Shortcuts);
+    }
+
+    #[test]
+    fn parses_unread_threads() {
+        assert_eq!(parse("/unreadthreads"), Command::UnreadThreads);
+        assert_eq!(parse("/ut"), Command::UnreadThreads);
     }
 
     #[test]

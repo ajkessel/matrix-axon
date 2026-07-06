@@ -24,6 +24,7 @@ mod completion;
 mod drafts;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
+mod read_markers;
 pub(crate) use lifecycle::LifecycleOutcome;
 pub(crate) mod media;
 pub(crate) use media::{
@@ -306,6 +307,59 @@ pub(crate) struct OwnReaction {
     pub(crate) event_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadThreadPreview {
+    pub(crate) event_id: String,
+    pub(crate) sender: String,
+    pub(crate) body: String,
+    pub(crate) origin_ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadThread {
+    pub(crate) root_event_id: String,
+    pub(crate) unread_count: usize,
+    pub(crate) latest_event_id: String,
+    pub(crate) latest_sender: String,
+    pub(crate) latest_body: String,
+    pub(crate) latest_ts: i64,
+    pub(crate) recent: Vec<UnreadThreadPreview>,
+    /// Every event id ever counted toward `unread_count`, so a reply observed
+    /// twice (seen live, then re-encountered by a timeline load while still
+    /// past the read marker) can't inflate the count. `recent` can't serve as
+    /// the dedupe set — it is truncated to the preview budget. Session-local
+    /// and cleared with the marker, so bounded by the thread's own size.
+    pub(crate) counted: std::collections::HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadThreadEntry {
+    pub(crate) room_key: RoomKey,
+    pub(crate) room_title: String,
+    pub(crate) root_event_id: String,
+    pub(crate) root_snippet: Option<String>,
+    pub(crate) unread_count: usize,
+    pub(crate) latest_sender: String,
+    pub(crate) latest_body: String,
+    pub(crate) latest_ts: i64,
+    pub(crate) recent: Vec<UnreadThreadPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnreadThreadSelection {
+    pub(crate) room_key: RoomKey,
+    pub(crate) root_event_id: String,
+}
+
+impl From<&UnreadThreadEntry> for UnreadThreadSelection {
+    fn from(entry: &UnreadThreadEntry) -> Self {
+        Self {
+            room_key: entry.room_key.clone(),
+            root_event_id: entry.root_event_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchKind {
     Rooms,
@@ -473,6 +527,7 @@ impl AccountSelection {
 pub(crate) enum PopupKind {
     Help,
     Shortcuts,
+    UnreadThreads,
     RoomInfo,
     Status,
     CommandResponse,
@@ -767,6 +822,22 @@ pub(crate) struct App {
     /// Sender for background draft-PUT failures. `None` until the main loop
     /// wires it up (and in unit tests, where flushes stay local-only).
     pub(crate) drafts_tx: Option<mpsc::UnboundedSender<DraftOutcome>>,
+    /// Last known read marker per room (M12): the local mirror of the merged
+    /// `read_markers` device-state namespace. Advances monotonically only.
+    pub(crate) read_markers: HashMap<RoomKey, read_markers::ReadMarker>,
+    /// A read-marker advance waiting out its debounce window before being PUT
+    /// (M12). One slot; arming for a different room flushes the old one.
+    pub(crate) pending_marker_put: Option<read_markers::PendingMarkerPut>,
+    /// TUI-local unread attention state for thread roots (ADR 0049). This is
+    /// populated only from live events observed by this process and cleared when
+    /// the user opens the corresponding thread panel.
+    pub(crate) unread_threads: HashMap<RoomKey, HashMap<String, UnreadThread>>,
+    /// Selected row in the unread-thread picker popup.
+    pub(crate) unread_thread_selection: usize,
+    /// Stable identity of the selected unread-thread row. The sorted picker
+    /// list can reorder while live replies arrive, so Enter follows this
+    /// identity rather than whatever item happens to occupy the old index.
+    pub(crate) unread_thread_selected: Option<UnreadThreadSelection>,
 }
 
 #[derive(Default)]
@@ -852,6 +923,7 @@ pub(crate) struct InputState {
     pub(crate) delete_command_completion: Option<(String, usize)>,
     pub(crate) account_command_completion: Option<(String, usize)>,
     pub(crate) verify_command_completion: Option<(String, usize)>,
+    pub(crate) filter_command_completion: Option<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -932,6 +1004,9 @@ impl App {
             pending_reply: None,
             pending_thread: None,
             promoted_thread_events: std::collections::HashSet::new(),
+            unread_threads: HashMap::new(),
+            unread_thread_selection: 0,
+            unread_thread_selected: None,
             accounts_panel_hidden: false,
             rooms_panel_hidden: false,
             config_path,
@@ -946,6 +1021,8 @@ impl App {
             pending_draft_put: None,
             compose_room: None,
             drafts_tx: None,
+            read_markers: HashMap::new(),
+            pending_marker_put: None,
         }
     }
 
@@ -1378,6 +1455,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.filter_command_completion = None;
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
@@ -1391,6 +1469,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.filter_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -1414,6 +1493,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.filter_command_completion = None;
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -1464,6 +1544,7 @@ impl App {
         self.input.delete_command_completion = None;
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
+        self.input.filter_command_completion = None;
         if self.input.cursor == 0 {
             return;
         }
@@ -1583,6 +1664,7 @@ impl App {
                 self.select_most_recent_message_if_needed();
                 self.start_thread_from_selected_message().await;
             }
+            Command::UnreadThreads => self.open_unread_threads_picker(),
             Command::Verify(device_id) => self.start_verification(device_id),
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
@@ -4044,6 +4126,24 @@ mod tests {
         events.iter().map(|event| event.event_id.clone()).collect()
     }
 
+    fn unread_thread(root: &str, count: usize, latest_ts: i64) -> UnreadThread {
+        UnreadThread {
+            root_event_id: root.to_owned(),
+            unread_count: count,
+            latest_event_id: format!("{root}-reply"),
+            latest_sender: "@bob:example.com".to_owned(),
+            latest_body: "new reply".to_owned(),
+            latest_ts,
+            recent: vec![UnreadThreadPreview {
+                event_id: format!("{root}-reply"),
+                sender: "@bob:example.com".to_owned(),
+                body: "new reply".to_owned(),
+                origin_ts: latest_ts,
+            }],
+            counted: std::collections::HashSet::from([format!("{root}-reply")]),
+        }
+    }
+
     #[test]
     fn reply_context_resolves_from_loaded_slice() {
         let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
@@ -4232,6 +4332,239 @@ mod tests {
         let events = app.selected_events();
         let ctx = app.relation_context(&events);
         assert_eq!(ctx.thread_badges.get("$root:example.com").unwrap().count, 3);
+    }
+
+    #[test]
+    fn live_thread_member_marks_thread_unread_when_panel_closed() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(key.clone(), vec![root]);
+
+        let mut live = thread_event("$reply:example.com", "$root:example.com", "new reply");
+        live.sender = "@bob:example.com".to_owned();
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+
+        assert_eq!(
+            app.unread_threads[&key]["$root:example.com"].unread_count,
+            1
+        );
+        let events = app.selected_events();
+        let ctx = app.relation_context(&events);
+        assert_eq!(ctx.thread_badges["$root:example.com"].unread_count, 1);
+        assert_eq!(app.rooms.unread.get(&key), None);
+    }
+
+    #[test]
+    fn live_thread_member_for_unselected_room_marks_room_and_thread_unread() {
+        let unread_room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let other = room(
+            "!other:example.com",
+            Some("#other:example.com"),
+            Some("Other"),
+        );
+        let mut app = app_with_rooms(vec![unread_room.clone(), other]);
+        app.rooms.selected = Some(1);
+        let key = RoomKey::from(&unread_room);
+
+        let mut live = thread_event("$reply:example.com", "$root:example.com", "new reply");
+        live.sender = "@bob:example.com".to_owned();
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+
+        assert_eq!(app.rooms.unread.get(&key).copied(), Some(1));
+        assert_eq!(
+            app.unread_threads[&key]["$root:example.com"].unread_count,
+            1
+        );
+    }
+
+    #[test]
+    fn own_live_thread_member_does_not_mark_thread_unread() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        let root = event_with_id(
+            "$root:example.com",
+            "m.room.message",
+            Some("Let's discuss"),
+            serde_json::json!({ "msgtype": "m.text", "body": "Let's discuss" }),
+        );
+        app.messages.events.insert(key.clone(), vec![root]);
+        app.seed_own_senders_from_rooms();
+
+        let live = thread_event("$reply:example.com", "$root:example.com", "my reply");
+        app.handle_live_frame(LiveFrame::Timeline(Box::new(live)));
+
+        assert!(!app.unread_threads.contains_key(&key));
+    }
+
+    #[test]
+    fn clearing_thread_unread_removes_only_that_thread() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let key = RoomKey::from(&room);
+        app.unread_threads.insert(
+            key.clone(),
+            HashMap::from([
+                (
+                    "$root:example.com".to_owned(),
+                    unread_thread("$root:example.com", 2, 2),
+                ),
+                (
+                    "$other-root:example.com".to_owned(),
+                    unread_thread("$other-root:example.com", 1, 1),
+                ),
+            ]),
+        );
+
+        app.clear_unread_thread(&key, "$root:example.com");
+
+        assert!(!app.unread_threads[&key].contains_key("$root:example.com"));
+        assert!(app.unread_threads[&key].contains_key("$other-root:example.com"));
+    }
+
+    #[test]
+    fn unread_thread_entries_sort_newest_first_and_include_context() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let key = RoomKey::from(&room);
+        app.messages.events.insert(
+            key.clone(),
+            vec![event_with_id(
+                "$root:example.com",
+                "m.room.message",
+                Some("Root topic"),
+                serde_json::json!({ "msgtype": "m.text", "body": "Root topic" }),
+            )],
+        );
+        app.unread_threads.insert(
+            key,
+            HashMap::from([(
+                "$root:example.com".to_owned(),
+                unread_thread("$root:example.com", 2, 2),
+            )]),
+        );
+
+        let entries = app.unread_thread_entries();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].room_title, "Room");
+        assert_eq!(entries[0].root_snippet.as_deref(), Some("Root topic"));
+        assert_eq!(entries[0].unread_count, 2);
+        assert_eq!(entries[0].recent.len(), 1);
+    }
+
+    #[test]
+    fn unread_thread_previews_keep_three_newest_posts() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let key = RoomKey::from(&room);
+
+        for idx in 0..5 {
+            let mut event = thread_event(
+                &format!("$reply{idx}:example.com"),
+                "$root:example.com",
+                &format!("reply {idx}"),
+            );
+            event.sender = format!("@sender{idx}:example.com");
+            event.origin_ts = idx;
+            app.mark_thread_unread_from_event(&key, "$root:example.com", &event);
+        }
+
+        let thread = &app.unread_threads[&key]["$root:example.com"];
+
+        assert_eq!(thread.unread_count, 5);
+        assert_eq!(
+            thread
+                .recent
+                .iter()
+                .map(|preview| preview.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reply 4", "reply 3", "reply 2"]
+        );
+    }
+
+    #[test]
+    fn unread_threads_command_opens_picker_when_entries_exist() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let key = RoomKey::from(&room);
+        app.unread_threads.insert(
+            key,
+            HashMap::from([(
+                "$root:example.com".to_owned(),
+                unread_thread("$root:example.com", 1, 1),
+            )]),
+        );
+
+        app.open_unread_threads_picker();
+
+        assert_eq!(app.mode, Mode::Popup(PopupKind::UnreadThreads));
+        assert_eq!(app.unread_thread_selection, 0);
+    }
+
+    #[test]
+    fn unread_thread_selection_follows_identity_after_resort() {
+        let room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        let mut app = app_with_rooms(vec![room.clone()]);
+        let key = RoomKey::from(&room);
+        app.unread_threads.insert(
+            key.clone(),
+            HashMap::from([
+                (
+                    "$root-a:example.com".to_owned(),
+                    unread_thread("$root-a:example.com", 1, 20),
+                ),
+                (
+                    "$root-b:example.com".to_owned(),
+                    unread_thread("$root-b:example.com", 1, 10),
+                ),
+            ]),
+        );
+
+        app.open_unread_threads_picker();
+        assert_eq!(app.unread_thread_selection, 0);
+        assert_eq!(
+            app.unread_thread_selected
+                .as_ref()
+                .map(|selected| selected.root_event_id.as_str()),
+            Some("$root-a:example.com")
+        );
+
+        let mut newer = thread_event("$reply-b:example.com", "$root-b:example.com", "newer");
+        newer.sender = "@bob:example.com".to_owned();
+        newer.origin_ts = 30;
+        app.mark_thread_unread_from_event(&key, "$root-b:example.com", &newer);
+        let entries = app.unread_thread_entries();
+        app.sync_unread_thread_selection(&entries);
+
+        assert_eq!(entries[0].root_event_id, "$root-b:example.com");
+        assert_eq!(app.unread_thread_selection, 1);
+        assert_eq!(
+            app.unread_thread_selected
+                .as_ref()
+                .map(|selected| selected.root_event_id.as_str()),
+            Some("$root-a:example.com")
+        );
+    }
+
+    #[test]
+    fn unread_threads_command_reports_empty_state_without_popup() {
+        let mut app = app_with_rooms(Vec::new());
+
+        app.open_unread_threads_picker();
+
+        assert_eq!(app.mode, Mode::Compose);
+        assert_eq!(app.status.text(false), "no unread threads");
     }
 
     #[test]
@@ -5823,9 +6156,61 @@ mod tests {
     }
 
     #[test]
+    fn tab_completion_fills_filter_argument() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/filter un".to_owned();
+
+        app.complete_input();
+
+        assert_eq!(app.input.buffer, "/filter unread");
+        assert_eq!(
+            app.status.text(false),
+            "[1/1] unread - Tab/Shift-Tab to cycle, Enter to filter"
+        );
+    }
+
+    #[test]
+    fn tab_completion_cycles_filter_argument_aliases() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/filter g".to_owned();
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/filter groups");
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/filter group");
+
+        app.complete_input_reverse();
+        assert_eq!(app.input.buffer, "/filter groups");
+    }
+
+    #[test]
+    fn tab_completion_cycles_filter_arguments_without_target() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/filter ".to_owned();
+
+        app.complete_input();
+        assert_eq!(app.input.buffer, "/filter all");
+        assert!(app.status.text(false).contains("[1/11] all"));
+    }
+
+    #[tokio::test]
+    async fn filter_completion_edit_resets_cycle() {
+        let mut app = app_with_rooms(Vec::new());
+        app.input.buffer = "/filter g".to_owned();
+        app.input.cursor = app.input.buffer.len();
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).await;
+        assert!(app.input.filter_command_completion.is_some());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('x'))).await;
+        assert!(app.input.filter_command_completion.is_none());
+    }
+
+    #[test]
     fn tab_completion_fills_unreact_command() {
         let mut app = app_with_rooms(Vec::new());
-        app.input.buffer = "/unr".to_owned();
+        app.input.buffer = "/unreac".to_owned();
 
         app.complete_input();
 

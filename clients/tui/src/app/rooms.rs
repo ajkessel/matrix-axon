@@ -252,7 +252,22 @@ impl App {
                     }
                 }
                 self.reseed_display_names(&room, &page.events).await;
+                // Thread replies newer than the read marker made this room
+                // unread while hidden behind their roots' badges — promote
+                // them so what caused the badge is visible (M12). Collected
+                // against the *pre-advance* marker, so this must precede
+                // note_room_read; the root fetches run after the page is
+                // installed so in-slice roots aren't re-fetched.
+                let unseen_thread_roots = self.collect_unseen_thread_promotions(&key, &page.events);
+                // Opening the room reads it up to its newest loaded event (M12).
+                if let Some(newest) = page.events.last() {
+                    let (event_id, origin_ts) = (newest.event_id.clone(), newest.origin_ts);
+                    self.note_room_read(key.clone(), &event_id, origin_ts);
+                }
                 self.messages.events.insert(key.clone(), page.events);
+                for (account_id, root) in unseen_thread_roots {
+                    self.spawn_live_thread_root_fetch(account_id, &key, &root);
+                }
                 self.rooms.unread.remove(&key);
                 self.thread_panel = None;
                 self.spawn_relations_refresh(&room);
@@ -400,7 +415,7 @@ impl App {
     /// so we expand a window forward from `ts` until the returned page holds
     /// enough messages after `ts` to fill the lower half — while it still
     /// straddles `ts` so earlier context survives in the same page. Iteration is
-    /// capped so a server that does not honour `at_ts` cannot spin forever.
+    /// capped so a server that does not honor `at_ts` cannot spin forever.
     ///
     /// Returns `true` when a non-empty page was loaded.
     pub(crate) async fn jump_to_date(&mut self, ts: i64) -> bool {
@@ -543,7 +558,7 @@ impl App {
     /// we expand a window forward from `pivot` until the page holds enough later
     /// messages, while keeping it straddling `pivot`. `want_after` is clamped to
     /// half a page so there is always room for earlier context. Iteration is
-    /// capped so a server that does not honour `at_ts` cannot spin forever.
+    /// capped so a server that does not honor `at_ts` cannot spin forever.
     pub(crate) async fn fetch_straddling_page(
         &self,
         room: &RoomDto,
@@ -680,7 +695,7 @@ impl App {
     /// so we first expand a window forward until it contains content at or after
     /// `lower`, then page backward to pin the *earliest* such message when the
     /// window is denser than one page. Iteration is capped so a server that does
-    /// not honour `at_ts` cannot spin this loop forever.
+    /// not honor `at_ts` cannot spin this loop forever.
     pub(crate) async fn find_first_event_at_or_after(&self, lower: i64) -> Option<i64> {
         const DAY_MS: i64 = 86_400_000;
         let room = self.selected_room()?.clone();
