@@ -129,6 +129,19 @@ impl Store {
         Ok(tokens)
     }
 
+    /// All still-active tokens with the given label — the lookup behind
+    /// `axon token revoke --label`. Revoked tokens are excluded since a label
+    /// only needs to be unambiguous among tokens that can still be revoked.
+    pub async fn find_active_tokens_by_label(&self, label: &str) -> Result<Vec<Token>, StoreError> {
+        let sql =
+            format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE label = $1 AND revoked_at IS NULL");
+        let tokens = sqlx_core::query_as::query_as::<Postgres, Token>(&sql)
+            .bind(label)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(tokens)
+    }
+
     /// Revoke a token by id (stamp `revoked_at`). Returns `true` if a still-active
     /// token was revoked, `false` if no such id exists or it was already revoked —
     /// so the CLI can report the difference. Idempotent: the first revocation's

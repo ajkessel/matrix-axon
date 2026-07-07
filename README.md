@@ -198,7 +198,8 @@ All `/v1/` API endpoints require a bearer token. Mint one after startup:
 ```bash
 axon token issue --label my-client   # prints the raw token once
 axon token list                       # list tokens (never shows secrets)
-axon token revoke <id>                # revoke a token
+axon token revoke <id>                # revoke a token by id
+axon token revoke --label my-client   # or by label, if it uniquely identifies one active token
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance. Supply the token to clients via their config file or environment; see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.

@@ -92,6 +92,35 @@ mod tests {
             .expect_err("--tui-config implies minting, so --no-token must conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
+
+    #[test]
+    fn revoke_requires_id_or_label() {
+        let err = Cli::try_parse_from(["axon", "token", "revoke"])
+            .expect_err("revoke needs either an id or a label");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn revoke_rejects_both_id_and_label() {
+        let id = Uuid::nil().to_string();
+        let err = Cli::try_parse_from(["axon", "token", "revoke", &id, "--label", "laptop"])
+            .expect_err("id and --label are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn revoke_accepts_label_alone() {
+        let cli = Cli::try_parse_from(["axon", "token", "revoke", "--label", "laptop"])
+            .expect("label alone is valid");
+        let Some(Command::Token {
+            action: TokenAction::Revoke { id, label },
+        }) = cli.command
+        else {
+            panic!("expected token revoke");
+        };
+        assert_eq!(id, None);
+        assert_eq!(label.as_deref(), Some("laptop"));
+    }
 }
 
 /// `axon search …` actions.
@@ -113,9 +142,15 @@ pub enum TokenAction {
     },
     /// List all tokens with their status (never prints any secret).
     List,
-    /// Revoke a token by id (see `list`).
+    /// Revoke a token by id or by label (see `list`).
+    #[command(group(clap::ArgGroup::new("target").args(["id", "label"]).required(true)))]
     Revoke {
         /// The token's id.
-        id: Uuid,
+        id: Option<Uuid>,
+        /// Revoke by label instead of id. Must uniquely identify one active
+        /// token — if more than one active token has this label, the command
+        /// refuses to guess and lists the matches instead.
+        #[arg(long)]
+        label: Option<String>,
     },
 }

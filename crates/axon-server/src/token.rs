@@ -54,7 +54,38 @@ pub async fn run(action: TokenAction, config: &Config) -> anyhow::Result<()> {
                 }
             }
         }
-        TokenAction::Revoke { id } => {
+        TokenAction::Revoke { id, label } => {
+            let id = match id {
+                Some(id) => id,
+                None => {
+                    let label = label.expect("clap requires id or label");
+                    let matches = store
+                        .find_active_tokens_by_label(&label)
+                        .await
+                        .context("looking up token by label")?;
+                    match matches.as_slice() {
+                        [] => {
+                            println!("No active token with label {label:?}.");
+                            return Ok(());
+                        }
+                        [token] => token.id,
+                        _ => {
+                            println!(
+                                "Label {label:?} matches {} active tokens; revoke by id instead:",
+                                matches.len()
+                            );
+                            for token in &matches {
+                                println!(
+                                    "  {}  created {}",
+                                    token.id,
+                                    token.created_at.to_rfc3339()
+                                );
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+            };
             if store.revoke_token(id).await.context("revoking token")? {
                 println!("Revoked token {id}.");
             } else {
