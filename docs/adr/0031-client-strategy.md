@@ -100,6 +100,7 @@ cleaner API; Svelte is compelling for performance and simplicity but carries
 ecosystem and tooling risk; Preact offers near-identical React API with a
 fraction of the bundle size via its compatibility layer.
 **Team should discuss and decide before the web client milestone is started.**
+*(Resolved: ADR 0046 selects Preact and records the web client roadmap.)*
 
 **Sequencing: Web (+Tauri desktop) → iOS → Android → macOS.** Web ships
 first: no app-store approval, fastest feedback loop, validates design patterns
@@ -112,8 +113,8 @@ macOS last, because it depends on the iOS Swift Package being stable.
 
 - Three client codebases: `clients/web/` (SPA + Tauri shell), `clients/apple/`
   (shared Swift Package with iOS and macOS targets), `clients/android/`.
-- **For further discussion**: at what point do we break the clients into separate
-  repos/workspaces. Pros and cons of monorepo versus clean separation.
+- ADR 0046 keeps `clients/web/` in this monorepo through the basic browser
+  client and parity audit; revisit a separate repo after the SPA is stable.
 - The OpenAPI spec becomes a first-class contract artifact. Breaking changes to
   `/v1/` require coordinated updates across all generated SDKs.
 - OAuth 2.0 + PKCE (post-MVP) will replace the bearer-token paste flow for web
@@ -128,4 +129,4 @@ macOS last, because it depends on the iOS Swift Package being stable.
   directly. The `matrix-api-media-proxy` branch establishes this contract.
 - The web-framework choice is the one unsettled decision. It must be resolved —
   and recorded as a follow-on ADR or amendment here — before `clients/web/`
-  work begins.
+  work begins. *(Resolved by ADR 0046: Preact.)*
