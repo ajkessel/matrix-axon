@@ -326,6 +326,7 @@ Milestones 1–6 shipped as originally numbered. After M6, the sequence was reth
 | **11** Media proxy | old M7 | Unchanged in substance; renumbered. |
 | **12** Drafts & per-device read state | old M10 | Unchanged in substance; renumbered. |
 | **13** Deployment docs | old M12 | Retargeted at `axon-tui`; first-run flow now uses the M7a account endpoints. |
+| **15** Media send/upload | — (new) | Adds the write-side counterpart to M11: staged uploads plus `m.image` / `m.file` send over Axon's `/v1/` API. |
 | _(dropped)_ | old M11 (Web alpha) | `axon-tui` replaced `axon-web` as the alpha/reference client; it is tracked outside the milestone sequence. |
 
 Older docs (`AGENTS.md` "Current state", the ADR log) still reference the original numbers as historical context; this table is the bridge. References to milestone numbers in those frozen/append-only docs are not retro-renumbered.
@@ -454,6 +455,7 @@ Mirrors the PRD non-goals and out-of-scope items; the agent should not drift int
 - No full OAuth 2.0 server. Bearer tokens via CLI only. *(Post-MVP: revisited by M14 — ADR 0054 proposes axon become its own OAuth 2.0 authorization server behind the existing `TokenVerifier` seam; in design, no code landed.)*
 - No advanced search UI (faceted, semantic). Backend ships; a minimal search input in `axon-tui` ships; rich UI does not.
 - No S3 / object-store media backend. Local disk LRU cache only.
+- No client-side media-send UX in MVP docs. *(Post-MVP: revisited by M15 — ADR 0059 proposes server-side staged uploads plus `m.image` / `m.file` mutations; in design, no code landed.)*
 - No spaces-specific endpoints. Events flow through.
 - No `store_key` rotation. One key decrypts every account's token; rotation stays deferred (ADR 0008), tracked against #24.
 - No incremental/materialized aggregation tallies in MVP. M8 aggregates at read time over indexed relations; maintaining counters on ingest is a later optimization.
