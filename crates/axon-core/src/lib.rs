@@ -9,11 +9,16 @@ pub mod config;
 pub mod error;
 pub mod live;
 pub mod message;
+pub mod secret;
 
-pub use config::{AccountProvision, Config, Credential, MediaConfig, SearchConfig, SyncConfig};
+pub use config::{
+    AccountProvision, AppleOauthConfig, Config, Credential, GenericOauthProviderConfig,
+    MediaConfig, OauthClientConfig, OauthConfig, OauthProvidersConfig, SearchConfig, SyncConfig,
+};
 pub use error::{ConfigError, Error, Result};
 pub use live::{
     DeviceStateFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
     VerificationFrameKind,
 };
 pub use message::{Formatted, Relation};
+pub use secret::{generate_opaque_secret, hash_secret};

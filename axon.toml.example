@@ -89,3 +89,50 @@ password = "hunter2"
 # ~/Library/Caches/axon/media; Windows: %LOCALAPPDATA%\axon\cache\media). Override
 # here or via AXON_MEDIA__CACHE_DIR.
 # cache_dir = "axon-data/media"
+
+# [oauth]
+# Axon as its own OAuth 2.0 authorization server to its clients (public
+# clients, PKCE mandatory) and an OIDC relying party to Google/Microsoft/Apple
+# (M14, ADR 0054). Disabled by default — every /v1/oauth/* route 404s and
+# existing CLI-token deployments are unaffected until an operator opts in.
+# enabled = false
+# This axon instance's externally-reachable base URL (no trailing slash),
+# used to build each upstream provider's callback URL. Required once
+# `enabled = true`; axon refuses to boot without it.
+# external_base_url = "https://myaxon.example.com"
+# How long a minted access token verifies for, in seconds. Default 3600 (1h).
+# access_token_ttl_secs = 3600
+# How long a minted refresh token is redeemable for, in seconds. Default
+# 2592000 (30 days).
+# refresh_token_ttl_secs = 2592000
+#
+# Statically pre-registered OAuth clients (no dynamic client registration).
+# Repeat [[oauth.clients]] for each client app; redirect_uris is an exact-match
+# allow-list, not a prefix match.
+# [[oauth.clients]]
+# client_id = "axon-ios"
+# redirect_uris = ["axon://oauth/callback"]
+#
+# [oauth.providers.google]
+# Google sign-in via the discovery-doc-driven generic OIDC provider.
+# enabled = false
+# issuer = "https://accounts.google.com"
+# client_id = "your-client-id.apps.googleusercontent.com"
+# Prefer AXON_OAUTH__PROVIDERS__GOOGLE__CLIENT_SECRET over committing this here.
+# client_secret = "change-me"
+#
+# [oauth.providers.microsoft]
+# Azure AD sign-in. The multi-tenant endpoints (common/organizations/consumers)
+# publish a {tenantid}-templated issuer, which axon validates by substituting
+# the token's own `tid` claim — no extra config needed for that.
+# enabled = false
+# issuer = "https://login.microsoftonline.com/common/v2.0"
+# client_id = "00000000-0000-0000-0000-000000000000"
+# Prefer AXON_OAUTH__PROVIDERS__MICROSOFT__CLIENT_SECRET over committing this here.
+# client_secret = "change-me"
+#
+# [oauth.providers.apple]
+# Sign in with Apple. NOT YET IMPLEMENTED — axon refuses to boot with
+# `enabled = true` here until M14c ships AppleProvider. The fields exist now so
+# this config shape won't change again when it does.
+# enabled = false

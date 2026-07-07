@@ -42,3 +42,6 @@ crossterm = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 dotenvy = { workspace = true }
+# OAuth 2.0 authorization server (M14, ADR 0054): builds each configured
+# provider's `GenericOidcProvider` (discovery-doc fetch) at boot.
+reqwest = { workspace = true, features = ["json", "form", "rustls"] }

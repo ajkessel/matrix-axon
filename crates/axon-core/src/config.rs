@@ -58,6 +58,10 @@ pub struct Config {
     /// enabled, where it lives, and its size bounds.
     #[serde(default)]
     pub media: MediaConfig,
+    /// OAuth 2.0 authorization-server settings: whether axon issues its own
+    /// bearer tokens via Apple/Google/Microsoft sign-in (M14, ADR 0054).
+    #[serde(default)]
+    pub oauth: OauthConfig,
 }
 
 /// HTTP server bind settings.
@@ -285,6 +289,150 @@ pub struct MediaConfig {
     /// queue rather than being rejected. Defaults to 16.
     #[serde(default = "default_media_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
+}
+
+/// OAuth 2.0 authorization-server settings (M14, ADR 0054).
+///
+/// Axon is its own OAuth 2.0 Authorization Server to its clients (public
+/// clients, PKCE mandatory) and an OIDC Relying Party to Apple/Google/
+/// Microsoft. Disabled by default so an existing deployment's behavior is
+/// unchanged until an operator opts in.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OauthConfig {
+    /// Whether the `/v1/oauth/*` surface is served at all. When `false`,
+    /// every oauth route 404s regardless of provider configuration. Defaults
+    /// to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// This axon instance's externally-reachable base URL (e.g.
+    /// `https://myaxon.example.com`), used to build the upstream-provider
+    /// callback URL and any links a client is redirected to. Required once
+    /// `enabled` is `true`; validated at boot (`build_oauth_runtime`) so
+    /// the error is human-readable (same pattern as `sync.store_key`).
+    #[serde(default)]
+    pub external_base_url: Option<String>,
+    /// How long a minted access token verifies for, in seconds. A config
+    /// default, not a settled policy decision — adjust freely. Defaults to
+    /// 3600 (1 hour).
+    #[serde(default = "default_oauth_access_token_ttl_secs")]
+    pub access_token_ttl_secs: u64,
+    /// How long a minted refresh token is redeemable for, in seconds.
+    /// Defaults to 2,592,000 (30 days).
+    #[serde(default = "default_oauth_refresh_token_ttl_secs")]
+    pub refresh_token_ttl_secs: u64,
+    /// Statically pre-registered OAuth clients (no dynamic client
+    /// registration, RFC 7591). Defaults to empty, which means no client can
+    /// complete Path A (an empty `redirect_uri` allow-list matches nothing).
+    #[serde(default)]
+    pub clients: Vec<OauthClientConfig>,
+    /// Per-provider settings.
+    #[serde(default)]
+    pub providers: OauthProvidersConfig,
+}
+
+/// One statically pre-registered OAuth client.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OauthClientConfig {
+    /// The client's id, e.g. `axon-ios`.
+    pub client_id: String,
+    /// Exact-match allow-list of redirect URIs this client may request in
+    /// Path A. Exact match, not prefix — a loose match would let a malicious
+    /// app registered under the same `client_id` redirect an authorization
+    /// code to itself.
+    pub redirect_uris: Vec<String>,
+}
+
+/// Per-provider OIDC settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OauthProvidersConfig {
+    /// Sign in with Apple. `AppleProvider` itself ships in M14c; these
+    /// fields exist now so the config shape is stable ahead of it.
+    #[serde(default)]
+    pub apple: AppleOauthConfig,
+    /// Google sign-in via `GenericOidcProvider`.
+    #[serde(default)]
+    pub google: GenericOauthProviderConfig,
+    /// Microsoft (Azure AD) sign-in via `GenericOidcProvider`. Its
+    /// multi-tenant endpoints (`common`/`organizations`/`consumers`) publish
+    /// a `{tenantid}`-templated issuer, handled by `GenericOidcProvider`
+    /// itself — not a config concern.
+    #[serde(default)]
+    pub microsoft: GenericOauthProviderConfig,
+}
+
+/// Config shared by Google and Microsoft — both are plain discovery-doc-driven
+/// OIDC providers (`GenericOidcProvider`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GenericOauthProviderConfig {
+    /// Whether this provider is wired up. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The provider's OIDC issuer, e.g. `https://accounts.google.com`.
+    /// Required when `enabled`; validated at oauth-runtime construction.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// The client id axon registered with this provider.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// The client secret axon registered with this provider. Stored as a
+    /// plain string, not `pgp_sym_encrypt`'d — same reasoning as
+    /// `sync.store_key`: nothing to recover, must stay cheap to read.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+}
+
+/// Sign-in-with-Apple settings. `AppleProvider`'s construction (ES256
+/// client-secret signing, native-audience handling) is M14c; these fields are
+/// declared now so the config shape doesn't change shape again then.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AppleOauthConfig {
+    /// Whether Apple sign-in is wired up. Defaults to `false`. **Not yet
+    /// implemented** — the binary refuses to start with this `true` until
+    /// M14c ships `AppleProvider`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The web Services ID Apple issues, used as the OIDC `client_id` for the
+    /// web (Path A) flow.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Native app bundle ID(s) whose Sign-in-with-Apple SDK identity tokens
+    /// (Path B) carry this as `aud` instead of `client_id`.
+    #[serde(default)]
+    pub native_audiences: Vec<String>,
+    /// Apple Developer team id, used to sign the ES256 client-secret JWT.
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// The signing key's key id (Apple Developer console).
+    #[serde(default)]
+    pub key_id: Option<String>,
+    /// The PEM-encoded ES256 private key backing `key_id`.
+    #[serde(default)]
+    pub private_key: Option<String>,
+    /// This provider's callback URL, e.g.
+    /// `https://myaxon.example.com/v1/oauth/apple/callback`.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+}
+
+fn default_oauth_access_token_ttl_secs() -> u64 {
+    3600
+}
+
+fn default_oauth_refresh_token_ttl_secs() -> u64 {
+    2_592_000
+}
+
+impl Default for OauthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            external_base_url: None,
+            access_token_ttl_secs: default_oauth_access_token_ttl_secs(),
+            refresh_token_ttl_secs: default_oauth_refresh_token_ttl_secs(),
+            clients: Vec::new(),
+            providers: OauthProvidersConfig::default(),
+        }
+    }
 }
 
 /// Provisioning details for a single Matrix account.
@@ -728,6 +876,7 @@ mod tests {
             sync: SyncConfig::default(),
             search: SearchConfig::default(),
             media: MediaConfig::default(),
+            oauth: OauthConfig::default(),
         };
         assert_eq!(config.socket_addr().to_string(), "0.0.0.0:1234");
     }

@@ -100,6 +100,14 @@ clap = { version = "4", features = ["derive"] }
 sha2 = { version = "0.10" }
 rand = { version = "0.9" }
 
+# OAuth 2.0 / OIDC (M14). `jsonwebtoken` verifies id_token signatures/claims
+# against a JWKS-selected key; discovery-doc fetch and token-exchange are
+# hand-rolled over `reqwest` (see axon-api/src/oauth/generic.rs) rather than
+# pulling a heavier OIDC-client crate — see ADR 0054. `governor` provides the
+# per-IP/per-state rate limiter over `/v1/oauth/*`.
+jsonwebtoken = { version = "9" }
+governor = { version = "0.7" }
+
 # Smoke harnesses (smoke/*). Cross-platform PTY + a terminal screen model so the
 # TUI smoke suite can drive the real binary and assert on rendered rows.
 portable-pty = { version = "0.9" }

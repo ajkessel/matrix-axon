@@ -18,6 +18,7 @@ use crate::auth::TokenVerifier;
 use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
+use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::MessageSender;
 use crate::trust::SenderTrustService;
@@ -78,6 +79,11 @@ pub struct AppState {
     /// (always-healthy) provider; the binary injects an adapter over the sync
     /// engine's `BackfillHealth` via [`with_backfill_status`](Self::with_backfill_status).
     pub backfill_status: Arc<dyn BackfillStatusProvider>,
+    /// OAuth 2.0 authorization-server runtime for `/v1/oauth/*` (M14, ADR
+    /// 0054). `None` when `oauth.enabled = false`, in which case every oauth
+    /// handler (and the rate-limiting layer in front of them) returns `404`
+    /// — the same "disabled surface" pattern as `search`.
+    pub oauth: Option<Arc<OAuthRuntime>>,
 }
 
 impl AppState {
@@ -109,6 +115,7 @@ impl AppState {
             media,
             search,
             backfill_status: Arc::new(NoBackfillStatus),
+            oauth: None,
         }
     }
 
@@ -125,6 +132,14 @@ impl AppState {
     /// don't care keep the default no-op provider.
     pub fn with_backfill_status(mut self, provider: Arc<dyn BackfillStatusProvider>) -> Self {
         self.backfill_status = provider;
+        self
+    }
+
+    /// Enable `/v1/oauth/*` with the given runtime. The binary calls this
+    /// only when `oauth.enabled = true`; tests that don't care leave the
+    /// default `None` (every oauth route 404s).
+    pub fn with_oauth(mut self, oauth: Arc<OAuthRuntime>) -> Self {
+        self.oauth = Some(oauth);
         self
     }
 }
@@ -186,6 +201,12 @@ impl FromRef<AppState> for Option<Arc<dyn SearchQuery>> {
 impl FromRef<AppState> for Arc<dyn BackfillStatusProvider> {
     fn from_ref(state: &AppState) -> Arc<dyn BackfillStatusProvider> {
         state.backfill_status.clone()
+    }
+}
+
+impl FromRef<AppState> for Option<Arc<OAuthRuntime>> {
+    fn from_ref(state: &AppState) -> Option<Arc<OAuthRuntime>> {
+        state.oauth.clone()
     }
 }
 

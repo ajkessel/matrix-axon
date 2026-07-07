@@ -24,12 +24,6 @@ chrono = { workspace = true, features = ["serde"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-# Bearer-token hashing + generation (M7b). `sha2` hashes the high-entropy token
-# (a plain hash, not a KDF — see tokens.rs); `rand` is the CSPRNG for minting;
-# `base64` encodes both the token and its hash.
-sha2 = { workspace = true }
-rand = { workspace = true }
-base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

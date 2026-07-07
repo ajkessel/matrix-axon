@@ -17,6 +17,7 @@ mod dto;
 mod extract;
 mod lifecycle;
 mod media;
+mod oauth;
 mod openapi;
 mod response;
 mod routes;
@@ -32,6 +33,10 @@ pub use axon_core::{Formatted, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use media::{MediaError, MediaProxy, MediaResource};
+pub use oauth::{
+    http_client as oauth_http_client, GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider,
+    UpstreamTokens, VerifiedIdentity,
+};
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
@@ -178,6 +183,24 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/{*path}", get(v1_not_found))
         .route_layer(from_fn_with_state(verifier, auth::require_bearer));
 
+    // The third un-gated sibling (M14, ADR 0054): how a client obtains a
+    // bearer token in the first place, so it cannot itself sit behind
+    // `require_bearer`. Its own `oauth.enabled`/per-provider checks (and this
+    // layer's rate limiter) are the boundary instead — see `routes::oauth`.
+    let oauth_state = state.oauth.clone();
+    let oauth_router = Router::new()
+        .route("/v1/oauth/authorize", get(routes::oauth::authorize))
+        .route(
+            "/v1/oauth/{provider}/callback",
+            get(routes::oauth::callback),
+        )
+        .route("/v1/oauth/token", post(routes::oauth::token))
+        .route("/v1/oauth/bind", get(routes::oauth::bind))
+        .route_layer(from_fn_with_state(
+            oauth_state,
+            oauth::rate_limit::rate_limit,
+        ));
+
     Router::new()
         // Unversioned operational liveness probe — no auth (a monitor must reach
         // it without a token).
@@ -189,6 +212,7 @@ pub fn router(state: AppState) -> Router {
         // header on a socket, so the handler authenticates the token itself at
         // upgrade time rather than riding the `require_bearer` layer.
         .route("/v1/ws", get(ws::ws_handler))
+        .merge(oauth_router)
         // Human-facing browser fallback for the server root / other non-API
         // unmatched paths. This is intentionally outside the `/v1` subtree so
         // unknown API routes keep auth + JSON semantics above.

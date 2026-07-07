@@ -12,6 +12,10 @@ mod device_state;
 mod error;
 mod events;
 mod migrations;
+mod oauth_authorization_requests;
+mod oauth_identities;
+mod oauth_refresh_tokens;
+mod oauth_replay;
 mod rooms;
 mod search;
 mod state;
@@ -25,6 +29,9 @@ pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
+pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
+pub use oauth_identities::OauthIdentity;
+pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
 pub use rooms::RoomSummary;
 pub use search::{
     room_purge_sentinel, IndexableEvent, SearchOutboxEntry, SEARCH_OUTBOX_PURGE,

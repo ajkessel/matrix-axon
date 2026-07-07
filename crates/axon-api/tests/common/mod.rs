@@ -7,6 +7,8 @@
 
 #![allow(dead_code)] // each tests/*.rs is its own crate; not all use every helper.
 
+pub mod oidc;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 

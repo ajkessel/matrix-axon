@@ -5,6 +5,7 @@ pub mod device_state;
 pub mod events;
 pub mod media;
 pub mod messages;
+pub mod oauth;
 pub mod rooms;
 pub mod search;
 pub mod status;

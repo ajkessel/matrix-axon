@@ -125,6 +125,12 @@ impl ApiError {
         )
     }
 
+    /// `429 Too Many Requests` — the caller exceeded a rate limit (M14b's
+    /// `/v1/oauth/*` guard); retrying immediately will not help.
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
+    }
+
     /// `503 Service Unavailable` — the account isn't reachable right now (e.g. its
     /// homeserver is down); the caller should retry.
     pub fn service_unavailable(message: impl Into<String>) -> Self {

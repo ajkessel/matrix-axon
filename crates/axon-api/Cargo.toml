@@ -25,6 +25,18 @@ tokio      = { workspace = true, features = ["sync", "time", "fs", "io-util"] }
 # ReaderStream wraps a cached file as a streaming media response body.
 tokio-util = { workspace = true, features = ["io"] }
 tracing    = { workspace = true }
+# OAuth 2.0 authorization server (M14, ADR 0054). `rustls` matches the feature
+# spelling used elsewhere in the workspace (clients/tui) so Cargo unifies on
+# the single already-locked reqwest/aws-lc-rs TLS provider (see axon-store's
+# Cargo.toml comment on why two providers in one process TLS-panics).
+reqwest       = { workspace = true, features = ["json", "form", "rustls"] }
+jsonwebtoken  = { workspace = true }
+governor      = { workspace = true }
+url           = { workspace = true }
+thiserror     = { workspace = true }
+rand          = { workspace = true }
+sha2          = { workspace = true }
+chrono        = { workspace = true, features = ["clock"] }
 
 [dev-dependencies]
 # DB-gated HTTP integration test: drive the real router with tower's oneshot,

@@ -208,20 +208,38 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )),
     ));
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
-    let app = axon_api::router(
-        axon_api::AppState::new(
-            store,
-            sync_engine.live_events(),
-            sender,
-            lifecycle,
-            verify,
-            trust,
-            verifier,
-            media,
-            search_port,
+
+    // OAuth 2.0 authorization server (M14, ADR 0054), when enabled. Provider
+    // construction is async (discovery-doc fetch), so it happens here rather
+    // than inside `AppState`/`router` — a failure here is fatal at boot,
+    // consistent with the search index / media cache above.
+    let oauth = if config.oauth.enabled {
+        Some(
+            build_oauth_runtime(&config.oauth)
+                .await
+                .context("configuring oauth")?,
         )
-        .with_backfill_status(backfill_status),
-    );
+    } else {
+        tracing::info!("oauth disabled (oauth.enabled = false); /v1/oauth/* will 404");
+        None
+    };
+
+    let mut state = axon_api::AppState::new(
+        store,
+        sync_engine.live_events(),
+        sender,
+        lifecycle,
+        verify,
+        trust,
+        verifier,
+        media,
+        search_port,
+    )
+    .with_backfill_status(backfill_status);
+    if let Some(oauth) = oauth {
+        state = state.with_oauth(oauth);
+    }
+    let app = axon_api::router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -229,10 +247,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     tracing::info!(%addr, "axon listening");
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    // `with_connect_info` gives the peer's `SocketAddr` to any handler/layer
+    // that extracts `ConnectInfo<SocketAddr>` — the oauth rate limiter (M14,
+    // ADR 0054) is the one consumer today.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     // HTTP has drained; now wind down the sync tasks and wait for them to flush
     // their SDK stores before exiting. This drops every `IndexHandle` the sync
@@ -297,6 +321,83 @@ fn indexer_options(search: &axon_core::SearchConfig) -> axon_search::IndexerOpti
         batch_size: search.index_batch_size,
         seed_throttle: std::time::Duration::from_millis(search.build_throttle_ms),
     }
+}
+
+/// Build the OAuth runtime from `[oauth]` config: construct a
+/// `GenericOidcProvider` (discovery-doc fetch) for each of Google/Microsoft
+/// that has `enabled = true`, and refuse to boot if Apple is enabled (its
+/// provider ships in M14c — silently ignoring the setting would be a worse
+/// surprise than a clear boot-time error).
+async fn build_oauth_runtime(
+    oauth_config: &axon_core::OauthConfig,
+) -> anyhow::Result<Arc<axon_api::OAuthRuntime>> {
+    anyhow::ensure!(
+        !oauth_config.providers.apple.enabled,
+        "oauth.providers.apple.enabled = true, but Sign in with Apple support ships in M14c \
+         (ADR 0054) — disable it or wait for that milestone"
+    );
+    anyhow::ensure!(
+        oauth_config
+            .external_base_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty()),
+        "oauth.external_base_url is required when oauth.enabled = true (it becomes the base of \
+         every upstream provider's redirect_uri)"
+    );
+
+    let http = axon_api::oauth_http_client();
+    let mut providers: std::collections::HashMap<&'static str, Arc<dyn axon_api::OidcProvider>> =
+        std::collections::HashMap::new();
+
+    if let Some(provider) =
+        discover_generic_provider("google", &oauth_config.providers.google, &http).await?
+    {
+        providers.insert("google", provider);
+    }
+    if let Some(provider) =
+        discover_generic_provider("microsoft", &oauth_config.providers.microsoft, &http).await?
+    {
+        providers.insert("microsoft", provider);
+    }
+
+    Ok(Arc::new(axon_api::OAuthRuntime::new(
+        oauth_config,
+        providers,
+    )))
+}
+
+/// Fetch `provider_name`'s discovery document and build its
+/// `GenericOidcProvider`, or `Ok(None)` if it isn't enabled. A missing
+/// `issuer`/`client_id`/`client_secret` on an enabled provider is a clear
+/// boot-time error rather than a confusing runtime 404 later.
+async fn discover_generic_provider(
+    provider_name: &'static str,
+    config: &axon_core::GenericOauthProviderConfig,
+    http: &reqwest::Client,
+) -> anyhow::Result<Option<Arc<dyn axon_api::OidcProvider>>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let issuer = config.issuer.as_deref().with_context(|| {
+        format!("oauth.providers.{provider_name}.issuer is required when enabled")
+    })?;
+    let client_id = config.client_id.clone().with_context(|| {
+        format!("oauth.providers.{provider_name}.client_id is required when enabled")
+    })?;
+    let client_secret = config.client_secret.clone().with_context(|| {
+        format!("oauth.providers.{provider_name}.client_secret is required when enabled")
+    })?;
+
+    let provider = axon_api::GenericOidcProvider::discover(
+        provider_name,
+        http.clone(),
+        issuer,
+        client_id,
+        client_secret,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("discovering {provider_name} OIDC configuration: {err}"))?;
+    Ok(Some(Arc::new(provider) as Arc<dyn axon_api::OidcProvider>))
 }
 
 /// Initialize the `tracing` subscriber. Honors `RUST_LOG` if set, otherwise

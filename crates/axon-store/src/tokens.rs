@@ -18,7 +18,6 @@
 //! As elsewhere in this crate the queries use sqlx's runtime API and `FromRow`
 //! is hand-implemented (see `migrations.rs` for why the macros are unavailable).
 
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use sqlx_core::row::Row;
 use sqlx_postgres::{PgRow, Postgres};
@@ -40,6 +39,17 @@ pub struct Token {
     pub last_used_at: Option<DateTime<Utc>>,
     /// When the token was revoked, or `None` if still active.
     pub revoked_at: Option<DateTime<Utc>>,
+    /// When this token stops verifying, or `None` for a CLI-minted token
+    /// (which never expires). Set on OAuth-minted access tokens (M14b).
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Which upstream OIDC provider (if any) backed the login that minted
+    /// this token. `None` for a CLI-minted token.
+    pub provider: Option<String>,
+    /// The bound identity this token was minted for, if any.
+    pub oauth_identity_id: Option<Uuid>,
+    /// The registered OAuth client (`[[oauth.clients]]`) that redeemed the
+    /// code/identity-token minting this row, if any.
+    pub client_id: Option<String>,
 }
 
 impl Token {
@@ -57,6 +67,10 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for Token {
             created_at: row.try_get("created_at")?,
             last_used_at: row.try_get("last_used_at")?,
             revoked_at: row.try_get("revoked_at")?,
+            expires_at: row.try_get("expires_at")?,
+            provider: row.try_get("provider")?,
+            oauth_identity_id: row.try_get("oauth_identity_id")?,
+            client_id: row.try_get("client_id")?,
         })
     }
 }
@@ -75,7 +89,8 @@ pub struct IssuedToken {
 }
 
 /// Columns selected for a [`Token`] (never the `hash`).
-const TOKEN_COLUMNS: &str = "id, label, created_at, last_used_at, revoked_at";
+const TOKEN_COLUMNS: &str =
+    "id, label, created_at, last_used_at, revoked_at, expires_at, provider, oauth_identity_id, client_id";
 
 impl Store {
     /// Mint a new bearer token with the given label: generate a random secret,
@@ -98,16 +113,20 @@ impl Store {
         })
     }
 
-    /// Verify a presented bearer token. Hashes it, looks up an **unrevoked** row,
-    /// and (on a match) stamps `last_used_at`. Returns the token's id on success
-    /// or `None` if the token is unknown or revoked. The match and the
-    /// `last_used_at` touch happen in one statement so verification is a single
-    /// round-trip on the hot path (every `/v1/` request goes through here).
+    /// Verify a presented bearer token. Hashes it, looks up an **unrevoked,
+    /// unexpired** row, and (on a match) stamps `last_used_at`. Returns the
+    /// token's id on success or `None` if the token is unknown, revoked, or
+    /// expired. The match and the `last_used_at` touch happen in one
+    /// statement so verification is a single round-trip on the hot path
+    /// (every `/v1/` request goes through here). A CLI-minted token's
+    /// `expires_at` is `NULL`, so `expires_at IS NULL` keeps it verifying
+    /// forever exactly as before OAuth existed.
     pub async fn verify_token(&self, raw: &str) -> Result<Option<Uuid>, StoreError> {
         let hash = hash_token(raw);
         let row = sqlx_core::query::query(
             "UPDATE tokens SET last_used_at = now() \
              WHERE hash = $1 AND revoked_at IS NULL \
+               AND (expires_at IS NULL OR expires_at > now()) \
              RETURNING id",
         )
         .bind(&hash)
@@ -117,6 +136,38 @@ impl Store {
             Some(row) => Ok(Some(row.try_get("id")?)),
             None => Ok(None),
         }
+    }
+
+    /// Mint an OAuth-backed access token: like [`issue_token`](Self::issue_token),
+    /// but carrying an expiry and the OAuth provenance columns. Used by the
+    /// `oauth` module's token orchestration, never by the CLI.
+    pub async fn issue_oauth_token(
+        &self,
+        label: &str,
+        expires_at: DateTime<Utc>,
+        provider: &str,
+        oauth_identity_id: Uuid,
+        client_id: &str,
+    ) -> Result<IssuedToken, StoreError> {
+        let token = generate_token();
+        let hash = hash_token(&token);
+        let row = sqlx_core::query::query(
+            "INSERT INTO tokens (label, hash, expires_at, provider, oauth_identity_id, client_id) \
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        )
+        .bind(label)
+        .bind(&hash)
+        .bind(expires_at)
+        .bind(provider)
+        .bind(oauth_identity_id)
+        .bind(client_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(IssuedToken {
+            id: row.try_get("id")?,
+            label: label.to_owned(),
+            token,
+        })
     }
 
     /// All tokens, newest first — the management read (`axon token list`).
@@ -162,22 +213,14 @@ impl Store {
 /// greppable, like a GitHub `ghp_…` token) over 256 bits of CSPRNG entropy,
 /// base64url-encoded without padding.
 fn generate_token() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    format!(
-        "axon_{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    )
+    format!("axon_{}", axon_core::generate_opaque_secret())
 }
 
 /// Hash a raw token for storage / lookup: SHA-256, base64-encoded. A plain hash
 /// (not a password KDF) is correct here because the input is high-entropy —
 /// there is nothing to brute-force — and it must be cheap to run on every request.
 fn hash_token(raw: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(raw.as_bytes());
-    base64::engine::general_purpose::STANDARD.encode(digest)
+    axon_core::hash_secret(raw)
 }
 
 #[cfg(test)]
