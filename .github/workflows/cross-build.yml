@@ -181,10 +181,10 @@ jobs:
       - name: Build workspace (Windows via cross/mingw-w64)
         # `cross` shells out to Docker; the runner's Docker daemon must be
         # reachable by whichever user runs the Actions runner service.
-        run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
+        run: CARGO_TARGET_DIR=target/cross/windows cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/axon-windows.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe build/THIRDPARTY LICENSE.md
+        run: zip -j target/axon-windows.zip target/cross/windows/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/cross/windows/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe build/THIRDPARTY LICENSE.md
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -318,9 +318,9 @@ jobs:
 
       - name: Build workspace (cross-compile)
         if: runner.os != 'linux'
-        run: cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
+        run: CARGO_TARGET_DIR=target/cross/linux cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
       - name: Zip binaries
-        run: zip -j target/axon-linux.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
+        run: zip -j target/axon-linux.zip target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
