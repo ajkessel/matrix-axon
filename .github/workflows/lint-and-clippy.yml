@@ -9,8 +9,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
   lint-and-test:
-    runs-on: [binary-builder]
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     steps:
       - uses: actions/checkout@v7
 

@@ -1,0 +1,23 @@
+# about.toml
+# axon is a placeholder license for now
+
+# 1. Root level property (Do NOT put [licenses] above this)
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+    "LicenseRef-axon",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0"
+]
+
+private = { ignore = true }
+

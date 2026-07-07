@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 # This crate is a black-box smoke harness: it spawns the shipped `axon-tui`
 # binary and drives it over a PTY against an in-process Axum stub of the Axon

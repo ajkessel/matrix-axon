@@ -16,9 +16,13 @@ jobs:
     uses: ./.github/workflows/check-environment.yml
     with:
       require-docker: true
+
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
   smoke:
-    needs: check-environment
-    runs-on: [binary-builder]
+    needs: [check-environment, resolve-runner]
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     steps:
       - uses: actions/checkout@v7
 

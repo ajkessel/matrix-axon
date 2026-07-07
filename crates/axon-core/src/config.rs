@@ -738,14 +738,30 @@ mod tests {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             // Pin the platform data root so the default resolves deterministically
-            // regardless of the test runner's HOME/XDG.
+            // regardless of the test runner's real HOME/XDG: Linux honors
+            // XDG_DATA_HOME directly, and macOS's `directories` backend falls
+            // back to $HOME when it's set (dirs-sys checks $HOME before the
+            // OS's real passwd-database home). Windows' SHGetKnownFolderPath
+            // can't be redirected via env vars at all, so it gets a
+            // suffix-only check below instead of a exact-path one.
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
             jail.set_env("XDG_DATA_HOME", "/xdg/data");
             let config = Config::load(None).expect("load");
             assert!(config.search.enabled);
-            assert_eq!(
-                config.search.index_path,
-                PathBuf::from("/xdg/data/axon/search")
-            );
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.search.index_path,
+                    home.join("Library/Application Support/axon/search")
+                );
+            } else if cfg!(target_os = "linux") {
+                assert_eq!(
+                    config.search.index_path,
+                    PathBuf::from("/xdg/data/axon/search")
+                );
+            } else {
+                assert!(config.search.index_path.ends_with("axon/search"));
+            }
             assert_eq!(config.search.index_batch_size, 1000);
             assert_eq!(config.search.build_throttle_ms, 0);
             assert_eq!(config.search.writer_heap_mb, 50);
@@ -770,14 +786,26 @@ mod tests {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             // Disposable cache defaults under the platform cache root, not the
-            // data root; pin it so the assertion is runner-independent.
+            // data root; pinned the same way as search/sync (see the comment
+            // there for why this works cross-platform).
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
             jail.set_env("XDG_CACHE_HOME", "/xdg/cache");
             let config = Config::load(None).expect("load");
             assert!(config.media.enabled);
-            assert_eq!(
-                config.media.cache_dir,
-                PathBuf::from("/xdg/cache/axon/media")
-            );
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.media.cache_dir,
+                    home.join("Library/Caches/axon/media")
+                );
+            } else if cfg!(target_os = "linux") {
+                assert_eq!(
+                    config.media.cache_dir,
+                    PathBuf::from("/xdg/cache/axon/media")
+                );
+            } else {
+                assert!(config.media.cache_dir.ends_with("axon/media"));
+            }
             assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
             assert_eq!(config.media.fetch_timeout_secs, 60);
@@ -805,10 +833,23 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
-            // Durable state defaults under the platform data root.
+            // Durable state defaults under the platform data root; pinned the
+            // same way as search/media (see the comment on search above for
+            // why this works cross-platform).
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
             jail.set_env("XDG_DATA_HOME", "/xdg/data");
             let config = Config::load(None).expect("load");
-            assert_eq!(config.sync.data_dir, PathBuf::from("/xdg/data/axon/sync"));
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    config.sync.data_dir,
+                    home.join("Library/Application Support/axon/sync")
+                );
+            } else if cfg!(target_os = "linux") {
+                assert_eq!(config.sync.data_dir, PathBuf::from("/xdg/data/axon/sync"));
+            } else {
+                assert!(config.sync.data_dir.ends_with("axon/sync"));
+            }
             assert!(config.sync.store_key.is_none());
             assert!(config.sync.account.is_none());
             Ok(())
@@ -876,23 +917,40 @@ mod tests {
         ));
     }
 
-    // The XDG mapping (the Linux branch CI exercises; macOS/Windows are
-    // documented in ADR 0050) is asserted by the `_defaults_when_absent` tests
-    // above, which pin `XDG_DATA_HOME` / `XDG_CACHE_HOME`. The tests below cover
-    // config-file discovery from the platform config dir and CLI-path precedence.
+    // The XDG mapping (Linux and macOS; see the `_defaults_when_absent` tests
+    // above, pinned via `HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME` so they're
+    // deterministic on both — Windows is documented in ADR 0050 but can't be
+    // redirected via env vars, so it gets a suffix-only check there instead).
+    // The tests below cover config-file discovery from the platform config dir
+    // and CLI-path precedence.
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn config_file_discovered_from_platform_config_dir() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
             // Point the XDG config root inside the jail so we can seed a file at
             // <config dir>/axon/axon.toml and prove `discover_config_path` finds it when
-            // neither AXON_CONFIG nor ./axon.toml is present.
+            // neither AXON_CONFIG nor ./axon.toml is present. Pinned via HOME/
+            // XDG_CONFIG_HOME the same way as the `_defaults_when_absent` tests
+            // (Linux honors XDG_CONFIG_HOME; macOS's `directories` backend
+            // honors $HOME). Windows' SHGetKnownFolderPath can't be redirected
+            // via env vars at all, so this test is gated off there — running it
+            // un-mocked would mean seeding (and asserting on) the real user's
+            // AppData directory instead of a throwaway jail path.
+            let home = jail.directory().join("home");
+            jail.set_env("HOME", home.to_str().expect("utf8"));
             let cfg_home = jail.directory().join("cfg");
             jail.set_env("XDG_CONFIG_HOME", cfg_home.to_str().expect("utf8"));
-            jail.create_dir("cfg/axon")?;
+
+            let config_dir = if cfg!(target_os = "macos") {
+                home.join("Library/Application Support/axon")
+            } else {
+                cfg_home.join("axon")
+            };
+            jail.create_dir(&config_dir)?;
             jail.create_file(
-                "cfg/axon/axon.toml",
+                config_dir.join("axon.toml"),
                 r#"
                     [database]
                     url = "postgres://cfgdir@localhost/db"

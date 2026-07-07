@@ -64,10 +64,39 @@ env:
   RELEASE_FLAG: ${{ (github.event.inputs.release != 'false') && '--release' || '' }}
 
 jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+    with:
+      runner-label: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
+
+  generate-thirdparty:
+    name: Generate license disclosure
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    steps:
+      - name: checkout source code
+        uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate license disclosure file
+        run: scripts/generate-thirdparty.sh
+
+      - name: Upload license disclosure artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: thirdparty-license
+          path: build/THIRDPARTY
+          if-no-files-found: error
+
   lint-fmt-test:
-    runs-on:
-      group: binary-builder
-      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
+    name: rustfmt, clippy, and test
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
       - name: checkout source code
@@ -101,17 +130,17 @@ jobs:
         run: cargo test --all
 
   windows:
+    name: Build for Windows
+    needs: [resolve-runner, generate-thirdparty]
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     if: ${{ github.event.inputs.windows != 'false' }}
-    runs-on:
-      group: binary-builder
-      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
         run: |
           echo "RUSTUP_HOME=$HOME/.rustup-windows" >> $GITHUB_ENV
-          echo "CARGO_HOME=$HOME/.rustup-windows" >> $GITHUB_ENV
-          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
-          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo-windows" >> $GITHUB_ENV
+          echo "$HOME/.rustup-windows/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo-windows/bin" >> $GITHUB_PATH
 
       - name: checkout source code
         uses: actions/checkout@v7
@@ -134,6 +163,12 @@ jobs:
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: windows-cargo-
 
+      - name: Download license disclosure artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: thirdparty-license
+          path: build
+
       - name: Install cross
         # cross-rs's tagged releases (latest: v0.2.5, 2023) lag well behind
         # main, which is what upstream actually maintains/recommends — so we
@@ -149,7 +184,7 @@ jobs:
         run: cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/axon-windows.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe 
+        run: zip -j target/axon-windows.zip target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe build/THIRDPARTY LICENSE.md
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -159,21 +194,21 @@ jobs:
           if-no-files-found: error
 
   macos:
-    if: ${{ github.event.inputs.macos != 'false' }}
-    runs-on:
-      group: binary-builder
-      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
+    name: Build for MacOS (Intel and Silicon)
+    needs: [resolve-runner, generate-thirdparty]
     strategy:
       fail-fast: true
       matrix:
         target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    if: ${{ github.event.inputs.macos != 'false' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
         run: |
           echo "RUSTUP_HOME=$HOME/.rustup-macos" >> $GITHUB_ENV
-          echo "CARGO_HOME=$HOME/.rustup-macos" >> $GITHUB_ENV
-          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
-          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo-macos" >> $GITHUB_ENV
+          echo "$HOME/.rustup-macos/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo-macos/bin" >> $GITHUB_PATH
 
       - name: checkout source code
         uses: actions/checkout@v7
@@ -204,6 +239,12 @@ jobs:
             exit 1
           fi
 
+      - name: Download license disclosure artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: thirdparty-license
+          path: build
+
       - name: Build workspace (macOS via osxcross)
         if: runner.os != 'macOS'
         run: |
@@ -220,7 +261,7 @@ jobs:
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/axon-macos.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui
+        run: zip -j target/axon-macos.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -230,17 +271,17 @@ jobs:
           if-no-files-found: error
 
   linux:
+    name: Build for Linux
+    needs: [resolve-runner, generate-thirdparty]
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     if: ${{ github.event.inputs.linux != 'false' }}
-    runs-on:
-      group: binary-builder
-      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
         run: |
           echo "RUSTUP_HOME=$HOME/.rustup-linux" >> $GITHUB_ENV
-          echo "CARGO_HOME=$HOME/.rustup-linux" >> $GITHUB_ENV
-          echo "$CARGO_HOME/bin" >> $GITHUB_PATH
-          echo "$RUSTUP_HOME/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo-linux" >> $GITHUB_ENV
+          echo "$HOME/.rustup-linux/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo-linux/bin" >> $GITHUB_PATH
 
       - name: checkout source code
         uses: actions/checkout@v7
@@ -261,6 +302,12 @@ jobs:
           key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: linux-cargo-
 
+      - name: Download license disclosure artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: thirdparty-license
+          path: build
+
       - name: Build workspace (native Linux)
         if: runner.os == 'linux'
         run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
@@ -272,9 +319,8 @@ jobs:
       - name: Build workspace (cross-compile)
         if: runner.os != 'linux'
         run: cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
-
       - name: Zip binaries
-        run: zip -j target/axon-linux.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui
+        run: zip -j target/axon-linux.zip target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
 
       - name: Upload binaries as artifacts
         uses: actions/upload-artifact@v7
@@ -284,11 +330,9 @@ jobs:
           if-no-files-found: error
 
   release:
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     name: Publish GitHub Release
-    needs: [windows, macos, linux]
-    runs-on:
-      group: binary-builder
-      labels: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
+    needs: [resolve-runner, windows, macos, linux]
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
 
     permissions:

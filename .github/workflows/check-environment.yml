@@ -21,8 +21,12 @@ on:
         default: false
 
 jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
   check-environment:
-    runs-on: [binary-builder]
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     steps:
       - name: test environment
         run: whoami

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 # This crate is a black-box smoke harness: it exercises the shipped
 # `axon-server` binary through HTTP, WebSocket, and Matrix Client-Server API
