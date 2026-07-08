@@ -23,7 +23,9 @@
 //! the TUI) or a `bearer.<token>` entry in `Sec-WebSocket-Protocol` (browsers) —
 //! and rejects with `401` before upgrading if it is missing or invalid. The
 //! token-bearing subprotocol is **never echoed** in the 101 response, so the
-//! secret doesn't land in response headers/logs.
+//! secret doesn't land in response headers/logs; the server instead echoes the
+//! benign [`WS_SUBPROTOCOL`] name when the client offered it, keeping the
+//! handshake RFC 6455-compliant for browsers (see #238).
 //!
 //! A long-lived socket also re-checks its token on an interval (revocation
 //! happens out-of-process, via the CLI, so there is no push signal) and closes
@@ -52,6 +54,13 @@ use crate::state::WsRevalidationInterval;
 /// kinds (e.g. the `verification.*` frames below) extend the protocol without
 /// colliding.
 const TIMELINE_EVENT: &str = "timeline.event";
+
+/// The benign WebSocket subprotocol the server negotiates when a browser client
+/// offers it. It carries no credential: browsers offer `axon, bearer.<token>`
+/// and the server echoes only `axon`, never the token-bearing entry. Echoing
+/// *some* offered subprotocol is required so the 101 handshake is RFC 6455 §4.1
+/// compliant (Chrome fails the connection otherwise); see #238 and ADR 0029.
+const WS_SUBPROTOCOL: &str = "axon";
 
 /// The wire envelope for every `/v1/ws` frame: a `type` discriminant, the
 /// `account_id` the frame pertains to, and a type-specific `payload`.
@@ -197,17 +206,21 @@ pub async fn ws_handler(
     }
 
     // Subscribe before the upgrade completes so no event that arrives during the
-    // handshake is missed. We deliberately do **not** echo the token-bearing
-    // subprotocol as the negotiated protocol — that would place the secret in the
-    // 101 response headers, where proxies and access logs may capture it. axum
-    // selects no subprotocol unless asked, and the handshake completes without one.
+    // handshake is missed. We echo the benign `axon` subprotocol when the client
+    // offered it (`protocols` selects a protocol only if the client requested it),
+    // which keeps the 101 handshake RFC 6455-compliant for browsers. We never echo
+    // the token-bearing `bearer.<token>` entry — that would place the secret in the
+    // 101 response headers, where proxies and access logs may capture it. Header-auth
+    // clients (the TUI) offer no subprotocols, so nothing is negotiated for them.
     let rx = live.subscribe();
-    ws.on_upgrade(move |socket| pump(socket, rx, verifier, token, revalidation))
+    ws.protocols([WS_SUBPROTOCOL])
+        .on_upgrade(move |socket| pump(socket, rx, verifier, token, revalidation))
 }
 
 /// Find a `bearer.<token>` entry in the `Sec-WebSocket-Protocol` header and
 /// return the token. The credential is accepted here but never echoed back as
-/// the negotiated subprotocol (see [`ws_handler`]).
+/// the negotiated subprotocol — the server negotiates the benign
+/// [`WS_SUBPROTOCOL`] instead (see [`ws_handler`]).
 fn bearer_subprotocol(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get("sec-websocket-protocol")?.to_str().ok()?;
     raw.split(',')

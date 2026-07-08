@@ -41,7 +41,9 @@ Facts established while planning, which shape the milestones below:
   `/v1/` from a browser today. Development is unaffected (Vite dev-server
   proxy), but deployment needs server-side CORS support (decided below).
 - Browser WebSocket auth is `Sec-WebSocket-Protocol: bearer.<token>`
-  (ADR 0029); the server never echoes the subprotocol back.
+  (ADR 0029); the server never echoes the token-bearing entry back. (Amended by
+  #238: the client also offers a benign `axon` subprotocol, which the server
+  echoes so the handshake is RFC 6455-compliant in Chrome.)
 - The media endpoint (`GET /v1/media/{account_id}/{server_name}/{media_id}`)
   is header-auth only and returns raw bytes with no server-side
   thumbnailing. A bare `<img src>` cannot carry the bearer token; the client

@@ -50,6 +50,20 @@ fn authed_request(url: &str) -> tokio_tungstenite::tungstenite::handshake::clien
     request
 }
 
+/// Build a WebSocket client request that authenticates the way a browser must —
+/// no `Authorization` header, the token smuggled into `Sec-WebSocket-Protocol`
+/// alongside the benign `axon` subprotocol the server echoes (#238, ADR 0029).
+fn subprotocol_request(url: &str) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    let mut request = url.into_client_request().expect("ws request");
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        format!("axon, bearer.{TEST_TOKEN}")
+            .parse()
+            .expect("header value"),
+    );
+    request
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn ws_streams_live_events() {
@@ -84,9 +98,17 @@ async fn ws_streams_live_events() {
     // `connect_async` returns, the handler's receiver is registered and any
     // subsequent `send` reaches it.
     let url = format!("ws://{addr}/v1/ws");
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(authed_request(&url))
+    let (mut ws, resp) = tokio_tungstenite::connect_async(authed_request(&url))
         .await
         .expect("ws connect");
+
+    // Header-auth clients offer no subprotocols, so the server negotiates none:
+    // the 101 must carry no `Sec-WebSocket-Protocol` header (the TUI path is
+    // unchanged by the browser-facing `axon` negotiation; see #238).
+    assert!(
+        resp.headers().get("sec-websocket-protocol").is_none(),
+        "no subprotocol should be echoed when the client offered none",
+    );
 
     // Publish one live event. With the initial receiver dropped, a successful
     // send means exactly the connected handler received it.
@@ -229,6 +251,95 @@ async fn ws_upgrade_rejected_without_a_token() {
         other => panic!("expected an HTTP 401 rejection, got {other:?}"),
     }
 
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn ws_negotiates_axon_subprotocol_for_browser_auth() {
+    let store = store().await;
+    // Drop the initial receiver so a successful `send` proves the connected
+    // handler subscribed — the same wiring proof `ws_streams_live_events` uses.
+    let (live, _) = broadcast::channel::<LiveFrame>(16);
+    let app = axon_api::router(AppState::new(
+        store,
+        live.clone(),
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
+        None,
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    // Browser-style handshake: token in `Sec-WebSocket-Protocol` (no auth
+    // header), offering `axon, bearer.<token>`. The upgrade must succeed and the
+    // 101 must echo `axon` — never the token-bearing entry — so the handshake is
+    // RFC 6455 §4.1 compliant (Chrome fails it otherwise; #238).
+    let url = format!("ws://{addr}/v1/ws");
+    let (mut ws, resp) = tokio_tungstenite::connect_async(subprotocol_request(&url))
+        .await
+        .expect("ws connect via subprotocol auth");
+    let negotiated = resp
+        .headers()
+        .get("sec-websocket-protocol")
+        .expect("a subprotocol was negotiated")
+        .to_str()
+        .expect("ascii subprotocol");
+    assert_eq!(
+        negotiated, "axon",
+        "server echoes only the benign `axon` name"
+    );
+    assert!(
+        !negotiated.contains("bearer."),
+        "the token-bearing subprotocol must never be echoed",
+    );
+
+    // The socket is live: a published frame reaches the authenticated client,
+    // proving the subprotocol token was accepted for auth.
+    let account_id = Uuid::new_v4();
+    let event_id = format!("$evt-{}:localhost", Uuid::new_v4());
+    let receivers = live
+        .send(LiveFrame::Timeline(LiveEvent {
+            account_id,
+            event_id: event_id.clone(),
+            room_id: "!room:localhost".to_owned(),
+            sender: "@jamie:localhost".to_owned(),
+            state_key: None,
+            origin_ts: 1234,
+            event_type: "m.room.message".to_owned(),
+            content: None,
+            body: Some("hello".to_owned()),
+            relates_to: None,
+            sender_trust: None,
+        }))
+        .expect("a connected subscriber");
+    assert_eq!(receivers, 1, "exactly the connected socket subscribed");
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a frame within the timeout")
+        .expect("stream still open")
+        .expect("a websocket message");
+    let text = match frame {
+        Message::Text(text) => text,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
+    assert_eq!(envelope["type"], "timeline.event");
+    assert_eq!(envelope["account_id"], account_id.to_string());
+    assert_eq!(envelope["payload"]["event_id"], event_id.as_str());
+
+    ws.close(None).await.ok();
     server.abort();
 }
 

@@ -63,6 +63,18 @@ capture it — so axum selects no subprotocol and the handshake completes withou
 one. The scheme name in the `Authorization` header is matched case-insensitively
 (RFC 7235); the token is verbatim.
 
+Amendment (2026-07-08, #238): selecting **no** subprotocol breaks browsers.
+RFC 6455 §4.1 requires a client that offered subprotocols to fail the connection
+when the server echoes none, and Chrome enforces this — so the browser handshake
+above could not complete. The fix adds a benign, credential-free subprotocol
+`axon` to the wire contract: browsers offer `Sec-WebSocket-Protocol: axon,
+bearer.<token>`, and `ws_handler` echoes **only** `axon` in the `101`, and only
+when the client offered it. The token-bearing `bearer.<token>` entry is still
+never echoed, so the secret stays out of response headers. Header-auth clients
+(the TUI) offer no subprotocols and so still negotiate none — the change is
+invisible to them. This mirrors the Kubernetes API server's solution to the same
+problem.
+
 **Revocation must reach live sockets.** Revocation happens out-of-process (the
 `axon token revoke` CLI writes the DB; the running server gets no push signal), so
 an established socket would otherwise keep streaming frames to a revoked client
