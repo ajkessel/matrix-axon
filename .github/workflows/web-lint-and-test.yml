@@ -1,0 +1,12 @@
+name: Web lint and test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  do-nothing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Empty Step
+        run: echo "No operation"
