@@ -15,6 +15,7 @@
 
 mod backfill;
 mod client;
+mod devices;
 mod discovery;
 mod engine;
 mod error;
@@ -29,6 +30,7 @@ mod trust;
 mod verification;
 
 pub use backfill::BackfillHealth;
+pub use devices::{DeviceInfo, DeviceList, DeviceListEngine, DeviceListError};
 pub use engine::SyncEngine;
 pub use error::{GatewayError, SyncError};
 pub use gateway::SdkGateway;

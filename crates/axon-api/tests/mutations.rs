@@ -21,8 +21,8 @@ use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    Call, Outcome, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
-    StubVerification, TEST_TOKEN,
+    Call, Outcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier,
+    StubTrust, StubVerification, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -41,10 +41,11 @@ fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
     let lifecycle = Arc::new(StubLifecycle::ok(Uuid::nil()));
     let verify = Arc::new(StubVerification::ok("$unused-flow"));
     let trust = Arc::new(StubTrust::ok());
+    let devices = Arc::new(StubDeviceList::ok());
     let verifier = Arc::new(StubTokenVerifier::ok());
     let media = Arc::new(StubMediaProxy);
     axon_api::router(AppState::new(
-        store, live, sender, lifecycle, verify, trust, verifier, media, None,
+        store, live, sender, lifecycle, verify, trust, devices, verifier, media, None,
     ))
 }
 

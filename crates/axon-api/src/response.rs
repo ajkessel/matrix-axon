@@ -259,3 +259,17 @@ impl From<crate::trust::TrustError> for ApiError {
         }
     }
 }
+
+impl From<crate::devices::DeviceListError> for ApiError {
+    fn from(err: crate::devices::DeviceListError) -> Self {
+        use crate::devices::DeviceListError;
+        match err {
+            DeviceListError::NotFound(msg) => ApiError::not_found(msg),
+            DeviceListError::NotActive(msg) => ApiError::conflict(msg),
+            DeviceListError::BadRequest(msg) => ApiError::bad_request(msg),
+            DeviceListError::Upstream(msg) => ApiError::bad_gateway(msg),
+            // The real cause is logged at the adapter/store boundary; return generic.
+            DeviceListError::Internal => ApiError::internal(),
+        }
+    }
+}

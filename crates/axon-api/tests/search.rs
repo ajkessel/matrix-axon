@@ -21,8 +21,8 @@ use axon_store::{NewEvent, Store};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    StubLifecycle, StubMediaProxy, StubSearchQuery, StubSender, StubTokenVerifier, StubTrust,
-    StubVerification, TEST_TOKEN,
+    StubDeviceList, StubLifecycle, StubMediaProxy, StubSearchQuery, StubSender, StubTokenVerifier,
+    StubTrust, StubVerification, TEST_TOKEN,
 };
 use serde_json::Value;
 use tower::ServiceExt; // for `oneshot`
@@ -45,6 +45,7 @@ fn search_app(store: Store, search: Option<Arc<dyn SearchQuery>>) -> axum::Route
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         search,

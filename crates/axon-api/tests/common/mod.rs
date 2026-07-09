@@ -14,11 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, ApiError, CurrentTrust, DeleteError, FlowStage, FlowSummary, Formatted,
-    LoginError, LogoutError, MediaError, MediaProxy, MediaResource, MessageSender, RecoverError,
-    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
-    VerifyError,
+    AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
+    DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaError,
+    MediaProxy, MediaResource, MessageSender, RecoverError, Relation, SearchHit, SearchHits,
+    SearchQuery, SearchQueryError, SearchQueryParams, SendError, SenderTrustService, TokenVerifier,
+    TrustBundle, TrustError, TrustSnapshot, VerificationService, VerifyError,
 };
 use uuid::Uuid;
 
@@ -792,6 +792,85 @@ impl SenderTrustService for StubTrust {
             return Err(make());
         }
         Ok(self.bundle.clone().expect("ok stub has a bundle"))
+    }
+}
+
+/// An in-memory [`DeviceListService`] for tests: returns a preset device list
+/// (or a canned error) and records the `user_id` each call received, so the
+/// `GET …/devices` handler can be exercised — the own-user default, the
+/// `?user_id=` passthrough, and error → status mapping — without a real SDK
+/// client.
+pub struct StubDeviceList {
+    list: Option<DeviceList>,
+    error: Option<fn() -> DeviceListError>,
+    calls: Mutex<Vec<Option<String>>>,
+}
+
+impl StubDeviceList {
+    /// A stub returning a representative single-device list for
+    /// `"@alice:localhost"` (the account's own user in these tests).
+    pub fn ok() -> Self {
+        Self {
+            list: Some(DeviceList {
+                user_id: "@alice:localhost".to_owned(),
+                devices: vec![DeviceInfo {
+                    device_id: "ALICEDEVICE".to_owned(),
+                    display_name: Some("Alice's Phone".to_owned()),
+                    is_verified: false,
+                    is_cross_signed_by_owner: false,
+                    local_trust_state: "unset".to_owned(),
+                    algorithms: vec!["m.megolm.v1.aes-sha2".to_owned()],
+                }],
+            }),
+            error: None,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub returning the given error for every call.
+    pub fn failing(error: fn() -> DeviceListError) -> Self {
+        Self {
+            list: None,
+            error: Some(error),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub returning an empty device list for `user_id` — the
+    /// unknown-but-syntactically-valid-user case, which is `200` with
+    /// `devices: []`, not a `404`.
+    pub fn empty(user_id: &str) -> Self {
+        Self {
+            list: Some(DeviceList {
+                user_id: user_id.to_owned(),
+                devices: vec![],
+            }),
+            error: None,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The `user_id` argument of each call received so far, in order.
+    pub fn calls(&self) -> Vec<Option<String>> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl DeviceListService for StubDeviceList {
+    async fn list(
+        &self,
+        _account_id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<DeviceList, DeviceListError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(user_id.map(str::to_owned));
+        if let Some(make) = self.error {
+            return Err(make());
+        }
+        Ok(self.list.clone().expect("ok stub has a list"))
     }
 }
 

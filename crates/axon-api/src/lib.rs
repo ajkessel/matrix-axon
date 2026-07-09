@@ -13,6 +13,7 @@
 mod auth;
 mod backfill;
 mod cursor;
+mod devices;
 mod dto;
 mod extract;
 mod lifecycle;
@@ -31,6 +32,7 @@ mod ws;
 pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
+pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
 pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
 pub use media::{MediaError, MediaProxy, MediaResource};
 pub use oauth::{
@@ -100,6 +102,13 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/verify/{flow_id}/cancel",
             post(routes::verify::cancel),
+        )
+        // Device-list / discovery (M16, ADR 0060): the picker a client reads
+        // before starting SAS verification above. Defaults to the account's
+        // own devices; `?user_id=` lists another user's (cross-user, ADR 0040).
+        .route(
+            "/v1/accounts/{account_id}/devices",
+            get(routes::devices::list_devices),
         )
         // Full-text search across the index (M9b). Cross-account by default;
         // narrowed by the query filters. Returns hydrated events + BM25 score.

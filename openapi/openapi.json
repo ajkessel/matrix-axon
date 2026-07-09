@@ -254,6 +254,106 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/devices": {
+      "get": {
+        "tags": [
+          "devices"
+        ],
+        "summary": "List a Matrix user's devices — the account's own by default, or an\narbitrary user via `?user_id=`. Reads the SDK's local crypto-store cache\non every call (kept current by the account's background sync, not by a\nhomeserver call this endpoint makes itself); no device roster is\npersisted by axon. A `user_id` axon has never tracked (no shared\nencrypted room) returns `200` with an empty `devices` list, not an error.",
+        "operationId": "list_devices",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Matrix user id to list devices for. Omit to list the account's own\ndevices (self-verification picker); supply to list another user's\n(cross-user picker, ADR 0040).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The target user's devices (empty if axon has never tracked this user)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_DeviceListDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "user_id is not a syntactically valid Matrix user id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active (logged out or being deleted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The homeserver connection itself failed (e.g. couldn't establish/restore the SDK client)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/events/{event_id}": {
       "get": {
         "tags": [
@@ -2675,6 +2775,35 @@
           }
         }
       },
+      "ApiResponse_DeviceListDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response body for `GET …/devices`: the resolved target user plus their\ndevices, read live from the SDK — never persisted (M16, ADR 0060).",
+            "required": [
+              "user_id",
+              "devices"
+            ],
+            "properties": {
+              "devices": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DeviceDto"
+                }
+              },
+              "user_id": {
+                "type": "string",
+                "description": "The Matrix user id the devices belong to — either the account's own\n`user_id` (self, when `?user_id=` was omitted) or the requested one."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_DeviceStateDto": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -3627,6 +3756,67 @@
           }
         }
       },
+      "DeviceDto": {
+        "type": "object",
+        "description": "One Matrix device of a user, as reported by `GET …/devices` — the picker a\nclient shows before starting SAS verification (M16, ADR 0060).",
+        "required": [
+          "device_id",
+          "is_verified",
+          "is_cross_signed_by_owner",
+          "local_trust_state",
+          "algorithms"
+        ],
+        "properties": {
+          "algorithms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Encryption algorithms this device advertises, e.g.\n`\"m.megolm.v1.aes-sha2\"`."
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_cross_signed_by_owner": {
+            "type": "boolean",
+            "description": "Cross-signed specifically by the device owner's own master key — the\nfiner-grained signal the verification bundle (ADR 0031) also exposes\nfor a sender's device."
+          },
+          "is_verified": {
+            "type": "boolean",
+            "description": "Locally *or* cross-signing trusted — the SDK's combined predicate. A\nUI can use this alone as \"trusted / not trusted\"."
+          },
+          "local_trust_state": {
+            "type": "string",
+            "description": "Raw local trust state (`\"verified\"` | `\"black_listed\"` | `\"ignored\"` |\n`\"unset\"`)."
+          }
+        }
+      },
+      "DeviceListDto": {
+        "type": "object",
+        "description": "Response body for `GET …/devices`: the resolved target user plus their\ndevices, read live from the SDK — never persisted (M16, ADR 0060).",
+        "required": [
+          "user_id",
+          "devices"
+        ],
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeviceDto"
+            }
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The Matrix user id the devices belong to — either the account's own\n`user_id` (self, when `?user_id=` was omitted) or the requested one."
+          }
+        }
+      },
       "DeviceStateDto": {
         "type": "object",
         "description": "One namespace of per-device client state (M12, ADR 0048), as the merged\nlast-write-wins view across *all* the account's devices: per key, the newest\nwrite wins and deleted keys are absent. This is what\n`GET /v1/devices/{device_id}/state/{namespace}` returns, so a starting\nclient sees the state its sibling devices left.",
@@ -4501,6 +4691,10 @@
     {
       "name": "verification",
       "description": "Interactive SAS device verification"
+    },
+    {
+      "name": "devices",
+      "description": "Device-list / discovery, for the SAS verification picker"
     },
     {
       "name": "media",

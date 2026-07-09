@@ -266,6 +266,57 @@ impl VerificationBundleDto {
     }
 }
 
+/// One Matrix device of a user, as reported by `GET …/devices` — the picker a
+/// client shows before starting SAS verification (M16, ADR 0060).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeviceDto {
+    pub device_id: String,
+    pub display_name: Option<String>,
+    /// Locally *or* cross-signing trusted — the SDK's combined predicate. A
+    /// UI can use this alone as "trusted / not trusted".
+    pub is_verified: bool,
+    /// Cross-signed specifically by the device owner's own master key — the
+    /// finer-grained signal the verification bundle (ADR 0031) also exposes
+    /// for a sender's device.
+    pub is_cross_signed_by_owner: bool,
+    /// Raw local trust state (`"verified"` | `"black_listed"` | `"ignored"` |
+    /// `"unset"`).
+    pub local_trust_state: String,
+    /// Encryption algorithms this device advertises, e.g.
+    /// `"m.megolm.v1.aes-sha2"`.
+    pub algorithms: Vec<String>,
+}
+
+/// Response body for `GET …/devices`: the resolved target user plus their
+/// devices, read live from the SDK — never persisted (M16, ADR 0060).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeviceListDto {
+    /// The Matrix user id the devices belong to — either the account's own
+    /// `user_id` (self, when `?user_id=` was omitted) or the requested one.
+    pub user_id: String,
+    pub devices: Vec<DeviceDto>,
+}
+
+impl From<crate::devices::DeviceList> for DeviceListDto {
+    fn from(list: crate::devices::DeviceList) -> Self {
+        DeviceListDto {
+            user_id: list.user_id,
+            devices: list
+                .devices
+                .into_iter()
+                .map(|d| DeviceDto {
+                    device_id: d.device_id,
+                    display_name: d.display_name,
+                    is_verified: d.is_verified,
+                    is_cross_signed_by_owner: d.is_cross_signed_by_owner,
+                    local_trust_state: d.local_trust_state,
+                    algorithms: d.algorithms,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived
 /// from the current resolved `m.room.member` state row for the user.
 #[derive(Debug, Serialize, ToSchema)]

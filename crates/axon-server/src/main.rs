@@ -8,6 +8,7 @@
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
 mod cli;
+mod devices;
 mod gateway;
 mod init;
 mod lifecycle;
@@ -30,6 +31,7 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::cli::{Cli, Command};
+use crate::devices::DeviceAdapter;
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
 use crate::media::CachingMediaProxy;
@@ -196,12 +198,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // can add/reactivate accounts at runtime, and its verification engine (adapted
     // onto the VerificationService port) so the verify routes can drive SAS flows,
     // and its sender-trust engine (adapted onto the SenderTrustService port) so the
-    // verification-bundle route can read per-event trust (M7c). The bearer-token
-    // verifier (M7b) is backed straight by the store.
+    // verification-bundle route can read per-event trust (M7c), and its
+    // device-list engine (adapted onto the DeviceListService port) so a client
+    // can list a user's devices before starting SAS verification (M16, ADR
+    // 0060). The bearer-token verifier (M7b) is backed straight by the store.
     let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
+    let devices = Arc::new(DeviceAdapter(sync_engine.devices()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
     let media = Arc::new(CachingMediaProxy::new(
         media_cache,
@@ -233,6 +238,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         lifecycle,
         verify,
         trust,
+        devices,
         verifier,
         media,
         search_port,

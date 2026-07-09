@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod device_state;
+pub mod devices;
 pub mod events;
 pub mod media;
 pub mod messages;

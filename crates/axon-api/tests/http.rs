@@ -26,8 +26,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
     ConfiguredMediaProxy, DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, MediaOutcome,
-    RecoverOutcome, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
-    StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
+    RecoverOutcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier,
+    StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -221,6 +221,7 @@ fn read_app(store: Store) -> axum::Router {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -239,6 +240,7 @@ fn lifecycle_app(store: Store, lifecycle: Arc<dyn AccountLifecycle>) -> axum::Ro
         lifecycle,
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -255,6 +257,7 @@ fn verify_app(store: Store, verify: Arc<dyn axon_api::VerificationService>) -> a
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         verify,
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -272,6 +275,25 @@ fn trust_app(store: Store, trust: Arc<dyn axon_api::SenderTrustService>) -> axum
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         trust,
+        Arc::new(StubDeviceList::ok()),
+        Arc::new(StubTokenVerifier::ok()),
+        Arc::new(StubMediaProxy),
+        None,
+    ))
+}
+
+/// Build a router whose device-list route is backed by `devices` (other ports
+/// unused).
+fn devices_app(store: Store, devices: Arc<dyn axon_api::DeviceListService>) -> axum::Router {
+    let (live, _rx) = tokio::sync::broadcast::channel(16);
+    axon_api::router(AppState::new(
+        store,
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        devices,
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -288,6 +310,7 @@ fn media_app(store: Store, media: Arc<dyn MediaProxy>) -> axum::Router {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         media,
         None,
@@ -494,6 +517,7 @@ async fn read_api_end_to_end() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -629,6 +653,7 @@ async fn accounts_read_api() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -1539,6 +1564,112 @@ async fn verification_bundle_error_maps_to_status() {
             &format!("/v1/accounts/{account_id}/events/$evt:localhost/verification"),
         )
         .await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+// ---- Device-list / discovery (M16, ADR 0060) ----
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_devices_defaults_to_own_user() {
+    let store = store().await;
+    let app = devices_app(store, Arc::new(StubDeviceList::ok()));
+    let account_id = Uuid::new_v4();
+
+    let (status, body) = get(&app, &format!("/v1/accounts/{account_id}/devices")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["user_id"], "@alice:localhost");
+    let devices = body["data"]["devices"].as_array().expect("devices array");
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["device_id"], "ALICEDEVICE");
+    assert_eq!(devices[0]["display_name"], "Alice's Phone");
+    assert_eq!(devices[0]["is_verified"], false);
+    assert_eq!(devices[0]["is_cross_signed_by_owner"], false);
+    assert_eq!(devices[0]["local_trust_state"], "unset");
+    assert_eq!(devices[0]["algorithms"][0], "m.megolm.v1.aes-sha2");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_devices_with_explicit_user_id() {
+    let store = store().await;
+    let stub = Arc::new(StubDeviceList::ok());
+    let app = devices_app(store, stub.clone());
+    let account_id = Uuid::new_v4();
+
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/devices?user_id=@bob:localhost"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    // The stub always returns its canned list regardless of the requested
+    // user; what this test asserts is that the query param actually reached
+    // the port.
+    assert_eq!(stub.calls(), vec![Some("@bob:localhost".to_owned())]);
+    assert!(body["data"]["devices"].as_array().is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_devices_empty_is_200_not_404() {
+    let store = store().await;
+    let stub = Arc::new(StubDeviceList::empty("@nobody:localhost"));
+    let app = devices_app(store, stub);
+    let account_id = Uuid::new_v4();
+
+    let (status, body) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/devices?user_id=@nobody:localhost"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["devices"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_devices_error_maps_to_status() {
+    let store = store().await;
+    let account_id = Uuid::new_v4();
+
+    let cases = [
+        (
+            (|| axon_api::DeviceListError::NotFound("no account".into()))
+                as fn() -> axon_api::DeviceListError,
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            || axon_api::DeviceListError::NotActive("logged out".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            || axon_api::DeviceListError::BadRequest("bad user id".into()),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+        ),
+        (
+            || axon_api::DeviceListError::Upstream("hs down".into()),
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+        ),
+        (
+            || axon_api::DeviceListError::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (make_err, want_status, want_code) in cases {
+        let app = devices_app(store.clone(), Arc::new(StubDeviceList::failing(make_err)));
+        let (status, err) = get(&app, &format!("/v1/accounts/{account_id}/devices")).await;
         assert_eq!(status, want_status);
         assert_eq!(err["error"]["code"], want_code);
     }

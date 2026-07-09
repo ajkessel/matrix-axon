@@ -21,8 +21,8 @@ use axon_api::AppState;
 use axon_core::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
 use common::{
-    StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust, StubVerification,
-    TEST_TOKEN,
+    StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
+    StubVerification, TEST_TOKEN,
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -79,6 +79,7 @@ async fn ws_streams_live_events() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -202,6 +203,7 @@ async fn ws_upgrade_rejected_without_a_token() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
@@ -376,6 +378,7 @@ async fn ws_socket_closes_when_token_is_revoked() {
             Arc::new(StubLifecycle::ok(Uuid::nil())),
             Arc::new(StubVerification::ok("$unused-flow")),
             Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
             Arc::new(stub),
             Arc::new(StubMediaProxy),
             None,
@@ -456,6 +459,7 @@ async fn ws_streams_device_state_changes() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,

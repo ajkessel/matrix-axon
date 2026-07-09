@@ -21,7 +21,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
 use common::oidc::TestOidcProvider;
-use common::{StubLifecycle, StubMediaProxy, StubSender, StubTrust, StubVerification};
+use common::{
+    StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTrust, StubVerification,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -84,6 +86,7 @@ fn app_with_oauth(store: Store) -> (axum::Router, Arc<TestOidcProvider>) {
             Arc::new(StubLifecycle::ok(Uuid::nil())),
             Arc::new(StubVerification::ok("$unused-flow")),
             Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
             real_verifier(store),
             Arc::new(StubMediaProxy),
             None,

@@ -334,6 +334,14 @@ impl SyncEngine {
         crate::trust::SenderTrustEngine::new(self.store.clone(), self.manager.clone())
     }
 
+    /// The runtime device-list port, for the API layer's device-picker route
+    /// (M16, ADR 0060). `axon-server` wraps this in an adapter implementing
+    /// its `DeviceListService` port. Shares this engine's store and client
+    /// manager; read-only, no lifecycle lock (see [`devices`]).
+    pub fn devices(&self) -> crate::devices::DeviceListEngine {
+        crate::devices::DeviceListEngine::new(self.store.clone(), self.manager.clone())
+    }
+
     /// Cancel all tracked sync tasks and wait for them to finish. Safe to call
     /// without canceling the token first — this method cancels it internally.
     /// Returns whether every tracked task drained within the shutdown budget.

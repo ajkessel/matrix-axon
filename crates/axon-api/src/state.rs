@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::TokenVerifier;
 use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
+use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
 use crate::oauth::OAuthRuntime;
@@ -57,6 +58,10 @@ pub struct AppState {
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `verify`.
     pub trust: Arc<dyn SenderTrustService>,
+    /// Device-list port for the `GET /v1/accounts/{id}/devices` handler (M16,
+    /// ADR 0060). Injected by the binary via an adapter over the sync engine,
+    /// same as `trust`.
+    pub devices: Arc<dyn DeviceListService>,
     /// Bearer-token verifier (M7b): the seam the `/v1/` auth gate (the
     /// `require_bearer` middleware and the WebSocket upgrade) checks every
     /// request against. The shipped implementation is
@@ -99,6 +104,7 @@ impl AppState {
         lifecycle: Arc<dyn AccountLifecycle>,
         verify: Arc<dyn VerificationService>,
         trust: Arc<dyn SenderTrustService>,
+        devices: Arc<dyn DeviceListService>,
         verifier: Arc<dyn TokenVerifier>,
         media: Arc<dyn MediaProxy>,
         search: Option<Arc<dyn SearchQuery>>,
@@ -110,6 +116,7 @@ impl AppState {
             lifecycle,
             verify,
             trust,
+            devices,
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
             media,
@@ -177,6 +184,12 @@ impl FromRef<AppState> for Arc<dyn VerificationService> {
 impl FromRef<AppState> for Arc<dyn SenderTrustService> {
     fn from_ref(state: &AppState) -> Arc<dyn SenderTrustService> {
         state.trust.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn DeviceListService> {
+    fn from_ref(state: &AppState) -> Arc<dyn DeviceListService> {
+        state.devices.clone()
     }
 }
 
