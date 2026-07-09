@@ -270,6 +270,7 @@ async fn ws_negotiates_axon_subprotocol_for_browser_auth() {
         Arc::new(StubLifecycle::ok(Uuid::nil())),
         Arc::new(StubVerification::ok("$unused-flow")),
         Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
         Arc::new(StubTokenVerifier::ok()),
         Arc::new(StubMediaProxy),
         None,
