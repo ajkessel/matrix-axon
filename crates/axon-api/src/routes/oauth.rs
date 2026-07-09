@@ -19,22 +19,28 @@
 
 use std::sync::Arc;
 
-use axon_store::{NewAuthorizationRequest, Store};
+use axon_store::{BindRequest, NewAuthorizationRequest, Store};
 use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::extract::{Path, Query};
 use crate::oauth::provider::OidcError;
 use crate::oauth::tokens::{self, TokenError, TokenPair};
-use crate::oauth::OAuthRuntime;
+use crate::oauth::{OAuthRuntime, OidcProvider};
 use crate::response::ApiError;
 
 /// How long a Path A flow (and its axon-minted code) stays redeemable.
 const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
+
+/// Tags a bind handshake's outgoing `state` so [`callback`] can tell it apart
+/// from a Path A `state` explicitly, rather than by relying on the two
+/// generators' outputs happening never to overlap in shape.
+const BIND_STATE_PREFIX: &str = "bind:";
 
 /// `GET /v1/oauth/authorize` query parameters (RFC 6749 §4.1.1, PKCE's
 /// `code_challenge`/`code_challenge_method` per RFC 7636, plus `provider` to
@@ -112,11 +118,17 @@ pub async fn authorize(
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
-/// Finish Path A's upstream leg: exchange the provider's code, verify the
-/// id_token, confirm the asserted identity is already bound, mint axon's own
-/// authorization code, and redirect the browser back to the client's
-/// `redirect_uri`. Path A only ever authenticates an **already-bound**
-/// owner — binding itself is the separate `axon oauth bind` flow (M14c).
+/// Finish Path A's upstream leg, **or** finish an `axon oauth bind`
+/// handshake — both land here, since both are "the upstream provider
+/// redirected back to axon" and share a `(provider, state)` pair to look a
+/// pending flow up by. Disambiguated by an explicit [`BIND_STATE_PREFIX`] tag
+/// on the `state` value, not by its incidental shape — Path A's `state`
+/// ([`tokens::generate_opaque_value`]) happens to never be UUID-parseable
+/// today, but relying on that would couple this dispatch to a format neither
+/// generator promises to keep, and the tag costs nothing extra to check.
+/// Path A only ever authenticates an **already-bound** owner; a bind
+/// handshake is the opposite — it's specifically how a *new* identity gets
+/// bound.
 pub async fn callback(
     State(store): State<Store>,
     State(runtime): State<Option<Arc<OAuthRuntime>>>,
@@ -129,6 +141,31 @@ pub async fn callback(
     let Some(provider) = runtime.provider(&provider_name) else {
         return Err(ApiError::not_found("unknown or disabled provider"));
     };
+
+    if let Some(device_code) = q
+        .state
+        .strip_prefix(BIND_STATE_PREFIX)
+        .and_then(|rest| Uuid::parse_str(rest).ok())
+    {
+        if let Some(bind_request) = store.find_bind_request(device_code).await? {
+            // `expires_at` is checked here too, not just inside
+            // `complete_bind_request`'s atomic claim — an already-expired
+            // row is still `status = 'pending'` until the next unrelated
+            // `create_bind_request` sweeps it, and there's no reason to
+            // burn a one-time upstream authorization code and do a full
+            // token-exchange/verification round trip on a flow that's
+            // already dead; `complete_bind_request` remains the actual
+            // security-relevant guard against the tighter race (expiry
+            // landing between this check and that claim).
+            if bind_request.status == "pending"
+                && bind_request.provider == provider_name
+                && bind_request.expires_at > Utc::now()
+            {
+                let callback_uri = callback_url(&runtime, &provider_name);
+                return complete_bind(&store, provider, &q.code, &callback_uri, bind_request).await;
+            }
+        }
+    }
 
     let request = store
         .find_authorization_request_by_upstream_state(&provider_name, &q.state)
@@ -248,11 +285,100 @@ pub async fn token(
     }
 }
 
-/// `GET /v1/oauth/bind` — the CLI device-code handshake's browser leg. Not
-/// yet implemented: the `axon oauth bind` CLI verb that drives this ships in
-/// M14c. Always `404` in M14b, matching every other disabled-surface route.
-pub async fn bind() -> ApiError {
-    ApiError::not_found("oauth bind is not yet implemented")
+/// `GET /v1/oauth/bind` query parameters — the `user_code` the CLI printed.
+#[derive(Debug, Deserialize)]
+pub struct BindQuery {
+    pub user_code: String,
+}
+
+/// `GET /v1/oauth/bind?user_code=...` — the CLI device-code handshake's
+/// browser leg (`axon oauth bind`, ADR 0054). Looks up the pending request
+/// by its human-typeable `user_code`, stashes a fresh nonce, and redirects
+/// straight to the upstream provider — the bind request's own `device_code`
+/// doubles as the `state` sent upstream (see [`callback`]).
+pub async fn bind(
+    State(store): State<Store>,
+    State(runtime): State<Option<Arc<OAuthRuntime>>>,
+    Query(q): Query<BindQuery>,
+) -> Result<Response, ApiError> {
+    let Some(runtime) = runtime else {
+        return Err(ApiError::not_found("oauth is disabled"));
+    };
+    let request = store
+        .find_bind_request_by_user_code(&q.user_code)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("unknown or expired bind code"))?;
+    let Some(provider) = runtime.provider(&request.provider) else {
+        return Err(ApiError::not_found("unknown or disabled provider"));
+    };
+
+    let nonce = tokens::generate_opaque_value();
+    if !store
+        .set_bind_request_upstream_nonce(request.device_code, &nonce)
+        .await?
+    {
+        // Lost a race against expiry or another completion between the
+        // lookup above and this write — redirecting upstream now would send
+        // the browser off with a nonce that was never actually persisted,
+        // which `complete_bind` would later read back as `None` and (since
+        // `verify_identity_token` treats a missing expected nonce as
+        // "nothing to check") silently skip nonce verification entirely.
+        return Err(ApiError::bad_request("unknown or expired bind code"));
+    }
+
+    let callback_uri = callback_url(&runtime, &request.provider);
+    let state = format!("{BIND_STATE_PREFIX}{}", request.device_code);
+    let redirect_url = provider.authorize_url(&state, &nonce, &callback_uri);
+    Ok(Redirect::to(&redirect_url).into_response())
+}
+
+/// Finish an `axon oauth bind` handshake: exchange the provider's code,
+/// verify the id_token against the nonce [`bind`] stashed, bind the
+/// asserted identity (UPSERT — this is specifically how a *new* identity
+/// gets bound, unlike Path A's [`callback`] which requires one already
+/// exists), and mark the bind request complete. Returns a small static page
+/// rather than a redirect: unlike Path A, there's no client `redirect_uri`
+/// to bounce an ad hoc admin browser tab back to.
+async fn complete_bind(
+    store: &Store,
+    provider: &Arc<dyn OidcProvider>,
+    code: &str,
+    callback_uri: &str,
+    bind_request: BindRequest,
+) -> Result<Response, ApiError> {
+    let upstream = provider
+        .exchange_code(code, callback_uri)
+        .await
+        .map_err(oidc_error_to_api_error)?;
+    let verified = provider
+        .verify_identity_token(&upstream.id_token, bind_request.upstream_nonce.as_deref())
+        .await
+        .map_err(oidc_error_to_api_error)?;
+
+    // Claims the bind request and binds the identity atomically — the
+    // identity is only ever written if the request was genuinely still
+    // `pending`/unexpired at the instant this ran, closing the window a
+    // separate "UPSERT identity, then conditionally complete" pair would
+    // leave between an unconditional write and its expiry check.
+    if store
+        .complete_bind_request(
+            bind_request.device_code,
+            &bind_request.provider,
+            &verified.subject,
+            verified.email.as_deref(),
+        )
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::conflict(
+            "bind request already completed or expired",
+        ));
+    }
+
+    Ok(
+        Html("<!doctype html><title>axon</title><p>Signed in. You can close this window.</p>")
+            .into_response(),
+    )
 }
 
 fn callback_url(runtime: &OAuthRuntime, provider_name: &str) -> String {

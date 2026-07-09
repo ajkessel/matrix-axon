@@ -157,4 +157,24 @@ impl Store {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Revoke every currently-active refresh token for one identity, across
+    /// *every* client — broader than
+    /// [`revoke_refresh_tokens_for_identity_client`](Self::revoke_refresh_tokens_for_identity_client),
+    /// which is scoped to a single client's reuse-detection blast radius.
+    /// `axon oauth identities unbind`'s "sign out everywhere for this
+    /// identity" step.
+    pub async fn revoke_refresh_tokens_for_identity(
+        &self,
+        oauth_identity_id: Uuid,
+    ) -> Result<u64, StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE oauth_refresh_tokens SET revoked_at = now() \
+              WHERE oauth_identity_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(oauth_identity_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }

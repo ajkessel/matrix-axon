@@ -13,6 +13,7 @@ mod error;
 mod events;
 mod migrations;
 mod oauth_authorization_requests;
+mod oauth_bind_requests;
 mod oauth_identities;
 mod oauth_refresh_tokens;
 mod oauth_replay;
@@ -30,6 +31,7 @@ pub use events::{
     ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
+pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;
 pub use oauth_refresh_tokens::{RedeemRefreshTokenError, RotatedRefreshToken};
 pub use rooms::RoomSummary;

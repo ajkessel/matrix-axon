@@ -207,6 +207,26 @@ impl Store {
         .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// Revoke every still-active token minted for `oauth_identity_id`.
+    /// `axon oauth identities unbind`'s first step — `delete_identity`
+    /// leaves any `tokens`/`oauth_refresh_tokens` rows referencing the
+    /// identity alone (no `ON DELETE` action on that FK), so a caller must
+    /// revoke them before the identity can be deleted. Returns the number of
+    /// tokens revoked.
+    pub async fn revoke_tokens_for_identity(
+        &self,
+        oauth_identity_id: Uuid,
+    ) -> Result<u64, StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE tokens SET revoked_at = now() \
+              WHERE oauth_identity_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(oauth_identity_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 /// Generate a fresh bearer token: an `axon_` prefix (so it is recognizable and

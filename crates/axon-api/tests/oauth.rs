@@ -20,6 +20,7 @@ use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::Engine;
+use chrono::{Duration, Utc};
 use common::oidc::TestOidcProvider;
 use common::{
     StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTrust, StubVerification,
@@ -401,4 +402,279 @@ async fn preexisting_cli_token_still_verifies() {
 /// simpler than adding a dependency).
 fn urlencoding_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// The full `axon oauth bind` handshake (M14, ADR 0054): `GET
+/// /v1/oauth/bind?user_code=...` redirects upstream keyed by the bind
+/// request's own `device_code` (its `state`), and the callback binds a
+/// **new** identity — the opposite of Path A, which requires one to already
+/// exist. Then confirms that identity can immediately complete a real Path A
+/// flow, closing the loop `unbound_identity_is_rejected` only proves the
+/// negative of.
+#[tokio::test]
+#[ignore]
+async fn bind_flow_creates_identity_then_path_a_succeeds() {
+    let store = store().await;
+    let (app, provider) = app_with_oauth(store.clone());
+
+    let subject = format!("bind-subject-{}", Uuid::new_v4());
+    let user_code = format!("TEST-{}", &Uuid::new_v4().simple().to_string()[..4]).to_uppercase();
+    let bind_request = store
+        .create_bind_request(
+            TEST_PROVIDER,
+            &user_code,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await
+        .expect("create bind request");
+
+    let resp = get_no_body(
+        &app,
+        &format!(
+            "/v1/oauth/bind?user_code={}",
+            urlencoding_encode(&user_code)
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "bind must redirect upstream"
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("Location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let upstream_url = url::Url::parse(&location).expect("upstream redirect is a URL");
+    let upstream_state = query_param(&upstream_url, "state");
+    let upstream_nonce = query_param(&upstream_url, "nonce");
+    assert_eq!(
+        upstream_state,
+        format!("bind:{}", bind_request.device_code),
+        "state must be the bind request's own device_code, explicitly tagged"
+    );
+
+    // Stand-in for "the admin completed the upstream provider's login".
+    let code = provider.issue_code(&subject, Some("owner@example.com"), &upstream_nonce);
+    let callback_uri =
+        format!("/v1/oauth/{TEST_PROVIDER}/callback?code={code}&state={upstream_state}");
+    let resp = get_no_body(&app, &callback_uri).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "bind callback should return a plain success page, not redirect anywhere"
+    );
+
+    let identity = store
+        .find_identity(TEST_PROVIDER, &subject)
+        .await
+        .expect("query identity")
+        .expect("identity must now be bound");
+    assert_eq!(identity.email.as_deref(), Some("owner@example.com"));
+
+    let completed = store
+        .find_bind_request(bind_request.device_code)
+        .await
+        .expect("query bind request")
+        .expect("bind request row must still exist");
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.oauth_identity_id, Some(identity.id));
+
+    // The identity bound above can now complete a real Path A flow — proves
+    // the bind flow actually unblocks login, not just that it writes a row.
+    let (verifier, challenge) = pkce_pair();
+    let authorize_uri = format!(
+        "/v1/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&provider={TEST_PROVIDER}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let resp = get_no_body(&app, &authorize_uri).await;
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("Location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let upstream_url = url::Url::parse(&location).expect("upstream redirect is a URL");
+    let path_a_state = query_param(&upstream_url, "state");
+    let path_a_nonce = query_param(&upstream_url, "nonce");
+    let path_a_code = provider.issue_code(&subject, Some("owner@example.com"), &path_a_nonce);
+    let resp = get_no_body(
+        &app,
+        &format!("/v1/oauth/{TEST_PROVIDER}/callback?code={path_a_code}&state={path_a_state}"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let client_redirect = url::Url::parse(
+        resp.headers()
+            .get("location")
+            .expect("Location header")
+            .to_str()
+            .unwrap(),
+    )
+    .expect("client redirect is a URL");
+    let axon_code = query_param(&client_redirect, "code");
+
+    let (status, body) = post_form(
+        &app,
+        "/v1/oauth/token",
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &axon_code),
+            ("code_verifier", &verifier),
+            ("client_id", CLIENT_ID),
+            ("redirect_uri", REDIRECT_URI),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+}
+
+/// A bind request's `device_code`/`state` can't be completed twice — the
+/// second callback (a replay, or a slow duplicate request) must be rejected
+/// rather than silently re-binding or overwriting `oauth_identity_id`.
+#[tokio::test]
+#[ignore]
+async fn bind_request_cannot_be_completed_twice() {
+    let store = store().await;
+    let (app, provider) = app_with_oauth(store.clone());
+
+    let subject = format!("bind-replay-{}", Uuid::new_v4());
+    let user_code = Uuid::new_v4().simple().to_string()[..9].to_uppercase();
+    let bind_request = store
+        .create_bind_request(
+            TEST_PROVIDER,
+            &user_code,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await
+        .expect("create bind request");
+
+    let resp = get_no_body(
+        &app,
+        &format!(
+            "/v1/oauth/bind?user_code={}",
+            urlencoding_encode(&user_code)
+        ),
+    )
+    .await;
+    let upstream_url =
+        url::Url::parse(resp.headers().get("location").unwrap().to_str().unwrap()).unwrap();
+    let upstream_state = query_param(&upstream_url, "state");
+    let upstream_nonce = query_param(&upstream_url, "nonce");
+
+    let code = provider.issue_code(&subject, None, &upstream_nonce);
+    let callback_uri =
+        format!("/v1/oauth/{TEST_PROVIDER}/callback?code={code}&state={upstream_state}");
+    let resp = get_no_body(&app, &callback_uri).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Replaying the same `device_code`/`state` after completion: the
+    // bind-flow branch's lookup only matches a `pending` row (mirroring Path
+    // A's `find_authorization_request_by_upstream_state`, which is likewise
+    // scoped to `status = 'pending'`), so a fully-sequential replay after
+    // completion falls through and 400s as "unknown" — the same outcome
+    // Path A gives a stale `state`. `complete_bind_request`'s atomic
+    // conditional `UPDATE` (409 on a lost race) is what actually guards the
+    // *concurrent* case, where two requests both observe `pending` before
+    // either's completion lands; a sharper fresh code bound to the same
+    // `device_code` still proves the row can't be driven through twice.
+    let code2 = provider.issue_code(&subject, None, &upstream_nonce);
+    let callback_uri2 =
+        format!("/v1/oauth/{TEST_PROVIDER}/callback?code={code2}&state={upstream_state}");
+    let resp = get_no_body(&app, &callback_uri2).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a second completion of the same bind request must be rejected"
+    );
+
+    let final_state = store
+        .find_bind_request(bind_request.device_code)
+        .await
+        .expect("query bind request")
+        .expect("row still exists");
+    assert_eq!(final_state.status, "completed");
+}
+
+/// Regression: `complete_bind_request` must not write an identity for a row
+/// that's already `expires_at`-expired, even though it's still `status =
+/// 'pending'` (nothing has swept it yet). An earlier version of this code
+/// let `bind_identity`'s UPSERT run unconditionally *before* the only
+/// expiry-checked step, so a stale/replayed callback could permanently bind
+/// an identity despite the caller seeing a `409` rejection.
+#[tokio::test]
+#[ignore]
+async fn expired_bind_request_does_not_bind_an_identity() {
+    let store = store().await;
+    let subject = format!("expired-bind-{}", Uuid::new_v4());
+    let user_code = Uuid::new_v4().simple().to_string()[..9].to_uppercase();
+
+    let request = store
+        .create_bind_request(TEST_PROVIDER, &user_code, Utc::now() - Duration::minutes(1))
+        .await
+        .expect("create already-expired bind request");
+
+    let identity_id = store
+        .complete_bind_request(request.device_code, TEST_PROVIDER, &subject, None)
+        .await
+        .expect("query complete_bind_request");
+    assert_eq!(
+        identity_id, None,
+        "an expired bind request must not be completable"
+    );
+
+    let identity = store
+        .find_identity(TEST_PROVIDER, &subject)
+        .await
+        .expect("query identity");
+    assert!(
+        identity.is_none(),
+        "no identity should have been written for an expired bind request"
+    );
+}
+
+/// Regression: `axon oauth identities unbind` (revoke tokens, then delete the
+/// identity) must succeed even for an identity that was actually bound
+/// through `axon oauth bind` — a completed bind request's `oauth_identity_id`
+/// FK previously had no `ON DELETE` action, so `delete_identity` failed with
+/// a foreign-key violation for exactly this case.
+#[tokio::test]
+#[ignore]
+async fn unbind_succeeds_for_an_identity_bound_via_the_bind_flow() {
+    let store = store().await;
+    let subject = format!("unbind-after-bind-{}", Uuid::new_v4());
+    let user_code = Uuid::new_v4().simple().to_string()[..9].to_uppercase();
+
+    let request = store
+        .create_bind_request(
+            TEST_PROVIDER,
+            &user_code,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await
+        .expect("create bind request");
+    let identity_id = store
+        .complete_bind_request(request.device_code, TEST_PROVIDER, &subject, None)
+        .await
+        .expect("complete bind request")
+        .expect("bind request must complete");
+
+    // Mirrors `axon oauth identities unbind`'s own sequence.
+    store
+        .revoke_tokens_for_identity(identity_id)
+        .await
+        .expect("revoke tokens");
+    store
+        .revoke_refresh_tokens_for_identity(identity_id)
+        .await
+        .expect("revoke refresh tokens");
+    let deleted = store
+        .delete_identity(identity_id)
+        .await
+        .expect("delete identity must not fail with a foreign-key violation");
+    assert!(deleted);
 }

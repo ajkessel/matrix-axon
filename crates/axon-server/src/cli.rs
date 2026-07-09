@@ -6,6 +6,9 @@
 //! API, talking only to the database (no sync engine, no HTTP listener). The
 //! `search` subcommand is the M9b operator path for the full-text index. The
 //! `init` subcommand (M13, ADR 0051) generates a starter config on first run.
+//! The `oauth` subcommand (M14, ADR 0054) binds upstream OIDC identities to
+//! this instance's one owner and manages them — same DB-only pattern as
+//! `token`.
 
 use std::path::PathBuf;
 
@@ -46,6 +49,11 @@ pub enum Command {
     /// interactive terminal it confirms the database URL and offers to mint a
     /// first bearer token; with `--non-interactive` it runs from flags/defaults.
     Init(InitArgs),
+    /// Bind upstream OIDC identities to this instance's owner, and manage them.
+    Oauth {
+        #[command(subcommand)]
+        action: OauthAction,
+    },
 }
 
 /// Flags for `axon init`.
@@ -121,6 +129,33 @@ mod tests {
         assert_eq!(id, None);
         assert_eq!(label.as_deref(), Some("laptop"));
     }
+
+    #[test]
+    fn oauth_bind_requires_provider() {
+        let err =
+            Cli::try_parse_from(["axon", "oauth", "bind"]).expect_err("bind needs --provider");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn oauth_bind_parses_provider() {
+        let cli = Cli::try_parse_from(["axon", "oauth", "bind", "--provider", "google"])
+            .expect("valid bind invocation");
+        let Some(Command::Oauth {
+            action: OauthAction::Bind { provider },
+        }) = cli.command
+        else {
+            panic!("expected oauth bind");
+        };
+        assert_eq!(provider, "google");
+    }
+
+    #[test]
+    fn oauth_identities_unbind_requires_id() {
+        let err = Cli::try_parse_from(["axon", "oauth", "identities", "unbind"])
+            .expect_err("unbind needs an id");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
 }
 
 /// `axon search …` actions.
@@ -129,6 +164,41 @@ pub enum SearchAction {
     /// Force a from-scratch rebuild of the search index: clears the seed marker so
     /// the next server start reseeds the whole corpus from Postgres.
     Reindex,
+}
+
+/// `axon oauth …` actions.
+#[derive(Debug, Subcommand)]
+pub enum OauthAction {
+    /// Start binding a new upstream identity to this instance's owner.
+    ///
+    /// Prints a URL to open in any browser (on this machine or elsewhere —
+    /// it only needs to reach axon's already-running `/v1/` HTTP surface),
+    /// then polls the database until that browser leg completes or the
+    /// 10-minute handshake expires.
+    Bind {
+        /// Which configured provider to bind against, e.g. `google`,
+        /// `microsoft`.
+        #[arg(long)]
+        provider: String,
+    },
+    /// Manage already-bound identities.
+    Identities {
+        #[command(subcommand)]
+        action: IdentitiesAction,
+    },
+}
+
+/// `axon oauth identities …` actions.
+#[derive(Debug, Subcommand)]
+pub enum IdentitiesAction {
+    /// List all bound identities.
+    List,
+    /// Unbind an identity by id (see `list`) and revoke every token/refresh
+    /// token it was used to mint — "sign out everywhere" for that identity.
+    Unbind {
+        /// The identity's id.
+        id: Uuid,
+    },
 }
 
 /// `axon token …` actions.

@@ -46,3 +46,4 @@ libc = { workspace = true }
 # OAuth 2.0 authorization server (M14, ADR 0054): builds each configured
 # provider's `GenericOidcProvider` (discovery-doc fetch) at boot.
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
+chrono = { workspace = true }

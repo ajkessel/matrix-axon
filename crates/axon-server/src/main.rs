@@ -13,6 +13,7 @@ mod gateway;
 mod init;
 mod lifecycle;
 mod media;
+mod oauth;
 mod search;
 mod status;
 mod token;
@@ -97,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Token { action }) => token::run(action, &config).await,
         Some(Command::Search { action }) => search::run(action, &config),
+        Some(Command::Oauth { action }) => oauth::run(action, &config).await,
         // Handled above, before config load.
         Some(Command::Init(_)) => unreachable!("init runs before config load"),
         None => serve(config).await,
@@ -374,6 +376,29 @@ async fn build_oauth_runtime(
     )))
 }
 
+/// Confirm `provider_name`'s config carries everything `GenericOidcProvider`
+/// needs (assumes the caller already checked `config.enabled`) — shared
+/// between server boot ([`discover_generic_provider`]) and `axon oauth
+/// bind`'s own pre-flight check ([`crate::oauth::run`]), so the two can't
+/// silently disagree about what "configured" means: without this, the CLI
+/// could print a bind URL for a provider the running server never actually
+/// registered because its `issuer`/`client_id`/`client_secret` were missing.
+pub(crate) fn require_generic_provider_configured<'a>(
+    provider_name: &str,
+    config: &'a axon_core::GenericOauthProviderConfig,
+) -> anyhow::Result<(&'a str, &'a str, &'a str)> {
+    let issuer = config.issuer.as_deref().with_context(|| {
+        format!("oauth.providers.{provider_name}.issuer is required when enabled")
+    })?;
+    let client_id = config.client_id.as_deref().with_context(|| {
+        format!("oauth.providers.{provider_name}.client_id is required when enabled")
+    })?;
+    let client_secret = config.client_secret.as_deref().with_context(|| {
+        format!("oauth.providers.{provider_name}.client_secret is required when enabled")
+    })?;
+    Ok((issuer, client_id, client_secret))
+}
+
 /// Fetch `provider_name`'s discovery document and build its
 /// `GenericOidcProvider`, or `Ok(None)` if it isn't enabled. A missing
 /// `issuer`/`client_id`/`client_secret` on an enabled provider is a clear
@@ -386,22 +411,15 @@ async fn discover_generic_provider(
     if !config.enabled {
         return Ok(None);
     }
-    let issuer = config.issuer.as_deref().with_context(|| {
-        format!("oauth.providers.{provider_name}.issuer is required when enabled")
-    })?;
-    let client_id = config.client_id.clone().with_context(|| {
-        format!("oauth.providers.{provider_name}.client_id is required when enabled")
-    })?;
-    let client_secret = config.client_secret.clone().with_context(|| {
-        format!("oauth.providers.{provider_name}.client_secret is required when enabled")
-    })?;
+    let (issuer, client_id, client_secret) =
+        require_generic_provider_configured(provider_name, config)?;
 
     let provider = axon_api::GenericOidcProvider::discover(
         provider_name,
         http.clone(),
         issuer,
-        client_id,
-        client_secret,
+        client_id.to_owned(),
+        client_secret.to_owned(),
     )
     .await
     .map_err(|err| anyhow::anyhow!("discovering {provider_name} OIDC configuration: {err}"))?;
