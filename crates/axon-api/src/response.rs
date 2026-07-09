@@ -231,6 +231,17 @@ impl From<crate::lifecycle::RecoverError> for ApiError {
     }
 }
 
+impl From<crate::lifecycle::RedecryptUtdsError> for ApiError {
+    fn from(err: crate::lifecycle::RedecryptUtdsError) -> Self {
+        use crate::lifecycle::RedecryptUtdsError;
+        match err {
+            RedecryptUtdsError::NotFound(msg) => ApiError::not_found(msg),
+            RedecryptUtdsError::Conflict(msg) => ApiError::conflict(msg),
+            RedecryptUtdsError::Internal => ApiError::internal(),
+        }
+    }
+}
+
 impl From<crate::verification::VerifyError> for ApiError {
     fn from(err: crate::verification::VerifyError) -> Self {
         use crate::verification::VerifyError;

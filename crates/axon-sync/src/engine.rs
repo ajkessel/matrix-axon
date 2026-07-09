@@ -1170,15 +1170,34 @@ async fn run_account(
         index.cloned(),
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
-    // keys: keys already in the crypto store don't fire the arrival stream. Raced
-    // against cancellation: a large backlog can take a while (one async decrypt
-    // call per row), and the sweep has no cancel-checks of its own, so without
-    // this a shutdown mid-sweep would block until the engine's hard drain timeout
-    // rather than exiting promptly. Safe to abandon mid-row — rows stay `pending`
-    // and are retried on the next boot's sweep (or the room-key arrival stream).
+    // keys: keys already in the crypto store don't fire the arrival stream. By
+    // default, each row gets one startup attempt; operators can opt into the
+    // legacy every-boot full sweep. Raced against cancellation: a large backlog
+    // can take a while (one async decrypt call per row), and the sweep has no
+    // cancel-checks of its own, so without this a shutdown mid-sweep would block
+    // until the engine's hard drain timeout rather than exiting promptly. Safe to
+    // abandon mid-row — rows stay `pending` and are retried on the next boot's
+    // sweep (or the room-key arrival stream).
+    let scope = if config.always_redecrypt_utds_on_startup {
+        redecrypt::SweepScope::AllPending
+    } else {
+        redecrypt::SweepScope::StartupUnattempted
+    };
     tokio::select! {
         _ = cancel.cancelled() => {}
-        () = redecrypt::sweep_pending_utds(&client, store, account.account_id, index) => {}
+        summary = redecrypt::sweep_pending_utds(&client, store, account.account_id, scope, index) => {
+            if summary.selected > 0 {
+                tracing::info!(
+                    account_id = %account.account_id,
+                    selected = summary.selected,
+                    attempted = summary.attempted,
+                    decrypted = summary.decrypted,
+                    still_pending = summary.still_pending,
+                    startup_marked = summary.startup_marked,
+                    "startup UTD re-decryption sweep completed"
+                );
+            }
+        }
     }
 
     // History backfill (M10): a continuous, throttled background task that pages

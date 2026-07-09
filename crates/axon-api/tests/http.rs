@@ -20,14 +20,14 @@ mod common;
 
 use std::sync::Arc;
 
-use axon_api::{AccountLifecycle, AppState, MediaProxy};
+use axon_api::{AccountLifecycle, AppState, MediaProxy, RedecryptUtdsStats};
 use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
     ConfiguredMediaProxy, DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, MediaOutcome,
-    RecoverOutcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier,
-    StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
+    RecoverOutcome, RedecryptOutcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender,
+    StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -1263,6 +1263,83 @@ async fn recover_error_maps_to_status() {
             "POST",
             &format!("/v1/accounts/{id}/recover"),
             Some(body.clone()),
+            Some(&bearer()),
+        )
+        .await;
+        assert_eq!(status, want_status);
+        assert_eq!(err["error"]["code"], want_code);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn redecrypt_utds_succeeds_and_envelopes_counts() {
+    let store = store().await;
+    let id = Uuid::new_v4();
+    let stats = RedecryptUtdsStats {
+        selected: 10,
+        attempted: 8,
+        decrypted: 3,
+        still_pending: 7,
+        timed_out: false,
+    };
+    let stub = Arc::new(StubLifecycle::redecrypt_failing(RedecryptOutcome::Ok(
+        stats,
+    )));
+    let app = lifecycle_app(store, stub.clone());
+
+    let (status, resp) = request(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{id}/utds/redecrypt"),
+        None,
+        Some(&bearer()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["data"]["selected"], 10);
+    assert_eq!(resp["data"]["attempted"], 8);
+    assert_eq!(resp["data"]["decrypted"], 3);
+    assert_eq!(resp["data"]["still_pending"], 7);
+    assert_eq!(resp["data"]["timed_out"], false);
+    assert_eq!(stub.redecrypt_calls(), vec![id]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn redecrypt_utds_error_maps_to_status() {
+    let store = store().await;
+    let id = Uuid::new_v4();
+
+    let cases = [
+        (
+            RedecryptOutcome::NotFound("nope".into()),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            RedecryptOutcome::Conflict("not active".into()),
+            StatusCode::CONFLICT,
+            "conflict",
+        ),
+        (
+            RedecryptOutcome::Internal,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+
+    for (outcome, want_status, want_code) in cases {
+        let app = lifecycle_app(
+            store.clone(),
+            Arc::new(StubLifecycle::redecrypt_failing(outcome)),
+        );
+        let (status, err) = request(
+            &app,
+            "POST",
+            &format!("/v1/accounts/{id}/utds/redecrypt"),
+            None,
             Some(&bearer()),
         )
         .await;

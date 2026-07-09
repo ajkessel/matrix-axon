@@ -1640,6 +1640,77 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/utds/redecrypt": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Explicitly retry every pending UTD for an active account. The default startup\npolicy attempts each stored UTD once, then waits for fresh room-key arrivals;\nthis endpoint is the authenticated operator escape hatch for rows whose keys\nare already in the crypto store or whose initial startup attempt predated key\nacquisition.",
+        "operationId": "redecrypt_utds",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Manual UTD re-decryption retry completed or timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RedecryptUtdsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not active (logged out — log in first) or is being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/verify": {
       "get": {
         "tags": [
@@ -3055,6 +3126,52 @@
           }
         }
       },
+      "ApiResponse_RedecryptUtdsResponse": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Result of an explicit UTD re-decryption retry.",
+            "required": [
+              "selected",
+              "attempted",
+              "decrypted",
+              "still_pending",
+              "timed_out"
+            ],
+            "properties": {
+              "attempted": {
+                "type": "integer",
+                "description": "Selected rows that reached a re-decryption attempt.",
+                "minimum": 0
+              },
+              "decrypted": {
+                "type": "integer",
+                "description": "Rows successfully back-filled with decrypted content.",
+                "minimum": 0
+              },
+              "selected": {
+                "type": "integer",
+                "description": "Pending UTD rows selected at the start of the retry.",
+                "minimum": 0
+              },
+              "still_pending": {
+                "type": "integer",
+                "description": "Selected rows that are still UTDs after the retry.",
+                "minimum": 0
+              },
+              "timed_out": {
+                "type": "boolean",
+                "description": "Whether the server stopped waiting before the retry completed."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_SearchPage": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -4274,6 +4391,43 @@
           "recovery_key": {
             "type": "string",
             "description": "The account's Secure-Storage (4S) recovery key."
+          }
+        }
+      },
+      "RedecryptUtdsResponse": {
+        "type": "object",
+        "description": "Result of an explicit UTD re-decryption retry.",
+        "required": [
+          "selected",
+          "attempted",
+          "decrypted",
+          "still_pending",
+          "timed_out"
+        ],
+        "properties": {
+          "attempted": {
+            "type": "integer",
+            "description": "Selected rows that reached a re-decryption attempt.",
+            "minimum": 0
+          },
+          "decrypted": {
+            "type": "integer",
+            "description": "Rows successfully back-filled with decrypted content.",
+            "minimum": 0
+          },
+          "selected": {
+            "type": "integer",
+            "description": "Pending UTD rows selected at the start of the retry.",
+            "minimum": 0
+          },
+          "still_pending": {
+            "type": "integer",
+            "description": "Selected rows that are still UTDs after the retry.",
+            "minimum": 0
+          },
+          "timed_out": {
+            "type": "boolean",
+            "description": "Whether the server stopped waiting before the retry completed."
           }
         }
       },

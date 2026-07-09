@@ -33,7 +33,10 @@ pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
-pub use lifecycle::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
+pub use lifecycle::{
+    AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
+    RedecryptUtdsStats,
+};
 pub use media::{MediaError, MediaProxy, MediaResource};
 pub use oauth::{
     http_client as oauth_http_client, GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider,
@@ -79,6 +82,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/recover",
             post(routes::accounts::recover),
+        )
+        .route(
+            "/v1/accounts/{account_id}/utds/redecrypt",
+            post(routes::accounts::redecrypt_utds),
         )
         // Read one account and delete one account (same path, two methods).
         .route(

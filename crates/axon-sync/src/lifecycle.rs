@@ -34,6 +34,7 @@ use crate::backfill::BackfillHealth;
 use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
+use crate::redecrypt::{RedecryptSummary, SweepScope};
 use crate::verification::{FlowRegistry, VerificationRooms};
 
 /// How long logout waits for a cancelled supervised task to finish draining
@@ -66,8 +67,10 @@ const UPSTREAM_LOGOUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// stalled homeserver could otherwise let `recover` hold the per-identity lock —
 /// blocking a concurrent logout/delete — for an unbounded time. On timeout the
 /// keys and `verified` are already persisted (the success the caller awaits); the
-/// unswept rows are retried by the next supervised boot sweep.
+/// operator can retry the remaining rows explicitly or enable every-startup
+/// retries in config.
 const RECOVER_SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
+const MANUAL_REDECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What can go wrong running a lifecycle verb. Wire-neutral, like
 /// [`GatewayError`](crate::GatewayError): the composition-root adapter
@@ -371,6 +374,58 @@ impl AccountLifecycle {
         lock_for(&self.locks, user_id, homeserver_url)
     }
 
+    /// Resolve an account, take its per-identity lock, and get a connected
+    /// client — the shared preamble for verbs that must serialize against
+    /// login/logout/delete and refuse a non-`Active` account: `recover()` and
+    /// `redecrypt_utds()`. The returned guard must be held for the verb's
+    /// entire body so the account can't change state underneath it.
+    async fn lock_active_account_client(
+        &self,
+        account_id: Uuid,
+    ) -> Result<(Account, Client, tokio::sync::OwnedMutexGuard<()>), LifecycleError> {
+        // Resolve identity to take the per-identity lock (keyed by
+        // `(user_id, homeserver_url)`, the key space the other verbs use); a 404
+        // is cheap and needs no lock.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+
+        let lock = self.lock_for(&account.user_id, &account.homeserver_url);
+        let guard = lock.lock_owned().await;
+
+        // Re-read under the lock: the state may have moved between the unlocked
+        // resolve above and acquiring the lock. The lock serializes this against
+        // login/logout/delete, so the state checked here can't change under us.
+        let account = self
+            .store
+            .get_account(account_id)
+            .await?
+            .ok_or(LifecycleError::NotFound(account_id))?;
+        match account.state {
+            AccountState::Active => {}
+            AccountState::Deactivated => return Err(LifecycleError::NotActive(account_id)),
+            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
+        }
+
+        // The supervised task normally holds a cached client; the cold-connect
+        // gate (active-only) is satisfied by the check above. Map the gateway's
+        // errors onto the lifecycle ones — under the lock on an `active` row the
+        // not-active/unknown arms are unreachable, but stay defensive.
+        let client = self
+            .manager
+            .get_or_connect(account_id)
+            .await
+            .map_err(|err| match err {
+                GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
+                GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
+                other => LifecycleError::Upstream(other.to_string()),
+            })?;
+
+        Ok((account, client, guard))
+    }
+
     /// Log a Matrix account in at runtime as a fresh device, returning its Axon
     /// `account_id`. Idempotent by Matrix user id:
     ///
@@ -662,45 +717,9 @@ impl AccountLifecycle {
         account_id: Uuid,
         recovery_key: &str,
     ) -> Result<(), LifecycleError> {
-        // Resolve identity to take the per-identity lock (keyed by
-        // `(user_id, homeserver_url)`, the key space the other verbs use); a 404
-        // is cheap and needs no lock.
-        let account = self
-            .store
-            .get_account(account_id)
-            .await?
-            .ok_or(LifecycleError::NotFound(account_id))?;
-
-        let lock = self.lock_for(&account.user_id, &account.homeserver_url);
-        let _guard = lock.lock().await;
-
-        // Re-read under the lock: the state may have moved between the unlocked
-        // resolve above and acquiring the lock. The lock serializes recover against
-        // login/logout/delete, so the state checked here can't change under us.
-        let account = self
-            .store
-            .get_account(account_id)
-            .await?
-            .ok_or(LifecycleError::NotFound(account_id))?;
-        match account.state {
-            AccountState::Active => {}
-            AccountState::Deactivated => return Err(LifecycleError::NotActive(account_id)),
-            AccountState::Deleting => return Err(LifecycleError::BeingDeleted(account_id)),
-        }
-
-        // The supervised task normally holds a cached client; the cold-connect
-        // gate (active-only) is satisfied by the check above. Map the gateway's
-        // errors onto the lifecycle ones — under the lock on an `active` row the
-        // not-active/unknown arms are unreachable, but stay defensive.
-        let client = self
-            .manager
-            .get_or_connect(account_id)
-            .await
-            .map_err(|e| match e {
-                GatewayError::UnknownAccount(id) => LifecycleError::NotFound(id),
-                GatewayError::AccountNotActive(id) => LifecycleError::NotActive(id),
-                other => LifecycleError::Upstream(other.to_string()),
-            })?;
+        // Resolve identity, take the per-identity lock, re-check state under it,
+        // and get a connected client — the same preamble `redecrypt_utds` uses.
+        let (account, client, _guard) = self.lock_active_account_client(account_id).await?;
 
         // One SDK call imports the megolm backup + cross-signing keys. The failure
         // is classified per variant (see `classify_recovery_error`), not blanket-
@@ -730,11 +749,13 @@ impl AccountLifecycle {
         // only thing that retries them now. Bounded by `RECOVER_SWEEP_TIMEOUT` so a
         // large backlog or a stalled homeserver can't pin the per-identity lock and
         // starve a concurrent logout/delete; an overrun leaves the remaining rows
-        // for the next supervised boot sweep (keys + `verified` are already saved).
+        // for a manual retry or an operator-enabled every-startup sweep (keys +
+        // `verified` are already saved).
         let sweep = crate::redecrypt::sweep_pending_utds(
             &client,
             &self.store,
             account_id,
+            SweepScope::AllPending,
             self.index.as_ref(),
         );
         if tokio::time::timeout(RECOVER_SWEEP_TIMEOUT, sweep)
@@ -744,7 +765,7 @@ impl AccountLifecycle {
             tracing::warn!(
                 %account_id,
                 timeout_secs = RECOVER_SWEEP_TIMEOUT.as_secs(),
-                "recover UTD back-fill sweep timed out; remaining UTDs retry on next sync restart"
+                "recover UTD back-fill sweep timed out; remaining UTDs require manual retry or every-startup retry config"
             );
         }
 
@@ -755,6 +776,45 @@ impl AccountLifecycle {
             "account recovered keys via recovery key"
         );
         Ok(())
+    }
+
+    /// Explicitly retry every pending UTD for an active account. This is the
+    /// operator escape hatch for the default startup policy, which attempts each
+    /// UTD only once at boot and then waits for fresh room-key arrivals.
+    pub async fn redecrypt_utds(
+        &self,
+        account_id: Uuid,
+    ) -> Result<RedecryptSummary, LifecycleError> {
+        let (_account, client, _guard) = self.lock_active_account_client(account_id).await?;
+
+        let sweep = crate::redecrypt::sweep_pending_utds(
+            &client,
+            &self.store,
+            account_id,
+            SweepScope::AllPending,
+            self.index.as_ref(),
+        );
+        let summary = match tokio::time::timeout(MANUAL_REDECRYPT_TIMEOUT, sweep).await {
+            Ok(summary) => summary,
+            Err(_) => {
+                tracing::warn!(
+                    %account_id,
+                    timeout_secs = MANUAL_REDECRYPT_TIMEOUT.as_secs(),
+                    "manual UTD re-decryption sweep timed out"
+                );
+                RedecryptSummary::timed_out()
+            }
+        };
+        tracing::info!(
+            %account_id,
+            selected = summary.selected,
+            attempted = summary.attempted,
+            decrypted = summary.decrypted,
+            still_pending = summary.still_pending,
+            timed_out = summary.timed_out,
+            "manual UTD re-decryption sweep completed"
+        );
+        Ok(summary)
     }
 
     /// Stop an account's live session: reap its supervised task **awaiting its

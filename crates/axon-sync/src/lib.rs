@@ -36,5 +36,6 @@ pub use error::{GatewayError, SyncError};
 pub use gateway::SdkGateway;
 pub use lifecycle::{AccountLifecycle, LifecycleError};
 pub use media::SdkMediaProxy;
+pub use redecrypt::RedecryptSummary;
 pub use trust::{CurrentTrust, SenderTrustEngine, TrustBundle, TrustError, TrustSnapshot};
 pub use verification::{FlowStage, FlowState, VerificationEngine, VerifyError};

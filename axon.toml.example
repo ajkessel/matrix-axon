@@ -56,6 +56,11 @@ timeline_limit = 20
 # burstier clients at the cost of more memory; it never back-pressures sync.
 # Default 1024.
 live_event_buffer = 1024
+# By default, each pending UTD is retried once by the startup sweep; later room-key
+# arrivals and explicit retries still back-fill rows. Set true to retry every
+# pending UTD on every process start (legacy behavior, expensive on large
+# permanently-undecryptable backlogs).
+always_redecrypt_utds_on_startup = false
 # Symmetric key used to (a) encrypt each account's access token at rest via
 # pgcrypto and (b) passphrase the SDK's SQLite store. Required once an account
 # is configured. Keep it secret; prefer setting it via AXON_SYNC__STORE_KEY

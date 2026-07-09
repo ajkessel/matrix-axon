@@ -18,6 +18,7 @@ mod search;
 mod status;
 mod token;
 mod trust;
+mod utd;
 mod verification;
 
 use std::io::IsTerminal;
@@ -50,11 +51,14 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // `init` (M13, ADR 0051) generates the config, so it must run *before* — and
-    // without — a successful config load; it's the one path that works with no
-    // configuration in place.
-    if let Some(Command::Init(args)) = &cli.command {
-        return init::run(args, cli.config.as_deref()).await;
+    // `init` generates config, and `utd` is an API client for a running server;
+    // both must run before this process tries to load its own server config.
+    if let Some(command) = &cli.command {
+        match command {
+            Command::Init(args) => return init::run(args, cli.config.as_deref()).await,
+            Command::Utd { action } => return utd::run(action).await,
+            _ => {}
+        }
     }
 
     // Config first, so we know how to configure logging. A `--config` flag (if
@@ -98,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Token { action }) => token::run(action, &config).await,
         Some(Command::Search { action }) => search::run(action, &config),
+        Some(Command::Utd { .. }) => unreachable!("utd runs before config load"),
         Some(Command::Oauth { action }) => oauth::run(action, &config).await,
         // Handled above, before config load.
         Some(Command::Init(_)) => unreachable!("init runs before config load"),

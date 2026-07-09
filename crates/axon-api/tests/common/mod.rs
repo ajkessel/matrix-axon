@@ -16,9 +16,10 @@ use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
     DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaError,
-    MediaProxy, MediaResource, MessageSender, RecoverError, Relation, SearchHit, SearchHits,
-    SearchQuery, SearchQueryError, SearchQueryParams, SendError, SenderTrustService, TokenVerifier,
-    TrustBundle, TrustError, TrustSnapshot, VerificationService, VerifyError,
+    MediaProxy, MediaResource, MessageSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
+    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
+    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
+    VerifyError,
 };
 use uuid::Uuid;
 
@@ -253,6 +254,26 @@ impl RecoverOutcome {
     }
 }
 
+/// The outcome the [`StubLifecycle`] returns for every `redecrypt_utds` call.
+#[derive(Clone)]
+pub enum RedecryptOutcome {
+    Ok(RedecryptUtdsStats),
+    NotFound(String),
+    Conflict(String),
+    Internal,
+}
+
+impl RedecryptOutcome {
+    fn to_result(&self) -> Result<RedecryptUtdsStats, RedecryptUtdsError> {
+        match self {
+            RedecryptOutcome::Ok(stats) => Ok(*stats),
+            RedecryptOutcome::NotFound(m) => Err(RedecryptUtdsError::NotFound(m.clone())),
+            RedecryptOutcome::Conflict(m) => Err(RedecryptUtdsError::Conflict(m.clone())),
+            RedecryptOutcome::Internal => Err(RedecryptUtdsError::Internal),
+        }
+    }
+}
+
 /// An in-memory [`AccountLifecycle`] for tests: records each
 /// `login`/`logout`/`delete`/`recover` call and returns a preset outcome, so the
 /// lifecycle routes can be exercised (auth gate, request decoding, error →
@@ -262,10 +283,12 @@ pub struct StubLifecycle {
     logout_outcome: LogoutOutcome,
     delete_outcome: DeleteOutcome,
     recover_outcome: RecoverOutcome,
+    redecrypt_outcome: RedecryptOutcome,
     login_calls: Mutex<Vec<LoginCall>>,
     logout_calls: Mutex<Vec<Uuid>>,
     delete_calls: Mutex<Vec<Uuid>>,
     recover_calls: Mutex<Vec<(Uuid, String)>>,
+    redecrypt_calls: Mutex<Vec<Uuid>>,
 }
 
 impl StubLifecycle {
@@ -280,6 +303,8 @@ impl StubLifecycle {
             delete_calls: Mutex::new(Vec::new()),
             recover_outcome: RecoverOutcome::Ok,
             recover_calls: Mutex::new(Vec::new()),
+            redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
+            redecrypt_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -294,6 +319,8 @@ impl StubLifecycle {
             delete_calls: Mutex::new(Vec::new()),
             recover_outcome: RecoverOutcome::Ok,
             recover_calls: Mutex::new(Vec::new()),
+            redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
+            redecrypt_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -308,6 +335,8 @@ impl StubLifecycle {
             delete_calls: Mutex::new(Vec::new()),
             recover_outcome: RecoverOutcome::Ok,
             recover_calls: Mutex::new(Vec::new()),
+            redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
+            redecrypt_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -322,6 +351,8 @@ impl StubLifecycle {
             delete_calls: Mutex::new(Vec::new()),
             recover_outcome: RecoverOutcome::Ok,
             recover_calls: Mutex::new(Vec::new()),
+            redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
+            redecrypt_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -336,6 +367,24 @@ impl StubLifecycle {
             logout_calls: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
             recover_calls: Mutex::new(Vec::new()),
+            redecrypt_outcome: RedecryptOutcome::Ok(RedecryptUtdsStats::default()),
+            redecrypt_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose manual UTD retry returns the given outcome.
+    pub fn redecrypt_failing(outcome: RedecryptOutcome) -> Self {
+        Self {
+            login_outcome: LoginOutcome::Ok(Uuid::nil()),
+            logout_outcome: LogoutOutcome::Ok,
+            delete_outcome: DeleteOutcome::Ok,
+            recover_outcome: RecoverOutcome::Ok,
+            redecrypt_outcome: outcome,
+            login_calls: Mutex::new(Vec::new()),
+            logout_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
+            recover_calls: Mutex::new(Vec::new()),
+            redecrypt_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -357,6 +406,11 @@ impl StubLifecycle {
     /// The `(account_id, recovery_key)` pairs passed to recover, in order.
     pub fn recover_calls(&self) -> Vec<(Uuid, String)> {
         self.recover_calls.lock().unwrap().clone()
+    }
+
+    /// The account ids passed to manual UTD retry, in order.
+    pub fn redecrypt_calls(&self) -> Vec<Uuid> {
+        self.redecrypt_calls.lock().unwrap().clone()
     }
 }
 
@@ -557,6 +611,14 @@ impl AccountLifecycle for StubLifecycle {
             .unwrap()
             .push((account_id, recovery_key.to_owned()));
         self.recover_outcome.to_result()
+    }
+
+    async fn redecrypt_utds(
+        &self,
+        account_id: Uuid,
+    ) -> Result<RedecryptUtdsStats, RedecryptUtdsError> {
+        self.redecrypt_calls.lock().unwrap().push(account_id);
+        self.redecrypt_outcome.to_result()
     }
 }
 

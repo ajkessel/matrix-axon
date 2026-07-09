@@ -10,7 +10,7 @@ use axon_store::Store;
 use axum::extract::State;
 use uuid::Uuid;
 
-use crate::dto::{AccountDto, LoginRequest, RecoverRequest};
+use crate::dto::{AccountDto, LoginRequest, RecoverRequest, RedecryptUtdsResponse};
 use crate::extract::{Json, Path};
 use crate::lifecycle::AccountLifecycle;
 use crate::response::{ApiError, ApiResponse};
@@ -183,6 +183,32 @@ pub async fn recover(
         .await?
         .ok_or_else(ApiError::internal)?;
     Ok(ApiResponse::new(AccountDto::from(account)))
+}
+
+/// Explicitly retry every pending UTD for an active account. The default startup
+/// policy attempts each stored UTD once, then waits for fresh room-key arrivals;
+/// this endpoint is the authenticated operator escape hatch for rows whose keys
+/// are already in the crypto store or whose initial startup attempt predated key
+/// acquisition.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/utds/redecrypt",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+    ),
+    responses(
+        (status = 200, description = "Manual UTD re-decryption retry completed or timed out", body = ApiResponse<RedecryptUtdsResponse>),
+        (status = 404, description = "No such account", body = crate::response::ErrorResponse),
+        (status = 409, description = "The account is not active (logged out — log in first) or is being deleted", body = crate::response::ErrorResponse),
+    ),
+    tag = "accounts",
+)]
+pub async fn redecrypt_utds(
+    State(lifecycle): State<Arc<dyn AccountLifecycle>>,
+    Path(account_id): Path<Uuid>,
+) -> Result<ApiResponse<RedecryptUtdsResponse>, ApiError> {
+    let stats = lifecycle.redecrypt_utds(account_id).await?;
+    Ok(ApiResponse::new(RedecryptUtdsResponse::from(stats)))
 }
 
 /// Permanently delete an account and every trace of it: stops syncing it,

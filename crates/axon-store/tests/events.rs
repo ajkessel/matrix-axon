@@ -96,6 +96,40 @@ async fn pending_utd_is_found_then_back_filled_idempotently() {
         .await
         .expect("pending by account");
     assert!(by_account.iter().any(|p| p.event_id == event_id));
+    let startup = store
+        .pending_utds_for_startup_attempt(account_id)
+        .await
+        .expect("pending startup");
+    assert!(startup.iter().any(|p| p.event_id == event_id));
+
+    let marked = store
+        .mark_utd_startup_redecrypt_attempted(account_id, std::slice::from_ref(&event_id))
+        .await
+        .expect("mark startup attempted");
+    assert_eq!(marked, 1);
+    assert!(store
+        .pending_utds_for_startup_attempt(account_id)
+        .await
+        .expect("pending startup after mark")
+        .is_empty());
+    assert_eq!(
+        store
+            .pending_utds_for_session(account_id, &room_id, &session_id)
+            .await
+            .expect("pending by session after mark")
+            .len(),
+        1,
+        "startup marker must not suppress fresh room-key arrival retries"
+    );
+    assert_eq!(
+        store
+            .pending_utds_for_account(account_id)
+            .await
+            .expect("all pending after mark")
+            .len(),
+        1,
+        "manual/recovery retries must ignore the startup marker"
+    );
 
     // Back-fill the decrypted payload.
     let content = json!({ "msgtype": "m.text", "body": "decrypted!" });

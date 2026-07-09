@@ -591,9 +591,9 @@ impl Store {
     }
 
     /// Load every pending UTD for an account, regardless of session. Used for
-    /// the startup sweep: keys may already sit in the SDK crypto store from a
-    /// prior run or a just-completed `recover()`, so we retry the whole backlog
-    /// once at boot rather than waiting for new arrivals.
+    /// explicit retries (`recover` and the operator API): keys may already sit
+    /// in the SDK crypto store, with no fresh arrival event to trigger the
+    /// session-key path.
     pub async fn pending_utds_for_account(
         &self,
         account_id: Uuid,
@@ -607,6 +607,50 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
+    }
+
+    /// Load pending UTDs that have not yet been attempted by the startup sweep.
+    /// This is the default boot-time path so permanently-undecryptable rows are
+    /// not retried on every process start. The room-key arrival stream and
+    /// explicit/manual retries deliberately ignore this marker.
+    pub async fn pending_utds_for_startup_attempt(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Vec<PendingUtd>, StoreError> {
+        let sql = format!(
+            "SELECT {PENDING_UTD_COLUMNS} FROM events \
+             WHERE account_id = $1 AND content IS NULL \
+               AND utd_startup_redecrypt_attempted_at IS NULL"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, PendingUtd>(&sql)
+            .bind(account_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// Mark selected rows as having had their one default startup re-decryption
+    /// attempt. The `content IS NULL` guard avoids writing the marker to rows
+    /// that were successfully back-filled during the sweep.
+    pub async fn mark_utd_startup_redecrypt_attempted(
+        &self,
+        account_id: Uuid,
+        event_ids: &[String],
+    ) -> Result<u64, StoreError> {
+        if event_ids.is_empty() {
+            return Ok(0);
+        }
+        let result = sqlx_core::query::query(
+            "UPDATE events \
+             SET utd_startup_redecrypt_attempted_at = now() \
+             WHERE account_id = $1 AND event_id = ANY($2) AND content IS NULL \
+               AND utd_startup_redecrypt_attempted_at IS NULL",
+        )
+        .bind(account_id)
+        .bind(event_ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Back-fill a successfully re-decrypted event: set its `content`, real

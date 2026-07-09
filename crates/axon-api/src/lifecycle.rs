@@ -88,6 +88,29 @@ pub enum RecoverError {
     Internal,
 }
 
+/// What can go wrong retrying pending UTD re-decryption. Like recovery, this
+/// needs a live active account but takes no secret-bearing input.
+#[derive(Debug)]
+pub enum RedecryptUtdsError {
+    /// No account exists for the given id. → `404`.
+    NotFound(String),
+    /// The account is logged out or mid-teardown. → `409`.
+    Conflict(String),
+    /// An internal failure (e.g. the store, or the live client could not be
+    /// reached). The detail is logged, not returned. → `500`.
+    Internal,
+}
+
+/// Counts returned by a manual UTD re-decryption retry.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RedecryptUtdsStats {
+    pub selected: usize,
+    pub attempted: usize,
+    pub decrypted: usize,
+    pub still_pending: usize,
+    pub timed_out: bool,
+}
+
 /// Adds, reactivates, stops, or removes a Matrix account at runtime. Implemented
 /// outside this crate; held in [`AppState`](crate::AppState) as
 /// `Arc<dyn AccountLifecycle>`.
@@ -123,6 +146,15 @@ pub trait AccountLifecycle: Send + Sync {
     /// is a [`Conflict`](RecoverError::Conflict); a wrong/rotated key (or no Secure
     /// Backup) is a [`BadRequest`](RecoverError::BadRequest).
     async fn recover(&self, account_id: Uuid, recovery_key: &str) -> Result<(), RecoverError>;
+
+    /// Explicitly retry every pending UTD for an active account. This is the
+    /// operator path for rows that the default startup sweep already attempted
+    /// once, or for keys that are already in the crypto store without a fresh
+    /// room-key arrival event.
+    async fn redecrypt_utds(
+        &self,
+        account_id: Uuid,
+    ) -> Result<RedecryptUtdsStats, RedecryptUtdsError>;
 
     /// Permanently delete the account `account_id` and every trace of it — an
     /// ordered, crash-recoverable teardown (the Postgres archive via cascade, the

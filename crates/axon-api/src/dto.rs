@@ -530,6 +530,33 @@ pub struct RecoverRequest {
     pub recovery_key: String,
 }
 
+/// Result of an explicit UTD re-decryption retry.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RedecryptUtdsResponse {
+    /// Pending UTD rows selected at the start of the retry.
+    pub selected: usize,
+    /// Selected rows that reached a re-decryption attempt.
+    pub attempted: usize,
+    /// Rows successfully back-filled with decrypted content.
+    pub decrypted: usize,
+    /// Selected rows that are still UTDs after the retry.
+    pub still_pending: usize,
+    /// Whether the server stopped waiting before the retry completed.
+    pub timed_out: bool,
+}
+
+impl From<crate::lifecycle::RedecryptUtdsStats> for RedecryptUtdsResponse {
+    fn from(stats: crate::lifecycle::RedecryptUtdsStats) -> Self {
+        Self {
+            selected: stats.selected,
+            attempted: stats.attempted,
+            decrypted: stats.decrypted,
+            still_pending: stats.still_pending,
+            timed_out: stats.timed_out,
+        }
+    }
+}
+
 /// Request body for starting a SAS verification
 /// (`POST /v1/accounts/{account_id}/verify`). Names the verification target:
 /// either a `device_id` — one of the user's own trusted devices

@@ -6,8 +6,11 @@
 //! translation live here. `axon-api` and `axon-sync` never depend on each other.
 
 use async_trait::async_trait;
-use axon_api::{AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError};
-use axon_sync::{AccountLifecycle as SyncLifecycle, LifecycleError};
+use axon_api::{
+    AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
+    RedecryptUtdsStats,
+};
+use axon_sync::{AccountLifecycle as SyncLifecycle, LifecycleError, RedecryptSummary};
 use uuid::Uuid;
 
 /// Wraps the sync engine's lifecycle so it satisfies the API's `AccountLifecycle`
@@ -161,6 +164,48 @@ fn map_recover_err(err: LifecycleError) -> RecoverError {
     }
 }
 
+/// Map a sync-layer lifecycle error onto the API-layer manual UTD retry error:
+/// an unknown id → not found, a logged-out / mid-teardown account → conflict, and
+/// store/client failures → a logged internal error.
+fn map_redecrypt_err(err: LifecycleError) -> RedecryptUtdsError {
+    match err {
+        LifecycleError::NotFound(id) => {
+            RedecryptUtdsError::NotFound(format!("account {id} not found"))
+        }
+        LifecycleError::NotActive(id) => RedecryptUtdsError::Conflict(format!(
+            "account {id} is not active; log in before retrying UTD re-decryption"
+        )),
+        LifecycleError::BeingDeleted(id) => {
+            RedecryptUtdsError::Conflict(format!("account is being deleted: {id}"))
+        }
+        LifecycleError::Draining(id) => RedecryptUtdsError::Conflict(format!(
+            "the session for account {id} is still shutting down; retry shortly"
+        )),
+        LifecycleError::Store(msg) => {
+            tracing::error!(error = %msg, "store error during manual UTD re-decryption");
+            RedecryptUtdsError::Internal
+        }
+        LifecycleError::Upstream(msg) => {
+            tracing::error!(error = %msg, "client error during manual UTD re-decryption");
+            RedecryptUtdsError::Internal
+        }
+        other => {
+            tracing::error!(error = %other, "unexpected error during manual UTD re-decryption");
+            RedecryptUtdsError::Internal
+        }
+    }
+}
+
+fn map_redecrypt_summary(summary: RedecryptSummary) -> RedecryptUtdsStats {
+    RedecryptUtdsStats {
+        selected: summary.selected,
+        attempted: summary.attempted,
+        decrypted: summary.decrypted,
+        still_pending: summary.still_pending,
+        timed_out: summary.timed_out,
+    }
+}
+
 #[async_trait]
 impl AccountLifecycle for LifecycleAdapter {
     async fn login(
@@ -188,5 +233,16 @@ impl AccountLifecycle for LifecycleAdapter {
             .recover(account_id, recovery_key)
             .await
             .map_err(map_recover_err)
+    }
+
+    async fn redecrypt_utds(
+        &self,
+        account_id: Uuid,
+    ) -> Result<RedecryptUtdsStats, RedecryptUtdsError> {
+        self.0
+            .redecrypt_utds(account_id)
+            .await
+            .map(map_redecrypt_summary)
+            .map_err(map_redecrypt_err)
     }
 }

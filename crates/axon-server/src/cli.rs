@@ -42,6 +42,11 @@ pub enum Command {
         #[command(subcommand)]
         action: SearchAction,
     },
+    /// Operator actions for Unable-To-Decrypt (UTD) event back-fill.
+    Utd {
+        #[command(subcommand)]
+        action: UtdAction,
+    },
     /// Generate a starter configuration file (first-run setup).
     ///
     /// Writes a minimal config (a generated `store_key` plus the Postgres URL) to
@@ -131,6 +136,28 @@ mod tests {
     }
 
     #[test]
+    fn utd_redecrypt_accepts_account_id() {
+        let id = Uuid::nil();
+        let cli =
+            Cli::try_parse_from(["axon", "utd", "redecrypt", "--account-id", &id.to_string()])
+                .expect("utd redecrypt is valid");
+        let Some(Command::Utd {
+            action:
+                UtdAction::Redecrypt {
+                    account_id,
+                    base_url,
+                    token,
+                },
+        }) = cli.command
+        else {
+            panic!("expected utd redecrypt");
+        };
+        assert_eq!(account_id, id);
+        assert_eq!(base_url, None);
+        assert_eq!(token, None);
+    }
+
+    #[test]
     fn oauth_bind_requires_provider() {
         let err =
             Cli::try_parse_from(["axon", "oauth", "bind"]).expect_err("bind needs --provider");
@@ -164,6 +191,23 @@ pub enum SearchAction {
     /// Force a from-scratch rebuild of the search index: clears the seed marker so
     /// the next server start reseeds the whole corpus from Postgres.
     Reindex,
+}
+
+/// `axon utd …` actions.
+#[derive(Debug, Subcommand)]
+pub enum UtdAction {
+    /// Explicitly retry pending UTD re-decryption for one active account.
+    Redecrypt {
+        /// Axon account id to retry.
+        #[arg(long)]
+        account_id: Uuid,
+        /// Axon API base URL. Defaults to AXON_BASE_URL, then http://127.0.0.1:8080.
+        #[arg(long, value_name = "URL")]
+        base_url: Option<String>,
+        /// Bearer token for the Axon API. Defaults to AXON_TOKEN.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
 }
 
 /// `axon oauth …` actions.

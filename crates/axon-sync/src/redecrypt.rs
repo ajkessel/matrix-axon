@@ -12,9 +12,9 @@
 //! - [`run`] subscribes to the SDK's `room_keys_received_stream`: every batch of
 //!   arriving keys names a `(room_id, session_id)`, and we drain exactly the
 //!   pending rows waiting on that session.
-//! - [`sweep_pending_utds`] runs once at startup, retrying the whole backlog — keys
-//!   may already sit in the crypto store from a prior run or a just-completed
-//!   `recover()`, with no fresh arrival event to react to.
+//! - [`sweep_pending_utds`] runs at startup and on explicit retries. The default
+//!   startup mode attempts each stored UTD once; explicit retries and the legacy
+//!   startup mode retry the full pending backlog.
 //!
 //! Every per-row failure (a row that still won't decrypt, a malformed envelope,
 //! a missing room) is logged and skipped — re-decryption is best-effort
@@ -34,6 +34,47 @@ use matrix_sdk::{Client, Room};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Which pending rows an account-wide sweep should load.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SweepScope {
+    /// Default boot behavior: attempt only rows that have not yet had a startup
+    /// retry. Fresh key arrivals still use the session stream regardless.
+    StartupUnattempted,
+    /// Operator/config/recovery behavior: retry every currently pending UTD.
+    AllPending,
+}
+
+/// Counters from one account-wide re-decryption sweep.
+#[derive(Debug, Clone, Default)]
+pub struct RedecryptSummary {
+    /// Rows selected before the sweep started.
+    pub selected: usize,
+    /// Rows that reached `decrypt_event` or were identified as malformed.
+    pub attempted: usize,
+    /// Rows successfully back-filled.
+    pub decrypted: usize,
+    /// Rows selected but still UTD after the sweep finished or timed out.
+    pub still_pending: usize,
+    /// Rows marked so the default startup sweep will not select them again.
+    pub startup_marked: u64,
+    /// Whether the caller stopped waiting before the sweep completed.
+    pub timed_out: bool,
+    /// Event IDs that actually reached `redecrypt_one` (i.e. excludes rows
+    /// skipped for a missing room handle). Only these are safe to mark as
+    /// startup-attempted; a skipped row must remain eligible for retry on the
+    /// next boot.
+    attempted_event_ids: Vec<String>,
+}
+
+impl RedecryptSummary {
+    pub fn timed_out() -> Self {
+        Self {
+            timed_out: true,
+            ..Self::default()
+        }
+    }
+}
 
 /// Pull the megolm `session_id` out of an `m.room.encrypted` envelope's
 /// `content`. Pure; used by the persistence handler to populate the
@@ -129,23 +170,51 @@ pub(crate) async fn sweep_pending_utds(
     client: &Client,
     store: &Store,
     account_id: Uuid,
+    scope: SweepScope,
     index: Option<&IndexHandle>,
-) {
-    let rows = match store.pending_utds_for_account(account_id).await {
+) -> RedecryptSummary {
+    let rows = match scope {
+        SweepScope::StartupUnattempted => store.pending_utds_for_startup_attempt(account_id).await,
+        SweepScope::AllPending => store.pending_utds_for_account(account_id).await,
+    };
+    let rows = match rows {
         Ok(rows) => rows,
         Err(err) => {
             tracing::warn!(%account_id, error = %err, "failed to load pending UTDs for startup sweep");
-            return;
+            return RedecryptSummary::default();
         }
     };
     if rows.is_empty() {
-        return;
+        return RedecryptSummary::default();
     }
-    tracing::info!(%account_id, count = rows.len(), "sweeping pending UTDs at startup");
+    let selected = rows.len();
+    tracing::info!(%account_id, count = selected, ?scope, "sweeping pending UTDs");
     // `from_backup`: recover() imported the backup *decryption key* but not the
     // room keys themselves, so the sweep must pull them from the server backup
     // before decrypting (see redecrypt_rows).
-    redecrypt_rows(client, store, account_id, rows, true, index).await;
+    let mut summary = redecrypt_rows(client, store, account_id, rows, true, index).await;
+    summary.selected = selected;
+    summary.still_pending = summary.selected.saturating_sub(summary.decrypted);
+    if matches!(scope, SweepScope::StartupUnattempted) {
+        // Only mark rows that actually reached `redecrypt_one`: a row skipped
+        // because its room hasn't hydrated yet must stay eligible for the next
+        // boot's sweep, or it would be stuck as a permanent UTD (see PR #244
+        // review).
+        match store
+            .mark_utd_startup_redecrypt_attempted(account_id, &summary.attempted_event_ids)
+            .await
+        {
+            Ok(marked) => summary.startup_marked = marked,
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    error = %err,
+                    "failed to mark UTD startup re-decryption attempts"
+                );
+            }
+        }
+    }
+    summary
 }
 
 /// Drain the pending UTDs in `room_id` waiting on `session_id`.
@@ -188,7 +257,8 @@ async fn redecrypt_rows(
     rows: Vec<PendingUtd>,
     from_backup: bool,
     index: Option<&IndexHandle>,
-) {
+) -> RedecryptSummary {
+    let mut summary = RedecryptSummary::default();
     let mut by_room: HashMap<String, Vec<PendingUtd>> = HashMap::new();
     for row in rows {
         by_room.entry(row.room_id.clone()).or_default().push(row);
@@ -210,9 +280,14 @@ async fn redecrypt_rows(
             }
         }
         for row in &rows {
-            redecrypt_one(&room, store, account_id, row, index).await;
+            summary.attempted += 1;
+            summary.attempted_event_ids.push(row.event_id.clone());
+            if redecrypt_one(&room, store, account_id, row, index).await {
+                summary.decrypted += 1;
+            }
         }
     }
+    summary
 }
 
 /// Re-decrypt a single stored UTD and back-fill it on success. Every failure
@@ -224,7 +299,7 @@ async fn redecrypt_one(
     account_id: Uuid,
     row: &PendingUtd,
     index: Option<&IndexHandle>,
-) {
+) -> bool {
     let raw: Raw<OriginalSyncRoomEncryptedEvent> =
         match serde_json::from_value(row.raw_event.clone()) {
             Ok(raw) => raw,
@@ -236,7 +311,7 @@ async fn redecrypt_one(
                     error = %err,
                     "malformed encrypted envelope; skipping re-decryption"
                 );
-                return;
+                return false;
             }
         };
 
@@ -250,14 +325,14 @@ async fn redecrypt_one(
                 error = %err,
                 "re-decryption failed; leaving as UTD"
             );
-            return;
+            return false;
         }
     };
 
     // `decrypt_event` returns a UTD `TimelineEvent` (not an error) when the key
     // still isn't available; only a genuine `Decrypted` kind yields content.
     let Some((content, event_type)) = extract_decrypted(&decrypted) else {
-        return;
+        return false;
     };
 
     // Plaintext-derived hot columns, now available post-decryption.
@@ -303,7 +378,7 @@ async fn redecrypt_one(
                 error = %err,
                 "failed to back-fill re-decrypted event"
             );
-            return;
+            return false;
         }
     }
 
@@ -324,6 +399,7 @@ async fn redecrypt_one(
             );
         }
     }
+    true
 }
 
 /// Parse a room ID string and look up its `Room` handle on the client.

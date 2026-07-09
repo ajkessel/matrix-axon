@@ -204,6 +204,12 @@ axon token revoke --label my-client   # or by label, if it uniquely identifies o
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance. Supply the token to clients via their config file or environment; see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
 
+To explicitly retry stored Unable-To-Decrypt events for an active account, call the authenticated API through the CLI wrapper:
+
+```bash
+AXON_TOKEN=<token> axon utd redecrypt --account-id <account-id>
+```
+
 ### TLS
 
 Axon serves plain HTTP. For any non-local deployment, place a TLS-terminating reverse proxy (Caddy, nginx, etc.) in front of it and keep Axon bound to loopback (the default). Axon refuses to start on a non-loopback address over plain HTTP unless `AXON_SERVER__ALLOW_INSECURE_BIND=true` is explicitly set.

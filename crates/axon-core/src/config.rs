@@ -148,6 +148,12 @@ pub struct SyncConfig {
     /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
     #[serde(default = "default_backfill_enabled")]
     pub backfill_enabled: bool,
+    /// When `true`, the boot-time UTD re-decryption sweep retries every pending
+    /// UTD on every process start. The default (`false`) attempts each row once
+    /// at startup, then relies on the room-key arrival stream or an explicit
+    /// manual retry to back-fill it later.
+    #[serde(default)]
+    pub always_redecrypt_utds_on_startup: bool,
     /// Events requested per `/messages` page during backfill. Larger pages
     /// backfill faster but hold the connection longer per request. Defaults to 100.
     #[serde(default = "default_backfill_page_size")]
@@ -670,6 +676,7 @@ impl Default for SyncConfig {
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
             backfill_enabled: default_backfill_enabled(),
+            always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),
             backfill_target_depth: 0,
             backfill_throttle_ms: default_backfill_throttle_ms(),
@@ -837,6 +844,29 @@ mod tests {
 
             jail.set_env("AXON_SERVER__ALLOW_INSECURE_BIND", "true");
             assert!(Config::load(None).expect("load").server.allow_insecure_bind);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn startup_utd_redecrypt_defaults_false_and_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(
+                !Config::load(None)
+                    .expect("load")
+                    .sync
+                    .always_redecrypt_utds_on_startup
+            );
+
+            jail.set_env("AXON_SYNC__ALWAYS_REDECRYPT_UTDS_ON_STARTUP", "true");
+            assert!(
+                Config::load(None)
+                    .expect("load")
+                    .sync
+                    .always_redecrypt_utds_on_startup
+            );
             Ok(())
         });
     }

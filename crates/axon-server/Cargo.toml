@@ -29,6 +29,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 # Subcommand parsing for the `axon` binary (`axon token …`, M7b).
 clap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # `axon init` (M13, ADR 0051): CSPRNG for the generated store_key, toml_edit to
 # render the starter config, and `url` to parse the Postgres URL when offering to
