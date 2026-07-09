@@ -108,6 +108,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         git_hash = env!("GIT_HASH"),
         "axon starting",
     );
+    log_fd_limit();
 
     // Fail fast (before any side effects) on an unsafe bind. Axon serves plain
     // HTTP and the /v1 API carries credentials (login passwords, recovery keys,
@@ -175,6 +176,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let media_cache = axon_media::MediaCache::open(&config.media)
         .await
         .context("opening media cache")?;
+    spawn_fd_diagnostics(media_cache.clone());
 
     // Start the sync engine: it provisions the configured account and runs one
     // supervised Simplified Sliding Sync task per account.
@@ -398,6 +400,74 @@ async fn discover_generic_provider(
     .await
     .map_err(|err| anyhow::anyhow!("discovering {provider_name} OIDC configuration: {err}"))?;
     Ok(Some(Arc::new(provider) as Arc<dyn axon_api::OidcProvider>))
+}
+
+/// Log the process's `RLIMIT_NOFILE` (soft/hard) once at boot. Diagnostic only
+/// (see the fd-exhaustion investigation, GH #242): this pins down, from the
+/// very first log line, whether a future "Too many open files" crash is
+/// hitting a low ceiling inherited from the launching environment (macOS's
+/// launchd-wide soft default is 256) versus an actual leak past a generous
+/// one.
+fn log_fd_limit() {
+    #[cfg(unix)]
+    {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `rlim` is a valid, correctly-sized out-param for `getrlimit`.
+        let ret = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        if ret == 0 {
+            tracing::info!(
+                soft = %fmt_rlim(rlim.rlim_cur),
+                hard = %fmt_rlim(rlim.rlim_max),
+                "RLIMIT_NOFILE at boot",
+            );
+        } else {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                "failed to read RLIMIT_NOFILE",
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::debug!("RLIMIT_NOFILE is not applicable on this platform");
+    }
+}
+
+#[cfg(unix)]
+fn fmt_rlim(v: libc::rlim_t) -> String {
+    if v == libc::RLIM_INFINITY {
+        "unlimited".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// Periodically log signals relevant to the fd-exhaustion investigation (GH
+/// #242): the media cache's currently-open serve handles (the one place this
+/// process deliberately holds a file open per in-flight request) alongside its
+/// on-disk LRU size. If `open_handles` climbs and never comes back down across
+/// several ticks, that isolates the leak to media serving rather than
+/// matrix-rust-sdk or Tantivy. Runs for the life of the process — logging has
+/// no state to drain, so it isn't wired into the shutdown sequence.
+fn spawn_fd_diagnostics(media_cache: axon_media::MediaCache) {
+    const INTERVAL: Duration = Duration::from_secs(300);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(INTERVAL);
+        tick.tick().await; // first tick fires immediately; skip it, we just booted
+        loop {
+            tick.tick().await;
+            let stats = media_cache.stats();
+            tracing::info!(
+                open_handles = stats.open_handles,
+                cache_entries = stats.entries,
+                cache_bytes = stats.total_bytes,
+                "media cache fd diagnostics",
+            );
+        }
+    });
 }
 
 /// Initialize the `tracing` subscriber. Honors `RUST_LOG` if set, otherwise

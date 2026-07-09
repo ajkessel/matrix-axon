@@ -1162,8 +1162,16 @@ async fn run_account(
         index.cloned(),
     ));
     // One sweep now that the service is up and `recover()` (if any) has imported
-    // keys: keys already in the crypto store don't fire the arrival stream.
-    redecrypt::sweep_pending_utds(&client, store, account.account_id, index).await;
+    // keys: keys already in the crypto store don't fire the arrival stream. Raced
+    // against cancellation: a large backlog can take a while (one async decrypt
+    // call per row), and the sweep has no cancel-checks of its own, so without
+    // this a shutdown mid-sweep would block until the engine's hard drain timeout
+    // rather than exiting promptly. Safe to abandon mid-row — rows stay `pending`
+    // and are retried on the next boot's sweep (or the room-key arrival stream).
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        () = redecrypt::sweep_pending_utds(&client, store, account.account_id, index) => {}
+    }
 
     // History backfill (M10): a continuous, throttled background task that pages
     // each joined room's pre-existing history backward through the shared ingestion

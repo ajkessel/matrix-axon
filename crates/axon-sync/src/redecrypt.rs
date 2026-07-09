@@ -276,7 +276,11 @@ async fn redecrypt_one(
         .await
     {
         Ok(()) => {
-            tracing::info!(
+            // debug, not info, to match the sibling failure log a few lines up:
+            // a startup sweep can back-fill thousands of rows in one burst, and
+            // the per-account count already logged in `sweep_pending_utds` is
+            // the info-level signal that matters for routine visibility.
+            tracing::debug!(
                 %account_id,
                 room_id = %room.room_id(),
                 event_id = row.event_id,

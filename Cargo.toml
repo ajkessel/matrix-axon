@@ -68,6 +68,10 @@ matrix-sdk-ui = { version = "0.18" }
 # ~/Library on macOS, Known Folders on Windows) for the on-disk store defaults.
 directories = { version = "6" }
 
+# Already in the graph transitively (matrix-sdk's dependency tree); named here
+# so axon-server can read RLIMIT_NOFILE directly (Unix-only; see main.rs).
+libc = { version = "0.2" }
+
 # Config + serialization
 figment    = { version = "0.10" }
 serde      = { version = "1" }

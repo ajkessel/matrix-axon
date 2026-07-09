@@ -23,6 +23,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -87,6 +88,34 @@ pub struct MediaResource {
     /// for `ETag` / `If-None-Match`. MXC content is immutable, so this never
     /// changes for a given URI.
     pub etag: String,
+    /// Decrements [`Inner::open_handles`] on drop — see that field's doc.
+    _open_guard: HandleGuard,
+}
+
+/// Counts outstanding [`MediaResource`]s for the fd-diagnostics gauge exposed by
+/// [`MediaCache::stats`] (see the fd-exhaustion investigation, GH #242): this is
+/// the one place the process deliberately holds a file open per in-flight
+/// request, so if a leak lives here rather than in matrix-rust-sdk or Tantivy,
+/// this count climbing and never coming back down is how it shows up.
+#[derive(Debug)]
+struct HandleGuard(Arc<AtomicUsize>);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A point-in-time snapshot for the fd-diagnostics logger (GH #242).
+#[derive(Debug, Clone, Copy)]
+pub struct MediaCacheStats {
+    /// Outstanding [`MediaResource`]s (see [`HandleGuard`]) — file handles
+    /// currently being streamed to a client.
+    pub open_handles: usize,
+    /// Number of objects currently tracked in the on-disk LRU.
+    pub entries: usize,
+    /// Total bytes tracked in the on-disk LRU.
+    pub total_bytes: u64,
 }
 
 /// Fetch/cache failures.
@@ -183,6 +212,7 @@ impl MediaCache {
             rebuild: Mutex::new(None),
             account_locks: Mutex::new(HashMap::new()),
             purged: Mutex::new(HashSet::new()),
+            open_handles: Arc::new(AtomicUsize::new(0)),
         });
 
         if cfg.enabled {
@@ -264,6 +294,11 @@ impl MediaCache {
             inner: self.inner.clone(),
         }
     }
+
+    /// A point-in-time snapshot for fd-diagnostics logging (GH #242).
+    pub fn stats(&self) -> MediaCacheStats {
+        self.inner.stats()
+    }
 }
 
 /// Name of the temp subdirectory under the cache root. Not a valid UUID, so the
@@ -303,11 +338,30 @@ struct Inner {
     /// (account ids are never reused), but bounded by the number of accounts
     /// ever deleted — negligible next to message/event storage.
     purged: Mutex<HashSet<Uuid>>,
+    /// Outstanding [`MediaResource`]s, for [`MediaCache::stats`] (GH #242's
+    /// fd-diagnostics logging). See [`HandleGuard`].
+    open_handles: Arc<AtomicUsize>,
 }
 
 impl Inner {
     fn account_dir(&self, account_id: Uuid) -> PathBuf {
         self.cache_dir.join(account_id.to_string())
+    }
+
+    /// Bump the open-handle gauge and return the guard that decrements it when
+    /// the resulting [`MediaResource`] drops.
+    fn open_handle_guard(&self) -> HandleGuard {
+        self.open_handles.fetch_add(1, Ordering::Relaxed);
+        HandleGuard(self.open_handles.clone())
+    }
+
+    fn stats(&self) -> MediaCacheStats {
+        let index = self.index.lock().expect("index mutex");
+        MediaCacheStats {
+            open_handles: self.open_handles.load(Ordering::Relaxed),
+            entries: index.entries.len(),
+            total_bytes: index.total_bytes,
+        }
     }
 
     fn path_for(&self, account_id: Uuid, hash: &str) -> PathBuf {
@@ -332,6 +386,7 @@ impl Inner {
             file,
             len,
             etag: hash.to_owned(),
+            _open_guard: self.open_handle_guard(),
         })
     }
 
@@ -427,13 +482,23 @@ impl Inner {
                     .await
                     .map_err(MediaCacheError::Io)?;
                 let _ = tokio::fs::remove_file(&os_tmp).await;
-                return Ok(MediaResource { file, len, etag });
+                return Ok(MediaResource {
+                    file,
+                    len,
+                    etag,
+                    _open_guard: self.open_handle_guard(),
+                });
             }
         };
 
         if !self.enabled {
             let _ = tokio::fs::remove_file(&tmp).await;
-            return Ok(MediaResource { file, len, etag });
+            return Ok(MediaResource {
+                file,
+                len,
+                etag,
+                _open_guard: self.open_handle_guard(),
+            });
         }
 
         // Serialize the promotion against a concurrent `purge_account` for this
@@ -454,7 +519,12 @@ impl Inner {
             // in flight — never resurrect its cache directory. Still serve the
             // freshly-fetched bytes; just don't retain them.
             let _ = tokio::fs::remove_file(&tmp).await;
-            return Ok(MediaResource { file, len, etag });
+            return Ok(MediaResource {
+                file,
+                len,
+                etag,
+                _open_guard: self.open_handle_guard(),
+            });
         }
 
         // Promote temp → final. The fd we already hold points at the same inode,
@@ -487,7 +557,12 @@ impl Inner {
             }
         }
 
-        Ok(MediaResource { file, len, etag })
+        Ok(MediaResource {
+            file,
+            len,
+            etag,
+            _open_guard: self.open_handle_guard(),
+        })
     }
 
     async fn remove_file(&self, account_id: Uuid, hash: &str) {
@@ -831,6 +906,37 @@ mod tests {
 
         // Second call was a cache hit — no extra fetch.
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn open_handles_gauge_tracks_outstanding_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let fetcher = CountingFetcher::new(b"hello world".to_vec());
+
+        assert_eq!(cache.stats().open_handles, 0);
+
+        let first = cache
+            .get_or_fetch(account, "mxc://s/one", None, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(cache.stats().open_handles, 1);
+
+        // A second outstanding resource (cache hit this time) bumps it again.
+        let second = cache
+            .get_or_fetch(account, "mxc://s/one", None, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(cache.stats().open_handles, 2);
+
+        drop(first);
+        assert_eq!(cache.stats().open_handles, 1);
+
+        drop(second);
+        assert_eq!(cache.stats().open_handles, 0);
     }
 
     #[tokio::test]

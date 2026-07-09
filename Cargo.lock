@@ -455,6 +455,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dotenvy",
+ "libc",
  "percent-encoding",
  "rand 0.9.4",
  "reqwest",

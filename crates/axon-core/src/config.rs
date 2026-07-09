@@ -518,7 +518,17 @@ fn default_max_connections() -> u32 {
 }
 
 fn default_log_level() -> String {
-    "info".to_string()
+    // Bare "info" is unusable for local dev: matrix-rust-sdk's crypto machinery
+    // logs routine, expected conditions (a UTD whose key hasn't arrived yet, a
+    // gossip request being served, a backup-downloaded room key that doesn't
+    // decrypt) at info/warn, and a startup UTD-backfill sweep can emit thousands
+    // of such lines in seconds. These two targets mute that noise while still
+    // surfacing anything the SDK itself considers a real error.
+    // `matrix_sdk::encryption::backups` (not `matrix_sdk_crypto::backups` —
+    // verified against the actual log target; an older comment here/in
+    // axon.toml.example named the wrong path) is the "couldn't decrypt a room
+    // key we downloaded from backups" warning specifically.
+    "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error".to_string()
 }
 
 /// The platform's Axon directory set — data / config / cache roots following OS
@@ -809,7 +819,10 @@ mod tests {
             assert_eq!(config.server.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
             assert_eq!(config.server.port, 8080);
             assert_eq!(config.database.max_connections, 5);
-            assert_eq!(config.log.level, "info");
+            assert_eq!(
+                config.log.level,
+                "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error"
+            );
             assert_eq!(config.database.url, "postgres://u:p@localhost/db");
             Ok(())
         });

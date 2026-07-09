@@ -26,9 +26,14 @@ url = "postgres://axon:axon@127.0.0.1:5432/axon"
 max_connections = 5
 
 [log]
-# Full tracing EnvFilter directive. The global level remains `info`, while the
-# noisy missing-backup-key warning is suppressed. Overridden by RUST_LOG.
-level = "info,matrix_sdk_crypto::backups=error"
+# Full tracing EnvFilter directive. Overridden by RUST_LOG. The built-in default
+# is "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error" —
+# matrix-rust-sdk's crypto machinery is muted because it logs routine, expected
+# conditions (a UTD whose key hasn't arrived yet, a startup backfill sweep, a
+# backup-downloaded room key that doesn't decrypt) at info/warn, which floods
+# local dev. Add `,matrix_sdk_crypto=debug` (or similar) here if you're
+# debugging decryption/backup issues and want that detail back.
+level = "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error"
 
 [sync]
 # Directory for the matrix-rust-sdk state + crypto stores (one subdir per
