@@ -1327,14 +1327,13 @@ async fn run_account(
         );
     }
 
-    // Cancel any in-flight SAS verification drivers for this account: they hold the
-    // SDK client this run is tearing down (or rebuilding), so they must not survive
-    // it. Each cancelled driver best-effort cancels upstream and drops its registry
-    // entry — binding a flow's lifetime to the *run*, not just the account or the
-    // process. (Incoming drivers run under this account's token; API-started ones
-    // under the engine token, so neither is reliably reached by token cascade on a
-    // single-account stop — this sweep covers both.)
-    cancel_account_flows(verifications, account.account_id);
+    // Cancel any in-flight SAS verification drivers for this account and wait for
+    // them to exit: they hold the SDK client this run is tearing down (or
+    // rebuilding) — and with it, the crypto store's whole connection pool — so they
+    // must not survive it (GH #242). (Incoming drivers run under this account's
+    // token; API-started ones under the engine token, so neither is reliably
+    // reached by token cascade on a single-account stop — this sweep covers both.)
+    cancel_account_flows(verifications, account.account_id).await;
 
     result
 }

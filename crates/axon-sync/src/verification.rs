@@ -34,6 +34,7 @@ use matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent;
 use matrix_sdk::ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId};
 use matrix_sdk::{Client, Room};
 use tokio::sync::{broadcast, mpsc, OwnedMutexGuard};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
@@ -160,6 +161,13 @@ pub(crate) struct FlowEntry {
     /// driver must never outlive the SDK client it was attached to (a supervised
     /// restart evicts and rebuilds that client).
     driver_cancel: CancellationToken,
+    /// The driver task's handle, so [`cancel_account_flows`] can wait for it to
+    /// actually exit (not just signal `driver_cancel`) before a restart rebuilds
+    /// the client — otherwise the driver's `Client` clone (and the crypto store's
+    /// whole connection pool behind it) outlives the run that owned it. `None`
+    /// once taken for that wait, or if the driver has already removed this entry
+    /// itself.
+    driver_handle: Option<JoinHandle<()>>,
 }
 
 /// `(account_id, flow_id) → flow`. Shared (clone of the `Arc`) between the
@@ -184,7 +192,30 @@ const CANDIDATE_TTL: Duration = Duration::from_secs(90);
 /// outruns device-key availability must keep its room subscribed for the protocol
 /// retry window.
 const REQUEST_TTL: Duration = Duration::from_secs(600);
+/// How long `cancel_account_flows` waits for a signalled driver to actually exit
+/// before escalating to `abort()` — same escalation shape as lifecycle.rs's
+/// `DRAIN_TIMEOUT`/`ABORT_TIMEOUT`. Shrunk under test so the escalation path (a
+/// driver that ignores cancellation) runs in milliseconds.
+#[cfg(not(test))]
 const DRIVER_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const DRIVER_CANCEL_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// How long `join_or_abort_drivers` waits for a signalled driver to actually
+/// exit before escalating to `abort()`. Deliberately larger than
+/// `DRIVER_CANCEL_TIMEOUT` with real margin: a driver's own cancellation branch
+/// runs a `cancel_verification_best_effort` bounded by `DRIVER_CANCEL_TIMEOUT`
+/// *before* it calls `remove_flow`, and that inner timer starts at essentially
+/// the same instant as this outer one (`driver_cancel.cancel()` fires
+/// immediately before the handle is collected for joining) — without margin the
+/// two race, and if the outer one wins, `abort()` drops the task mid-cleanup and
+/// orphans the registry entry (caught in review of the #242 fix, see
+/// `join_or_abort_drivers`'s own belt-and-suspenders cleanup below).
+#[cfg(not(test))]
+const DRIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const DRIVER_JOIN_TIMEOUT: Duration = Duration::from_millis(600);
+
 const DRIVER_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a direct invite that failed the known-contact gate is remembered, so
@@ -573,19 +604,77 @@ async fn cancel_verification_best_effort<F, E>(
     }
 }
 
-/// Cancel the driver of every non-terminal flow belonging to `account_id`.
-/// Called from `engine::run_account` when a sync run tears down or is rebuilt, so
-/// a verification driver never keeps running against an evicted SDK client. Each
-/// cancelled driver best-effort cancels upstream and drops its registry entry. A
-/// driver attached to the engine token would otherwise survive a supervised
-/// restart; this is what binds the flow's lifetime to the *run*, not the process.
-pub(crate) fn cancel_account_flows(registry: &FlowRegistry, account_id: Uuid) {
-    let reg = registry.lock().expect("flow registry poisoned");
-    for ((aid, _), entry) in reg.iter() {
-        if *aid == account_id && entry.terminal.is_none() {
-            entry.driver_cancel.cancel();
+/// Cancel the driver of every non-terminal flow belonging to `account_id`, and
+/// wait for each to actually exit before returning. Called from
+/// `engine::run_account` when a sync run tears down or is rebuilt, so a
+/// verification driver never keeps running against an evicted SDK client.
+///
+/// Signaling `driver_cancel` alone isn't enough: each driver holds a `Client`
+/// clone, and until it drops, so does the crypto store's whole connection pool
+/// behind it (GH #242 — this is a confirmed leak source, not a theoretical one).
+/// A driver attached to the engine token would otherwise survive a supervised
+/// restart, so this is what actually binds the flow's lifetime to the *run*.
+/// Bounded by [`DRIVER_JOIN_TIMEOUT`] per driver, with a forced `abort()` on
+/// timeout so a stuck driver still can't hold the pool open indefinitely. All
+/// drivers for the account are joined concurrently, so this doesn't scale with
+/// the (normally-rare) count of concurrent flows on one account.
+pub(crate) async fn cancel_account_flows(registry: &FlowRegistry, account_id: Uuid) {
+    let handles: Vec<(String, JoinHandle<()>)> = {
+        let mut reg = registry.lock().expect("flow registry poisoned");
+        reg.iter_mut()
+            .filter(|((aid, _), entry)| *aid == account_id && entry.terminal.is_none())
+            .filter_map(|((_, flow_id), entry)| {
+                entry.driver_cancel.cancel();
+                entry.driver_handle.take().map(|h| (flow_id.clone(), h))
+            })
+            .collect()
+    };
+    join_or_abort_drivers(registry, account_id, handles).await;
+}
+
+/// Wait for each already-signalled driver to exit (concurrently, not one at a
+/// time), escalating to `abort()` on a per-driver [`DRIVER_JOIN_TIMEOUT`] so a
+/// driver stuck in non-yielding code (or one that ignores its cancellation
+/// token entirely) still can't hold its `Client` clone — and the crypto store
+/// pool behind it — open indefinitely. An aborted driver that never reached a
+/// terminal outcome has its registry entry cleaned up here too, since it can no
+/// longer do that for itself.
+async fn join_or_abort_drivers(
+    registry: &FlowRegistry,
+    account_id: Uuid,
+    handles: Vec<(String, JoinHandle<()>)>,
+) {
+    let joins = handles.into_iter().map(|(flow_id, mut handle)| async move {
+        if tokio::time::timeout(DRIVER_JOIN_TIMEOUT, &mut handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                account_id = %account_id,
+                %flow_id,
+                timeout_secs = DRIVER_JOIN_TIMEOUT.as_secs(),
+                "verification driver did not exit after cancellation; aborting"
+            );
+            handle.abort();
+            // The aborted task may have been killed mid-way through its own
+            // `remove_flow` (or before reaching it), which would otherwise orphan
+            // this entry forever — `sweep_expired` only reclaims entries with
+            // `terminal_at` set. Only clean up if it's still non-terminal: a task
+            // that reached `mark_terminal` before being aborted (e.g. wedged on a
+            // full `live_tx` send after already marking Done/Cancelled) must keep
+            // its outcome for the grace TTL, not have it erased here.
+            let key = (account_id, flow_id);
+            let still_pending = registry
+                .lock()
+                .expect("flow registry poisoned")
+                .get(&key)
+                .is_some_and(|entry| entry.terminal.is_none());
+            if still_pending {
+                remove_flow(registry, &key);
+            }
         }
-    }
+    });
+    futures_util::future::join_all(joins).await;
 }
 
 /// Background task: periodically reclaim terminal flows past their grace TTL.
@@ -806,22 +895,30 @@ pub(crate) async fn on_incoming_request(
                 terminal: None,
                 terminal_at: None,
                 driver_cancel: driver_cancel.clone(),
+                driver_handle: None,
             },
         );
+        // Spawn and attach the handle while still holding the lock: otherwise
+        // `cancel_account_flows` could run in the gap between insert and attach,
+        // see `driver_handle: None` above, take a `None` handle, and return
+        // without waiting for (or bounding) this driver's exit — reproducing a
+        // narrow version of the #242 leak this registration exists to prevent.
+        let handle = ctx.tracker.spawn(drive_request(
+            request,
+            FlowDriverCtx {
+                account_id: ctx.account_id,
+                target_user_id,
+                target_device_id: Some(target_device_id),
+                registry: ctx.registry.clone(),
+                live_tx: ctx.live_tx.clone(),
+                rooms: ctx.rooms.clone(),
+                cancel: driver_cancel,
+            },
+        ));
+        reg.get_mut(&key)
+            .expect("just inserted above")
+            .driver_handle = Some(handle);
     }
-
-    ctx.tracker.spawn(drive_request(
-        request,
-        FlowDriverCtx {
-            account_id: ctx.account_id,
-            target_user_id,
-            target_device_id: Some(target_device_id),
-            registry: ctx.registry.clone(),
-            live_tx: ctx.live_tx.clone(),
-            rooms: ctx.rooms.clone(),
-            cancel: driver_cancel,
-        },
-    ));
 }
 
 /// Event handler for peer-initiated in-room `m.key.verification.request` messages.
@@ -942,7 +1039,7 @@ pub(crate) async fn on_incoming_room_request(
             return;
         }
         reg.insert(
-            registry_key,
+            registry_key.clone(),
             FlowEntry {
                 request: request.clone(),
                 sas: None,
@@ -952,8 +1049,26 @@ pub(crate) async fn on_incoming_room_request(
                 terminal: None,
                 terminal_at: None,
                 driver_cancel: driver_cancel.clone(),
+                driver_handle: None,
             },
         );
+        // Spawn and attach the handle while still holding the lock — see the
+        // matching comment in `on_incoming_request` for why the gap matters.
+        let handle = ctx.tracker.spawn(drive_request(
+            request,
+            FlowDriverCtx {
+                account_id: ctx.account_id,
+                target_user_id,
+                target_device_id,
+                registry: ctx.registry.clone(),
+                live_tx: ctx.live_tx.clone(),
+                rooms: ctx.rooms.clone(),
+                cancel: driver_cancel,
+            },
+        ));
+        reg.get_mut(&registry_key)
+            .expect("just inserted above")
+            .driver_handle = Some(handle);
     }
 
     // The request resolved and a flow is now registered, so commit the side effects
@@ -969,19 +1084,6 @@ pub(crate) async fn on_incoming_room_request(
     // Keep this account's active-flow room subscribed (the loop derives it from the
     // registry on the next recompute).
     ctx.rooms.wake(ctx.account_id);
-
-    ctx.tracker.spawn(drive_request(
-        request,
-        FlowDriverCtx {
-            account_id: ctx.account_id,
-            target_user_id,
-            target_device_id,
-            registry: ctx.registry.clone(),
-            live_tx: ctx.live_tx.clone(),
-            rooms: ctx.rooms.clone(),
-            cancel: driver_cancel,
-        },
-    ));
 }
 
 struct FlowDriverCtx {
@@ -1448,11 +1550,11 @@ impl VerificationEngine {
         // [`cancel_account_flows`]) — it never outlives the SDK client it drives.
         let driver_cancel = self.cancel.child_token();
         let is_room_flow = room_id.is_some();
-        self.registry
-            .lock()
-            .expect("flow registry poisoned")
-            .insert(
-                (account_id, flow_id.clone()),
+        let key = (account_id, flow_id.clone());
+        {
+            let mut reg = self.registry.lock().expect("flow registry poisoned");
+            reg.insert(
+                key.clone(),
                 FlowEntry {
                     request: request.clone(),
                     sas: None,
@@ -1462,8 +1564,27 @@ impl VerificationEngine {
                     terminal: None,
                     terminal_at: None,
                     driver_cancel: driver_cancel.clone(),
+                    driver_handle: None,
                 },
             );
+            // Spawn and attach the handle while still holding the lock — see the
+            // matching comment in `on_incoming_request` for why the gap matters.
+            let handle = self.tracker.spawn(drive_request(
+                request,
+                FlowDriverCtx {
+                    account_id,
+                    target_user_id,
+                    target_device_id,
+                    registry: self.registry.clone(),
+                    live_tx: self.live_tx.clone(),
+                    rooms: self.rooms.clone(),
+                    cancel: driver_cancel,
+                },
+            ));
+            reg.get_mut(&key)
+                .expect("just inserted above")
+                .driver_handle = Some(handle);
+        }
 
         // A cross-user flow runs over a DM the sliding-sync loop must subscribe so
         // the peer's responses are delivered; wake it to pick up the new active-flow
@@ -1471,19 +1592,6 @@ impl VerificationEngine {
         if is_room_flow {
             self.rooms.wake(account_id);
         }
-
-        self.tracker.spawn(drive_request(
-            request,
-            FlowDriverCtx {
-                account_id,
-                target_user_id,
-                target_device_id,
-                registry: self.registry.clone(),
-                live_tx: self.live_tx.clone(),
-                rooms: self.rooms.clone(),
-                cancel: driver_cancel,
-            },
-        ));
 
         Ok(flow_id)
     }
@@ -1638,6 +1746,7 @@ mod tests {
     use super::*;
     use crate::manager::ClientManager;
     use axon_core::SyncConfig;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// `cancelled_err` is a pure mapping — no DB needed. It must carry the reason
     /// when there is one and never read as a success.
@@ -1653,6 +1762,100 @@ mod tests {
             VerifyError::WrongStage(msg) => assert!(msg.contains("cancelled")),
             other => panic!("expected WrongStage, got {other:?}"),
         }
+    }
+
+    /// `join_or_abort_drivers` must actually wait for a driver that exits
+    /// promptly rather than aborting it out from under itself — a driver mid-way
+    /// through its own best-effort upstream cancel (see `drive_request`) should be
+    /// allowed to finish that within the timeout, not be killed pre-emptively.
+    #[tokio::test]
+    async fn join_or_abort_drivers_waits_for_a_task_that_exits_promptly() {
+        let ran_to_completion = Arc::new(AtomicBool::new(false));
+        let flag = ran_to_completion.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        join_or_abort_drivers(
+            &new_registry(),
+            Uuid::new_v4(),
+            vec![("flow".to_owned(), handle)],
+        )
+        .await;
+
+        assert!(
+            ran_to_completion.load(Ordering::SeqCst),
+            "a driver that exits well within DRIVER_JOIN_TIMEOUT must be allowed to finish, not be aborted"
+        );
+    }
+
+    /// Regression for the fd-exhaustion leak (GH #242): a driver that ignores its
+    /// cancellation token entirely (wedged, or non-yielding code) must still be
+    /// forced out via `abort()` once `DRIVER_JOIN_TIMEOUT` elapses — otherwise it
+    /// keeps its `Client` clone (and the crypto store's whole connection pool
+    /// behind it) alive forever, exactly the leak this function exists to close.
+    #[tokio::test]
+    async fn join_or_abort_drivers_aborts_a_task_that_ignores_cancellation() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        let abort_handle = handle.abort_handle();
+
+        join_or_abort_drivers(
+            &new_registry(),
+            Uuid::new_v4(),
+            vec![("flow".to_owned(), handle)],
+        )
+        .await;
+        // The abort lands at the task's next await point; give the scheduler one
+        // more tick to actually observe it before asserting.
+        tokio::task::yield_now().await;
+
+        assert!(
+            abort_handle.is_finished(),
+            "a driver that ignores cancellation must be aborted once DRIVER_JOIN_TIMEOUT elapses"
+        );
+    }
+
+    /// Regression for the review finding on PR #251: `DRIVER_JOIN_TIMEOUT` (the
+    /// outer join-or-abort budget) and `DRIVER_CANCEL_TIMEOUT` (the inner
+    /// best-effort-cancel budget inside a driver's own cancellation branch) used
+    /// to be the same constant, started at nearly the same instant — a coin flip
+    /// over whether the driver's own `remove_flow()` landed before the outer
+    /// `abort()` fired, which on the outer-wins side orphaned the registry entry
+    /// forever (`sweep_expired` never reclaims a `terminal_at == None` entry).
+    /// This asserts the margin exists so the two can't regress back to parity.
+    #[test]
+    fn driver_join_timeout_has_margin_over_cancel_timeout() {
+        assert!(
+            DRIVER_JOIN_TIMEOUT > DRIVER_CANCEL_TIMEOUT,
+            "the outer join-or-abort budget must leave real headroom past the inner \
+             best-effort-cancel budget, or the outer abort can race and win against \
+             the driver's own cleanup"
+        );
+    }
+
+    /// Companion to the margin test above: even if a driver is aborted before it
+    /// can run its own cleanup, `join_or_abort_drivers` must reclaim the registry
+    /// entry itself rather than leaving a `terminal_at == None` entry to linger
+    /// forever. A real `FlowEntry` can't be constructed here (its `request` field
+    /// is a `VerificationRequest`, buildable only via a live SDK `Client` — see the
+    /// PR discussion), so this exercises the no-entry-present case: `abort()` must
+    /// still complete without panicking when there is nothing to clean up (e.g. a
+    /// driver that had already removed itself between cancellation and the join).
+    #[tokio::test]
+    async fn join_or_abort_drivers_abort_path_tolerates_a_missing_registry_entry() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+
+        join_or_abort_drivers(
+            &new_registry(),
+            Uuid::new_v4(),
+            vec![("flow".to_owned(), handle)],
+        )
+        .await;
     }
 
     /// The dedup memory must record an id only on an explicit `mark`, never on a
