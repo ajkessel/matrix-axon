@@ -47,6 +47,10 @@ bytes = { version = "1" }
 sqlx = { version = "0.8", default-features = false }
 sqlx-core = { version = "=0.8.2", default-features = false }
 sqlx-postgres = { version = "=0.8.2", default-features = false }
+# Reproduces sqlx-postgres's own `_sqlx_migrations` advisory-lock id (see
+# axon-server/src/db.rs) so the dev-only repair command locks against the
+# same key the real migrator uses around schema-history operations.
+crc = { version = "3" }
 uuid = { version = "1", default-features = false }
 chrono = { version = "0.4", default-features = false }
 # Embeds the migrations/ directory into the binary at compile time. We can't use

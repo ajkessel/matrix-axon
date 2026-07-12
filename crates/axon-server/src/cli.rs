@@ -32,6 +32,12 @@ pub struct Cli {
 /// The `axon` subcommands. Absent → run the server.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[cfg(feature = "dev-tools")]
+    /// Developer database maintenance helpers.
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
     /// Manage client→axon bearer tokens (the local-API auth gate).
     Token {
         #[command(subcommand)]
@@ -58,6 +64,24 @@ pub enum Command {
     Oauth {
         #[command(subcommand)]
         action: OauthAction,
+    },
+}
+
+#[cfg(feature = "dev-tools")]
+/// `axon db …` actions.
+#[derive(Debug, Subcommand)]
+pub enum DbAction {
+    /// Repair sqlx migration checksums/descriptions for already-applied versions.
+    ///
+    /// This is a local developer escape hatch for checksum drift in
+    /// `_sqlx_migrations` after rebases or edited historical migration files. It
+    /// never touches application tables. By default it prints a dry run; pass
+    /// `--apply` to rewrite the metadata rows.
+    RepairMigrations {
+        /// Rewrite `_sqlx_migrations` rows in place. Without this flag the command
+        /// only prints what it would change.
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -111,6 +135,20 @@ mod tests {
         let err = Cli::try_parse_from(["axon", "token", "revoke"])
             .expect_err("revoke needs either an id or a label");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[cfg(feature = "dev-tools")]
+    #[test]
+    fn db_repair_migrations_parses_apply() {
+        let cli = Cli::try_parse_from(["axon", "db", "repair-migrations", "--apply"])
+            .expect("valid db repair invocation");
+        let Some(Command::Db {
+            action: DbAction::RepairMigrations { apply },
+        }) = cli.command
+        else {
+            panic!("expected db repair-migrations");
+        };
+        assert!(apply);
     }
 
     #[test]

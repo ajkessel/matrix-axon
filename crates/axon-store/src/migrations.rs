@@ -18,11 +18,46 @@ use sqlx_core::migrate::{Migration, MigrationType, Migrator};
 
 use crate::StoreError;
 
+/// Metadata about one embedded migration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedMigration {
+    /// sqlx migration version parsed from the filename prefix.
+    pub version: i64,
+    /// Human-readable description derived from the filename.
+    pub description: String,
+    /// sqlx-compatible SHA-384 checksum of the SQL contents.
+    pub checksum: Vec<u8>,
+}
+
 /// The `migrations/` directory, embedded into the binary at compile time.
 static MIGRATIONS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/migrations");
 
+/// Return the embedded migration manifest with the same checksum sqlx stores in
+/// `_sqlx_migrations`.
+pub fn embedded_migrations() -> Result<Vec<EmbeddedMigration>, StoreError> {
+    let migrations = collect_migrations()?;
+    Ok(migrations
+        .iter()
+        .map(|m| EmbeddedMigration {
+            version: m.version,
+            description: m.description.clone().into_owned(),
+            checksum: m.checksum.clone().into_owned(),
+        })
+        .collect())
+}
+
 /// Build a [`Migrator`] from the embedded migration files, sorted by version.
 pub(crate) fn embedded_migrator() -> Result<Migrator, StoreError> {
+    Ok(Migrator {
+        migrations: Cow::Owned(collect_migrations()?),
+        ..Migrator::DEFAULT
+    })
+}
+
+/// Read every embedded migration file and hash its SQL exactly once, producing
+/// fully-formed [`Migration`]s (SQL, description, and checksum together) that
+/// both [`embedded_migrations`] and [`embedded_migrator`] derive from.
+fn collect_migrations() -> Result<Vec<Migration>, StoreError> {
     let mut migrations = Vec::new();
 
     for file in MIGRATIONS.files() {
@@ -52,11 +87,7 @@ pub(crate) fn embedded_migrator() -> Result<Migrator, StoreError> {
     }
 
     migrations.sort_by_key(|m| m.version);
-
-    Ok(Migrator {
-        migrations: Cow::Owned(migrations),
-        ..Migrator::DEFAULT
-    })
+    Ok(migrations)
 }
 
 /// Parse a migration filename (e.g. `20260530120000_create_accounts.sql`) into

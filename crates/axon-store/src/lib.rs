@@ -32,6 +32,7 @@ pub use events::{
     ThreadSummary, TimelineCursor, TimelineRow,
 };
 pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
+pub use migrations::{embedded_migrations, EmbeddedMigration};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;

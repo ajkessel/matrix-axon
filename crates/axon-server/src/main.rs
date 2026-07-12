@@ -8,6 +8,8 @@
 //! `anyhow` is used here at the binary boundary; library crates use `thiserror`.
 
 mod cli;
+#[cfg(feature = "dev-tools")]
+mod db;
 mod devices;
 mod gateway;
 mod init;
@@ -102,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(&config.log.level);
 
     match cli.command {
+        #[cfg(feature = "dev-tools")]
+        Some(Command::Db { action }) => db::run(action, &config).await,
         Some(Command::Token { action }) => token::run(action, &config).await,
         Some(Command::Search { action }) => search::run(action, &config),
         Some(Command::Utd { .. }) => unreachable!("utd runs before config load"),

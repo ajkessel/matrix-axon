@@ -179,6 +179,20 @@ docker compose up -d postgres
 
 During very early development, there may be some breaking updates. If you get an error like `Error: connecting to database` after `cargo run -p axon-server`, try starting a fresh postgres docker instance per the instructions directly above.
 
+If startup fails because `sqlx` says an already-applied migration "has been modified", you can repair the local metadata without dropping your database:
+
+```bash
+cargo run -p axon-server --features dev-tools -- db repair-migrations
+cargo run -p axon-server --features dev-tools -- db repair-migrations --apply
+```
+
+The command compares the current embedded migration checksums against
+`_sqlx_migrations` and rewrites only the metadata rows for matching versions. It
+does not touch your application tables or Matrix history. This is intended for
+local developer databases after rebases or edited historical migration files, not
+for production remediation, so it is only compiled into `axon-server` when the
+`dev-tools` Cargo feature is enabled.
+
 ## Docs
 
 |                                                   |                                                  |
