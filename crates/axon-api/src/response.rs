@@ -179,6 +179,25 @@ impl From<crate::sender::SendError> for ApiError {
     }
 }
 
+impl From<crate::uploads::StageUploadError> for ApiError {
+    fn from(err: crate::uploads::StageUploadError) -> Self {
+        use crate::uploads::StageUploadError;
+        match err {
+            StageUploadError::Invalid(msg) => ApiError::bad_request(msg),
+            StageUploadError::NotFound(msg) => ApiError::not_found(msg),
+            StageUploadError::Forbidden(msg) => ApiError::forbidden(msg),
+            StageUploadError::TooLarge { cap } => ApiError::payload_too_large(format!(
+                "upload exceeds configured limit of {cap} bytes"
+            )),
+            StageUploadError::Timeout(msg) => ApiError::service_unavailable(msg),
+            StageUploadError::Internal(msg) => {
+                tracing::error!(error = %msg, "staged upload error serving request");
+                ApiError::internal()
+            }
+        }
+    }
+}
+
 impl From<crate::lifecycle::LoginError> for ApiError {
     fn from(err: crate::lifecycle::LoginError) -> Self {
         use crate::lifecycle::LoginError;

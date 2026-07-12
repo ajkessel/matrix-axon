@@ -431,6 +431,51 @@ pub struct SendResultDto {
     pub event_id: String,
 }
 
+/// Query parameters for staging a media upload (`POST …/media/uploads`).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct StageMediaUploadQuery {
+    /// Matrix media message kind the staged bytes are intended to become.
+    pub kind: MediaUploadKindDto,
+    /// Original filename. The handler normalizes path-like input down to the
+    /// basename before storing it.
+    pub filename: String,
+}
+
+/// Supported outbound media kind for M15.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaUploadKindDto {
+    Image,
+    File,
+}
+
+impl MediaUploadKindDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MediaUploadKindDto::Image => "image",
+            MediaUploadKindDto::File => "file",
+        }
+    }
+}
+
+/// Metadata returned after bytes have been staged successfully.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StagedUploadDto {
+    /// Server-issued upload id used by the later send-media mutation.
+    pub upload_id: Uuid,
+    /// Intended Matrix media message kind.
+    pub kind: MediaUploadKindDto,
+    /// Normalized filename persisted with the upload.
+    pub filename: String,
+    /// Sanitized content type from the request, when supplied.
+    pub content_type: Option<String>,
+    /// Accepted byte length.
+    pub size_bytes: u64,
+    /// RFC 3339 expiry time for the staged upload.
+    pub expires_at: String,
+}
+
 /// Lifecycle state on the wire — the constrained enum form of
 /// [`axon_store::AccountState`], so the OpenAPI schema advertises the closed set
 /// (`active` / `deactivated` / `deleting`) and generated clients can model it

@@ -18,6 +18,7 @@ mod search;
 mod status;
 mod token;
 mod trust;
+mod uploads;
 mod utd;
 mod verification;
 
@@ -38,6 +39,7 @@ use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
 use crate::media::CachingMediaProxy;
 use crate::trust::TrustAdapter;
+use crate::uploads::FilesystemStagedUploads;
 use crate::verification::VerificationAdapter;
 
 const SEARCH_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -221,6 +223,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.media.fetch_timeout_secs,
         )),
     ));
+    let uploads = Arc::new(
+        FilesystemStagedUploads::new(store.clone(), &config.media)
+            .context("configuring staged media uploads")?,
+    );
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
 
     // OAuth 2.0 authorization server (M14, ADR 0054), when enabled. Provider
@@ -250,7 +256,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         media,
         search_port,
     )
-    .with_backfill_status(backfill_status);
+    .with_backfill_status(backfill_status)
+    .with_staged_uploads(uploads);
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }

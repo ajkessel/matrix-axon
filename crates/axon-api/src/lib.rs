@@ -26,6 +26,7 @@ mod search;
 mod sender;
 mod state;
 mod trust;
+mod uploads;
 mod verification;
 mod ws;
 
@@ -33,6 +34,7 @@ pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
+pub use dto::MediaUploadKindDto;
 pub use lifecycle::{
     AccountLifecycle, DeleteError, LoginError, LogoutError, RecoverError, RedecryptUtdsError,
     RedecryptUtdsStats,
@@ -48,6 +50,9 @@ pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQue
 pub use sender::{MessageSender, SendError};
 pub use state::AppState;
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
+pub use uploads::{
+    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
+};
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
 use axum::{
@@ -178,6 +183,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
             post(routes::messages::react),
+        )
+        // Staged media uploads (M15a): client bytes are accepted and stored
+        // before the later room-aware send-media mutation consumes them.
+        .route(
+            "/v1/accounts/{account_id}/media/uploads",
+            post(routes::uploads::stage_upload),
+        )
+        .route(
+            "/v1/accounts/{account_id}/media/uploads/{upload_id}",
+            axum::routing::delete(routes::uploads::delete_upload),
         )
         // Per-device client state (M12): drafts / read markers, GET the merged
         // cross-device view and PUT a merge-upsert that fans out over /v1/ws.

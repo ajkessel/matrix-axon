@@ -23,6 +23,9 @@ use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::MessageSender;
 use crate::trust::SenderTrustService;
+use crate::uploads::{
+    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
+};
 use crate::verification::VerificationService;
 
 /// How often an established `/v1/ws` socket re-checks its bearer token. Token
@@ -75,6 +78,10 @@ pub struct AppState {
     /// concrete implementation fetches via the SDK client's authenticated
     /// connection and is injected by the binary via an adapter.
     pub media: Arc<dyn MediaProxy>,
+    /// Staged-upload port for `POST`/`DELETE /v1/accounts/{id}/media/uploads`.
+    /// The concrete implementation streams bytes to durable local storage and
+    /// records metadata in Postgres.
+    pub uploads: Arc<dyn StagedUploadService>,
     /// Full-text-search port for `GET /v1/search` (M9b). `None` when search is
     /// disabled (`search.enabled = false`), in which case the handler returns
     /// `503`. The concrete implementation is an adapter over the `axon-search`
@@ -120,6 +127,7 @@ impl AppState {
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
             media,
+            uploads: Arc::new(DisabledStagedUploads),
             search,
             backfill_status: Arc::new(NoBackfillStatus),
             oauth: None,
@@ -142,12 +150,45 @@ impl AppState {
         self
     }
 
+    /// Inject the staged-upload service (`POST`/`DELETE media/uploads`). The
+    /// binary calls this with the filesystem-backed implementation; tests that
+    /// don't touch the route keep the default disabled stub.
+    pub fn with_staged_uploads(mut self, uploads: Arc<dyn StagedUploadService>) -> Self {
+        self.uploads = uploads;
+        self
+    }
+
     /// Enable `/v1/oauth/*` with the given runtime. The binary calls this
     /// only when `oauth.enabled = true`; tests that don't care leave the
     /// default `None` (every oauth route 404s).
     pub fn with_oauth(mut self, oauth: Arc<OAuthRuntime>) -> Self {
         self.oauth = Some(oauth);
         self
+    }
+}
+
+struct DisabledStagedUploads;
+
+#[async_trait::async_trait]
+impl StagedUploadService for DisabledStagedUploads {
+    async fn stage_upload(
+        &self,
+        _request: StageUploadRequest,
+        _body: UploadStream,
+    ) -> Result<StagedUpload, StageUploadError> {
+        Err(StageUploadError::Internal(
+            "staged upload service is not configured".to_owned(),
+        ))
+    }
+
+    async fn delete_upload(
+        &self,
+        _account_id: uuid::Uuid,
+        _upload_id: uuid::Uuid,
+    ) -> Result<(), StageUploadError> {
+        Err(StageUploadError::Internal(
+            "staged upload service is not configured".to_owned(),
+        ))
     }
 }
 
@@ -202,6 +243,12 @@ impl FromRef<AppState> for Arc<dyn TokenVerifier> {
 impl FromRef<AppState> for Arc<dyn MediaProxy> {
     fn from_ref(state: &AppState) -> Arc<dyn MediaProxy> {
         state.media.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn StagedUploadService> {
+    fn from_ref(state: &AppState) -> Arc<dyn StagedUploadService> {
+        state.uploads.clone()
     }
 }
 

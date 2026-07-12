@@ -99,6 +99,16 @@ password = "hunter2"
 # ~/Library/Caches/axon/media; Windows: %LOCALAPPDATA%\axon\cache\media). Override
 # here or via AXON_MEDIA__CACHE_DIR.
 # cache_dir = "axon-data/media"
+# Durable staging directory for client-originated media uploads (M15). Pending
+# uploads are in-flight local mutations, so this defaults under the platform DATA
+# directory, not the disposable cache. Override here or via
+# AXON_MEDIA__UPLOADS_DIR.
+# uploads_dir = "axon-data/uploads"
+# max_upload_bytes = 104857600
+# upload_request_timeout_secs = 60
+# upstream_upload_timeout_secs = 60
+# max_concurrent_uploads = 4
+# staged_upload_ttl_secs = 86400
 
 # [oauth]
 # Axon as its own OAuth 2.0 authorization server to its clients (public

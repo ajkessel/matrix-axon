@@ -12,6 +12,7 @@ axon-core  = { workspace = true }
 axon-store = { workspace = true }
 # `ws` enables the WebSocket extractor for /v1/ws (not in axum's defaults).
 axum       = { workspace = true, features = ["ws"] }
+bytes      = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 uuid       = { workspace = true, features = ["serde"] }
@@ -19,6 +20,7 @@ utoipa     = { workspace = true, features = ["axum_extras", "uuid"] }
 base64     = { workspace = true }
 # `MessageSender` is an async trait used behind `Arc<dyn …>` in AppState.
 async-trait = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
 # broadcast channel (live-event bus) + time (periodic WS token revalidation);
 # fs + io-util let the media handler seek/stream cached files for range requests.
 tokio      = { workspace = true, features = ["sync", "time", "fs", "io-util"] }
@@ -37,6 +39,7 @@ thiserror     = { workspace = true }
 rand          = { workspace = true }
 sha2          = { workspace = true }
 chrono        = { workspace = true, features = ["clock"] }
+mime          = { workspace = true }
 
 [dev-dependencies]
 # DB-gated HTTP integration test: drive the real router with tower's oneshot,

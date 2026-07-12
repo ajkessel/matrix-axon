@@ -15,8 +15,10 @@
 //!
 //! The durable SDK store ([`SyncConfig::data_dir`]) and search index
 //! ([`SearchConfig::index_path`]) default under the platform **data** directory,
-//! the disposable media cache ([`MediaConfig::cache_dir`]) under the platform
-//! **cache** directory, and the config file is discovered from the platform
+//! the media-upload staging area ([`MediaConfig::uploads_dir`]) under the
+//! platform **data** directory, the disposable media cache
+//! ([`MediaConfig::cache_dir`]) under the platform **cache** directory, and the
+//! config file is discovered from the platform
 //! **config** directory (see [`Config::discover_config_path`]). These follow OS
 //! conventions — XDG on Linux, `~/Library` on macOS, Known Folders on Windows —
 //! via the `directories` crate (ADR 0050). Any of them can be overridden by its
@@ -269,6 +271,12 @@ pub struct MediaConfig {
     /// directory's `axon/media`.
     #[serde(default = "default_media_cache_dir")]
     pub cache_dir: PathBuf,
+    /// Durable staging directory for client-originated media uploads. Pending
+    /// uploads are in-flight local mutations, so they live under the platform
+    /// data directory rather than the disposable cache. Defaults to the platform
+    /// data directory's `axon/uploads`.
+    #[serde(default = "default_media_uploads_dir")]
+    pub uploads_dir: PathBuf,
     /// Total cache size cap, in bytes. When a fetch would push the cache over
     /// this, least-recently-used entries are evicted until it fits. Defaults to
     /// 5 GiB.
@@ -295,6 +303,29 @@ pub struct MediaConfig {
     /// queue rather than being rejected. Defaults to 16.
     #[serde(default = "default_media_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
+    /// Maximum accepted client upload body, in bytes. Enforced while streaming
+    /// the request to the staging directory. Defaults to 100 MiB.
+    #[serde(default = "default_media_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    /// Wall-clock budget for accepting one upload request, in seconds. Bounds a
+    /// slow or stalled client before the bytes reach any homeserver. Defaults to
+    /// 60.
+    #[serde(default = "default_media_upload_request_timeout_secs")]
+    pub upload_request_timeout_secs: u64,
+    /// Wall-clock budget for the later homeserver upload/send step, in seconds.
+    /// Declared with M15a so the config shape is stable before the M15b SDK
+    /// adapter consumes it. Defaults to 60.
+    #[serde(default = "default_media_upstream_upload_timeout_secs")]
+    pub upstream_upload_timeout_secs: u64,
+    /// Maximum number of client uploads streamed to disk concurrently. Requests
+    /// over the limit queue rather than allocating unbounded writers. Defaults
+    /// to 4.
+    #[serde(default = "default_media_max_concurrent_uploads")]
+    pub max_concurrent_uploads: usize,
+    /// How long an unsent staged upload remains reusable before boot reconcile
+    /// prunes it. Defaults to 24 hours.
+    #[serde(default = "default_media_staged_upload_ttl_secs")]
+    pub staged_upload_ttl_secs: u64,
 }
 
 /// OAuth 2.0 authorization-server settings (M14, ADR 0054).
@@ -624,6 +655,12 @@ fn default_media_cache_dir() -> PathBuf {
         .unwrap_or_else(|| cwd_relative_fallback("media"))
 }
 
+fn default_media_uploads_dir() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("uploads"))
+        .unwrap_or_else(|| cwd_relative_fallback("uploads"))
+}
+
 fn cwd_relative_fallback(child: &str) -> PathBuf {
     let path = PathBuf::from("axon-data").join(child);
     tracing::warn!(
@@ -647,6 +684,26 @@ fn default_media_fetch_timeout_secs() -> u64 {
 
 fn default_media_max_concurrent_downloads() -> usize {
     16
+}
+
+fn default_media_max_upload_bytes() -> u64 {
+    100 * 1024 * 1024
+}
+
+fn default_media_upload_request_timeout_secs() -> u64 {
+    60
+}
+
+fn default_media_upstream_upload_timeout_secs() -> u64 {
+    60
+}
+
+fn default_media_max_concurrent_uploads() -> usize {
+    4
+}
+
+fn default_media_staged_upload_ttl_secs() -> u64 {
+    24 * 60 * 60
 }
 
 impl Default for ServerConfig {
@@ -709,10 +766,16 @@ impl Default for MediaConfig {
         Self {
             enabled: default_media_enabled(),
             cache_dir: default_media_cache_dir(),
+            uploads_dir: default_media_uploads_dir(),
             max_bytes: default_media_max_bytes(),
             max_object_bytes: default_media_max_object_bytes(),
             fetch_timeout_secs: default_media_fetch_timeout_secs(),
             max_concurrent_downloads: default_media_max_concurrent_downloads(),
+            max_upload_bytes: default_media_max_upload_bytes(),
+            upload_request_timeout_secs: default_media_upload_request_timeout_secs(),
+            upstream_upload_timeout_secs: default_media_upstream_upload_timeout_secs(),
+            max_concurrent_uploads: default_media_max_concurrent_uploads(),
+            staged_upload_ttl_secs: default_media_staged_upload_ttl_secs(),
         }
     }
 }
@@ -990,18 +1053,29 @@ mod tests {
                     config.media.cache_dir,
                     home.join("Library/Caches/axon/media")
                 );
+                assert_eq!(
+                    config.media.uploads_dir,
+                    home.join("Library/Application Support/axon/uploads")
+                );
             } else if cfg!(target_os = "linux") {
                 assert_eq!(
                     config.media.cache_dir,
                     PathBuf::from("/xdg/cache/axon/media")
                 );
+                assert!(config.media.uploads_dir.ends_with("axon/uploads"));
             } else {
                 assert!(config.media.cache_dir.ends_with("axon/media"));
+                assert!(config.media.uploads_dir.ends_with("axon/uploads"));
             }
             assert_eq!(config.media.max_bytes, 5 * 1024 * 1024 * 1024);
             assert_eq!(config.media.max_object_bytes, 100 * 1024 * 1024);
             assert_eq!(config.media.fetch_timeout_secs, 60);
             assert_eq!(config.media.max_concurrent_downloads, 16);
+            assert_eq!(config.media.max_upload_bytes, 100 * 1024 * 1024);
+            assert_eq!(config.media.upload_request_timeout_secs, 60);
+            assert_eq!(config.media.upstream_upload_timeout_secs, 60);
+            assert_eq!(config.media.max_concurrent_uploads, 4);
+            assert_eq!(config.media.staged_upload_ttl_secs, 24 * 60 * 60);
             Ok(())
         });
     }
@@ -1013,9 +1087,11 @@ mod tests {
             jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
             jail.set_env("AXON_MEDIA__ENABLED", "false");
             jail.set_env("AXON_MEDIA__MAX_BYTES", "1048576");
+            jail.set_env("AXON_MEDIA__MAX_UPLOAD_BYTES", "4096");
             let config = Config::load(None).expect("load");
             assert!(!config.media.enabled);
             assert_eq!(config.media.max_bytes, 1_048_576);
+            assert_eq!(config.media.max_upload_bytes, 4096);
             Ok(())
         });
     }

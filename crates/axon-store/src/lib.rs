@@ -11,6 +11,7 @@ mod backfill;
 mod device_state;
 mod error;
 mod events;
+mod media_uploads;
 mod migrations;
 mod oauth_authorization_requests;
 mod oauth_bind_requests;
@@ -30,6 +31,7 @@ pub use events::{
     EventCiphertext, EventCrypto, EventSenderTrust, NewEvent, PendingUtd, ReactionTally,
     ThreadSummary, TimelineCursor, TimelineRow,
 };
+pub use media_uploads::{MediaUpload, MediaUploadKind, MediaUploadState, NewMediaUpload};
 pub use oauth_authorization_requests::{AuthorizationRequest, NewAuthorizationRequest};
 pub use oauth_bind_requests::BindRequest;
 pub use oauth_identities::OauthIdentity;

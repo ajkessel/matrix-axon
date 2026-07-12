@@ -1073,6 +1073,7 @@ mod tests {
             max_object_bytes: 1 << 20,
             fetch_timeout_secs: 30,
             max_concurrent_downloads: 8,
+            ..axon_core::MediaConfig::default()
         })
         .await
         .expect("open media cache")

@@ -766,6 +766,217 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/media/uploads": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Stage raw upload bytes for a later room-aware media send.",
+        "operationId": "stage_upload",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Matrix media message kind the staged bytes are intended to become.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MediaUploadKindDto"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "query",
+            "description": "Original filename. The handler normalizes path-like input down to the\nbasename before storing it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw media bytes streamed to Axon's durable upload staging area",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload staged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_StagedUploadDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Account cannot accept media mutations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Upload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Upload timed out",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/media/uploads/{upload_id}": {
+      "delete": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Delete an unsent staged upload.",
+        "operationId": "delete_upload",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Server-issued upload id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account/upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal upload cleanup failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/recover": {
       "post": {
         "tags": [
@@ -3232,6 +3443,58 @@
           }
         }
       },
+      "ApiResponse_StagedUploadDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Metadata returned after bytes have been staged successfully.",
+            "required": [
+              "upload_id",
+              "kind",
+              "filename",
+              "size_bytes",
+              "expires_at"
+            ],
+            "properties": {
+              "content_type": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Sanitized content type from the request, when supplied."
+              },
+              "expires_at": {
+                "type": "string",
+                "description": "RFC 3339 expiry time for the staged upload."
+              },
+              "filename": {
+                "type": "string",
+                "description": "Normalized filename persisted with the upload."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/MediaUploadKindDto",
+                "description": "Intended Matrix media message kind."
+              },
+              "size_bytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Accepted byte length.",
+                "minimum": 0
+              },
+              "upload_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Server-issued upload id used by the later send-media mutation."
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_StartVerifyResponse": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -3306,6 +3569,16 @@
               }
             }
           }
+        }
+      },
+      "ApiResponse_Value": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {}
         }
       },
       "ApiResponse_Vec_AccountDto": {
@@ -4272,6 +4545,14 @@
           }
         }
       },
+      "MediaUploadKindDto": {
+        "type": "string",
+        "description": "Supported outbound media kind for M15.",
+        "enum": [
+          "image",
+          "file"
+        ]
+      },
       "MemberDto": {
         "type": "object",
         "description": "One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived\nfrom the current resolved `m.room.member` state row for the user.",
@@ -4595,6 +4876,49 @@
           "event_id": {
             "type": "string",
             "description": "The created Matrix event id."
+          }
+        }
+      },
+      "StagedUploadDto": {
+        "type": "object",
+        "description": "Metadata returned after bytes have been staged successfully.",
+        "required": [
+          "upload_id",
+          "kind",
+          "filename",
+          "size_bytes",
+          "expires_at"
+        ],
+        "properties": {
+          "content_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sanitized content type from the request, when supplied."
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "RFC 3339 expiry time for the staged upload."
+          },
+          "filename": {
+            "type": "string",
+            "description": "Normalized filename persisted with the upload."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MediaUploadKindDto",
+            "description": "Intended Matrix media message kind."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Accepted byte length.",
+            "minimum": 0
+          },
+          "upload_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Server-issued upload id used by the later send-media mutation."
           }
         }
       },

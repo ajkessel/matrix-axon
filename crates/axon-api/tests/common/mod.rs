@@ -18,9 +18,11 @@ use axon_api::{
     DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaError,
     MediaProxy, MediaResource, MessageSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
     Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot, VerificationService,
+    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
     VerifyError,
 };
+use futures_util::StreamExt;
 use uuid::Uuid;
 
 /// The bearer token the test router's [`StubTokenVerifier`] accepts. Helpers
@@ -129,6 +131,61 @@ impl Outcome {
 pub struct StubSender {
     outcome: Outcome,
     calls: Mutex<Vec<Call>>,
+}
+
+/// One staged-upload call recorded by [`StubUploads`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UploadCall {
+    pub account_id: Uuid,
+    pub kind: axon_api::MediaUploadKindDto,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+/// The outcome [`StubUploads`] returns for every call.
+#[derive(Clone)]
+pub enum UploadOutcome {
+    Ok,
+    TooLarge { cap: u64 },
+    NotFound(String),
+    Forbidden(String),
+    Invalid(String),
+    Timeout(String),
+    Internal(String),
+}
+
+/// In-memory staged-upload service for route tests.
+pub struct StubUploads {
+    outcome: UploadOutcome,
+    calls: Mutex<Vec<UploadCall>>,
+    deletes: Mutex<Vec<(Uuid, Uuid)>>,
+}
+
+impl StubUploads {
+    pub fn ok() -> Self {
+        Self {
+            outcome: UploadOutcome::Ok,
+            calls: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn failing(outcome: UploadOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+            deletes: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<UploadCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    pub fn deletes(&self) -> Vec<(Uuid, Uuid)> {
+        self.deletes.lock().unwrap().clone()
+    }
 }
 
 impl StubSender {
@@ -723,6 +780,68 @@ impl MediaProxy for ConfiguredMediaProxy {
 
     fn etag(&self, mxc_url: &str) -> String {
         format!("configured-{mxc_url}")
+    }
+}
+
+#[async_trait]
+impl StagedUploadService for StubUploads {
+    async fn stage_upload(
+        &self,
+        request: StageUploadRequest,
+        mut body: UploadStream,
+    ) -> Result<StagedUpload, StageUploadError> {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(
+                &chunk.map_err(|err| StageUploadError::Invalid(err.to_string()))?,
+            );
+        }
+        self.calls.lock().unwrap().push(UploadCall {
+            account_id: request.account_id,
+            kind: request.kind,
+            filename: request.filename.clone(),
+            content_type: request.content_type.clone(),
+            bytes,
+        });
+        match &self.outcome {
+            UploadOutcome::Ok => Ok(StagedUpload {
+                upload_id: Uuid::new_v4(),
+                kind: request.kind,
+                filename: request.filename,
+                content_type: request.content_type,
+                size_bytes: self
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .last()
+                    .map(|call| call.bytes.len() as u64)
+                    .unwrap_or(0),
+                expires_at: "2026-07-11T00:00:00Z".to_owned(),
+            }),
+            UploadOutcome::TooLarge { cap } => Err(StageUploadError::TooLarge { cap: *cap }),
+            UploadOutcome::NotFound(message) => Err(StageUploadError::NotFound(message.clone())),
+            UploadOutcome::Forbidden(message) => Err(StageUploadError::Forbidden(message.clone())),
+            UploadOutcome::Invalid(message) => Err(StageUploadError::Invalid(message.clone())),
+            UploadOutcome::Timeout(message) => Err(StageUploadError::Timeout(message.clone())),
+            UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
+        }
+    }
+
+    async fn delete_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError> {
+        self.deletes.lock().unwrap().push((account_id, upload_id));
+        match &self.outcome {
+            UploadOutcome::Ok => Ok(()),
+            UploadOutcome::TooLarge { cap } => Err(StageUploadError::TooLarge { cap: *cap }),
+            UploadOutcome::NotFound(message) => Err(StageUploadError::NotFound(message.clone())),
+            UploadOutcome::Forbidden(message) => Err(StageUploadError::Forbidden(message.clone())),
+            UploadOutcome::Invalid(message) => Err(StageUploadError::Invalid(message.clone())),
+            UploadOutcome::Timeout(message) => Err(StageUploadError::Timeout(message.clone())),
+            UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
+        }
     }
 }
 

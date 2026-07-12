@@ -48,3 +48,4 @@ libc = { workspace = true }
 # provider's `GenericOidcProvider` (discovery-doc fetch) at boot.
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
 chrono = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
