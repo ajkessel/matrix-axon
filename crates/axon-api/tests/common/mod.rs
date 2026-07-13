@@ -15,12 +15,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
-    DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaError,
-    MediaProxy, MediaResource, MessageSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
-    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
-    VerifyError,
+    DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaAttachment,
+    MediaError, MediaProxy, MediaResource, MediaSendKind, MessageSender, RecoverError,
+    RedecryptUtdsError, RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery,
+    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
+    StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError,
+    TrustSnapshot, UploadStream, VerificationService, VerifyError,
 };
 use futures_util::StreamExt;
 use uuid::Uuid;
@@ -78,6 +78,18 @@ pub enum Call {
         /// The `reply_to` event id the handler passed, if any.
         reply_to: Option<String>,
         /// The `thread_root` event id the handler passed, if any.
+        thread_root: Option<String>,
+    },
+    SendMedia {
+        account_id: Uuid,
+        room_id: String,
+        kind: MediaSendKind,
+        filename: String,
+        content_type: Option<String>,
+        size_bytes: u64,
+        bytes: Vec<u8>,
+        caption: Option<String>,
+        reply_to: Option<String>,
         thread_root: Option<String>,
     },
     Edit {
@@ -160,6 +172,9 @@ pub struct StubUploads {
     outcome: UploadOutcome,
     calls: Mutex<Vec<UploadCall>>,
     deletes: Mutex<Vec<(Uuid, Uuid)>>,
+    claims: Mutex<Vec<(Uuid, Uuid)>>,
+    completes: Mutex<Vec<(Uuid, Uuid)>>,
+    releases: Mutex<Vec<(Uuid, Uuid)>>,
 }
 
 impl StubUploads {
@@ -168,6 +183,9 @@ impl StubUploads {
             outcome: UploadOutcome::Ok,
             calls: Mutex::new(Vec::new()),
             deletes: Mutex::new(Vec::new()),
+            claims: Mutex::new(Vec::new()),
+            completes: Mutex::new(Vec::new()),
+            releases: Mutex::new(Vec::new()),
         }
     }
 
@@ -176,6 +194,9 @@ impl StubUploads {
             outcome,
             calls: Mutex::new(Vec::new()),
             deletes: Mutex::new(Vec::new()),
+            claims: Mutex::new(Vec::new()),
+            completes: Mutex::new(Vec::new()),
+            releases: Mutex::new(Vec::new()),
         }
     }
 
@@ -185,6 +206,18 @@ impl StubUploads {
 
     pub fn deletes(&self) -> Vec<(Uuid, Uuid)> {
         self.deletes.lock().unwrap().clone()
+    }
+
+    pub fn claims(&self) -> Vec<(Uuid, Uuid)> {
+        self.claims.lock().unwrap().clone()
+    }
+
+    pub fn completes(&self) -> Vec<(Uuid, Uuid)> {
+        self.completes.lock().unwrap().clone()
+    }
+
+    pub fn releases(&self) -> Vec<(Uuid, Uuid)> {
+        self.releases.lock().unwrap().clone()
     }
 }
 
@@ -843,6 +876,64 @@ impl StagedUploadService for StubUploads {
             UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
         }
     }
+
+    async fn claim_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<axon_api::ClaimedUpload, StageUploadError> {
+        self.claims.lock().unwrap().push((account_id, upload_id));
+        match &self.outcome {
+            UploadOutcome::Ok => Ok(axon_api::ClaimedUpload {
+                upload_id,
+                kind: axon_api::MediaUploadKindDto::Image,
+                filename: "photo.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                size_bytes: 3,
+                bytes: b"abc".to_vec(),
+            }),
+            UploadOutcome::TooLarge { cap } => Err(StageUploadError::TooLarge { cap: *cap }),
+            UploadOutcome::NotFound(message) => Err(StageUploadError::NotFound(message.clone())),
+            UploadOutcome::Forbidden(message) => Err(StageUploadError::Forbidden(message.clone())),
+            UploadOutcome::Invalid(message) => Err(StageUploadError::Invalid(message.clone())),
+            UploadOutcome::Timeout(message) => Err(StageUploadError::Timeout(message.clone())),
+            UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
+        }
+    }
+
+    async fn complete_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError> {
+        self.completes.lock().unwrap().push((account_id, upload_id));
+        match &self.outcome {
+            UploadOutcome::Ok => Ok(()),
+            UploadOutcome::TooLarge { cap } => Err(StageUploadError::TooLarge { cap: *cap }),
+            UploadOutcome::NotFound(message) => Err(StageUploadError::NotFound(message.clone())),
+            UploadOutcome::Forbidden(message) => Err(StageUploadError::Forbidden(message.clone())),
+            UploadOutcome::Invalid(message) => Err(StageUploadError::Invalid(message.clone())),
+            UploadOutcome::Timeout(message) => Err(StageUploadError::Timeout(message.clone())),
+            UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
+        }
+    }
+
+    async fn release_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError> {
+        self.releases.lock().unwrap().push((account_id, upload_id));
+        match &self.outcome {
+            UploadOutcome::Ok => Ok(()),
+            UploadOutcome::TooLarge { cap } => Err(StageUploadError::TooLarge { cap: *cap }),
+            UploadOutcome::NotFound(message) => Err(StageUploadError::NotFound(message.clone())),
+            UploadOutcome::Forbidden(message) => Err(StageUploadError::Forbidden(message.clone())),
+            UploadOutcome::Invalid(message) => Err(StageUploadError::Invalid(message.clone())),
+            UploadOutcome::Timeout(message) => Err(StageUploadError::Timeout(message.clone())),
+            UploadOutcome::Internal(message) => Err(StageUploadError::Internal(message.clone())),
+        }
+    }
 }
 
 #[async_trait]
@@ -880,6 +971,29 @@ impl MessageSender for StubSender {
             event_id: event_id.to_owned(),
             body: body.to_owned(),
             formatted: formatted.map(|f| (f.format.to_owned(), f.body.to_owned())),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+        caption: Option<&str>,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(Call::SendMedia {
+            account_id,
+            room_id: room_id.to_owned(),
+            kind: attachment.kind,
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            size_bytes: attachment.size_bytes,
+            bytes: attachment.bytes,
+            caption: caption.map(str::to_owned),
+            reply_to: relation.reply_to.map(str::to_owned),
+            thread_root: relation.thread_root.map(str::to_owned),
         });
         self.outcome.to_result()
     }

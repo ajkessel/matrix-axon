@@ -20,5 +20,5 @@ pub use live::{
     DeviceStateFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
     VerificationFrameKind,
 };
-pub use message::{Formatted, Relation};
+pub use message::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use secret::{generate_opaque_secret, hash_secret};

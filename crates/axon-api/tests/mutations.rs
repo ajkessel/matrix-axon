@@ -16,13 +16,13 @@ mod common;
 
 use std::sync::Arc;
 
-use axon_api::{AppState, MessageSender};
+use axon_api::{AppState, MediaSendKind, MessageSender, StagedUploadService};
 use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
     Call, Outcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier,
-    StubTrust, StubVerification, TEST_TOKEN,
+    StubTrust, StubUploads, StubVerification, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -37,6 +37,14 @@ async fn store() -> Store {
 /// Build the router around a given sender. The live bus and lifecycle port are
 /// unused here.
 fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
+    app_with_uploads(store, sender, Arc::new(StubUploads::ok()))
+}
+
+fn app_with_uploads(
+    store: Store,
+    sender: Arc<dyn MessageSender>,
+    uploads: Arc<dyn StagedUploadService>,
+) -> axum::Router {
     let (live, _rx) = tokio::sync::broadcast::channel(16);
     let lifecycle = Arc::new(StubLifecycle::ok(Uuid::nil()));
     let verify = Arc::new(StubVerification::ok("$unused-flow"));
@@ -44,9 +52,12 @@ fn app(store: Store, sender: Arc<dyn MessageSender>) -> axum::Router {
     let devices = Arc::new(StubDeviceList::ok());
     let verifier = Arc::new(StubTokenVerifier::ok());
     let media = Arc::new(StubMediaProxy);
-    axon_api::router(AppState::new(
-        store, live, sender, lifecycle, verify, trust, devices, verifier, media, None,
-    ))
+    axon_api::router(
+        AppState::new(
+            store, live, sender, lifecycle, verify, trust, devices, verifier, media, None,
+        )
+        .with_staged_uploads(uploads),
+    )
 }
 
 /// Issue a request (optional JSON body) and return `(status, parsed body)`. Every
@@ -169,6 +180,78 @@ async fn mutations_route_to_sender_and_envelope_result() {
             },
         ]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_claims_sends_and_completes_upload() {
+    let store = store().await;
+    let sender = Arc::new(StubSender::ok("$media:localhost"));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender.clone(), uploads.clone());
+
+    let account_id = Uuid::new_v4();
+    let upload_id = Uuid::new_v4();
+    let room_id = "!room:localhost";
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/send-media"),
+        Some(json!({
+            "upload_id": upload_id,
+            "caption": "look",
+            "reply_to": "$reply:localhost",
+            "thread_root": "$root:localhost",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["event_id"], "$media:localhost");
+    assert_eq!(uploads.claims(), vec![(account_id, upload_id)]);
+    assert_eq!(uploads.completes(), vec![(account_id, upload_id)]);
+    assert!(uploads.releases().is_empty());
+    assert_eq!(
+        sender.calls(),
+        vec![Call::SendMedia {
+            account_id,
+            room_id: room_id.to_owned(),
+            kind: MediaSendKind::Image,
+            filename: "photo.png".to_owned(),
+            content_type: Some("image/png".to_owned()),
+            size_bytes: 3,
+            bytes: b"abc".to_vec(),
+            caption: Some("look".to_owned()),
+            reply_to: Some("$reply:localhost".to_owned()),
+            thread_root: Some("$root:localhost".to_owned()),
+        }]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn send_media_releases_upload_after_sender_failure() {
+    let store = store().await;
+    let sender = Arc::new(StubSender::failing(Outcome::Upstream("homeserver".into())));
+    let uploads = Arc::new(StubUploads::ok());
+    let app = app_with_uploads(store, sender, uploads.clone());
+
+    let account_id = Uuid::new_v4();
+    let upload_id = Uuid::new_v4();
+    let (status, body) = send(
+        &app,
+        "POST",
+        &format!("/v1/accounts/{account_id}/rooms/!room:localhost/send-media"),
+        Some(json!({ "upload_id": upload_id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"]["code"], "bad_gateway");
+    assert_eq!(uploads.claims(), vec![(account_id, upload_id)]);
+    assert!(uploads.completes().is_empty());
+    assert_eq!(uploads.releases(), vec![(account_id, upload_id)]);
 }
 
 #[tokio::test]

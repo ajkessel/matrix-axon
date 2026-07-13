@@ -31,7 +31,7 @@ mod verification;
 mod ws;
 
 pub use auth::{StoreTokenVerifier, TokenVerifier};
-pub use axon_core::{Formatted, Relation};
+pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
 pub use dto::MediaUploadKindDto;
@@ -51,7 +51,8 @@ pub use sender::{MessageSender, SendError};
 pub use state::AppState;
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
-    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
+    ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    UploadStream,
 };
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
@@ -175,6 +176,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/send",
             post(routes::messages::send_message),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
+            post(routes::messages::send_media),
         )
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}",

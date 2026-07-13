@@ -12,12 +12,16 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
-use axon_core::{Formatted, Relation};
+use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
+use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
+use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
-use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-use matrix_sdk::ruma::{EventId, RoomId};
+use matrix_sdk::ruma::events::room::message::{
+    AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
+};
+use matrix_sdk::ruma::{EventId, RoomId, UInt};
 use matrix_sdk::Room;
 use serde_json::json;
 use uuid::Uuid;
@@ -34,6 +38,84 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
         Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
+}
+
+fn effective_mime(
+    kind: MediaSendKind,
+    content_type: Option<&str>,
+) -> Result<mime::Mime, GatewayError> {
+    let parsed = match content_type {
+        Some(value) => value
+            .parse::<mime::Mime>()
+            .map_err(|e| GatewayError::Invalid(format!("content_type: {e}")))?,
+        None => match kind {
+            MediaSendKind::Image => mime::IMAGE_PNG,
+            MediaSendKind::File => mime::APPLICATION_OCTET_STREAM,
+        },
+    };
+
+    match kind {
+        MediaSendKind::Image if parsed.type_() != mime::IMAGE => Err(GatewayError::Invalid(
+            "image uploads must have an image/* content type".to_owned(),
+        )),
+        MediaSendKind::Image => Ok(parsed),
+        // matrix-sdk chooses m.image/m.audio/m.video from the MIME major type.
+        // M15 supports only explicit m.file for file uploads, so avoid those
+        // major types even when the original Content-Type was specific.
+        MediaSendKind::File
+            if matches!(parsed.type_(), mime::IMAGE | mime::AUDIO | mime::VIDEO) =>
+        {
+            Ok(mime::APPLICATION_OCTET_STREAM)
+        }
+        MediaSendKind::File => Ok(parsed),
+    }
+}
+
+fn attachment_info(kind: MediaSendKind, size_bytes: u64) -> Result<AttachmentInfo, GatewayError> {
+    let size = UInt::new(size_bytes).ok_or_else(|| {
+        GatewayError::Invalid("upload is too large for Matrix metadata".to_owned())
+    })?;
+    Ok(match kind {
+        MediaSendKind::Image => AttachmentInfo::Image(BaseImageInfo {
+            size: Some(size),
+            ..BaseImageInfo::default()
+        }),
+        MediaSendKind::File => AttachmentInfo::File(BaseFileInfo { size: Some(size) }),
+    })
+}
+
+fn attachment_reply(relation: Relation<'_>) -> Result<Option<Reply>, GatewayError> {
+    let reply_to = relation
+        .reply_to
+        .map(|id| EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("reply_to: {e}"))))
+        .transpose()?;
+    let thread_root = relation
+        .thread_root
+        .map(|id| {
+            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))
+        })
+        .transpose()?;
+
+    let Some(event_id) = reply_to.or(thread_root) else {
+        return Ok(None);
+    };
+    let (enforce_thread, add_mentions) = match (relation.thread_root, relation.reply_to) {
+        (Some(_), Some(_)) => (
+            EnforceThread::Threaded(ReplyWithinThread::Yes),
+            AddMentions::Yes,
+        ),
+        (Some(_), None) => (
+            EnforceThread::Threaded(ReplyWithinThread::No),
+            AddMentions::No,
+        ),
+        (None, Some(_)) => (EnforceThread::Unthreaded, AddMentions::Yes),
+        (None, None) => unreachable!("event_id checked above"),
+    };
+    Ok(Some(Reply {
+        event_id,
+        enforce_thread,
+        add_mentions,
+    }))
 }
 
 /// Sends Matrix message-like events on behalf of an account, routed through that
@@ -133,6 +215,32 @@ impl SdkGateway {
         Ok(resp.response.event_id.to_string())
     }
 
+    /// Send a staged media attachment as an `m.image` or `m.file`, letting the
+    /// SDK own media upload, encrypted-file metadata, and final room send.
+    pub async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+        caption: Option<&str>,
+        relation: Relation<'_>,
+    ) -> Result<String, GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
+        let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+        let reply = attachment_reply(relation)?;
+        let caption = caption.map(TextMessageEventContent::plain);
+        let config = AttachmentConfig::new()
+            .info(info)
+            .caption(caption)
+            .reply(reply);
+        let resp = room
+            .send_attachment(attachment.filename, &content_type, attachment.bytes, config)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(resp.event_id.to_string())
+    }
+
     /// Edit a message by sending an `m.replace` replacement of `event_id`.
     /// Built as a raw envelope (`m.new_content` + `m.relates_to`) so we don't
     /// need the original event in hand. Returns the replacement event's id.
@@ -217,5 +325,170 @@ impl SdkGateway {
         let content = ReactionEventContent::new(Annotation::new(event_id, key.to_owned()));
         let resp = room.send(content).await.map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axon_core::{MediaSendKind, Relation};
+    use matrix_sdk::attachment::AttachmentInfo;
+    use matrix_sdk::room::reply::EnforceThread;
+    use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
+
+    use super::{attachment_info, attachment_reply, effective_mime};
+    use crate::error::GatewayError;
+
+    const REPLY_EVENT: &str = "$reply:example.org";
+    const THREAD_ROOT: &str = "$thread:example.org";
+
+    #[test]
+    fn effective_mime_uses_kind_defaults() {
+        assert_eq!(
+            effective_mime(MediaSendKind::Image, None).expect("image default"),
+            mime::IMAGE_PNG
+        );
+        assert_eq!(
+            effective_mime(MediaSendKind::File, None).expect("file default"),
+            mime::APPLICATION_OCTET_STREAM
+        );
+    }
+
+    #[test]
+    fn effective_mime_accepts_matching_image_type() {
+        assert_eq!(
+            effective_mime(MediaSendKind::Image, Some("image/jpeg")).expect("image jpeg"),
+            mime::IMAGE_JPEG
+        );
+    }
+
+    #[test]
+    fn effective_mime_rejects_non_image_type_for_image_send() {
+        let err = effective_mime(MediaSendKind::Image, Some("application/pdf"))
+            .expect_err("non-image content type should fail");
+
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message == "image uploads must have an image/* content type")
+        );
+    }
+
+    #[test]
+    fn effective_mime_coerces_media_types_for_file_send() {
+        for content_type in ["image/png", "audio/ogg", "video/mp4"] {
+            assert_eq!(
+                effective_mime(MediaSendKind::File, Some(content_type)).expect("file mime"),
+                mime::APPLICATION_OCTET_STREAM
+            );
+        }
+    }
+
+    #[test]
+    fn effective_mime_rejects_unparseable_content_type() {
+        let err = effective_mime(MediaSendKind::File, Some("not a mime type"))
+            .expect_err("invalid content type should fail");
+
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message.starts_with("content_type:"))
+        );
+    }
+
+    #[test]
+    fn attachment_info_records_size_for_each_send_kind() {
+        let image_info = attachment_info(MediaSendKind::Image, 123).expect("image info");
+        let AttachmentInfo::Image(image_info) = image_info else {
+            panic!("expected image attachment info");
+        };
+        assert_eq!(u64::from(image_info.size.expect("image size")), 123);
+
+        let file_info = attachment_info(MediaSendKind::File, 456).expect("file info");
+        let AttachmentInfo::File(file_info) = file_info else {
+            panic!("expected file attachment info");
+        };
+        assert_eq!(u64::from(file_info.size.expect("file size")), 456);
+    }
+
+    #[test]
+    fn attachment_info_rejects_sizes_too_large_for_matrix_metadata() {
+        let err = attachment_info(MediaSendKind::File, u64::MAX)
+            .expect_err("oversized attachment metadata should fail");
+
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message == "upload is too large for Matrix metadata")
+        );
+    }
+
+    #[test]
+    fn attachment_reply_returns_none_without_relation() {
+        assert!(attachment_reply(Relation::default())
+            .expect("unrelated attachment")
+            .is_none());
+    }
+
+    #[test]
+    fn attachment_reply_maps_plain_reply() {
+        let reply = attachment_reply(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: None,
+        })
+        .expect("plain reply")
+        .expect("reply metadata");
+
+        assert_eq!(reply.event_id.as_str(), REPLY_EVENT);
+        assert_eq!(reply.enforce_thread, EnforceThread::Unthreaded);
+        assert_eq!(reply.add_mentions, AddMentions::Yes);
+    }
+
+    #[test]
+    fn attachment_reply_maps_thread_without_explicit_reply_to_root_fallback() {
+        let reply = attachment_reply(Relation {
+            reply_to: None,
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("thread relation")
+        .expect("reply metadata");
+
+        assert_eq!(reply.event_id.as_str(), THREAD_ROOT);
+        assert_eq!(
+            reply.enforce_thread,
+            EnforceThread::Threaded(ReplyWithinThread::No)
+        );
+        assert_eq!(reply.add_mentions, AddMentions::No);
+    }
+
+    #[test]
+    fn attachment_reply_maps_thread_with_explicit_reply() {
+        let reply = attachment_reply(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("thread reply relation")
+        .expect("reply metadata");
+
+        assert_eq!(reply.event_id.as_str(), REPLY_EVENT);
+        assert_eq!(
+            reply.enforce_thread,
+            EnforceThread::Threaded(ReplyWithinThread::Yes)
+        );
+        assert_eq!(reply.add_mentions, AddMentions::Yes);
+    }
+
+    #[test]
+    fn attachment_reply_rejects_invalid_event_ids() {
+        let bad_reply = attachment_reply(Relation {
+            reply_to: Some("not-an-event-id"),
+            thread_root: None,
+        })
+        .expect_err("bad reply id should fail");
+        assert!(
+            matches!(bad_reply, GatewayError::Invalid(message) if message.starts_with("reply_to:"))
+        );
+
+        let bad_thread = attachment_reply(Relation {
+            reply_to: None,
+            thread_root: Some("not-an-event-id"),
+        })
+        .expect_err("bad thread id should fail");
+        assert!(
+            matches!(bad_thread, GatewayError::Invalid(message) if message.starts_with("thread_root:"))
+        );
     }
 }

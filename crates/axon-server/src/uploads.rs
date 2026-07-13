@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axon_api::{
-    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
+    ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    UploadStream,
 };
 use axon_core::MediaConfig;
 use axon_store::{AccountState, MediaUploadKind, NewMediaUpload, Store};
@@ -140,6 +141,13 @@ impl FilesystemStagedUploads {
             expires_at: row.expires_at.to_rfc3339(),
         })
     }
+
+    fn to_api_kind(kind: MediaUploadKind) -> axon_api::MediaUploadKindDto {
+        match kind {
+            MediaUploadKind::Image => axon_api::MediaUploadKindDto::Image,
+            MediaUploadKind::File => axon_api::MediaUploadKindDto::File,
+        }
+    }
 }
 
 #[async_trait]
@@ -179,6 +187,86 @@ impl StagedUploadService for FilesystemStagedUploads {
             return Err(StageUploadError::NotFound("upload not found".to_owned()));
         };
         remove_file_if_exists(Path::new(&row.path)).await;
+        Ok(())
+    }
+
+    async fn claim_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<ClaimedUpload, StageUploadError> {
+        let Some(row) = self
+            .store
+            .claim_staged_media_upload(account_id, upload_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Err(StageUploadError::NotFound("upload not found".to_owned()));
+        };
+        let bytes = match tokio::fs::read(&row.path).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if let Err(release_err) = self
+                    .store
+                    .release_sending_media_upload(account_id, upload_id)
+                    .await
+                {
+                    tracing::warn!(
+                        account_id = %account_id,
+                        upload_id = %upload_id,
+                        error = %release_err,
+                        "failed to release upload after staged file read failed"
+                    );
+                }
+                return if err.kind() == std::io::ErrorKind::NotFound {
+                    Err(StageUploadError::NotFound(
+                        "upload file not found".to_owned(),
+                    ))
+                } else {
+                    Err(internal(err))
+                };
+            }
+        };
+        Ok(ClaimedUpload {
+            upload_id: row.upload_id,
+            kind: Self::to_api_kind(row.kind),
+            filename: row.filename,
+            content_type: row.content_type,
+            size_bytes: row.size_bytes as u64,
+            bytes,
+        })
+    }
+
+    async fn complete_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError> {
+        let Some(row) = self
+            .store
+            .complete_sending_media_upload(account_id, upload_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Err(StageUploadError::NotFound("upload not found".to_owned()));
+        };
+        remove_file_if_exists(Path::new(&row.path)).await;
+        Ok(())
+    }
+
+    async fn release_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError> {
+        let Some(_row) = self
+            .store
+            .release_sending_media_upload(account_id, upload_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Err(StageUploadError::NotFound("upload not found".to_owned()));
+        };
         Ok(())
     }
 }

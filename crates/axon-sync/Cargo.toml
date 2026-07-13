@@ -31,6 +31,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true, features = ["std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 serde_json = { workspace = true }
+mime = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 fs4 = { workspace = true }

@@ -7,14 +7,28 @@
 //! [`SendError`] — a mechanical 1:1 translation, the small cost of keeping the
 //! two crates decoupled.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
-use axon_api::{Formatted, MessageSender, Relation, SendError};
+use axon_api::{Formatted, MediaAttachment, MessageSender, Relation, SendError};
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
 /// Wraps the sync engine's gateway so it satisfies the API's `MessageSender`
 /// port. The orphan rule requires a local newtype to carry the impl.
-pub struct GatewayAdapter(pub SdkGateway);
+pub struct GatewayAdapter {
+    gateway: SdkGateway,
+    upstream_upload_timeout: Duration,
+}
+
+impl GatewayAdapter {
+    pub fn new(gateway: SdkGateway, upstream_upload_timeout: Duration) -> Self {
+        Self {
+            gateway,
+            upstream_upload_timeout,
+        }
+    }
+}
 
 /// Map a sync-layer gateway error onto the API-layer send error (and thus an
 /// HTTP status): unknown account / room → not found, a failed connect →
@@ -46,10 +60,33 @@ impl MessageSender for GatewayAdapter {
         formatted: Option<Formatted<'_>>,
         relation: Relation<'_>,
     ) -> Result<String, SendError> {
-        self.0
+        self.gateway
             .send_message(account_id, room_id, body, formatted, relation)
             .await
             .map_err(map_err)
+    }
+
+    async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+        caption: Option<&str>,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.upstream_upload_timeout,
+            self.gateway
+                .send_media(account_id, room_id, attachment, caption, relation),
+        )
+        .await
+        .map_err(|_| {
+            SendError::Upstream(format!(
+                "media send timed out after {}s",
+                self.upstream_upload_timeout.as_secs()
+            ))
+        })?
+        .map_err(map_err)
     }
 
     async fn edit(
@@ -60,7 +97,7 @@ impl MessageSender for GatewayAdapter {
         body: &str,
         formatted: Option<Formatted<'_>>,
     ) -> Result<String, SendError> {
-        self.0
+        self.gateway
             .edit(account_id, room_id, event_id, body, formatted)
             .await
             .map_err(map_err)
@@ -73,7 +110,7 @@ impl MessageSender for GatewayAdapter {
         event_id: &str,
         reason: Option<&str>,
     ) -> Result<String, SendError> {
-        self.0
+        self.gateway
             .redact(account_id, room_id, event_id, reason)
             .await
             .map_err(map_err)
@@ -86,7 +123,7 @@ impl MessageSender for GatewayAdapter {
         event_id: &str,
         key: &str,
     ) -> Result<String, SendError> {
-        self.0
+        self.gateway
             .react(account_id, room_id, event_id, key)
             .await
             .map_err(map_err)

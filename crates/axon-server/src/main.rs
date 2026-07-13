@@ -215,7 +215,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // device-list engine (adapted onto the DeviceListService port) so a client
     // can list a user's devices before starting SAS verification (M16, ADR
     // 0060). The bearer-token verifier (M7b) is backed straight by the store.
-    let sender = Arc::new(GatewayAdapter(sync_engine.gateway()));
+    let sender = Arc::new(GatewayAdapter::new(
+        sync_engine.gateway(),
+        std::time::Duration::from_secs(config.media.upstream_upload_timeout_secs),
+    ));
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));

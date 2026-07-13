@@ -36,6 +36,17 @@ pub struct StagedUpload {
     pub expires_at: String,
 }
 
+/// Bytes and metadata for a staged upload that has been claimed for sending.
+#[derive(Debug, Clone)]
+pub struct ClaimedUpload {
+    pub upload_id: Uuid,
+    pub kind: MediaUploadKindDto,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: u64,
+    pub bytes: Vec<u8>,
+}
+
 /// What can go wrong while staging or deleting upload bytes.
 #[derive(Debug)]
 pub enum StageUploadError {
@@ -63,6 +74,24 @@ pub trait StagedUploadService: Send + Sync {
     ) -> Result<StagedUpload, StageUploadError>;
 
     async fn delete_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError>;
+
+    async fn claim_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<ClaimedUpload, StageUploadError>;
+
+    async fn complete_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<(), StageUploadError>;
+
+    async fn release_upload(
         &self,
         account_id: Uuid,
         upload_id: Uuid,

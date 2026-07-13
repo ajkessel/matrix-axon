@@ -12,7 +12,7 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
-use axon_core::{Formatted, Relation};
+use axon_core::{Formatted, MediaAttachment, Relation};
 use uuid::Uuid;
 
 /// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
@@ -50,6 +50,19 @@ pub trait MessageSender: Send + Sync {
         room_id: &str,
         body: &str,
         formatted: Option<Formatted<'_>>,
+        relation: Relation<'_>,
+    ) -> Result<String, SendError>;
+
+    /// Send a staged media attachment as an `m.image` or `m.file`. The
+    /// attachment bytes are already claimed from the staging service; the sender
+    /// owns only the Matrix SDK upload/send operation. `caption`, when present,
+    /// becomes the media event body, otherwise the filename is the body.
+    async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+        caption: Option<&str>,
         relation: Relation<'_>,
     ) -> Result<String, SendError>;
 

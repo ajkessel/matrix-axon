@@ -11,12 +11,15 @@ use std::sync::Arc;
 use axum::extract::State;
 use uuid::Uuid;
 
-use axon_core::{Formatted, Relation};
+use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 
-use crate::dto::{EditRequest, ReactRequest, RedactQuery, SendMessageRequest, SendResultDto};
+use crate::dto::{
+    EditRequest, ReactRequest, RedactQuery, SendMediaRequest, SendMessageRequest, SendResultDto,
+};
 use crate::extract::{Json, Path, Query};
 use crate::response::{ApiError, ApiResponse};
 use crate::sender::MessageSender;
+use crate::uploads::StagedUploadService;
 
 /// The only `format` Matrix defines for `formatted_body`.
 const HTML_FORMAT: &str = "org.matrix.custom.html";
@@ -75,6 +78,82 @@ pub async fn send_message(
         .send_message(account_id, &room_id, &req.body, fmt, relation)
         .await?;
     Ok(ApiResponse::new(SendResultDto { event_id }))
+}
+
+/// Send a staged media upload to a room.
+#[utoipa::path(
+    post,
+    path = "/v1/accounts/{account_id}/rooms/{room_id}/send-media",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account id"),
+        ("room_id" = String, Path, description = "Matrix room id"),
+    ),
+    request_body = SendMediaRequest,
+    responses(
+        (status = 200, description = "Media sent", body = ApiResponse<SendResultDto>),
+        (status = 400, description = "Malformed request", body = crate::response::ErrorResponse),
+        (status = 403, description = "Operation not permitted", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account, room, or upload not found", body = crate::response::ErrorResponse),
+        (status = 502, description = "Upstream homeserver error", body = crate::response::ErrorResponse),
+        (status = 503, description = "Account not reachable", body = crate::response::ErrorResponse),
+    ),
+    tag = "messages",
+)]
+pub async fn send_media(
+    State(sender): State<Arc<dyn MessageSender>>,
+    State(uploads): State<Arc<dyn StagedUploadService>>,
+    Path((account_id, room_id)): Path<(Uuid, String)>,
+    Json(req): Json<SendMediaRequest>,
+) -> Result<ApiResponse<SendResultDto>, ApiError> {
+    let relation = Relation {
+        reply_to: req.reply_to.as_deref(),
+        thread_root: req.thread_root.as_deref(),
+    };
+    let upload = uploads.claim_upload(account_id, req.upload_id).await?;
+    let attachment = MediaAttachment {
+        kind: match upload.kind {
+            crate::dto::MediaUploadKindDto::Image => MediaSendKind::Image,
+            crate::dto::MediaUploadKindDto::File => MediaSendKind::File,
+        },
+        filename: upload.filename,
+        content_type: upload.content_type,
+        size_bytes: upload.size_bytes,
+        bytes: upload.bytes,
+    };
+
+    let send_result = sender
+        .send_media(
+            account_id,
+            &room_id,
+            attachment,
+            req.caption.as_deref(),
+            relation,
+        )
+        .await;
+    match send_result {
+        Ok(event_id) => {
+            if let Err(err) = uploads.complete_upload(account_id, req.upload_id).await {
+                tracing::warn!(
+                    account_id = %account_id,
+                    upload_id = %req.upload_id,
+                    error = ?err,
+                    "sent media but failed to consume staged upload"
+                );
+            }
+            Ok(ApiResponse::new(SendResultDto { event_id }))
+        }
+        Err(err) => {
+            if let Err(release_err) = uploads.release_upload(account_id, req.upload_id).await {
+                tracing::warn!(
+                    account_id = %account_id,
+                    upload_id = %req.upload_id,
+                    error = ?release_err,
+                    "failed to release staged upload after media send failure"
+                );
+            }
+            Err(err.into())
+        }
+    }
 }
 
 /// Edit an existing message (sends an `m.replace`).

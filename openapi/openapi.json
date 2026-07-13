@@ -1593,6 +1593,126 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/send-media": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send a staged media upload to a room.",
+        "operationId": "send_media",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMediaRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Media sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SendResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account, room, or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/threads": {
       "get": {
         "tags": [
@@ -4822,6 +4942,41 @@
             "type": "number",
             "format": "float",
             "description": "BM25 relevance score (higher is more relevant)."
+          }
+        }
+      },
+      "SendMediaRequest": {
+        "type": "object",
+        "description": "Request body for sending a staged media upload into a room\n(`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an\nunsent staged upload owned by the path account.",
+        "required": [
+          "upload_id"
+        ],
+        "properties": {
+          "caption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional media caption. When absent, Axon uses the staged filename as the\nMatrix event body."
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send as a reply to this event id (`m.in_reply_to`). Optional."
+          },
+          "thread_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set without `reply_to`, the\nthread root is used as the reply fallback."
+          },
+          "upload_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Server-issued staged upload id returned by `POST …/media/uploads`."
           }
         }
       },

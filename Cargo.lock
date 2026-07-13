@@ -549,6 +549,7 @@ dependencies = [
  "futures-util",
  "matrix-sdk",
  "matrix-sdk-ui",
+ "mime",
  "serde_json",
  "sqlx-core",
  "thiserror 2.0.18",

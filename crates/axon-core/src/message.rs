@@ -47,3 +47,21 @@ impl Relation<'_> {
         self.reply_to.is_some() || self.thread_root.is_some()
     }
 }
+
+/// Supported Matrix media message shape for a staged upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSendKind {
+    Image,
+    File,
+}
+
+/// Claimed media bytes and metadata passed from the API upload substrate to the
+/// outbound message gateway.
+#[derive(Debug, Clone)]
+pub struct MediaAttachment {
+    pub kind: MediaSendKind,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: u64,
+    pub bytes: Vec<u8>,
+}

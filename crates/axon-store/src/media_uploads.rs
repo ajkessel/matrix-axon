@@ -183,4 +183,70 @@ impl Store {
             .await?;
         Ok(row)
     }
+
+    /// Claim a staged upload for sending. The state transition is atomic, so two
+    /// clients cannot send the same upload concurrently. Expired uploads are not
+    /// claimable; M15c owns pruning/reconciliation of stale rows and files.
+    pub async fn claim_staged_media_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<Option<MediaUpload>, StoreError> {
+        let sql = format!(
+            "UPDATE media_uploads \
+             SET state = 'sending' \
+             WHERE account_id = $1 \
+               AND upload_id = $2 \
+               AND state = 'staged' \
+               AND expires_at > now() \
+             RETURNING {MEDIA_UPLOAD_COLUMNS}"
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
+            .bind(account_id)
+            .bind(upload_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    /// Delete a claimed upload after the Matrix event has been sent, returning
+    /// its path for filesystem cleanup.
+    pub async fn complete_sending_media_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<Option<MediaUpload>, StoreError> {
+        let sql = format!(
+            "DELETE FROM media_uploads \
+             WHERE account_id = $1 AND upload_id = $2 AND state = 'sending' \
+             RETURNING {MEDIA_UPLOAD_COLUMNS}"
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
+            .bind(account_id)
+            .bind(upload_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    /// Release a claimed upload after a send failure so the caller can retry
+    /// from a clean staged state.
+    pub async fn release_sending_media_upload(
+        &self,
+        account_id: Uuid,
+        upload_id: Uuid,
+    ) -> Result<Option<MediaUpload>, StoreError> {
+        let sql = format!(
+            "UPDATE media_uploads \
+             SET state = 'staged' \
+             WHERE account_id = $1 AND upload_id = $2 AND state = 'sending' \
+             RETURNING {MEDIA_UPLOAD_COLUMNS}"
+        );
+        let row = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
+            .bind(account_id)
+            .bind(upload_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
 }

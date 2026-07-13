@@ -190,6 +190,36 @@ impl StagedUploadService for DisabledStagedUploads {
             "staged upload service is not configured".to_owned(),
         ))
     }
+
+    async fn claim_upload(
+        &self,
+        _account_id: uuid::Uuid,
+        _upload_id: uuid::Uuid,
+    ) -> Result<crate::uploads::ClaimedUpload, StageUploadError> {
+        Err(StageUploadError::Internal(
+            "staged upload service is not configured".to_owned(),
+        ))
+    }
+
+    async fn complete_upload(
+        &self,
+        _account_id: uuid::Uuid,
+        _upload_id: uuid::Uuid,
+    ) -> Result<(), StageUploadError> {
+        Err(StageUploadError::Internal(
+            "staged upload service is not configured".to_owned(),
+        ))
+    }
+
+    async fn release_upload(
+        &self,
+        _account_id: uuid::Uuid,
+        _upload_id: uuid::Uuid,
+    ) -> Result<(), StageUploadError> {
+        Err(StageUploadError::Internal(
+            "staged upload service is not configured".to_owned(),
+        ))
+    }
 }
 
 impl FromRef<AppState> for Store {

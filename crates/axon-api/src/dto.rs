@@ -390,6 +390,27 @@ pub struct SendMessageRequest {
     pub thread_root: Option<String>,
 }
 
+/// Request body for sending a staged media upload into a room
+/// (`POST …/rooms/{room_id}/send-media`). The `upload_id` must refer to an
+/// unsent staged upload owned by the path account.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SendMediaRequest {
+    /// Server-issued staged upload id returned by `POST …/media/uploads`.
+    pub upload_id: Uuid,
+    /// Optional media caption. When absent, Axon uses the staged filename as the
+    /// Matrix event body.
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// Send as a reply to this event id (`m.in_reply_to`). Optional.
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Send into this thread, identified by its root event id
+    /// (`rel_type: m.thread`). Optional; when set without `reply_to`, the
+    /// thread root is used as the reply fallback.
+    #[serde(default)]
+    pub thread_root: Option<String>,
+}
+
 /// Request body for editing a message (`PUT …/events/{event_id}`). Replaces the
 /// target event's text via an `m.replace` relation.
 ///
