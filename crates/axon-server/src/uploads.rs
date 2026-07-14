@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axon_api::{
@@ -28,6 +28,9 @@ pub struct FilesystemStagedUploads {
     upload_timeout: Duration,
     ttl: Duration,
     concurrent_uploads: Arc<Semaphore>,
+    /// `config.max_concurrent_uploads`, kept alongside the semaphore purely for
+    /// logging context — `Semaphore` doesn't expose its original capacity.
+    concurrent_uploads_total: usize,
 }
 
 impl FilesystemStagedUploads {
@@ -47,6 +50,7 @@ impl FilesystemStagedUploads {
             upload_timeout: Duration::from_secs(config.upload_request_timeout_secs),
             ttl: Duration::from_secs(config.staged_upload_ttl_secs),
             concurrent_uploads: Arc::new(Semaphore::new(config.max_concurrent_uploads)),
+            concurrent_uploads_total: config.max_concurrent_uploads,
         })
     }
 
@@ -157,20 +161,60 @@ impl StagedUploadService for FilesystemStagedUploads {
         request: StageUploadRequest,
         body: UploadStream,
     ) -> Result<StagedUpload, StageUploadError> {
+        let account_id = request.account_id;
+        let queued_at = Instant::now();
+        let available_permits = self.concurrent_uploads.available_permits();
         let _permit = self
             .concurrent_uploads
             .clone()
             .acquire_owned()
             .await
             .map_err(|err| StageUploadError::Internal(err.to_string()))?;
-        tokio::time::timeout(self.upload_timeout, self.stage_upload_inner(request, body))
+        let wait = queued_at.elapsed();
+        // Anything more than trivial wait means every permit was in use — worth
+        // knowing even on success, since it's the leading signal that uploads are
+        // backing up (a slow/stuck upload elsewhere, or genuine load).
+        if wait > Duration::from_millis(50) {
+            tracing::warn!(
+                account_id = %account_id,
+                wait_ms = wait.as_millis(),
+                available_permits_before_wait = available_permits,
+                max_concurrent_uploads = self.concurrent_uploads_total,
+                "stage_upload waited for a concurrent-upload permit"
+            );
+        }
+        tracing::debug!(account_id = %account_id, filename = %request.filename, "stage_upload: permit acquired, starting write");
+        let started_at = Instant::now();
+        let result = tokio::time::timeout(self.upload_timeout, self.stage_upload_inner(request, body))
             .await
             .map_err(|_| {
+                tracing::warn!(
+                    account_id = %account_id,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    timeout_secs = self.upload_timeout.as_secs(),
+                    "stage_upload timed out — request never completed within upload_request_timeout_secs"
+                );
                 StageUploadError::Timeout(format!(
                     "upload timed out after {}s",
                     self.upload_timeout.as_secs()
                 ))
-            })?
+            })?;
+        match &result {
+            Ok(staged) => tracing::info!(
+                account_id = %account_id,
+                upload_id = %staged.upload_id,
+                size_bytes = staged.size_bytes,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "stage_upload completed"
+            ),
+            Err(err) => tracing::warn!(
+                account_id = %account_id,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                error = ?err,
+                "stage_upload failed"
+            ),
+        }
+        result
     }
 
     async fn delete_upload(

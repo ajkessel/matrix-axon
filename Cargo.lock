@@ -365,6 +365,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tokio-util",
  "tower",
+ "tower-http",
  "tracing",
  "url",
  "utoipa",
@@ -6259,6 +6260,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

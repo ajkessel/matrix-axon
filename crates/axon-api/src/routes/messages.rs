@@ -109,7 +109,21 @@ pub async fn send_media(
         reply_to: req.reply_to.as_deref(),
         thread_root: req.thread_root.as_deref(),
     };
+    let started_at = std::time::Instant::now();
+    tracing::debug!(
+        account_id = %account_id,
+        room_id = %room_id,
+        upload_id = %req.upload_id,
+        "send_media: claiming staged upload"
+    );
     let upload = uploads.claim_upload(account_id, req.upload_id).await?;
+    tracing::debug!(
+        account_id = %account_id,
+        upload_id = %req.upload_id,
+        size_bytes = upload.size_bytes,
+        claim_elapsed_ms = started_at.elapsed().as_millis(),
+        "send_media: upload claimed, handing off to the SDK attachment send"
+    );
     let attachment = MediaAttachment {
         kind: match upload.kind {
             crate::dto::MediaUploadKindDto::Image => MediaSendKind::Image,
@@ -121,6 +135,7 @@ pub async fn send_media(
         bytes: upload.bytes,
     };
 
+    let send_started_at = std::time::Instant::now();
     let send_result = sender
         .send_media(
             account_id,
@@ -132,6 +147,15 @@ pub async fn send_media(
         .await;
     match send_result {
         Ok(event_id) => {
+            tracing::info!(
+                account_id = %account_id,
+                room_id = %room_id,
+                upload_id = %req.upload_id,
+                event_id = %event_id,
+                send_elapsed_ms = send_started_at.elapsed().as_millis(),
+                total_elapsed_ms = started_at.elapsed().as_millis(),
+                "send_media completed"
+            );
             if let Err(err) = uploads.complete_upload(account_id, req.upload_id).await {
                 tracing::warn!(
                     account_id = %account_id,
@@ -143,6 +167,14 @@ pub async fn send_media(
             Ok(ApiResponse::new(SendResultDto { event_id }))
         }
         Err(err) => {
+            tracing::warn!(
+                account_id = %account_id,
+                room_id = %room_id,
+                upload_id = %req.upload_id,
+                send_elapsed_ms = send_started_at.elapsed().as_millis(),
+                error = ?err,
+                "send_media: SDK attachment send failed"
+            );
             if let Err(release_err) = uploads.release_upload(account_id, req.upload_id).await {
                 tracing::warn!(
                     account_id = %account_id,

@@ -61,12 +61,15 @@ pub use uploads::{
 pub use verification::{FlowStage, FlowSummary, VerificationService, VerifyError};
 
 use axum::{
+    body::Body,
     middleware::from_fn_with_state,
     response::Html,
     routing::{get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 /// Build the top-level application router over the shared [`AppState`].
 ///
@@ -257,6 +260,23 @@ pub fn router(state: AppState) -> Router {
         // unmatched paths. This is intentionally outside the `/v1` subtree so
         // unknown API routes keep auth + JSON semantics above.
         .fallback(browser_fallback)
+        // Baseline per-request access log (method/path/status/latency) at INFO
+        // so it's visible under the default log level, not just RUST_LOG=debug.
+        // Without this, a request that stalls inside a handler (e.g. blocked on
+        // a semaphore permit or slow disk I/O) leaves no server-side trace that
+        // it was ever received at all.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<Body>| {
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                        version = ?request.version(),
+                    )
+                })
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state)
 }
 
