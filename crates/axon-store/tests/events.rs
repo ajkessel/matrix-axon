@@ -398,6 +398,64 @@ async fn room_timeline_masks_redacted_events() {
     common::cleanup_account(&pool, account_id).await;
 }
 
+/// A standalone `m.room.redaction` row is collapsed out of the page like an
+/// `m.replace` edit or `m.reaction` annotation (M8): it carries no displayable
+/// body of its own (just a `redacts` pointer), and its effect already surfaces
+/// on the target row via `redaction_event_id`/masking, so leaving it un-collapsed
+/// would just be a blank row — the bug bridges/bots hit when they redact-and-
+/// repost instead of sending `m.replace` edits.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn room_timeline_collapses_standalone_redaction_events() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+
+    let user = format!("@redcol-{}:localhost", Uuid::new_v4());
+    let account_id = store
+        .upsert_account(&user, "https://hs.example.org")
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!room-{}:localhost", Uuid::new_v4());
+
+    let target = insert_message(&store, account_id, &room_id, 1_700_000_000_000, "secret").await;
+
+    let redaction_id = format!("$red-{}:localhost", Uuid::new_v4());
+    store
+        .upsert_event(&NewEvent {
+            event_id: &redaction_id,
+            room_id: &room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_500,
+            event_type: "m.room.redaction",
+            content: Some(json!({ "reason": "oops" })),
+            raw_event: json!({ "type": "m.room.redaction", "redacts": target }),
+            megolm_session_id: None,
+            redacts: Some(&target),
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert redaction");
+
+    let timeline = store
+        .room_timeline(account_id, &room_id, None, 10)
+        .await
+        .expect("timeline");
+
+    assert!(
+        timeline.iter().all(|r| r.event_id != redaction_id),
+        "the redaction event itself must not appear as its own row"
+    );
+    assert!(
+        timeline.iter().any(|r| r.event_id == target),
+        "the redacted target row must still be present (masked)"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
 /// The crypto sibling tables upsert from EncryptionInfo and cascade-delete with
 /// their event row.
 #[tokio::test]

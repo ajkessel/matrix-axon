@@ -705,13 +705,16 @@ impl Store {
     /// redaction's `event_id`. The masking is read-time only — the stored row and
     /// its ciphertext sibling are untouched.
     ///
-    /// Relations are **collapsed** (M8): standalone `m.replace` edit events and
-    /// `m.annotation` reaction events are excluded from the page — they are
-    /// surfaced instead on their target row (the latest edited body in place,
-    /// plus [`edited`](TimelineRow::edited) / [`edit_count`](TimelineRow::edit_count)
-    /// / [`reactions`](TimelineRow::reactions)), so a client gets the resolved view
-    /// regardless of where the relation landed in the timeline. Replies and thread
-    /// members keep their own rows. The forensic edit events stay on disk; only
+    /// Relations are **collapsed** (M8): standalone `m.replace` edit events,
+    /// `m.annotation` reaction events, and `m.room.redaction` events are excluded
+    /// from the page — they are surfaced instead on their target row (the latest
+    /// edited body in place, plus [`edited`](TimelineRow::edited) /
+    /// [`edit_count`](TimelineRow::edit_count) / [`reactions`](TimelineRow::reactions)
+    /// / [`redaction_event_id`](TimelineRow::redaction_event_id)), so a client gets
+    /// the resolved view regardless of where the relation landed in the timeline.
+    /// A redaction carries no displayable content of its own (`redacts` only), so
+    /// leaving it un-collapsed renders as a blank row. Replies and thread members
+    /// keep their own rows. The forensic edit/redaction events stay on disk; only
     /// the read collapses them.
     pub async fn room_timeline(
         &self,
@@ -728,9 +731,15 @@ impl Store {
         // when it is an `m.reaction` (the type we aggregate into the per-event
         // tally). Non-`m.reaction` annotations are neither aggregated (GH #112)
         // nor collapsed, so they must stay visible as raw rows. `COALESCE(...,'')`
-        // keeps NULL-`rel_type` rows (ordinary messages, replies) visible.
+        // keeps NULL-`rel_type` rows (ordinary messages, replies) visible. A bare
+        // `m.room.redaction` is dropped unconditionally — it has no body of its
+        // own, only a `redacts` pointer, and its effect already surfaces on the
+        // target row via the lateral `r` match, so an un-collapsed redaction is
+        // pure blank-row noise (seen from bridges/bots that redact-and-repost
+        // instead of sending `m.replace` edits).
         let mut sql = format!(
             "{} WHERE e.account_id = $1 AND e.room_id = $2 \
+             AND e.event_type <> 'm.room.redaction' \
              AND COALESCE(e.relates_to->>'rel_type', '') <> 'm.replace' \
              AND NOT (COALESCE(e.relates_to->>'rel_type', '') = 'm.annotation' \
                       AND e.event_type = 'm.reaction')",
