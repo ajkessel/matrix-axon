@@ -15,6 +15,7 @@ mod gateway;
 mod init;
 mod lifecycle;
 mod media;
+mod member_profiles;
 mod oauth;
 mod search;
 mod status;
@@ -40,6 +41,7 @@ use crate::devices::DeviceAdapter;
 use crate::gateway::GatewayAdapter;
 use crate::lifecycle::LifecycleAdapter;
 use crate::media::CachingMediaProxy;
+use crate::member_profiles::MemberProfileAdapter;
 use crate::trust::TrustAdapter;
 use crate::uploads::FilesystemStagedUploads;
 use crate::verification::VerificationAdapter;
@@ -214,7 +216,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // verification-bundle route can read per-event trust (M7c), and its
     // device-list engine (adapted onto the DeviceListService port) so a client
     // can list a user's devices before starting SAS verification (M16, ADR
-    // 0060). The bearer-token verifier (M7b) is backed straight by the store.
+    // 0060), and its cached member-profile engine so `/members` can enrich
+    // missing avatar URLs without client-side fan-out. The bearer-token verifier
+    // (M7b) is backed straight by the store.
     let sender = Arc::new(GatewayAdapter::new(
         sync_engine.gateway(),
         std::time::Duration::from_secs(config.media.upstream_upload_timeout_secs),
@@ -223,6 +227,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
     let devices = Arc::new(DeviceAdapter(sync_engine.devices()));
+    let member_profiles = Arc::new(MemberProfileAdapter(sync_engine.member_profiles()));
     let verifier = Arc::new(axon_api::StoreTokenVerifier::new(store.clone()));
     let media = Arc::new(CachingMediaProxy::new(
         media_cache,
@@ -264,6 +269,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         search_port,
     )
     .with_backfill_status(backfill_status)
+    .with_member_profiles(member_profiles)
     .with_staged_uploads(uploads);
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);

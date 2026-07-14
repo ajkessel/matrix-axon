@@ -26,8 +26,9 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{
     ConfiguredMediaProxy, DeleteOutcome, LoginCall, LoginOutcome, LogoutOutcome, MediaOutcome,
-    RecoverOutcome, RedecryptOutcome, StubDeviceList, StubLifecycle, StubMediaProxy, StubSender,
-    StubTokenVerifier, StubTrust, StubVerification, VerifyCall, VerifyOutcome, TEST_TOKEN,
+    RecoverOutcome, RedecryptOutcome, StubDeviceList, StubLifecycle, StubMediaProxy,
+    StubMemberProfiles, StubSender, StubTokenVerifier, StubTrust, StubVerification, VerifyCall,
+    VerifyOutcome, TEST_TOKEN,
 };
 use serde_json::{json, Value};
 use tower::ServiceExt; // for `oneshot`
@@ -510,18 +511,25 @@ async fn read_api_end_to_end() {
     // The read endpoints don't touch the live-event bus or the message sender;
     // throwaway instances satisfy `AppState`.
     let (live, _rx) = tokio::sync::broadcast::channel(16);
-    let app = axon_api::router(AppState::new(
-        store.clone(),
-        live,
-        Arc::new(StubSender::ok("$unused:localhost")),
-        Arc::new(StubLifecycle::ok(Uuid::nil())),
-        Arc::new(StubVerification::ok("$unused-flow")),
-        Arc::new(StubTrust::ok()),
-        Arc::new(StubDeviceList::ok()),
-        Arc::new(StubTokenVerifier::ok()),
-        Arc::new(StubMediaProxy),
-        None,
-    ));
+    let member_profiles = Arc::new(StubMemberProfiles::new(vec![axon_api::MemberProfile {
+        user_id: "@alice:localhost".to_owned(),
+        avatar_url: Some("mxc://hs/profile-alice".to_owned()),
+    }]));
+    let app = axon_api::router(
+        AppState::new(
+            store.clone(),
+            live,
+            Arc::new(StubSender::ok("$unused:localhost")),
+            Arc::new(StubLifecycle::ok(Uuid::nil())),
+            Arc::new(StubVerification::ok("$unused-flow")),
+            Arc::new(StubTrust::ok()),
+            Arc::new(StubDeviceList::ok()),
+            Arc::new(StubTokenVerifier::ok()),
+            Arc::new(StubMediaProxy),
+            None,
+        )
+        .with_member_profiles(member_profiles.clone()),
+    );
 
     // GET /v1/rooms?account_id= — our room is present with its name + latest event.
     let (status, body) = get(&app, &format!("/v1/rooms?account_id={account_id}")).await;
@@ -592,6 +600,21 @@ async fn read_api_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(member["data"]["state_key"], "@alice:localhost");
     assert_eq!(member["data"]["sender"], "@jamie:localhost");
+
+    let (status, members) = get(
+        &app,
+        &format!("/v1/accounts/{account_id}/rooms/{room_id}/members"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let members = members["data"].as_array().expect("members");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["user_id"], "@alice:localhost");
+    assert_eq!(members[0]["avatar_url"], "mxc://hs/profile-alice");
+    assert_eq!(
+        member_profiles.calls(),
+        vec![(room_id.clone(), vec!["@alice:localhost".to_owned()])]
+    );
 
     // Unknown event -> 404 with not_found code.
     let (status, err) = get(

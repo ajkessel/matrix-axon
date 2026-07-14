@@ -19,6 +19,7 @@ use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
 use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
+use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::MessageSender;
@@ -78,6 +79,10 @@ pub struct AppState {
     /// concrete implementation fetches via the SDK client's authenticated
     /// connection and is injected by the binary via an adapter.
     pub media: Arc<dyn MediaProxy>,
+    /// Cached room-member profile port for best-effort avatar enrichment on
+    /// `GET /v1/accounts/{id}/rooms/{room_id}/members`. Defaults to a no-op so
+    /// tests and non-sync configurations keep returning store-backed rows.
+    pub member_profiles: Arc<dyn MemberProfileService>,
     /// Staged-upload port for `POST`/`DELETE /v1/accounts/{id}/media/uploads`.
     /// The concrete implementation streams bytes to durable local storage and
     /// records metadata in Postgres.
@@ -127,6 +132,7 @@ impl AppState {
             verifier,
             ws_revalidation_interval: DEFAULT_WS_REVALIDATION_INTERVAL,
             media,
+            member_profiles: Arc::new(NoopMemberProfileService),
             uploads: Arc::new(DisabledStagedUploads),
             search,
             backfill_status: Arc::new(NoBackfillStatus),
@@ -155,6 +161,12 @@ impl AppState {
     /// don't touch the route keep the default disabled stub.
     pub fn with_staged_uploads(mut self, uploads: Arc<dyn StagedUploadService>) -> Self {
         self.uploads = uploads;
+        self
+    }
+
+    /// Inject cached room-member profile enrichment for `/members`.
+    pub fn with_member_profiles(mut self, profiles: Arc<dyn MemberProfileService>) -> Self {
+        self.member_profiles = profiles;
         self
     }
 
@@ -273,6 +285,12 @@ impl FromRef<AppState> for Arc<dyn TokenVerifier> {
 impl FromRef<AppState> for Arc<dyn MediaProxy> {
     fn from_ref(state: &AppState) -> Arc<dyn MediaProxy> {
         state.media.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MemberProfileService> {
+    fn from_ref(state: &AppState) -> Arc<dyn MemberProfileService> {
+        state.member_profiles.clone()
     }
 }
 

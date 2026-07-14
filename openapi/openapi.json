@@ -3990,7 +3990,7 @@
                     "string",
                     "null"
                   ],
-                  "description": "Avatar `mxc://` URI from the event content, if set."
+                  "description": "Resolved avatar `mxc://` URI for this member, if known. Prefers the\ncurrent room membership event's `avatar_url`; may fall back to cached\nroom-member profile data from the sync engine."
                 },
                 "display_name": {
                   "type": [
@@ -4686,7 +4686,7 @@
               "string",
               "null"
             ],
-            "description": "Avatar `mxc://` URI from the event content, if set."
+            "description": "Resolved avatar `mxc://` URI for this member, if known. Prefers the\ncurrent room membership event's `avatar_url`; may fall back to cached\nroom-member profile data from the sync engine."
           },
           "display_name": {
             "type": [

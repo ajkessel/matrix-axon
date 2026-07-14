@@ -1,5 +1,8 @@
 //! Room endpoints: the cross-account list and a room's paginated timeline.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axon_store::Store;
 use axum::extract::State;
 use serde::Deserialize;
@@ -9,6 +12,7 @@ use uuid::Uuid;
 use crate::cursor;
 use crate::dto::{EventDto, MemberDto, RoomDto, ThreadSummaryDto, TimelinePage};
 use crate::extract::{Path, Query};
+use crate::member_profiles::{MemberProfile, MemberProfileService};
 use crate::response::{ApiError, ApiResponse};
 
 /// Default timeline page size when `limit` is omitted.
@@ -132,14 +136,100 @@ pub async fn room_timeline(
 )]
 pub async fn room_members(
     State(store): State<Store>,
+    State(member_profiles): State<Arc<dyn MemberProfileService>>,
     Path((account_id, room_id)): Path<(Uuid, String)>,
 ) -> Result<ApiResponse<Vec<MemberDto>>, ApiError> {
     let rows = store
         .room_state_of_type(account_id, &room_id, "m.room.member")
         .await?;
-    Ok(ApiResponse::new(
-        rows.into_iter().map(MemberDto::from_state_row).collect(),
-    ))
+    let mut members: Vec<MemberDto> = rows.into_iter().map(MemberDto::from_state_row).collect();
+    let missing_avatar_user_ids: Vec<String> = members
+        .iter()
+        .filter(|member| member.avatar_url.is_none())
+        .map(|member| member.user_id.clone())
+        .collect();
+
+    if !missing_avatar_user_ids.is_empty() {
+        match member_profiles
+            .profiles(account_id, &room_id, &missing_avatar_user_ids)
+            .await
+        {
+            Ok(profiles) => enrich_member_avatars(&mut members, profiles),
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    %room_id,
+                    error = %err,
+                    "failed to enrich room member avatars from cached profiles"
+                );
+            }
+        }
+    }
+
+    Ok(ApiResponse::new(members))
+}
+
+fn enrich_member_avatars(members: &mut [MemberDto], profiles: Vec<MemberProfile>) {
+    let avatars: HashMap<String, String> = profiles
+        .into_iter()
+        .filter_map(|profile| profile.avatar_url.map(|avatar| (profile.user_id, avatar)))
+        .collect();
+    for member in members {
+        if member.avatar_url.is_none() {
+            member.avatar_url = avatars.get(&member.user_id).cloned();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(user_id: &str, avatar_url: Option<&str>) -> MemberDto {
+        MemberDto {
+            user_id: user_id.to_owned(),
+            membership: "join".to_owned(),
+            display_name: None,
+            avatar_url: avatar_url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn enrich_member_avatars_only_fills_missing_values() {
+        let mut members = vec![
+            member("@alice:localhost", None),
+            member("@bob:localhost", Some("mxc://hs/member-bob")),
+            member("@carol:localhost", None),
+        ];
+
+        enrich_member_avatars(
+            &mut members,
+            vec![
+                MemberProfile {
+                    user_id: "@alice:localhost".to_owned(),
+                    avatar_url: Some("mxc://hs/profile-alice".to_owned()),
+                },
+                MemberProfile {
+                    user_id: "@bob:localhost".to_owned(),
+                    avatar_url: Some("mxc://hs/profile-bob".to_owned()),
+                },
+                MemberProfile {
+                    user_id: "@carol:localhost".to_owned(),
+                    avatar_url: None,
+                },
+            ],
+        );
+
+        assert_eq!(
+            members[0].avatar_url.as_deref(),
+            Some("mxc://hs/profile-alice")
+        );
+        assert_eq!(
+            members[1].avatar_url.as_deref(),
+            Some("mxc://hs/member-bob")
+        );
+        assert_eq!(members[2].avatar_url, None);
+    }
 }
 
 /// List the threads in a room (M8): one summary per distinct `m.thread` root,

@@ -16,11 +16,12 @@ use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
     DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaAttachment,
-    MediaError, MediaProxy, MediaResource, MediaSendKind, MessageSender, RecoverError,
-    RedecryptUtdsError, RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery,
-    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
-    StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError,
-    TrustSnapshot, UploadStream, VerificationService, VerifyError,
+    MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile, MemberProfileError,
+    MemberProfileService, MessageSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
+    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
+    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
+    VerifyError,
 };
 use futures_util::StreamExt;
 use uuid::Uuid;
@@ -1166,6 +1167,41 @@ impl DeviceListService for StubDeviceList {
             return Err(make());
         }
         Ok(self.list.clone().expect("ok stub has a list"))
+    }
+}
+
+/// An in-memory [`MemberProfileService`] for tests.
+pub struct StubMemberProfiles {
+    profiles: Vec<MemberProfile>,
+    calls: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl StubMemberProfiles {
+    pub fn new(profiles: Vec<MemberProfile>) -> Self {
+        Self {
+            profiles,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<(String, Vec<String>)> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl MemberProfileService for StubMemberProfiles {
+    async fn profiles(
+        &self,
+        _account_id: Uuid,
+        room_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<MemberProfile>, MemberProfileError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((room_id.to_owned(), user_ids.to_vec()));
+        Ok(self.profiles.clone())
     }
 }
 

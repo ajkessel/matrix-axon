@@ -18,6 +18,7 @@ mod dto;
 mod extract;
 mod lifecycle;
 mod media;
+mod member_profiles;
 mod oauth;
 mod openapi;
 mod response;
@@ -40,6 +41,9 @@ pub use lifecycle::{
     RedecryptUtdsStats,
 };
 pub use media::{MediaError, MediaProxy, MediaResource};
+pub use member_profiles::{
+    MemberProfile, MemberProfileError, MemberProfileService, NoopMemberProfileService,
+};
 pub use oauth::{
     http_client as oauth_http_client, GenericOidcProvider, OAuthRuntime, OidcError, OidcProvider,
     UpstreamTokens, VerifiedIdentity,

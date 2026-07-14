@@ -624,6 +624,16 @@ async fn insert_image_event(
     room_id: &str,
     content: serde_json::Value,
 ) -> String {
+    insert_event_with_type(store, account_id, room_id, "m.room.message", content).await
+}
+
+async fn insert_event_with_type(
+    store: &axon_store::Store,
+    account_id: Uuid,
+    room_id: &str,
+    event_type: &str,
+    content: serde_json::Value,
+) -> String {
     let event_id = format!("$img-{}:localhost", Uuid::new_v4());
     store
         .upsert_event(&NewEvent {
@@ -632,16 +642,16 @@ async fn insert_image_event(
             account_id,
             sender: "@alice:localhost",
             origin_ts: 1_700_000_000_000,
-            event_type: "m.room.message",
+            event_type,
             content: Some(content.clone()),
-            raw_event: json!({ "type": "m.room.message", "content": content }),
+            raw_event: json!({ "type": event_type, "content": content }),
             megolm_session_id: None,
             redacts: None,
             relates_to: None,
             decrypted_body_text: None,
         })
         .await
-        .expect("insert image event");
+        .expect("insert event");
     event_id
 }
 
@@ -732,6 +742,87 @@ async fn get_event_by_mxc_url_finds_plain_thumbnail() {
         .expect("lookup")
         .expect("plain thumbnail event");
     assert_eq!(found.event_id, event_id);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_finds_member_avatar() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-member-avatar").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    let event_id = insert_event_with_type(
+        &store,
+        account_id,
+        &room_id,
+        "m.room.member",
+        json!({ "membership": "join", "avatar_url": mxc }),
+    )
+    .await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup")
+        .expect("member avatar event");
+    assert_eq!(found.event_id, event_id);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn get_event_by_mxc_url_prefers_encrypted_media_over_member_avatar_collision() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = common::test_account(&store, "mxc-avatar-collision").await;
+    let room_id = format!("!r-{}:localhost", Uuid::new_v4());
+    let mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+
+    insert_event_with_type(
+        &store,
+        account_id,
+        &room_id,
+        "m.room.member",
+        json!({ "membership": "join", "avatar_url": mxc }),
+    )
+    .await;
+    let media_event_id = insert_image_event(
+        &store,
+        account_id,
+        &room_id,
+        json!({
+            "msgtype": "m.image",
+            "body": "secret.jpg",
+            "file": {
+                "url": mxc,
+                "key": { "kty": "oct", "alg": "A256CTR", "k": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "key_ops": ["encrypt","decrypt"], "ext": true },
+                "iv": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "hashes": { "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+                "v": "v2"
+            }
+        }),
+    )
+    .await;
+
+    let found = store
+        .get_event_by_mxc_url(account_id, &mxc)
+        .await
+        .expect("lookup")
+        .expect("encrypted media event");
+    assert_eq!(found.event_id, media_event_id);
+    assert!(
+        found
+            .content
+            .as_ref()
+            .and_then(|content| content.get("file"))
+            .is_some(),
+        "content.file should be preserved for encrypted media"
+    );
 
     common::cleanup_account(&pool, account_id).await;
 }

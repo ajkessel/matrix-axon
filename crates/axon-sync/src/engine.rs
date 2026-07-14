@@ -342,6 +342,15 @@ impl SyncEngine {
         crate::devices::DeviceListEngine::new(self.store.clone(), self.manager.clone())
     }
 
+    /// The runtime cached member-profile port, for best-effort avatar
+    /// enrichment on the API's `/members` route. Shares this engine's store and
+    /// client manager; read-only, no lifecycle lock (see [`member_profiles`]).
+    ///
+    /// [`member_profiles`]: crate::member_profiles
+    pub fn member_profiles(&self) -> crate::member_profiles::MemberProfileEngine {
+        crate::member_profiles::MemberProfileEngine::new(self.store.clone(), self.manager.clone())
+    }
+
     /// Cancel all tracked sync tasks and wait for them to finish. Safe to call
     /// without canceling the token first — this method cancels it internally.
     /// Returns whether every tracked task drained within the shutdown budget.

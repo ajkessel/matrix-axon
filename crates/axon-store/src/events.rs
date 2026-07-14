@@ -1046,11 +1046,12 @@ impl Store {
     }
 
     /// Find the first event for `account_id` whose media URL matches `mxc_url`.
-    /// Checks primary and thumbnail URLs for both plain and encrypted media so
-    /// the caller can recover the matching encryption descriptor when needed.
+    /// Checks primary and thumbnail URLs for both plain and encrypted media, and
+    /// member/profile avatar URLs for plain avatar media, so the caller can
+    /// recover the matching encryption descriptor when needed.
     /// Each JSON path is a separate branch so PostgreSQL can use the matching
     /// partial expression index rather than filtering every event for an
-    /// account through one four-way `OR`.
+    /// account through one multi-way `OR`.
     pub async fn get_event_by_mxc_url(
         &self,
         account_id: Uuid,
@@ -1061,19 +1062,25 @@ impl Store {
              WHERE e.account_id = $1 \
                AND e.id = ( \
                    SELECT id FROM ( \
-                       SELECT id FROM events \
+                       SELECT id, 1 AS priority FROM events \
                        WHERE account_id = $1 AND content->>'url' = $2 \
                        UNION ALL \
-                       SELECT id FROM events \
+                       SELECT id, 5 AS priority FROM events \
+                       WHERE account_id = $1 \
+                         AND event_type = 'm.room.member' \
+                         AND content->>'avatar_url' = $2 \
+                       UNION ALL \
+                       SELECT id, 1 AS priority FROM events \
                        WHERE account_id = $1 AND content->'file'->>'url' = $2 \
                        UNION ALL \
-                       SELECT id FROM events \
+                       SELECT id, 2 AS priority FROM events \
                        WHERE account_id = $1 AND content->'info'->>'thumbnail_url' = $2 \
                        UNION ALL \
-                       SELECT id FROM events \
+                       SELECT id, 2 AS priority FROM events \
                        WHERE account_id = $1 \
                          AND content->'info'->'thumbnail_file'->>'url' = $2 \
                    ) media_matches \
+                   ORDER BY priority ASC, id ASC \
                    LIMIT 1 \
                )",
             TIMELINE_SELECT.as_str()

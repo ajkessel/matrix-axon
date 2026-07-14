@@ -327,7 +327,9 @@ pub struct MemberDto {
     pub membership: String,
     /// Display name from the event content, if set.
     pub display_name: Option<String>,
-    /// Avatar `mxc://` URI from the event content, if set.
+    /// Resolved avatar `mxc://` URI for this member, if known. Prefers the
+    /// current room membership event's `avatar_url`; may fall back to cached
+    /// room-member profile data from the sync engine.
     pub avatar_url: Option<String>,
 }
 
