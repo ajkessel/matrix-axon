@@ -657,6 +657,52 @@ impl RoomKey {
     }
 }
 
+/// Largest local file `/send` will read into memory to stage for upload.
+/// Mirrors `api::MAX_MEDIA_BYTES`'s reasoning for downloads (root AGENTS.md's
+/// "never size a buffer or allocation directly from a number the peer
+/// controls" applies equally to a user-supplied local path): without this,
+/// `/send`-ing a huge or pathological file (an accidentally-dropped video, a
+/// device path) would buffer the whole thing into a `Vec<u8>` unconditionally.
+const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Infer a `(kind, content_type)` pair for `/send` from a filename's
+/// extension (ADR 0059/0062) — good enough to satisfy the server's
+/// `kind=image` ⇒ `image/*` validation, not attempting to be exhaustive.
+fn media_kind_and_content_type(filename: &str) -> (&'static str, &'static str) {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => ("image", "image/png"),
+        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "gif" => ("image", "image/gif"),
+        "webp" => ("image", "image/webp"),
+        "bmp" => ("image", "image/bmp"),
+        "tif" | "tiff" => ("image", "image/tiff"),
+        "pdf" => ("file", "application/pdf"),
+        "txt" => ("file", "text/plain"),
+        "zip" => ("file", "application/zip"),
+        "mp4" => ("file", "video/mp4"),
+        "mp3" => ("file", "audio/mpeg"),
+        _ => ("file", "application/octet-stream"),
+    }
+}
+
+fn expand_send_path(path: &str) -> PathBuf {
+    expand_send_path_with_home(path, std::env::var_os("HOME"))
+}
+
+fn expand_send_path_with_home(path: &str, home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home.filter(|value| !value.is_empty()) {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
 pub(crate) struct App {
     pub(crate) client: AxonClient,
     pub(crate) account_filter: Option<Uuid>,
@@ -695,6 +741,10 @@ pub(crate) struct App {
     /// True while a login or logout request is awaiting its result, so the UI
     /// stays responsive but a second lifecycle verb can't race the first.
     pub(crate) lifecycle_busy: bool,
+    /// True while a `/send` upload is in flight, so its "uploading …" status
+    /// line survives until the result lands rather than being clobbered by a
+    /// second `/send` started mid-upload.
+    pub(crate) media_send_busy: bool,
     /// User-toggled hide for the accounts panel (independent of account count).
     pub(crate) accounts_panel_hidden: bool,
     /// User-toggled hide for the rooms panel.
@@ -924,6 +974,7 @@ pub(crate) struct InputState {
     pub(crate) account_command_completion: Option<(String, usize)>,
     pub(crate) verify_command_completion: Option<(String, usize)>,
     pub(crate) filter_command_completion: Option<(String, usize)>,
+    pub(crate) send_command_completion: Option<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -980,6 +1031,7 @@ impl App {
             should_quit: false,
             lifecycle_tx: None,
             lifecycle_busy: false,
+            media_send_busy: false,
             image_cache: HashMap::new(),
             image_cache_order: VecDeque::new(),
             media_tx: None,
@@ -1209,6 +1261,7 @@ impl App {
     /// in-progress text entry.
     pub(crate) fn is_mid_command(&self) -> bool {
         self.lifecycle_busy
+            || self.media_send_busy
             || matches!(
                 self.mode,
                 Mode::LoginUsername
@@ -1446,7 +1499,12 @@ impl App {
         }
     }
 
-    pub(crate) fn insert_char(&mut self, ch: char) {
+    /// Clear every in-progress Tab-completion cycle. Any edit to the buffer
+    /// invalidates whatever completion state was mid-cycle, so every mutating
+    /// entry point (character insert/paste, backspace, delete) calls this
+    /// first — kept as one method (rather than the field list inlined at each
+    /// call site) so a new completion field only needs updating here.
+    pub(crate) fn reset_completion_state(&mut self) {
         self.input.react_command_completion = None;
         self.input.partial_room_completions = None;
         self.input.room_command_completion = None;
@@ -1456,20 +1514,58 @@ impl App {
         self.input.account_command_completion = None;
         self.input.verify_command_completion = None;
         self.input.filter_command_completion = None;
+        self.input.send_command_completion = None;
+    }
+
+    pub(crate) fn insert_char(&mut self, ch: char) {
+        self.reset_completion_state();
         self.input.buffer.insert(self.input.cursor, ch);
         self.input.cursor += ch.len_utf8();
     }
 
+    /// Bulk-insert a whole string at the cursor in one edit — used for
+    /// bracketed paste (drag-and-drop, clipboard paste) so a large paste is
+    /// one atomic buffer change rather than a loop of `insert_char` calls,
+    /// which would otherwise re-run completion-state invalidation and
+    /// draft-debounce bookkeeping once per pasted character.
+    pub(crate) fn insert_str(&mut self, text: &str) {
+        self.reset_completion_state();
+        self.input.buffer.insert_str(self.input.cursor, text);
+        self.input.cursor += text.len();
+    }
+
+    /// Handle a bracketed-paste block (a terminal drag-and-drop drop, or a
+    /// clipboard paste) delivered as one atomic string from the input thread.
+    /// Only applied in modes that route ordinary character keys into
+    /// `self.input.buffer` (the same modes `insert_char`'s callers gate on in
+    /// `keymap.rs`); other modes either don't accept free text (list
+    /// navigation, popups) or use a different buffer entirely (`SearchForm`'s
+    /// per-field buffer), so a paste there is a no-op rather than corrupting
+    /// unrelated state.
+    pub(crate) fn handle_paste(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let accepts_free_text = matches!(
+            self.mode,
+            Mode::Compose
+                | Mode::LoginUsername
+                | Mode::LoginPassword { .. }
+                | Mode::RecoveryKey { .. }
+                | Mode::ConfirmDelete { .. }
+                | Mode::Editing { .. }
+                | Mode::Reacting { .. }
+                | Mode::DateJump
+        );
+        if !accepts_free_text {
+            return;
+        }
+        self.dismiss_input_help();
+        self.insert_str(&text);
+    }
+
     pub(crate) fn backspace(&mut self) {
-        self.input.react_command_completion = None;
-        self.input.partial_room_completions = None;
-        self.input.room_command_completion = None;
-        self.input.logout_command_completion = None;
-        self.input.recover_command_completion = None;
-        self.input.delete_command_completion = None;
-        self.input.account_command_completion = None;
-        self.input.verify_command_completion = None;
-        self.input.filter_command_completion = None;
+        self.reset_completion_state();
         if self.input.cursor == 0 {
             return;
         }
@@ -1485,15 +1581,7 @@ impl App {
     }
 
     pub(crate) fn delete_forward(&mut self) {
-        self.input.react_command_completion = None;
-        self.input.partial_room_completions = None;
-        self.input.room_command_completion = None;
-        self.input.logout_command_completion = None;
-        self.input.recover_command_completion = None;
-        self.input.delete_command_completion = None;
-        self.input.account_command_completion = None;
-        self.input.verify_command_completion = None;
-        self.input.filter_command_completion = None;
+        self.reset_completion_state();
         if self.input.cursor >= self.input.buffer.len() {
             return;
         }
@@ -1536,15 +1624,7 @@ impl App {
     }
 
     pub(crate) fn delete_word_back(&mut self) {
-        self.input.react_command_completion = None;
-        self.input.partial_room_completions = None;
-        self.input.room_command_completion = None;
-        self.input.logout_command_completion = None;
-        self.input.recover_command_completion = None;
-        self.input.delete_command_completion = None;
-        self.input.account_command_completion = None;
-        self.input.verify_command_completion = None;
-        self.input.filter_command_completion = None;
+        self.reset_completion_state();
         if self.input.cursor == 0 {
             return;
         }
@@ -1708,6 +1788,7 @@ impl App {
                 );
             }
             Command::SendLiteral(body) => self.send_message_to_room(&body, None),
+            Command::SendMedia { path, caption } => self.send_media_to_room(path, caption),
             Command::Rainbow(text) => {
                 let html = rainbow_html(&text);
                 self.send_message_to_room(&text, Some(("org.matrix.custom.html".to_owned(), html)));
@@ -2033,6 +2114,88 @@ impl App {
         });
     }
 
+    /// `/send <path> [caption]` (ADR 0059/0062): stage `path`'s bytes then
+    /// send them into the current room. Runs entirely off the event loop
+    /// (root AGENTS.md "never `await` an API call from key handling") and
+    /// reports back through the same `lifecycle_tx`/`LifecycleOutcome`
+    /// channel `send_message_to_room` uses, so the busy status line survives
+    /// until the result lands. No optimistic local echo — the sent event
+    /// arrives over `/v1/ws` like any other mutation.
+    fn send_media_to_room(&mut self, path: String, caption: Option<String>) {
+        let Some(room) = self.selected_room().cloned() else {
+            self.status = Status::from("select a room before sending".to_owned());
+            return;
+        };
+        let Some(tx) = self.lifecycle_tx.clone() else {
+            return;
+        };
+        if self.media_send_busy {
+            self.status = Status::Info("a /send upload is already in progress".to_owned());
+            return;
+        }
+        // Consume any pending reply/thread target the same way a plain send
+        // does (ADR 0032 M4), so /reply and /thread compose identically for
+        // media.
+        let reply_to = self.pending_reply.take();
+        let thread_root = self
+            .pending_thread
+            .take()
+            .or_else(|| self.thread_panel.clone());
+        let key = RoomKey {
+            account_id: room.account_id,
+            room_id: room.room_id.clone(),
+        };
+        let fs_path = expand_send_path(&path);
+        let filename = fs_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        self.media_send_busy = true;
+        self.status = Status::Info(format!("uploading {filename}…"));
+
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let size = tokio::fs::metadata(&fs_path)
+                    .await
+                    .map_err(|err| format!("read failed: {err}"))?
+                    .len();
+                if size > MAX_UPLOAD_BYTES {
+                    return Err(format!(
+                        "{filename} is {} MiB, over the {} MiB /send limit",
+                        size / (1024 * 1024),
+                        MAX_UPLOAD_BYTES / (1024 * 1024)
+                    ));
+                }
+                let bytes = tokio::fs::read(&fs_path)
+                    .await
+                    .map_err(|err| format!("read failed: {err}"))?;
+                let (kind, content_type) = media_kind_and_content_type(&filename);
+                let staged = client
+                    .stage_upload(room.account_id, kind, &filename, Some(content_type), bytes)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let relation = SendRelation {
+                    reply_to: reply_to.as_deref(),
+                    thread_root: thread_root.as_deref(),
+                };
+                client
+                    .send_media(
+                        room.account_id,
+                        &room.room_id,
+                        staged.upload_id,
+                        caption.as_deref(),
+                        relation,
+                    )
+                    .await
+                    .map(|r| r.event_id)
+                    .map_err(|err| err.to_string())
+            }
+            .await;
+            let _ = tx.send(LifecycleOutcome::MediaSent { key, result });
+        });
+    }
+
     pub(crate) async fn send_edit(&mut self, event_id: &str, body: &str) {
         let Some(room) = self.selected_room().cloned() else {
             self.status = Status::from("no room selected".to_owned());
@@ -2342,6 +2505,28 @@ mod tests {
             decimals: None,
             cancel_reason: None,
         }
+    }
+
+    #[test]
+    fn send_path_expands_home_slash_for_filesystem_reads() {
+        assert_eq!(
+            expand_send_path_with_home(
+                "~/Downloads/photo.png",
+                Some(std::ffi::OsString::from("/home/ada"))
+            ),
+            PathBuf::from("/home/ada/Downloads/photo.png")
+        );
+        assert_eq!(
+            expand_send_path_with_home(
+                "~other/photo.png",
+                Some(std::ffi::OsString::from("/home/ada"))
+            ),
+            PathBuf::from("~other/photo.png")
+        );
+        assert_eq!(
+            expand_send_path_with_home("~/photo.png", None),
+            PathBuf::from("~/photo.png")
+        );
     }
 
     #[test]

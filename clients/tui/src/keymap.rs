@@ -865,14 +865,7 @@ impl App {
     pub(crate) fn take_input_for_submit(&mut self) -> String {
         let input = std::mem::take(&mut self.input.buffer);
         self.input.cursor = 0;
-        self.input.react_command_completion = None;
-        self.input.partial_room_completions = None;
-        self.input.room_command_completion = None;
-        self.input.logout_command_completion = None;
-        self.input.recover_command_completion = None;
-        self.input.delete_command_completion = None;
-        self.input.account_command_completion = None;
-        self.input.filter_command_completion = None;
+        self.reset_completion_state();
         input
     }
 
@@ -896,14 +889,7 @@ impl App {
         self.dismiss_input_help();
         self.input.buffer.clear();
         self.input.cursor = 0;
-        self.input.react_command_completion = None;
-        self.input.partial_room_completions = None;
-        self.input.room_command_completion = None;
-        self.input.logout_command_completion = None;
-        self.input.recover_command_completion = None;
-        self.input.delete_command_completion = None;
-        self.input.account_command_completion = None;
-        self.input.filter_command_completion = None;
+        self.reset_completion_state();
     }
 
     fn clear_input_and_selection(&mut self) {

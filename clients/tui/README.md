@@ -34,6 +34,7 @@ loopback default.
 - Edits the selected message (`PUT /v1/.../events/{event_id}`).
 - Redacts the selected message (`DELETE /v1/.../events/{event_id}`).
 - Reacts to the selected message with an emoji (`POST /v1/.../events/{event_id}/reactions`).
+- Uploads and sends a local file to the selected room with `/send <path> [caption]` (`POST /v1/.../media/uploads` then `POST /v1/.../send-media`), with filesystem Tab completion and drag-and-drop: dropping a file into the terminal window fills in its path.
 - Withdraws the current user's reactions by redacting their reaction events.
 - Logs Matrix accounts in through Axon's lifecycle API (Axon resolves the homeserver server-side), with masked password entry.
 - Logs active accounts out while retaining their archived data.
@@ -69,6 +70,7 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/event <event_id>` | Show a compact status-line summary of one event in the selected account. |
 | `/whoami` | Show your Matrix ID and display name for the selected room's account. |
 | `/whereami` | Show a room information popup for the selected room. Up/Down/PageUp/PageDown scroll the popup. |
+| `/send <path> [caption]` | Upload a local file and send it to the current room, with an optional caption. `<path>` Tab-completes against the filesystem; dragging a file into the terminal window also fills it in (quoted or backslash-escaped paths from the drop are unescaped automatically). Honors a pending `/reply` or open thread the same way a plain send does. |
 | `/react [emoji]` | React to the selected message, or the most recent displayed message when none is selected. With an emoji or shortcode such as `/react +1`, send immediately; without one, open the selector. |
 | `/unreact` | Withdraw one of your reactions from the selected or most recent displayed message. A sole reaction is withdrawn immediately; Tab cycles when several exist. |
 | `/reply` | Reply to the selected or most recent displayed message; pending Axon API support. |
@@ -101,6 +103,13 @@ longest common prefix and lists the remaining suffixes. Enter reports an
 ambiguity until the text identifies one room. While Tab completion is partial,
 Enter keeps the command open instead of submitting it. A unique Tab match is
 replaced with that room's canonical alias or room ID.
+
+`/send <path>`'s path argument also Tab-completes against the filesystem the
+same way, advancing to the longest common prefix or cycling matches; a
+completed directory keeps a trailing `/` so completion can continue into it.
+Dropping a file into the terminal window fills in its path directly (real
+bracketed-paste support, not just tolerated keystrokes), including a path the
+terminal wraps in quotes or backslash-escapes.
 
 ## Keyboard Shortcuts
 

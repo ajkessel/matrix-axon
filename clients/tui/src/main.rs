@@ -19,8 +19,8 @@ use app::{App, LiveFrameAction, Mode, PopupKind};
 use args::{normalize_token, Args};
 use config::TuiConfig;
 use crossterm::event::{
-    self, Event, KeyEvent, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -528,12 +528,20 @@ async fn run_app(
                     next_sixel_preview_refresh = now + Duration::from_secs(5);
                 }
             }
-            Some(key) = key_rx.recv() => {
-                if app.handle_key(key).await {
+            Some(event) = key_rx.recv() => {
+                let quit = match event {
+                    TuiInputEvent::Key(key) => app.handle_key(key).await,
+                    TuiInputEvent::Paste(text) => {
+                        app.handle_paste(text);
+                        false
+                    }
+                };
+                if quit {
                     break;
                 }
-                // A keystroke may have changed the compose buffer: (re)start
-                // the draft debounce if it diverged from the synced draft.
+                // A keystroke or paste may have changed the compose buffer:
+                // (re)start the draft debounce if it diverged from the synced
+                // draft.
                 app.note_draft_activity();
                 if app.take_edit_config_request() {
                     // Pause the input thread so it does not compete with the
@@ -545,9 +553,10 @@ async fn run_app(
                     while key_rx.try_recv().is_ok() {} // drain any stray events
 
                     // Suspend the TUI: restore normal terminal state. Drop the
-                    // keyboard-enhancement flags too so the editor sees ordinary
-                    // key encoding.
+                    // keyboard-enhancement flags and bracketed paste too so the
+                    // editor sees ordinary key encoding and paste behavior.
                     disable_keyboard_enhancement(terminal.backend_mut(), kbd_enhanced);
+                    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
                     disable_raw_mode()?;
                     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                     terminal.show_cursor()?;
@@ -555,9 +564,11 @@ async fn run_app(
                     let result = open_in_editor(&app.config_path);
                     app.apply_editor_result(result);
 
-                    // Re-enter the TUI, restoring keyboard enhancement.
+                    // Re-enter the TUI, restoring keyboard enhancement and
+                    // bracketed paste.
                     enable_raw_mode()?;
                     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    let _ = execute!(terminal.backend_mut(), EnableBracketedPaste);
                     if kbd_enhanced {
                         let _ = execute!(
                             terminal.backend_mut(),
@@ -637,10 +648,18 @@ fn open_in_editor(path: &std::path::Path) -> io::Result<()> {
     Ok(())
 }
 
+/// An input-thread event: either an ordinary key press, or a bracketed-paste
+/// block (a drag-and-drop drop, or a clipboard paste) delivered as one atomic
+/// string rather than a burst of individual key presses.
+enum TuiInputEvent {
+    Key(KeyEvent),
+    Paste(String),
+}
+
 /// Keyboard input thread. Uses `event::poll` with a short timeout so the
 /// `paused` flag is checked regularly, allowing the main loop to suspend input
 /// while an external editor has control of the terminal.
-fn input_task(tx: mpsc::UnboundedSender<KeyEvent>, paused: Arc<AtomicBool>) {
+fn input_task(tx: mpsc::UnboundedSender<TuiInputEvent>, paused: Arc<AtomicBool>) {
     loop {
         if paused.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(10));
@@ -655,7 +674,12 @@ fn input_task(tx: mpsc::UnboundedSender<KeyEvent>, paused: Arc<AtomicBool>) {
                 }
                 match event::read() {
                     Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if tx.send(key).is_err() {
+                        if tx.send(TuiInputEvent::Key(key)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Paste(text)) => {
+                        if tx.send(TuiInputEvent::Paste(text)).is_err() {
                             break;
                         }
                     }
@@ -707,6 +731,11 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        // Ask the terminal to wrap a drag-and-drop or clipboard paste in
+        // bracketed-paste markers so it arrives as one `Event::Paste` instead
+        // of a burst of individual key events. Best-effort: a terminal that
+        // doesn't understand the escape sequence just ignores it.
+        let _ = execute!(stdout, EnableBracketedPaste);
         let kbd_enhanced = enable_keyboard_enhancement(&mut stdout);
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
@@ -720,6 +749,7 @@ impl TerminalGuard {
     fn leave(&mut self) -> anyhow::Result<()> {
         if self.active {
             disable_keyboard_enhancement(self.terminal.backend_mut(), self.kbd_enhanced);
+            let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
             disable_raw_mode()?;
             execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
             self.terminal.show_cursor()?;

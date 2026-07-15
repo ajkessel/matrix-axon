@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::api::RoomDto;
-use crate::command::{SlashCommand, SLASH_COMMANDS};
+use crate::command::{self, SlashCommand, SLASH_COMMANDS};
 
 use super::{
     cycle_index, emoji_matches, rooms::account_localpart, App, RoomKey, RoomTargetResolution,
@@ -53,6 +54,9 @@ impl App {
         if self.complete_filter_command_input(reverse) {
             return;
         }
+        if self.complete_send_command_input(reverse) {
+            return;
+        }
         if self.complete_command_input() {
             return;
         }
@@ -95,8 +99,90 @@ impl App {
         true
     }
 
+    /// `/send <path> [caption]` filename completion: lists filesystem entries
+    /// matching the partial path token, following the same prefix-advance /
+    /// full-cycle shape as `complete_room_input`. Declines to act (returns
+    /// `false`) once the caption text has started, so Tab in that position
+    /// falls through to the generic completers instead.
+    pub(crate) fn complete_send_command_input(&mut self, reverse: bool) -> bool {
+        if let Some((query, current)) = self.input.send_command_completion.clone() {
+            let candidates = send_path_candidates(&query);
+            if candidates.is_empty() {
+                self.input.send_command_completion = None;
+                return true;
+            }
+            let selected = cycle_index(current, candidates.len(), reverse);
+            self.apply_send_path_selection(&query, selected, &candidates);
+            return true;
+        }
+
+        let Some(target) = send_target_prefix(&self.input.buffer) else {
+            return false;
+        };
+        if send_path_completion_token(target).is_none() {
+            // Inside /send, but past the path token (caption text has
+            // started) — consume the Tab as a no-op rather than falling
+            // through to unrelated completers.
+            return true;
+        }
+        let (partial, _caption) = command::parse_leading_path_token(target);
+        let candidates = send_path_candidates(&partial);
+        match candidates.as_slice() {
+            [] => {
+                self.status = Status::Info(format!("no path matches: {partial}"));
+            }
+            [only] => {
+                self.input.buffer = format!("/send {}", quote_path_for_send(only));
+                self.move_cursor_to_end();
+                self.status = Status::from(format!("completed path: {only}"));
+            }
+            _ => {
+                let common = longest_common_prefix(&candidates);
+                let completed = common
+                    .as_deref()
+                    .filter(|prefix| prefix.len() > partial.len() && prefix.starts_with(&partial))
+                    .unwrap_or(&partial);
+                if completed != partial {
+                    self.input.buffer = format!("/send {}", quote_path_for_send(completed));
+                    self.move_cursor_to_end();
+                }
+                if completed == partial {
+                    let selected = if reverse { candidates.len() - 1 } else { 0 };
+                    self.apply_send_path_selection(&partial, selected, &candidates);
+                    return true;
+                }
+                let shown: Vec<&String> = candidates.iter().take(5).collect();
+                let more = candidates.len().saturating_sub(5);
+                let shown_joined = shown
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.status = Status::Info(if more == 0 {
+                    format!("path completions: {shown_joined}")
+                } else {
+                    format!("path completions: {shown_joined}, +{more} more")
+                });
+            }
+        }
+        true
+    }
+
+    fn apply_send_path_selection(&mut self, query: &str, selected: usize, candidates: &[String]) {
+        let candidate = &candidates[selected];
+        self.input.buffer = format!("/send {}", quote_path_for_send(candidate));
+        self.move_cursor_to_end();
+        self.input.send_command_completion = Some((query.to_owned(), selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to send",
+            selected + 1,
+            candidates.len(),
+            candidate,
+        ));
+    }
+
     pub(crate) fn complete_recover_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = recover_target_prefix(&self.input.buffer) else {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/recover") else {
             return false;
         };
         let query = self
@@ -137,7 +223,7 @@ impl App {
     }
 
     pub(crate) fn complete_logout_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = logout_target_prefix(&self.input.buffer) else {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/logout") else {
             return false;
         };
         let query = self
@@ -178,7 +264,7 @@ impl App {
     }
 
     pub(crate) fn complete_delete_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = delete_target_prefix(&self.input.buffer) else {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/delete") else {
             return false;
         };
         let query = self
@@ -219,7 +305,7 @@ impl App {
     }
 
     pub(crate) fn complete_account_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = account_target_prefix(&self.input.buffer) else {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/account") else {
             return false;
         };
         let query = self
@@ -276,7 +362,7 @@ impl App {
     }
 
     pub(crate) fn complete_verify_command_input(&mut self, reverse: bool) -> bool {
-        let Some(target) = verify_target_prefix(&self.input.buffer) else {
+        let Some(target) = command_target_prefix(&self.input.buffer, "/verify") else {
             return false;
         };
         // Only complete users (cross-user verification, ADR 0040); a device id for
@@ -725,8 +811,12 @@ fn react_command_emoji_prefix(input: &str) -> Option<&str> {
     (!query.is_empty() && !query.chars().any(char::is_whitespace)).then_some(query)
 }
 
-fn logout_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/logout")?;
+/// Shared tail of every `/<command> <target>` prefix helper: `rest` is
+/// whatever follows the command name (already stripped by the caller).
+/// Bare `/<command>` (nothing typed yet) yields an empty target; otherwise
+/// the command name must be followed by whitespace — `/logouty` is not
+/// `/logout` — and the target is the whitespace-trimmed remainder.
+fn target_after_command_name(rest: &str) -> Option<&str> {
     if rest.is_empty() {
         return Some("");
     }
@@ -736,59 +826,17 @@ fn logout_target_prefix(input: &str) -> Option<&str> {
         .then(|| rest.trim_start())
 }
 
-fn delete_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/delete")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
-}
-
-fn recover_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/recover")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
-}
-
-fn account_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/account")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
-}
-
-fn verify_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/verify")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
+/// `/<command> <target>` prefix extraction for the many commands that share
+/// this exact shape (`/send`, `/logout`, `/delete`, `/recover`, `/account`,
+/// `/verify`; `/room`'s `/switch` alias and `/filter`'s extra
+/// no-embedded-whitespace constraint build on [`target_after_command_name`]
+/// directly instead, since they aren't quite this shape).
+fn command_target_prefix<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    target_after_command_name(input.strip_prefix(command)?)
 }
 
 fn filter_target_prefix(input: &str) -> Option<&str> {
-    let rest = input.strip_prefix("/filter")?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
+    command_target_prefix(input, "/filter")
         .filter(|target| !target.chars().any(char::is_whitespace))
 }
 
@@ -810,17 +858,100 @@ fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {
         .collect()
 }
 
+fn send_target_prefix(input: &str) -> Option<&str> {
+    command_target_prefix(input, "/send")
+}
+
+/// `Some(target)` while the caller is still typing the path token; `None`
+/// once caption text has started, since filename completion no longer
+/// applies there. Delegates to [`command::send_argument_still_in_path_token`]
+/// (the same tokenizer `parse_leading_path_token` uses) rather than a
+/// separate whitespace check, so a backslash-escaped space mid-path (e.g.
+/// `My\ File`) doesn't get mistaken for the start of caption text.
+fn send_path_completion_token(target: &str) -> Option<&str> {
+    command::send_argument_still_in_path_token(target).then_some(target)
+}
+
+/// Split a partial path into `(raw_prefix, fs_dir, basename)`: `raw_prefix`
+/// is exactly what the user typed for the directory portion (so a literal
+/// `~/` is preserved when re-inserted into the buffer), `fs_dir` is the same
+/// directory with a leading `~/` expanded to `$HOME` for the actual
+/// `read_dir` call, and `basename` is the partial filename to prefix-match.
+fn send_path_dir_and_partial(partial: &str) -> (String, PathBuf, String) {
+    let (raw_prefix, basename) = if partial.is_empty() || partial.ends_with('/') {
+        (partial.to_owned(), String::new())
+    } else {
+        match partial.rfind('/') {
+            Some(idx) => (partial[..=idx].to_owned(), partial[idx + 1..].to_owned()),
+            None => (String::new(), partial.to_owned()),
+        }
+    };
+    // raw_prefix is always either empty or ends in '/' (see above), so it can
+    // never equal the bare string "~" — only the `~/`-prefixed form is
+    // reachable here.
+    let fs_dir = if raw_prefix.is_empty() {
+        PathBuf::from(".")
+    } else if let Some(rest) = raw_prefix.strip_prefix("~/") {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .unwrap_or_else(|| PathBuf::from(&raw_prefix))
+    } else {
+        PathBuf::from(&raw_prefix)
+    };
+    (raw_prefix, fs_dir, basename)
+}
+
+/// List filesystem entries in `partial`'s directory whose name starts with
+/// its basename, sorted, with a trailing `/` on directory candidates.
+/// Synchronous disk IO is acceptable here: this runs on a Tab keypress (not
+/// the render/key-handling hot path network calls must avoid), matching the
+/// existing synchronous file IO already used by the config-editor flow.
+fn send_path_candidates(partial: &str) -> Vec<String> {
+    let (raw_prefix, fs_dir, basename) = send_path_dir_and_partial(partial);
+    let Ok(entries) = std::fs::read_dir(&fs_dir) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&basename) {
+                return None;
+            }
+            let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+            Some(format!(
+                "{raw_prefix}{name}{}",
+                if is_dir { "/" } else { "" }
+            ))
+        })
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+/// Re-quote a filesystem path for insertion into the `/send` argument, using
+/// backslash-escapes (not wrapping quotes) so it round-trips through
+/// [`command::parse_leading_path_token`], which only unescapes `\ `, `\\`,
+/// `\'`, and `\"`.
+fn quote_path_for_send(path: &str) -> String {
+    if !path.chars().any(|c| matches!(c, ' ' | '\'' | '"' | '\\')) {
+        return path.to_owned();
+    }
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if matches!(ch, ' ' | '\'' | '"' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn room_target_prefix(input: &str) -> Option<&str> {
     let rest = input
         .strip_prefix("/room")
         .or_else(|| input.strip_prefix("/switch"))?;
-    if rest.is_empty() {
-        return Some("");
-    }
-    rest.chars()
-        .next()
-        .is_some_and(char::is_whitespace)
-        .then(|| rest.trim_start())
+    target_after_command_name(rest)
 }
 
 fn longest_common_prefix(candidates: &[String]) -> Option<String> {
@@ -929,4 +1060,106 @@ fn room_alias_with_hash(target: &str) -> Option<String> {
 fn matrix_room_local_name(value: &str) -> Option<&str> {
     let value = value.strip_prefix(['#', '!'])?;
     value.split_once(':').map(|(local, _server)| local)
+}
+
+#[cfg(test)]
+mod send_completion_tests {
+    use super::{
+        quote_path_for_send, send_path_candidates, send_path_completion_token,
+        send_path_dir_and_partial, send_target_prefix,
+    };
+    use std::fs;
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("axon-tui-send-completion-test-{name}"));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn send_target_prefix_requires_whitespace_after_command() {
+        assert_eq!(send_target_prefix("/send"), Some(""));
+        assert_eq!(send_target_prefix("/send "), Some(""));
+        assert_eq!(send_target_prefix("/send photo.png"), Some("photo.png"));
+        assert_eq!(send_target_prefix("/sendx"), None);
+        assert_eq!(send_target_prefix("/room foo"), None);
+    }
+
+    #[test]
+    fn completion_token_stops_once_caption_starts() {
+        assert_eq!(send_path_completion_token("photo.png"), Some("photo.png"));
+        assert_eq!(send_path_completion_token("photo.png caption"), None);
+        // Still inside an unterminated quote: whitespace is part of the token.
+        assert_eq!(send_path_completion_token("'my file"), Some("'my file"));
+        // Quote closed: whatever follows is caption territory.
+        assert_eq!(send_path_completion_token("'my file' caption"), None);
+        // A backslash-escaped space is still part of the path, matching
+        // parse_leading_path_token — not a signal that caption text started.
+        assert_eq!(send_path_completion_token("My\\ File"), Some("My\\ File"));
+        assert_eq!(send_path_completion_token("My\\ File caption"), None);
+    }
+
+    #[test]
+    fn splits_directory_and_basename() {
+        let (raw_prefix, fs_dir, basename) = send_path_dir_and_partial("photo");
+        assert_eq!(raw_prefix, "");
+        assert_eq!(fs_dir, std::path::PathBuf::from("."));
+        assert_eq!(basename, "photo");
+
+        let (raw_prefix, _fs_dir, basename) = send_path_dir_and_partial("/tmp/pho");
+        assert_eq!(raw_prefix, "/tmp/");
+        assert_eq!(basename, "pho");
+
+        let (raw_prefix, _fs_dir, basename) = send_path_dir_and_partial("/tmp/");
+        assert_eq!(raw_prefix, "/tmp/");
+        assert_eq!(basename, "");
+    }
+
+    #[test]
+    fn lists_matching_filesystem_entries_with_trailing_slash_on_dirs() {
+        let dir = TempDir::new("list");
+        fs::write(dir.0.join("photo.png"), b"").unwrap();
+        fs::write(dir.0.join("photo.jpg"), b"").unwrap();
+        fs::create_dir(dir.0.join("photos")).unwrap();
+        fs::write(dir.0.join("other.txt"), b"").unwrap();
+
+        let prefix = format!("{}/pho", dir.0.display());
+        let candidates = send_path_candidates(&prefix);
+        let base = dir.0.display().to_string();
+        assert_eq!(
+            candidates,
+            vec![
+                format!("{base}/photo.jpg"),
+                format!("{base}/photo.png"),
+                format!("{base}/photos/"),
+            ]
+        );
+    }
+
+    #[test]
+    fn quoting_round_trips_through_the_shared_tokenizer() {
+        for path in [
+            "photo.png",
+            "My Photo.png",
+            "it's a photo.png",
+            "quote\".png",
+            "back\\slash.png",
+        ] {
+            let quoted = quote_path_for_send(path);
+            let (parsed, caption) = crate::command::parse_leading_path_token(&quoted);
+            assert_eq!(parsed, path, "round-trip failed for {path:?}");
+            assert_eq!(caption, None);
+        }
+    }
 }

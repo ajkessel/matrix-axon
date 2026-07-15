@@ -32,6 +32,10 @@ const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// hold one of those workers forever.
 const MEDIA_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
+/// Staging an upload legitimately takes longer than an ordinary mutation (it's
+/// bounded by the whole file's transfer time, not a single small JSON body),
+/// so it gets its own, more generous timeout.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub struct AxonClient {
@@ -338,6 +342,63 @@ impl AxonClient {
             path_segment(event_id)
         ));
         let request = message_mutation(request).json(&serde_json::json!({ "key": key }));
+        self.send(request).await
+    }
+
+    /// Stage raw upload bytes ahead of a `send_media` call (ADR 0059/0062,
+    /// `POST …/media/uploads`). `kind` is `"image"` or `"file"`; the server
+    /// rejects `"image"` unless `content_type` is `image/*`. `filename` is
+    /// normalized server-side to its basename.
+    pub async fn stage_upload(
+        &self,
+        account_id: Uuid,
+        kind: &str,
+        filename: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> Result<StagedUploadDto, ApiError> {
+        let mut request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{}/media/uploads",
+                self.base_url, account_id
+            ))
+            .query(&[("kind", kind), ("filename", filename)])
+            .timeout(UPLOAD_TIMEOUT)
+            .body(bytes);
+        if let Some(content_type) = content_type {
+            request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        self.send(request).await
+    }
+
+    /// Send a previously staged upload into a room (ADR 0059/0062,
+    /// `POST …/rooms/{room_id}/send-media`), claiming `upload_id`.
+    pub async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        upload_id: Uuid,
+        caption: Option<&str>,
+        relation: SendRelation<'_>,
+    ) -> Result<SendResultDto, ApiError> {
+        let request = self.http.post(format!(
+            "{}/v1/accounts/{}/rooms/{}/send-media",
+            self.base_url,
+            account_id,
+            path_segment(room_id)
+        ));
+        let mut payload = serde_json::json!({ "upload_id": upload_id });
+        if let Some(caption) = caption {
+            payload["caption"] = serde_json::json!(caption);
+        }
+        if let Some(reply_to) = relation.reply_to {
+            payload["reply_to"] = serde_json::json!(reply_to);
+        }
+        if let Some(thread_root) = relation.thread_root {
+            payload["thread_root"] = serde_json::json!(thread_root);
+        }
+        let request = message_mutation(request).json(&payload);
         self.send(request).await
     }
 
@@ -890,6 +951,16 @@ pub struct SendResultDto {
 pub struct SendRelation<'a> {
     pub reply_to: Option<&'a str>,
     pub thread_root: Option<&'a str>,
+}
+
+/// Response from `POST …/media/uploads` (ADR 0059/0062): the handle a later
+/// `send_media` call claims. The server response carries additional metadata
+/// (`kind`, `filename`, `content_type`, `size_bytes`, `expires_at`) that
+/// axon-tui doesn't currently act on, so only `upload_id` is modeled —
+/// `serde` ignores the rest rather than erroring on them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StagedUploadDto {
+    pub upload_id: Uuid,
 }
 
 /// Response from `POST …/verify`: the transaction id for the new flow.
@@ -1816,5 +1887,27 @@ mod tests {
         assert_eq!(response.data.user_id, "@alice:example.com");
         assert_eq!(response.data.state, AccountState::Active);
         assert_eq!(response.data.device_id.as_deref(), Some("DEVICE"));
+    }
+
+    #[test]
+    fn deserializes_staged_upload_response_ignoring_extra_fields() {
+        // The real server response also carries kind/filename/content_type/
+        // size_bytes/expires_at; StagedUploadDto only models upload_id, so
+        // this proves the unmodeled fields are tolerated, not rejected.
+        let body = r#"{
+            "data": {
+                "upload_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "kind": "image",
+                "filename": "photo.png",
+                "content_type": "image/png",
+                "size_bytes": 1234,
+                "expires_at": "2026-07-11T01:00:00Z"
+            }
+        }"#;
+        let response: ApiResponse<StagedUploadDto> = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            response.data.upload_id,
+            Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap()
+        );
     }
 }

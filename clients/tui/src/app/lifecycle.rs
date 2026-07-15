@@ -76,6 +76,13 @@ pub(crate) enum LifecycleOutcome {
         temp_id: String,
         result: Result<String, String>,
     },
+    /// Result of a `/send` media upload + send-media call. Unlike
+    /// `MessageSent`, there is no optimistic local echo to reconcile — the
+    /// real event arrives over `/v1/ws` like any other mutation.
+    MediaSent {
+        key: super::RoomKey,
+        result: Result<String, String>,
+    },
     /// Result of an outgoing `POST …/verify`: the new flow's id, or an error to
     /// surface in the modal (ADR 0028).
     VerifyStarted {
@@ -736,6 +743,37 @@ impl App {
             }
             return;
         }
+        if let LifecycleOutcome::MediaSent { key, result } = outcome {
+            self.media_send_busy = false;
+            // The user may have switched rooms while the upload was in
+            // flight; only claim the status line for the room the send
+            // actually targeted (the same staleness discipline other
+            // background results apply before mutating visible state).
+            let same_room = self
+                .selected_room()
+                .is_some_and(|room| RoomKey::from(room) == key);
+            match result {
+                Ok(event_id) => {
+                    self.live.pending_own_event_id = Some(event_id.clone());
+                    self.status = if same_room {
+                        Status::EventAction {
+                            debug: format!("sent: {event_id}"),
+                            redacted: "sent",
+                        }
+                    } else {
+                        Status::Info(format!("sent to {}: {event_id}", key.room_id))
+                    };
+                }
+                Err(err) => {
+                    self.status = if same_room {
+                        Status::Info(format!("send failed: {err}"))
+                    } else {
+                        Status::Info(format!("send failed in {}: {err}", key.room_id))
+                    };
+                }
+            }
+            return;
+        }
         self.lifecycle_busy = false;
         if !matches!(self.mode, Mode::Popup(_)) {
             self.pending_command_response = None;
@@ -1011,6 +1049,7 @@ impl App {
                 }
             }
             LifecycleOutcome::MessageSent { .. } => unreachable!(),
+            LifecycleOutcome::MediaSent { .. } => unreachable!(),
         }
         self.queue_completed_command_response();
     }

@@ -43,6 +43,12 @@ pub enum Command {
     EditConfig,
     Quit,
     Send(String),
+    /// /send <path> [caption] — upload a local file and send it to the current
+    /// room as a media message.
+    SendMedia {
+        path: String,
+        caption: Option<String>,
+    },
     /// /html <raw-html> — send HTML literally as formatted_body
     SendHtml(String),
     /// /literal <text> — send as plaintext, skip markdown auto-conversion
@@ -129,6 +135,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/saveconfig", false),
     SlashCommand::supported("/editconfig", false),
     SlashCommand::supported("/quit", false),
+    SlashCommand::supported("/send", true),
     SlashCommand::supported("/html", true),
     SlashCommand::supported("/literal", true),
     SlashCommand::supported("/rainbow", true),
@@ -144,13 +151,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
 /// Each entry marks the first `HELP_COMMANDS` index belonging to that group.
 pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
     (0, "Messaging"),
-    (7, "Navigation"),
-    (13, "Account management"),
-    (17, "Information"),
-    (21, "Message actions"),
-    (25, "Verification"),
-    (27, "System"),
-    (33, "Pending"),
+    (8, "Navigation"),
+    (14, "Account management"),
+    (18, "Information"),
+    (22, "Message actions"),
+    (27, "Verification"),
+    (29, "System"),
+    (35, "Pending"),
 ];
 
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
@@ -189,6 +196,11 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/spoiler [reason |] <text>",
         insert_text: "/spoiler ",
         description: "send text as a spoiler; optional reason before \" | \" becomes the label",
+    },
+    HelpCommand {
+        label: "/send <path> [caption]",
+        insert_text: "/send ",
+        description: "upload a local file (Tab-completes paths; drag-and-drop also fills the path) and send it, with an optional caption",
     },
     // ── Navigation ───────────────────────────────────────────────────────────
     HelpCommand {
@@ -449,6 +461,15 @@ pub fn parse(input: &str) -> Command {
         "saveconfig" => Command::SaveConfig,
         "editconfig" => Command::EditConfig,
         "quit" | "q" => Command::Quit,
+        "send" if !arg.is_empty() => {
+            let (path, caption) = parse_leading_path_token(arg);
+            if path.is_empty() {
+                Command::Invalid("/send requires a file path".to_owned())
+            } else {
+                Command::SendMedia { path, caption }
+            }
+        }
+        "send" => Command::Invalid("/send requires a file path".to_owned()),
         "html" if !arg.is_empty() => Command::SendHtml(arg.to_owned()),
         "html" => Command::Invalid("/html requires HTML content to send".to_owned()),
         "literal" if !arg.is_empty() => Command::SendLiteral(arg.to_owned()),
@@ -494,6 +515,85 @@ pub fn parse(input: &str) -> Command {
             }
         }
     }
+}
+
+/// Scan an *unquoted* `/send` argument for its leading path token:
+/// characters up to the first unescaped whitespace, with `\ ` / `\\` / `\'` /
+/// `\"` unescaped. Returns the unescaped path plus the byte offset in `arg`
+/// where caption text begins — `None` when the whole string was consumed as
+/// the path (no unescaped whitespace seen yet, i.e. still mid-token). The
+/// sole tokenizing primitive for the unquoted case, shared by
+/// [`parse_leading_path_token`] and completion's
+/// [`send_argument_still_in_path_token`] so they can never disagree on where
+/// the path ends.
+fn scan_unquoted_path_token(arg: &str) -> (String, Option<usize>) {
+    let mut path = String::new();
+    let mut chars = arg.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\\' {
+            if let Some(&(_, next_ch)) = chars.peek() {
+                if matches!(next_ch, ' ' | '\\' | '\'' | '"') {
+                    path.push(next_ch);
+                    chars.next();
+                    continue;
+                }
+            }
+            path.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            return (path, Some(idx + ch.len_utf8()));
+        }
+        path.push(ch);
+    }
+    (path, None)
+}
+
+/// Split a `/send` argument into its leading path token and an optional
+/// caption. The path is either a `'...'`/`"..."`-quoted run, or characters up
+/// to the first unescaped whitespace with `\ ` / `\\` / `\'` / `\"`
+/// unescaped — matching what terminal emulators produce when a dropped
+/// file's path is typed out (quoted, or backslash-escaped). Everything after
+/// the path, trimmed, becomes the caption. Shared with tab completion
+/// (`app/completion.rs`) so parsing and completion agree on where the path
+/// ends.
+pub(crate) fn parse_leading_path_token(arg: &str) -> (String, Option<String>) {
+    if let Some(quote) = arg.chars().next().filter(|&ch| ch == '\'' || ch == '"') {
+        let rest = &arg[quote.len_utf8()..];
+        return match rest.find(quote) {
+            Some(end) => {
+                let path = rest[..end].to_owned();
+                let caption = rest[end + quote.len_utf8()..].trim();
+                (path, (!caption.is_empty()).then(|| caption.to_owned()))
+            }
+            // No closing quote: treat the rest of the line as the path rather
+            // than silently truncating a real filename.
+            None => (rest.to_owned(), None),
+        };
+    }
+    let (path, caption_start) = scan_unquoted_path_token(arg);
+    let caption = caption_start
+        .and_then(|start| arg.get(start..))
+        .unwrap_or("")
+        .trim();
+    (path, (!caption.is_empty()).then(|| caption.to_owned()))
+}
+
+/// Whether a `/send` argument typed so far is still mid-path-token — i.e.
+/// filename Tab completion should apply rather than treating the rest as
+/// caption text. An unclosed quote, or an unquoted run with no unescaped
+/// whitespace yet, are both "still typing the path". Built on the exact same
+/// tokenizing primitives [`parse_leading_path_token`] uses, so completion and
+/// submission can never disagree on where the path ends (the bug this
+/// replaced: a naive `contains(char::is_whitespace)` check treated a
+/// backslash-escaped space, e.g. `My\ File`, as if the path were already
+/// finished).
+pub(crate) fn send_argument_still_in_path_token(arg: &str) -> bool {
+    if let Some(quote) = arg.chars().next().filter(|&ch| ch == '\'' || ch == '"') {
+        let rest = &arg[quote.len_utf8()..];
+        return rest.find(quote).is_none();
+    }
+    scan_unquoted_path_token(arg).1.is_none()
 }
 
 /// Parse a human-readable date string into a Unix timestamp in milliseconds
@@ -636,6 +736,83 @@ fn days_since_epoch(y: i64, m: u32, d: u32) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_send_media_forms() {
+        assert_eq!(
+            parse("/send photo.png"),
+            Command::SendMedia {
+                path: "photo.png".to_owned(),
+                caption: None,
+            }
+        );
+        assert_eq!(
+            parse("/send photo.png sunset over the bay"),
+            Command::SendMedia {
+                path: "photo.png".to_owned(),
+                caption: Some("sunset over the bay".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse("/send '/home/user/My File.png' here's the sunset"),
+            Command::SendMedia {
+                path: "/home/user/My File.png".to_owned(),
+                caption: Some("here's the sunset".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse("/send \"/home/user/My File.png\""),
+            Command::SendMedia {
+                path: "/home/user/My File.png".to_owned(),
+                caption: None,
+            }
+        );
+        assert_eq!(
+            parse("/send /home/user/My\\ File.png caption text"),
+            Command::SendMedia {
+                path: "/home/user/My File.png".to_owned(),
+                caption: Some("caption text".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse("/send"),
+            Command::Invalid("/send requires a file path".to_owned())
+        );
+    }
+
+    #[test]
+    fn send_argument_still_in_path_token_matches_the_shared_tokenizer() {
+        assert!(send_argument_still_in_path_token("photo.png"));
+        assert!(!send_argument_still_in_path_token("photo.png caption"));
+        // A backslash-escaped space is still part of the path, not the start
+        // of caption text (this is the bug the shared tokenizer fixed: a
+        // naive whitespace check would wrongly say the path is finished).
+        assert!(send_argument_still_in_path_token("My\\ File"));
+        assert!(!send_argument_still_in_path_token("My\\ File caption"));
+        // Still inside an unterminated quote.
+        assert!(send_argument_still_in_path_token("'my file"));
+        assert!(!send_argument_still_in_path_token("'my file' caption"));
+    }
+
+    #[test]
+    fn leading_path_token_handles_quoting_and_escapes() {
+        assert_eq!(
+            parse_leading_path_token("photo.png"),
+            ("photo.png".to_owned(), None)
+        );
+        assert_eq!(
+            parse_leading_path_token("'a b.png' caption"),
+            ("a b.png".to_owned(), Some("caption".to_owned()))
+        );
+        assert_eq!(
+            parse_leading_path_token("a\\ b.png"),
+            ("a b.png".to_owned(), None)
+        );
+        assert_eq!(
+            parse_leading_path_token("'unterminated quote here"),
+            ("unterminated quote here".to_owned(), None)
+        );
+    }
 
     #[test]
     fn parses_room() {
