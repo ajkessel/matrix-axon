@@ -23,7 +23,7 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::{EventId, RoomId, UInt};
 use matrix_sdk::Room;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::error::GatewayError;
@@ -118,6 +118,36 @@ fn attachment_reply(relation: Relation<'_>) -> Result<Option<Reply>, GatewayErro
     }))
 }
 
+fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayError> {
+    if let Some(id) = relation.reply_to {
+        EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("reply_to: {e}")))?;
+    }
+    if let Some(id) = relation.thread_root {
+        EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))?;
+    }
+
+    Ok(match (relation.thread_root, relation.reply_to) {
+        // Thread member, not a reply. Do not invent an `m.in_reply_to` fallback:
+        // without the latest known in-thread event, falling back to the root
+        // makes thread additions render as replies to the first message.
+        (Some(root), None) => Some(json!({
+            "rel_type": "m.thread",
+            "event_id": root,
+        })),
+        // Explicit reply within a thread.
+        (Some(root), Some(reply)) => Some(json!({
+            "rel_type": "m.thread",
+            "event_id": root,
+            "m.in_reply_to": {
+                "event_id": reply,
+            },
+        })),
+        // Plain reply (no thread).
+        (None, Some(reply)) => Some(json!({ "m.in_reply_to": { "event_id": reply } })),
+        (None, None) => None,
+    })
+}
+
 /// Sends Matrix message-like events on behalf of an account, routed through that
 /// account's SDK client. Cheap to [`Clone`] (holds only a [`ClientManager`]).
 #[derive(Clone)]
@@ -174,30 +204,7 @@ impl SdkGateway {
         // A relation is requested: build a raw envelope with `m.relates_to`,
         // mirroring how `edit` constructs its relation by hand. Validate the
         // referenced event ids up front so a bad id is a clean 400, not a 502.
-        if let Some(id) = relation.reply_to {
-            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("reply_to: {e}")))?;
-        }
-        if let Some(id) = relation.thread_root {
-            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))?;
-        }
-
-        let relates_to = match (relation.thread_root, relation.reply_to) {
-            // Thread member. The `m.in_reply_to` fallback points at an explicit
-            // reply target when given, otherwise the root (marked as falling
-            // back) per the Matrix threads spec for non-thread-aware clients.
-            (Some(root), reply) => json!({
-                "rel_type": "m.thread",
-                "event_id": root,
-                "m.in_reply_to": {
-                    "event_id": reply.unwrap_or(root),
-                    "is_falling_back": reply.is_none(),
-                },
-            }),
-            // Plain reply (no thread).
-            (None, Some(reply)) => json!({ "m.in_reply_to": { "event_id": reply } }),
-            // Unreachable: `relation.is_some()` guaranteed one arm above.
-            (None, None) => unreachable!("relation.is_some() checked above"),
-        };
+        let relates_to = message_relates_to(relation)?.expect("relation.is_some() checked above");
 
         let mut content = json!({
             "msgtype": "m.text",
@@ -334,8 +341,9 @@ mod tests {
     use matrix_sdk::attachment::AttachmentInfo;
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
+    use serde_json::json;
 
-    use super::{attachment_info, attachment_reply, effective_mime};
+    use super::{attachment_info, attachment_reply, effective_mime, message_relates_to};
     use crate::error::GatewayError;
 
     const REPLY_EVENT: &str = "$reply:example.org";
@@ -413,6 +421,81 @@ mod tests {
 
         assert!(
             matches!(err, GatewayError::Invalid(message) if message == "upload is too large for Matrix metadata")
+        );
+    }
+
+    #[test]
+    fn message_relates_to_maps_thread_member_without_reply() {
+        let relates_to = message_relates_to(Relation {
+            reply_to: None,
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("valid relation")
+        .expect("thread relation");
+
+        assert_eq!(
+            relates_to,
+            json!({
+                "rel_type": "m.thread",
+                "event_id": THREAD_ROOT,
+            })
+        );
+    }
+
+    #[test]
+    fn message_relates_to_maps_thread_reply() {
+        let relates_to = message_relates_to(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("valid relation")
+        .expect("thread reply relation");
+
+        assert_eq!(
+            relates_to,
+            json!({
+                "rel_type": "m.thread",
+                "event_id": THREAD_ROOT,
+                "m.in_reply_to": {
+                    "event_id": REPLY_EVENT,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn message_relates_to_maps_plain_reply() {
+        let relates_to = message_relates_to(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: None,
+        })
+        .expect("valid relation")
+        .expect("reply relation");
+
+        assert_eq!(
+            relates_to,
+            json!({ "m.in_reply_to": { "event_id": REPLY_EVENT } })
+        );
+    }
+
+    #[test]
+    fn message_relates_to_rejects_invalid_event_ids() {
+        let bad_reply = message_relates_to(Relation {
+            reply_to: Some("not-an-event-id"),
+            thread_root: None,
+        })
+        .expect_err("bad reply id should fail");
+        assert!(
+            matches!(bad_reply, GatewayError::Invalid(message) if message.starts_with("reply_to:"))
+        );
+
+        let bad_thread = message_relates_to(Relation {
+            reply_to: None,
+            thread_root: Some("not-an-event-id"),
+        })
+        .expect_err("bad thread id should fail");
+        assert!(
+            matches!(bad_thread, GatewayError::Invalid(message) if message.starts_with("thread_root:"))
         );
     }
 

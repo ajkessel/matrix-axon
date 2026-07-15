@@ -387,7 +387,8 @@ pub struct SendMessageRequest {
     pub reply_to: Option<String>,
     /// Send into this thread, identified by its root event id
     /// (`rel_type: m.thread`). Optional; when set with `reply_to`, the reply is
-    /// scoped to the thread, otherwise it falls back to the root.
+    /// scoped to the thread. Without `reply_to`, this is a thread member, not a
+    /// reply.
     #[serde(default)]
     pub thread_root: Option<String>,
 }

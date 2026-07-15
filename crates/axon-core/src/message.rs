@@ -30,9 +30,8 @@ pub struct Formatted<'a> {
 /// the concrete `m.relates_to` envelope:
 ///
 /// - `reply_to` only → a plain reply (`m.in_reply_to`).
-/// - `thread_root` set → a thread member (`rel_type: m.thread`), with an
-///   `m.in_reply_to` fallback pointing at `reply_to` if given, else the root
-///   (marked `is_falling_back`).
+/// - `thread_root` only → a thread member (`rel_type: m.thread`), not a reply.
+/// - `thread_root` + `reply_to` → a reply scoped to the thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Relation<'a> {
     /// The event this message replies to (`m.in_reply_to`).
