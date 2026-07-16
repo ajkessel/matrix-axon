@@ -69,6 +69,18 @@ timeline_limit = 20
 # burstier clients at the cost of more memory; it never back-pressures sync.
 # Default 1024.
 live_event_buffer = 1024
+# Allowlist of room-scoped ephemeral event types (m.typing, m.receipt, ...)
+# forwarded verbatim onto the live-event bus as an "ephemeral.passthrough"
+# /v1/ws frame (ADR 0056). A type not on this list is dropped (fails closed,
+# logged at debug level); an empty list disables ephemeral forwarding
+# entirely. Default ["m.typing", "m.receipt"].
+#
+# m.presence is left off the default deliberately, and listing it here alone
+# does NOT enable it: presence is account-scoped and needs its own handler
+# registration in axon-sync (real code, not just this list), on top of the
+# lag-domain question still being open. Adding it here anyway logs a boot
+# warning rather than silently forwarding nothing.
+ephemeral_event_types = ["m.typing", "m.receipt"]
 # By default, each pending UTD is retried once by the startup sweep; later room-key
 # arrivals and explicit retries still back-fill rows. Set true to retry every
 # pending UTD on every process start (legacy behavior, expensive on large

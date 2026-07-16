@@ -35,6 +35,11 @@ pub enum LiveFrame {
     /// Per-device client state changed (M12) — a device PUT drafts / read
     /// markers, and sibling devices should apply the change.
     DeviceState(DeviceStateFrame),
+    /// A raw, allowlisted ephemeral event forwarded verbatim (ADR 0056) — e.g.
+    /// `m.typing`, `m.receipt`. Axon adds no value to these; unlike the other
+    /// variants above, this is the generic escape hatch for the long tail of
+    /// ephemeral signals that don't warrant a bespoke frame.
+    Ephemeral(EphemeralFrame),
 }
 
 impl From<LiveEvent> for LiveFrame {
@@ -61,6 +66,12 @@ impl From<DeviceStateFrame> for LiveFrame {
     }
 }
 
+impl From<EphemeralFrame> for LiveFrame {
+    fn from(frame: EphemeralFrame) -> Self {
+        LiveFrame::Ephemeral(frame)
+    }
+}
+
 /// A per-device state change (M12, ADR 0048), ready to fan out over the
 /// live-event bus. Carries the written entries themselves so sibling devices
 /// apply the change without a read-back; the bus is lossy, so a reconnecting
@@ -82,6 +93,30 @@ pub struct DeviceStateFrame {
     pub entries: Vec<(String, Option<Value>)>,
     /// Server-clock write time (the last-write-wins ordering).
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A raw, allowlisted ephemeral event (ADR 0056), ready to fan out over the
+/// live-event bus unmodified. This is the generic passthrough for the
+/// ephemeral long tail — `m.typing`, `m.receipt`, and future allowlisted
+/// types — that Axon never persists and derives nothing from: it forwards the
+/// event's `type` and `content` verbatim rather than reshaping them into a
+/// typed DTO. A signal graduates from this generic frame to a bespoke one
+/// (like [`SenderTrustFrame`] or [`VerificationFrame`]) the day Axon starts
+/// deriving something from it, not before.
+#[derive(Debug, Clone)]
+pub struct EphemeralFrame {
+    /// Axon account this event belongs to.
+    pub account_id: Uuid,
+    /// Matrix room ID the event is scoped to. `None` for account-scoped
+    /// signals (e.g. presence) — currently unused by any production
+    /// constructor, since forwarding an account-scoped signal needs its own
+    /// handler registration, not just a value here; kept `Option` so that
+    /// future handler's wire shape doesn't need a breaking change.
+    pub room_id: Option<String>,
+    /// Matrix event type, e.g. `"m.typing"`, `"m.receipt"`.
+    pub event_type: String,
+    /// The raw event `content`, unmodified.
+    pub content: Value,
 }
 
 /// A change in a *sender's* current device trust (M7c), ready to fan out over the

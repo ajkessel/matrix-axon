@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
+use axon_core::{EphemeralFrame, LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
@@ -18,8 +18,10 @@ use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::event_handler::{Ctx, RawEvent};
 use matrix_sdk::ruma::events::room::member::MembershipState;
 use matrix_sdk::ruma::events::{
-    AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnySyncStateEvent, AnySyncTimelineEvent,
+    AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnySyncEphemeralRoomEvent,
+    AnySyncStateEvent, AnySyncTimelineEvent,
 };
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::room_list_service::RoomListService;
@@ -516,6 +518,22 @@ pub(crate) struct PersistContext {
     pub(crate) purge_on_leave: bool,
 }
 
+/// Parse an event's raw JSON text into a [`serde_json::Value`], logging (with
+/// `what` naming the caller's context, e.g. `"state event"`) and returning
+/// `None` on failure instead of propagating the parse error. Shared by every
+/// handler below that needs generic field access (`type`/`content`/…) a typed
+/// `Ev` doesn't expose uniformly — extracted so a fix to this parse/log/skip
+/// shape (e.g. a size cap) only needs to land once.
+fn parse_raw_json(json: &str, account_id: Uuid, what: &'static str) -> Option<serde_json::Value> {
+    match serde_json::from_str(json) {
+        Ok(v) => Some(v),
+        Err(err) => {
+            tracing::warn!(account_id = %account_id, what, error = %err, "failed to parse raw event JSON; skipping");
+            None
+        }
+    }
+}
+
 /// Event handler: persist every synced timeline event to Postgres.
 ///
 /// For E2EE rooms, matrix-rust-sdk decrypts the megolm payload before
@@ -534,16 +552,8 @@ async fn persist_timeline_event(
     enc_info: Option<EncryptionInfo>,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
-    let raw_val: serde_json::Value = match serde_json::from_str(raw.get()) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(
-                account_id = %ctx.account_id,
-                error = %err,
-                "failed to parse raw event JSON; skipping persistence"
-            );
-            return;
-        }
+    let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "timeline event") else {
+        return;
     };
     // The live sync path: persist and emit the fresh event to `/v1/ws`.
     persist_event_core(
@@ -581,16 +591,8 @@ pub(crate) async fn persist_backfilled_event(
             return;
         }
     };
-    let raw_val: serde_json::Value = match serde_json::from_str(raw.json().get()) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(
-                account_id = %ctx.account_id,
-                error = %err,
-                "failed to parse backfilled raw event JSON; skipping"
-            );
-            return;
-        }
+    let Some(raw_val) = parse_raw_json(raw.json().get(), ctx.account_id, "backfilled event") else {
+        return;
     };
     persist_event_core(
         ctx,
@@ -818,12 +820,8 @@ async fn persist_room_state_event(
     raw: RawEvent,
     Ctx(ctx): Ctx<PersistContext>,
 ) {
-    let raw_val: serde_json::Value = match serde_json::from_str(raw.get()) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(account_id = %ctx.account_id, error = %err, "failed to parse raw state event JSON; skipping");
-            return;
-        }
+    let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "state event") else {
+        return;
     };
     let event_type = raw_val
         .get("type")
@@ -916,12 +914,8 @@ async fn persist_global_account_data(
 /// Account-data events carry only `type` + `content` (no event_id/sender/ts),
 /// both read from the raw JSON; `content` is required (the column is NOT NULL).
 async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: &RawEvent) {
-    let raw_val: serde_json::Value = match serde_json::from_str(raw.get()) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(account_id = %ctx.account_id, error = %err, "failed to parse raw account data JSON; skipping");
-            return;
-        }
+    let Some(raw_val) = parse_raw_json(raw.get(), ctx.account_id, "account data") else {
+        return;
     };
     let event_type = raw_val
         .get("type")
@@ -944,6 +938,112 @@ async fn persist_account_data(ctx: &PersistContext, room_id: Option<&str>, raw: 
     } else {
         tracing::debug!(account_id = %ctx.account_id, room_id = ?room_id, event_type = event_type.as_str(), "persisted account data");
     }
+}
+
+/// Context for the generic ephemeral-event passthrough (ADR 0056). Deliberately
+/// separate from [`PersistContext`]: nothing here is persisted, so there is no
+/// `store`/`index` to carry.
+#[derive(Clone)]
+struct EphemeralCtx {
+    account_id: Uuid,
+    /// Producer end of the live-event bus; [`forward_ephemeral_event`] publishes
+    /// each allowlisted event to it for `/v1/ws` fan-out.
+    live_tx: broadcast::Sender<LiveFrame>,
+    /// Event types forwarded verbatim (`config.ephemeral_event_types`). An
+    /// event type not in this set is dropped — fails closed.
+    allowlist: Arc<HashSet<String>>,
+}
+
+/// A raw ephemeral event larger than this (JSON byte length, checked before
+/// any parsing) is dropped rather than forwarded. `live_tx` is one broadcast
+/// bus shared by every account this process syncs, so an oversized `m.typing`/
+/// `m.receipt` EDU from one account's homeserver would otherwise cost every
+/// other account's `/v1/ws` clients ring-buffer space and lag risk. Mirrors
+/// the `RELATION_READ_CAP`/`REACTION_AGG_PAIR_CAP` bounds `axon-store` places
+/// on similarly homeserver-influenced data.
+const EPHEMERAL_EVENT_MAX_BYTES: usize = 262_144;
+
+/// Build an [`EphemeralFrame`] from a raw ephemeral-room-event JSON body, or
+/// `None` if the event's `type` is not on `allowlist` or `content` is missing.
+/// A pure function (unlike the persist_* handlers, which inline their
+/// parsing) so the allowlist behavior gets a fast, SDK-free unit test. Takes
+/// `raw` by value so `content` can be moved out of it instead of cloned.
+fn ephemeral_frame_from_raw(
+    account_id: Uuid,
+    room_id: Option<&str>,
+    mut raw: serde_json::Value,
+    allowlist: &HashSet<String>,
+) -> Option<EphemeralFrame> {
+    let event_type = raw
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    if !allowlist.contains(event_type.as_str()) {
+        tracing::debug!(
+            account_id = %account_id,
+            event_type = event_type.as_str(),
+            "ephemeral event type not on allowlist; skipping"
+        );
+        return None;
+    }
+    let Some(content) = raw.get_mut("content").map(serde_json::Value::take) else {
+        tracing::warn!(
+            account_id = %account_id,
+            event_type = event_type.as_str(),
+            "ephemeral event has no content; skipping"
+        );
+        return None;
+    };
+    Some(EphemeralFrame {
+        account_id,
+        room_id: room_id.map(str::to_owned),
+        event_type,
+        content,
+    })
+}
+
+/// Event handler: forward an allowlisted ephemeral room event (`m.typing`,
+/// `m.receipt`, …) verbatim onto the live-event bus (ADR 0056). Axon never
+/// persists these — they are transient overlays with no store row — so unlike
+/// the persist_* handlers above, this only touches the bus.
+///
+/// Takes `Raw<AnySyncEphemeralRoomEvent>` rather than the bare enum: it still
+/// drives the same `HandlerKind::EphemeralRoomData` dispatch/routing, but the
+/// SDK only has to capture the raw JSON bytes to build it, not fully
+/// deserialize into the enum's variant tree — the handler discards the typed
+/// event and re-parses the raw JSON itself below, so a second full parse
+/// would otherwise be pure waste on every ephemeral event, in every room, in
+/// every account.
+async fn forward_ephemeral_event(
+    _ev: Raw<AnySyncEphemeralRoomEvent>,
+    room: Room,
+    raw: RawEvent,
+    Ctx(ctx): Ctx<EphemeralCtx>,
+) {
+    if ctx.live_tx.receiver_count() == 0 {
+        return;
+    }
+    let json = raw.get();
+    if json.len() > EPHEMERAL_EVENT_MAX_BYTES {
+        tracing::warn!(
+            account_id = %ctx.account_id,
+            len = json.len(),
+            cap = EPHEMERAL_EVENT_MAX_BYTES,
+            "ephemeral event exceeds size cap; dropping"
+        );
+        return;
+    }
+    let Some(raw_val) = parse_raw_json(json, ctx.account_id, "ephemeral event") else {
+        return;
+    };
+    let room_id = room.room_id().as_str();
+    let Some(frame) =
+        ephemeral_frame_from_raw(ctx.account_id, Some(room_id), raw_val, &ctx.allowlist)
+    else {
+        return;
+    };
+    let _ = ctx.live_tx.send(LiveFrame::Ephemeral(frame));
 }
 
 /// How often the sync loop polls for new verification candidate invites and
@@ -1135,6 +1235,37 @@ async fn run_account(
     client.add_event_handler(persist_room_state_event);
     client.add_event_handler(persist_room_account_data);
     client.add_event_handler(persist_global_account_data);
+
+    // Generic ephemeral passthrough (ADR 0056): forward an allowlisted raw
+    // ephemeral room event (m.typing, m.receipt, …) straight onto the live-event
+    // bus. Axon derives nothing from these and persists nothing, so this is a
+    // plain handler, not a child task — no store/index/lifecycle involvement.
+    let ephemeral_allowlist: HashSet<String> =
+        config.ephemeral_event_types.iter().cloned().collect();
+    // `forward_ephemeral_event` is registered only for room-scoped ephemeral
+    // events (matrix-sdk's `HandlerKind::EphemeralRoomData`); `m.presence` is
+    // account-scoped and dispatches via a structurally separate handler kind
+    // this PR does not register, so it can never be forwarded regardless of
+    // this allowlist. Warn loudly rather than let it silently no-op.
+    if ephemeral_allowlist.contains("m.presence") {
+        tracing::warn!(
+            account_id = %account.account_id,
+            "m.presence is in sync.ephemeral_event_types but presence is account-scoped and \
+             never reaches the room-scoped ephemeral handler; it will not be forwarded until \
+             presence gets its own handler registration"
+        );
+    }
+    tracing::debug!(
+        account_id = %account.account_id,
+        allowlist = ?ephemeral_allowlist,
+        "resolved ephemeral passthrough allowlist"
+    );
+    client.add_event_handler_context(EphemeralCtx {
+        account_id: account.account_id,
+        live_tx: live_tx.clone(),
+        allowlist: Arc::new(ephemeral_allowlist),
+    });
+    client.add_event_handler(forward_ephemeral_event);
 
     // Interactive SAS verification (M7a PR6): surface peer-initiated requests with
     // no HTTP kickoff. The handler registers the flow and spawns a driver under a
@@ -1477,4 +1608,85 @@ fn recovery_key_for<'c>(config: &'c SyncConfig, account: &Account) -> Option<&'c
         .as_ref()
         .filter(|p| matches_account(p, account))
         .and_then(|p| p.recovery_key.as_deref())
+}
+
+#[cfg(test)]
+mod ephemeral_tests {
+    use super::ephemeral_frame_from_raw;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    fn allowlist() -> HashSet<String> {
+        ["m.typing", "m.receipt"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn allowlisted_type_is_forwarded_with_its_raw_content() {
+        let account_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "type": "m.typing",
+            "content": { "user_ids": ["@alice:localhost"] },
+        });
+        let expected_content = raw["content"].clone();
+        let frame = ephemeral_frame_from_raw(account_id, Some("!r:localhost"), raw, &allowlist())
+            .expect("m.typing is allowlisted");
+        assert_eq!(frame.account_id, account_id);
+        assert_eq!(frame.room_id.as_deref(), Some("!r:localhost"));
+        assert_eq!(frame.event_type, "m.typing");
+        assert_eq!(frame.content, expected_content);
+    }
+
+    #[test]
+    fn non_allowlisted_type_is_dropped() {
+        let raw = serde_json::json!({
+            "type": "m.presence",
+            "content": { "presence": "online" },
+        });
+        assert!(ephemeral_frame_from_raw(Uuid::new_v4(), None, raw, &allowlist()).is_none());
+    }
+
+    #[test]
+    fn empty_allowlist_drops_everything() {
+        let raw = serde_json::json!({
+            "type": "m.typing",
+            "content": { "user_ids": [] },
+        });
+        assert!(ephemeral_frame_from_raw(
+            Uuid::new_v4(),
+            Some("!r:localhost"),
+            raw,
+            &HashSet::new()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn missing_type_or_content_is_dropped() {
+        let allow = allowlist();
+        // No `type` defaults to "unknown" (matching persist_account_data's
+        // convention), which then fails the allowlist check rather than
+        // bailing early — same end result, different code path.
+        let no_type = serde_json::json!({ "content": {} });
+        assert!(ephemeral_frame_from_raw(Uuid::new_v4(), None, no_type, &allow).is_none());
+
+        let no_content = serde_json::json!({ "type": "m.typing" });
+        assert!(ephemeral_frame_from_raw(Uuid::new_v4(), None, no_content, &allow).is_none());
+    }
+
+    #[test]
+    fn m_presence_in_config_is_never_reachable_via_the_room_scoped_helper() {
+        // ephemeral_frame_from_raw itself has no opinion on presence — this
+        // documents the *actual* gap (finding: forward_ephemeral_event is
+        // only ever registered for room-scoped ephemeral events, so no raw
+        // presence JSON ever reaches this function in production, regardless
+        // of the allowlist). If m.presence is allowlisted, this helper alone
+        // would happily build a frame for it — the real fix is the run_account
+        // registration warning, not a change here.
+        let raw = serde_json::json!({ "type": "m.presence", "content": { "presence": "online" } });
+        let allow: HashSet<String> = ["m.presence".to_owned()].into_iter().collect();
+        assert!(ephemeral_frame_from_raw(Uuid::new_v4(), None, raw, &allow).is_some());
+    }
 }

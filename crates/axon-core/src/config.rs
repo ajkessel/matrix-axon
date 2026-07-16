@@ -164,6 +164,24 @@ pub struct SyncConfig {
     /// Defaults to 1024.
     #[serde(default = "default_live_event_buffer")]
     pub live_event_buffer: usize,
+    /// Allowlist of *room-scoped* ephemeral event types (`m.typing`,
+    /// `m.receipt`, …) forwarded verbatim onto the live-event bus as
+    /// `LiveFrame::Ephemeral` (ADR 0056). An event type not on this list is
+    /// dropped (logged at debug level) — the allowlist fails closed, so a
+    /// future EDU type Axon hasn't reasoned about isn't forwarded by
+    /// accident. An empty list disables ephemeral forwarding entirely.
+    /// Defaults to `["m.typing", "m.receipt"]`.
+    ///
+    /// `m.presence` is deliberately absent from the default, and adding it
+    /// here is **not sufficient** to enable it: presence is account-scoped,
+    /// not room-scoped, and dispatches through a structurally different
+    /// sync-engine handler this allowlist doesn't reach — forwarding it needs
+    /// a second handler registration (real code), not just this config
+    /// change, on top of settling the lag-domain question (see the ADR).
+    /// `axon-sync` logs a warning at boot if `m.presence` is listed here
+    /// anyway, since it would otherwise silently never be forwarded.
+    #[serde(default = "default_ephemeral_event_types")]
+    pub ephemeral_event_types: Vec<String>,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
     /// task that pages each joined room's pre-existing history backward through
     /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
@@ -610,6 +628,10 @@ fn default_live_event_buffer() -> usize {
     1024
 }
 
+fn default_ephemeral_event_types() -> Vec<String> {
+    vec!["m.typing".to_owned(), "m.receipt".to_owned()]
+}
+
 fn default_backfill_enabled() -> bool {
     true
 }
@@ -753,6 +775,7 @@ impl Default for SyncConfig {
             account: None,
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
+            ephemeral_event_types: default_ephemeral_event_types(),
             backfill_enabled: default_backfill_enabled(),
             always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),

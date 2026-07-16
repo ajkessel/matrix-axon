@@ -7,17 +7,19 @@ publishes [`LiveFrame`](../../crates/axon-core/src/live.rs)s onto a single
 `tokio::sync::broadcast`, and the `/v1/ws` handler
 ([`crates/axon-api/src/ws.rs`](../../crates/axon-api/src/ws.rs)) fans them out as
 tagged JSON envelopes (`type` + `account_id` + `payload`). Today the enum carries
-exactly three kinds:
+these value-added kinds:
 
 - `Timeline` — a freshly persisted timeline event (decrypted, with a
   `sender_trust` verdict snapshot).
 - `Verification` — a stage in an interactive SAS flow (rendered emoji/decimals).
 - `SenderTrustChanged` — an M7c sender device-trust overlay.
+- `DeviceState` — an M12 per-device drafts/read-marker change (ADR 0048).
 
-All three are *value-added*: Axon decrypts, derives a trust verdict, or renders
-SAS data the raw event doesn't carry. They are produced by the engine's
-persistence handlers (`engine.rs`), which register only for **persisted** data —
-timeline events, room state, room/global account data.
+All are *value-added*: Axon decrypts, derives a trust verdict, renders SAS
+data, or persists device state the raw event doesn't carry on its own. They
+are produced by the engine's persistence handlers (`engine.rs`), which
+register only for **persisted** data — timeline events, room state,
+room/global account data, and per-device state.
 
 Everything *ephemeral* is dropped on the floor. The homeserver delivers, via the
 sync response, a whole class of live signals Axon never observes or forwards:
@@ -149,8 +151,15 @@ cancelled.
   (TUI consumer) are separate PRs per the one-silo-per-PR rule; backend lands
   first with a wire-contract test, the TUI consumer second.
 - **Presence is explicitly deferred** behind the lag-domain decision; the frame
-  shape already accommodates it (`room_id: None`) so enabling it later is config,
-  not schema.
+  shape already accommodates its wire shape (`room_id: None`). **Implementation
+  correction:** enabling it later is *not* purely a config change as originally
+  assumed here — presence is account-scoped and matrix-sdk dispatches it via a
+  structurally different handler kind than the room-scoped ephemeral events
+  this ADR's implementation registers for, so forwarding presence needs a
+  second handler registration (real code) in addition to the config edit and
+  the lag-domain decision. The backend PR logs a boot warning if `m.presence`
+  is added to the allowlist anyway, so the gap fails loudly rather than
+  silently.
 - **Pairs with #130.** Adopting both yields a symmetric escape hatch — arbitrary
   requests out, arbitrary live events in — with the typed routes/frames as the
   value-added layer over each. This ADR can be accepted and shipped without #130;

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_api::AppState;
-use axon_core::{LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
+use axon_core::{EphemeralFrame, LiveEvent, LiveFrame, VerificationFrame, VerificationFrameKind};
 use axon_store::Store;
 use common::{
     StubDeviceList, StubLifecycle, StubMediaProxy, StubSender, StubTokenVerifier, StubTrust,
@@ -186,6 +186,37 @@ async fn ws_streams_live_events() {
     assert_eq!(envelope["payload"]["device_id"], "TRUSTEDDEV");
     assert_eq!(envelope["payload"]["emoji"][0]["symbol"], "🐶");
     assert_eq!(envelope["payload"]["decimals"], json!([1, 2, 3]));
+
+    // An ephemeral passthrough frame (ADR 0056) rides the same socket, tagged
+    // distinctly, carrying its raw content verbatim.
+    let receivers = live
+        .send(LiveFrame::Ephemeral(EphemeralFrame {
+            account_id,
+            room_id: Some("!room:localhost".to_owned()),
+            event_type: "m.typing".to_owned(),
+            content: json!({ "user_ids": ["@alice:localhost"] }),
+        }))
+        .expect("a connected subscriber");
+    assert_eq!(receivers, 1);
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("a frame within the timeout")
+        .expect("stream still open")
+        .expect("a websocket message");
+    let text = match frame {
+        Message::Text(text) => text,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let envelope: Value = serde_json::from_str(text.as_str()).expect("json frame");
+    assert_eq!(envelope["type"], "ephemeral.passthrough");
+    assert_eq!(envelope["account_id"], account_id.to_string());
+    assert_eq!(envelope["payload"]["room_id"], "!room:localhost");
+    assert_eq!(envelope["payload"]["event_type"], "m.typing");
+    assert_eq!(
+        envelope["payload"]["content"]["user_ids"][0],
+        "@alice:localhost"
+    );
 
     ws.close(None).await.ok();
     server.abort();

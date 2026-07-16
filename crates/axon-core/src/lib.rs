@@ -18,7 +18,7 @@ pub use config::{
 };
 pub use error::{ConfigError, Error, Result};
 pub use live::{
-    DeviceStateFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
+    DeviceStateFrame, EphemeralFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
     VerificationFrameKind,
 };
 pub use media::{ThumbnailMethod, ThumbnailSpec};

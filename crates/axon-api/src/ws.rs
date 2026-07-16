@@ -1,14 +1,16 @@
 //! The `/v1/ws` live-event WebSocket.
 //!
 //! A client opens one socket and receives every event the sync engine persists,
-//! across all of this Axon's accounts, as it arrives, plus the frames of any
-//! interactive device-verification flow. Each frame is a JSON envelope
+//! across all of this Axon's accounts, as it arrives, plus interactive
+//! device-verification flow frames and allowlisted raw ephemeral events (ADR
+//! 0056) forwarded without persistence. Each frame is a JSON envelope
 //! `{ "type", "account_id", "payload" }` ([`WsEnvelope`]) — the same
 //! `type`/`account_id`/`payload` shape used elsewhere on the wire. The `type`
 //! tag discriminates the kind: `timeline.event` carries the read API's
 //! [`EventDto`]; `verification.{requested,sas,done,cancelled}` carry a
 //! [`VerificationFramePayload`] (SAS emoji/decimals, optional target device,
-//! outcome).
+//! outcome); `ephemeral.passthrough` carries an allowlisted raw ephemeral
+//! event (`m.typing`, `m.receipt`, …) verbatim (ADR 0056).
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -36,7 +38,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::{
-    DeviceStateFrame, LiveFrame, SenderTrustFrame, VerificationFrame, VerificationFrameKind,
+    DeviceStateFrame, EphemeralFrame, LiveFrame, SenderTrustFrame, VerificationFrame,
+    VerificationFrameKind,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -149,6 +152,30 @@ impl From<DeviceStateFrame> for DeviceStateFramePayload {
     }
 }
 
+/// The `type` tag for a generic ephemeral passthrough frame (ADR 0056).
+const EPHEMERAL_PASSTHROUGH: &str = "ephemeral.passthrough";
+
+/// The wire payload for an `ephemeral.passthrough` frame: an allowlisted raw
+/// ephemeral event forwarded verbatim. `room_id` is absent for account-scoped
+/// signals (e.g. a future presence frame).
+#[derive(Debug, Serialize)]
+struct EphemeralFramePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room_id: Option<String>,
+    event_type: String,
+    content: serde_json::Value,
+}
+
+impl From<EphemeralFrame> for EphemeralFramePayload {
+    fn from(frame: EphemeralFrame) -> Self {
+        Self {
+            room_id: frame.room_id,
+            event_type: frame.event_type,
+            content: frame.content,
+        }
+    }
+}
+
 /// The `type` tag for a verification frame of the given kind.
 fn verification_type(kind: VerificationFrameKind) -> &'static str {
     match kind {
@@ -254,6 +281,11 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             account_id: frame.account_id,
             payload: DeviceStateFramePayload::from(frame),
         }),
+        LiveFrame::Ephemeral(frame) => serde_json::to_string(&WsEnvelope {
+            kind: EPHEMERAL_PASSTHROUGH,
+            account_id: frame.account_id,
+            payload: EphemeralFramePayload::from(frame),
+        }),
     }
 }
 
@@ -337,7 +369,9 @@ async fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axon_core::{LiveEvent, SenderTrustFrame, VerificationFrame, VerificationFrameKind};
+    use axon_core::{
+        EphemeralFrame, LiveEvent, SenderTrustFrame, VerificationFrame, VerificationFrameKind,
+    };
     use serde_json::Value;
 
     fn decode(frame: LiveFrame) -> Value {
@@ -459,6 +493,34 @@ mod tests {
         // A deletion rides as an explicit null, not an absent key.
         assert!(v["payload"]["entries"]["!gone:localhost"].is_null());
         assert!(v["payload"]["updated_at"].is_string());
+    }
+
+    #[test]
+    fn ephemeral_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::Ephemeral(EphemeralFrame {
+            account_id,
+            room_id: Some("!r:localhost".to_owned()),
+            event_type: "m.typing".to_owned(),
+            content: serde_json::json!({ "user_ids": ["@alice:localhost"] }),
+        }));
+        assert_eq!(v["type"], "ephemeral.passthrough");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
+        assert_eq!(v["payload"]["event_type"], "m.typing");
+        assert_eq!(v["payload"]["content"]["user_ids"][0], "@alice:localhost");
+    }
+
+    #[test]
+    fn ephemeral_frame_omits_room_id_when_absent() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::Ephemeral(EphemeralFrame {
+            account_id,
+            room_id: None,
+            event_type: "m.presence".to_owned(),
+            content: serde_json::json!({ "presence": "online" }),
+        }));
+        assert!(v["payload"].get("room_id").is_none());
     }
 
     #[test]
