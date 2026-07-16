@@ -837,7 +837,7 @@ fn prompt_database_url() -> anyhow::Result<String> {
     })
 }
 
-fn prompt_yes_no(question: &str, default_yes: bool) -> anyhow::Result<bool> {
+pub(crate) fn prompt_yes_no(question: &str, default_yes: bool) -> anyhow::Result<bool> {
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
     let line = prompt_line(&format!("{question} {hint} "))?;
     Ok(match line.trim().to_ascii_lowercase().as_str() {

@@ -34,6 +34,7 @@ use axon_core::Config;
 use axon_store::Store;
 use axon_sync::SyncEngine;
 use clap::Parser;
+use rand::Rng;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::cli::{Cli, Command};
@@ -47,6 +48,7 @@ use crate::uploads::FilesystemStagedUploads;
 use crate::verification::VerificationAdapter;
 
 const SEARCH_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const BOOTSTRAP_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -151,6 +153,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let store = Store::connect(&config.database.url, config.database.max_connections)
         .await
         .context("connecting to database")?;
+    let bootstrap = maybe_offer_web_bootstrap(&store, &config).await?;
 
     // Open the search index and spawn its background indexing actor (M9), when
     // enabled. The actor owns the sole Tantivy writer. `open` reports whether the
@@ -274,6 +277,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }
+    if let Some(bootstrap) = bootstrap.clone() {
+        state = state.with_bootstrap(bootstrap);
+    }
     let app = axon_api::router(state);
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -281,6 +287,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .with_context(|| format!("binding {addr}"))?;
 
     tracing::info!(%addr, "axon listening");
+    if let Some(bootstrap) = &bootstrap {
+        println!(
+            "First-credential web bootstrap is armed: open http://{addr}{}",
+            bootstrap.url_path()
+        );
+        if bootstrap.allow_remote {
+            println!(
+                "Remote bootstrap is enabled; ensure this address is protected by TLS, a proxy, or a trusted network."
+            );
+        } else {
+            println!("Bootstrap requests from non-loopback peers will be rejected.");
+        }
+    }
 
     // `with_connect_info` gives the peer's `SocketAddr` to any handler/layer
     // that extracts `ConnectInfo<SocketAddr>` — the oauth rate limiter (M14,
@@ -309,6 +328,51 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn maybe_offer_web_bootstrap(
+    store: &Store,
+    config: &Config,
+) -> anyhow::Result<Option<axon_api::BootstrapConfig>> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    if !store
+        .first_credential_bootstrap_available()
+        .await
+        .context("checking first-credential bootstrap state")?
+    {
+        return Ok(None);
+    }
+
+    let allowed = init::prompt_yes_no(
+        "No Matrix accounts or client credentials were found. Allow one first credential to be created through the web interface?",
+        true,
+    )?;
+    if !allowed {
+        tracing::info!("first-credential web bootstrap declined by operator");
+        return Ok(None);
+    }
+
+    tracing::info!(
+        allow_remote = config.server.bootstrap_web_allow_remote,
+        web_client_url_configured = config.server.web_client_url.is_some(),
+        "first-credential web bootstrap armed"
+    );
+    Ok(Some(axon_api::BootstrapConfig::new(
+        config.server.bootstrap_web_allow_remote,
+        generate_bootstrap_access_code(),
+        config.server.web_client_url.clone(),
+    )))
+}
+
+fn generate_bootstrap_access_code() -> String {
+    let mut rng = rand::rng();
+    (0..6)
+        .map(|_| {
+            BOOTSTRAP_CODE_ALPHABET[rng.random_range(0..BOOTSTRAP_CODE_ALPHABET.len())] as char
+        })
+        .collect()
 }
 
 async fn shutdown_search_indexer(

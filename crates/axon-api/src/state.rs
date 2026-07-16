@@ -6,6 +6,7 @@
 //! live-event sender is exactly that: the `/v1/ws` handler pulls
 //! `State<broadcast::Sender<LiveFrame>>`, the read handlers are unchanged.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,6 +102,100 @@ pub struct AppState {
     /// handler (and the rate-limiting layer in front of them) returns `404`
     /// — the same "disabled surface" pattern as `search`.
     pub oauth: Option<Arc<OAuthRuntime>>,
+    /// One-time first-credential web bootstrap. Present only when the server
+    /// was started interactively, the operator explicitly armed it, and the DB
+    /// had no accounts or credentials at boot.
+    pub bootstrap: Option<BootstrapConfig>,
+}
+
+#[derive(Clone)]
+pub struct BootstrapConfig {
+    pub allow_remote: bool,
+    access_code: String,
+    failed_url_attempts: Arc<AtomicUsize>,
+    pub web_client_url: Option<String>,
+}
+
+pub const BOOTSTRAP_MAX_WRONG_URLS: usize = 6;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootstrapAccessCodeError {
+    Invalid,
+    Locked,
+}
+
+/// The bootstrap surface is locked (too many wrong URL attempts). Distinct
+/// from [`BootstrapAccessCodeError`] because [`BootstrapConfig::ensure_unlocked`]
+/// only ever checks the attempt counter — it never compares a submitted code,
+/// so it can never produce an `Invalid` result. Giving it its own
+/// single-variant type makes that structural rather than an `unreachable!()`
+/// a caller's `match` has to carry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapLocked;
+
+impl From<BootstrapLocked> for BootstrapAccessCodeError {
+    fn from(_: BootstrapLocked) -> Self {
+        BootstrapAccessCodeError::Locked
+    }
+}
+
+impl BootstrapConfig {
+    pub fn new(allow_remote: bool, access_code: String, web_client_url: Option<String>) -> Self {
+        Self {
+            allow_remote,
+            access_code,
+            failed_url_attempts: Arc::new(AtomicUsize::new(0)),
+            web_client_url,
+        }
+    }
+
+    pub fn access_code(&self) -> &str {
+        &self.access_code
+    }
+
+    pub fn url_path(&self) -> String {
+        format!("/bootstrap/{}", self.access_code)
+    }
+
+    pub fn ensure_unlocked(&self) -> Result<(), BootstrapLocked> {
+        if self.failed_url_attempts.load(Ordering::Relaxed) >= BOOTSTRAP_MAX_WRONG_URLS {
+            Err(BootstrapLocked)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn failed_url_attempts(&self) -> usize {
+        self.failed_url_attempts.load(Ordering::Relaxed)
+    }
+
+    pub fn validate_access_code(&self, submitted: &str) -> Result<(), BootstrapAccessCodeError> {
+        self.ensure_unlocked()?;
+        // Constant-time compare: the 6-attempt lockout already bounds brute
+        // force, but the access code is otherwise unhashed and held in
+        // memory for the process lifetime, so there's no reason to leak
+        // per-byte timing on top of that.
+        if constant_time_eq(submitted.as_bytes(), self.access_code.as_bytes()) {
+            return Ok(());
+        }
+
+        let attempts = self.failed_url_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        if attempts >= BOOTSTRAP_MAX_WRONG_URLS {
+            Err(BootstrapAccessCodeError::Locked)
+        } else {
+            Err(BootstrapAccessCodeError::Invalid)
+        }
+    }
+}
+
+/// Constant-time byte-slice comparison. Always scans both slices in full
+/// regardless of where (or whether) they differ, so equality can't be
+/// inferred from how long the compare took.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 impl AppState {
@@ -137,6 +232,7 @@ impl AppState {
             search,
             backfill_status: Arc::new(NoBackfillStatus),
             oauth: None,
+            bootstrap: None,
         }
     }
 
@@ -175,6 +271,12 @@ impl AppState {
     /// default `None` (every oauth route 404s).
     pub fn with_oauth(mut self, oauth: Arc<OAuthRuntime>) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    /// Arm the one-time first-credential web bootstrap.
+    pub fn with_bootstrap(mut self, bootstrap: BootstrapConfig) -> Self {
+        self.bootstrap = Some(bootstrap);
         self
     }
 }
@@ -318,6 +420,12 @@ impl FromRef<AppState> for Option<Arc<OAuthRuntime>> {
     }
 }
 
+impl FromRef<AppState> for Option<BootstrapConfig> {
+    fn from_ref(state: &AppState) -> Option<BootstrapConfig> {
+        state.bootstrap.clone()
+    }
+}
+
 /// The `/v1/ws` token-revalidation cadence, extracted as router state by the
 /// WebSocket handler.
 #[derive(Clone, Copy)]
@@ -326,5 +434,43 @@ pub struct WsRevalidationInterval(pub Duration);
 impl FromRef<AppState> for WsRevalidationInterval {
     fn from_ref(state: &AppState) -> WsRevalidationInterval {
         WsRevalidationInterval(state.ws_revalidation_interval)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        constant_time_eq, BootstrapAccessCodeError, BootstrapConfig, BOOTSTRAP_MAX_WRONG_URLS,
+    };
+
+    #[test]
+    fn constant_time_eq_matches_equality() {
+        assert!(constant_time_eq(b"ABC234", b"ABC234"));
+        assert!(!constant_time_eq(b"ABC234", b"WRONG2"));
+        assert!(!constant_time_eq(b"ABC234", b"ABC23"));
+        assert!(!constant_time_eq(b"", b"ABC234"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn bootstrap_access_code_locks_after_six_wrong_attempts() {
+        let bootstrap = BootstrapConfig::new(false, "ABC234".to_owned(), None);
+
+        for _ in 0..(BOOTSTRAP_MAX_WRONG_URLS - 1) {
+            assert_eq!(
+                bootstrap.validate_access_code("WRONG2"),
+                Err(BootstrapAccessCodeError::Invalid)
+            );
+            assert_eq!(bootstrap.validate_access_code("ABC234"), Ok(()));
+        }
+
+        assert_eq!(
+            bootstrap.validate_access_code("WRONG2"),
+            Err(BootstrapAccessCodeError::Locked)
+        );
+        assert_eq!(
+            bootstrap.validate_access_code("ABC234"),
+            Err(BootstrapAccessCodeError::Locked)
+        );
     }
 }

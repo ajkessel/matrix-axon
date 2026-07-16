@@ -19,6 +19,19 @@
 # access, or set 0.0.0.0 to bind all interfaces.
 host = "127.0.0.1"
 port = 8080
+# When the server is launched interactively with no accounts and no credentials,
+# it can offer a one-time web bootstrap for the first client credential. The
+# server prints a per-boot /bootstrap/<code> URL and locks the bootstrap surface
+# after six wrong bootstrap URLs. By default that temporary surface is
+# loopback-only; set true only when a trusted TLS/proxy/VPN path fronts the
+# server during first setup. The lockout counter is process-local and shared
+# by every caller, so enabling this lets a remote client lock the operator's
+# own setup flow in six requests, forcing a restart.
+bootstrap_web_allow_remote = false
+# Optional human-facing web-client URL. When set, the one-time bootstrap success
+# page links here after showing the freshly minted credential. Tokens are never
+# placed in this URL.
+# web_client_url = "https://axon.example.com/app"
 
 [database]
 # Required. Also accepted via the bare DATABASE_URL env var.

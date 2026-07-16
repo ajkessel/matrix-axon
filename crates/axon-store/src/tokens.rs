@@ -20,6 +20,7 @@
 
 use chrono::{DateTime, Utc};
 use sqlx_core::row::Row;
+use sqlx_core::transaction::Transaction;
 use sqlx_postgres::{PgRow, Postgres};
 use uuid::Uuid;
 
@@ -88,11 +89,36 @@ pub struct IssuedToken {
     pub token: String,
 }
 
+/// A freshly minted OAuth credential pair from the first-run web bootstrap.
+/// The raw secrets are returned exactly once; only their hashes are persisted.
+#[derive(Debug, Clone)]
+pub struct IssuedOAuthTokenPair {
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
 /// Columns selected for a [`Token`] (never the `hash`).
 const TOKEN_COLUMNS: &str =
     "id, label, created_at, last_used_at, revoked_at, expires_at, provider, oauth_identity_id, client_id";
 
+const BOOTSTRAP_LOCK_KEY: i64 = 0x4158_4f4e_424f_4f54;
+
 impl Store {
+    /// Whether the one-time web bootstrap may still create the first login
+    /// credential. Historical credentials count: a revoked/expired token or an
+    /// unbound OAuth identity still proves bootstrap was already used.
+    pub async fn first_credential_bootstrap_available(&self) -> Result<bool, StoreError> {
+        let available: bool = sqlx_core::query::query(
+            "SELECT NOT EXISTS (SELECT 1 FROM accounts) \
+                 AND NOT EXISTS (SELECT 1 FROM tokens) \
+                 AND NOT EXISTS (SELECT 1 FROM oauth_identities) AS available",
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .try_get("available")?;
+        Ok(available)
+    }
+
     /// Mint a new bearer token with the given label: generate a random secret,
     /// store its hash, and return the raw secret once (it is never recoverable
     /// afterward). This is the CLI bootstrap path (`axon token issue`).
@@ -111,6 +137,39 @@ impl Store {
             label: label.to_owned(),
             token,
         })
+    }
+
+    /// Mint the first bearer token through the temporary web bootstrap. Returns
+    /// `None` if any account or prior credential already exists. The eligibility
+    /// check runs under an advisory transaction lock so concurrent requests
+    /// cannot both observe an empty instance and mint two first credentials.
+    pub async fn issue_first_bootstrap_token(
+        &self,
+        label: &str,
+    ) -> Result<Option<IssuedToken>, StoreError> {
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
+        self.lock_bootstrap(&mut tx).await?;
+        if !Self::bootstrap_available_in_tx(&mut tx).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let token = generate_token();
+        let hash = hash_token(&token);
+        let row = sqlx_core::query::query(
+            "INSERT INTO tokens (label, hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(label)
+        .bind(&hash)
+        .fetch_one(&mut *tx)
+        .await?;
+        let id = row.try_get("id")?;
+        tx.commit().await?;
+        Ok(Some(IssuedToken {
+            id,
+            label: label.to_owned(),
+            token,
+        }))
     }
 
     /// Verify a presented bearer token. Hashes it, looks up an **unrevoked,
@@ -227,6 +286,93 @@ impl Store {
         .await?;
         Ok(result.rows_affected())
     }
+
+    /// Bind the first OAuth identity and mint its access/refresh pair through
+    /// the temporary web bootstrap. Returns `None` if bootstrap is no longer
+    /// available. The identity and both tokens are written in one transaction.
+    pub async fn issue_first_oauth_token_pair(
+        &self,
+        provider: &str,
+        subject: &str,
+        email: Option<&str>,
+        client_id: &str,
+        access_expires_at: DateTime<Utc>,
+        refresh_expires_at: DateTime<Utc>,
+    ) -> Result<Option<IssuedOAuthTokenPair>, StoreError> {
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
+        self.lock_bootstrap(&mut tx).await?;
+        if !Self::bootstrap_available_in_tx(&mut tx).await? {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let identity_id: Uuid = sqlx_core::query::query(
+            "INSERT INTO oauth_identities (provider, subject, email) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(provider)
+        .bind(subject)
+        .bind(email)
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("id")?;
+
+        let access_token = generate_token();
+        let access_hash = hash_token(&access_token);
+        sqlx_core::query::query(
+            "INSERT INTO tokens (label, hash, expires_at, provider, oauth_identity_id, client_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(format!("oauth:{provider}:{client_id}"))
+        .bind(&access_hash)
+        .bind(access_expires_at)
+        .bind(provider)
+        .bind(identity_id)
+        .bind(client_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let refresh_token = generate_refresh_token();
+        let refresh_hash = hash_token(&refresh_token);
+        sqlx_core::query::query(
+            "INSERT INTO oauth_refresh_tokens (hash, oauth_identity_id, client_id, expires_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&refresh_hash)
+        .bind(identity_id)
+        .bind(client_id)
+        .bind(refresh_expires_at)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(Some(IssuedOAuthTokenPair {
+            access_token,
+            refresh_token,
+        }))
+    }
+
+    async fn lock_bootstrap(&self, tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+        sqlx_core::query::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(BOOTSTRAP_LOCK_KEY)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    async fn bootstrap_available_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<bool, StoreError> {
+        let available: bool = sqlx_core::query::query(
+            "SELECT NOT EXISTS (SELECT 1 FROM accounts) \
+                 AND NOT EXISTS (SELECT 1 FROM tokens) \
+                 AND NOT EXISTS (SELECT 1 FROM oauth_identities) AS available",
+        )
+        .fetch_one(&mut **tx)
+        .await?
+        .try_get("available")?;
+        Ok(available)
+    }
 }
 
 /// Generate a fresh bearer token: an `axon_` prefix (so it is recognizable and
@@ -234,6 +380,10 @@ impl Store {
 /// base64url-encoded without padding.
 fn generate_token() -> String {
     format!("axon_{}", axon_core::generate_opaque_secret())
+}
+
+fn generate_refresh_token() -> String {
+    format!("axon_rt_{}", axon_core::generate_opaque_secret())
 }
 
 /// Hash a raw token for storage / lookup: SHA-256, base64-encoded. A plain hash

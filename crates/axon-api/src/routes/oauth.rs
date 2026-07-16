@@ -17,10 +17,11 @@
 //! `{"error", "error_description"}` on failure — not this crate's
 //! `ApiResponse`/`ApiError` envelope; see [`TokenSuccessBody`]/[`OAuthErrorBody`].
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axon_store::{BindRequest, NewAuthorizationRequest, Store};
-use axum::extract::{FromRequest, Request, State};
+use axum::extract::{ConnectInfo, FromRequest, Request, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
@@ -33,6 +34,8 @@ use crate::oauth::provider::OidcError;
 use crate::oauth::tokens::{self, TokenError, TokenPair};
 use crate::oauth::{OAuthRuntime, OidcProvider};
 use crate::response::ApiError;
+use crate::routes::bootstrap::{self, BOOTSTRAP_STATE_PREFIX};
+use crate::state::BootstrapConfig;
 
 /// How long a Path A flow (and its axon-minted code) stays redeemable.
 const AUTHORIZATION_REQUEST_TTL: ChronoDuration = ChronoDuration::minutes(10);
@@ -132,8 +135,10 @@ pub async fn authorize(
 pub async fn callback(
     State(store): State<Store>,
     State(runtime): State<Option<Arc<OAuthRuntime>>>,
+    State(bootstrap_config): State<Option<BootstrapConfig>>,
     Path(provider_name): Path<String>,
     Query(q): Query<CallbackQuery>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Result<Response, ApiError> {
     let Some(runtime) = runtime else {
         return Err(ApiError::not_found("oauth is disabled"));
@@ -141,6 +146,20 @@ pub async fn callback(
     let Some(provider) = runtime.provider(&provider_name) else {
         return Err(ApiError::not_found("unknown or disabled provider"));
     };
+
+    if q.state.starts_with(BOOTSTRAP_STATE_PREFIX) {
+        return bootstrap::complete_oauth_callback(bootstrap::BootstrapOauthCallback {
+            store: &store,
+            bootstrap: bootstrap_config,
+            runtime: &runtime,
+            provider_name: &provider_name,
+            provider,
+            code: &q.code,
+            state: &q.state,
+            peer,
+        })
+        .await;
+    }
 
     if let Some(device_code) = q
         .state

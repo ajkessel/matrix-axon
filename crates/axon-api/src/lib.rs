@@ -52,7 +52,7 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
 pub use sender::{MessageSender, SendError};
-pub use state::AppState;
+pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
     ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
@@ -64,7 +64,7 @@ use axum::{
     body::Body,
     middleware::from_fn_with_state,
     response::Html,
-    routing::{get, post, put},
+    routing::{any, get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -253,10 +253,33 @@ pub fn router(state: AppState) -> Router {
             oauth::rate_limit::rate_limit,
         ));
 
+    let bootstrap_state = state.bootstrap.clone();
+    let bootstrap_router = Router::new()
+        .route("/bootstrap", any(routes::bootstrap::wrong_url))
+        .route("/bootstrap/token", any(routes::bootstrap::wrong_url))
+        .route(
+            "/bootstrap/oauth/{provider}",
+            any(routes::bootstrap::wrong_url),
+        )
+        .route("/bootstrap/{code}", get(routes::bootstrap::page))
+        .route(
+            "/bootstrap/{code}/token",
+            post(routes::bootstrap::issue_bearer),
+        )
+        .route(
+            "/bootstrap/{code}/oauth/{provider}",
+            get(routes::bootstrap::start_oauth),
+        )
+        .route_layer(from_fn_with_state(
+            bootstrap_state,
+            routes::bootstrap::require_allowed_peer,
+        ));
+
     Router::new()
         // Unversioned operational liveness probe — no auth (a monitor must reach
         // it without a token).
         .route("/healthz", get(healthz))
+        .merge(bootstrap_router)
         .merge(authed)
         // Live event fan-out. Not in the OpenAPI document — a WebSocket upgrade
         // isn't expressible in OpenAPI 3.1; the frame protocol is documented in

@@ -164,6 +164,15 @@ In another shell:
 curl localhost:8080/healthz     # -> {"status":"ok"}
 ```
 
+If the server starts interactively against a database with no Matrix accounts
+and no existing client credentials, it offers to arm a one-time web bootstrap.
+Accepting that prompt prints a per-boot `/bootstrap/<code>` URL, where you can
+create the first bearer token or, when OAuth is configured, bind and mint the
+first SSO-backed credential. The code is six unambiguous characters, and the
+web bootstrap locks for the rest of that process after six wrong bootstrap
+URLs. After any account, token, or OAuth identity exists, the web bootstrap
+closes permanently; use the backend CLI/admin paths for later credentials.
+
 CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` on every push. The pre-commit hook in `.githooks/` runs the fmt + clippy subset locally (enable with `./scripts/setup-hooks.sh`); bypass a single commit with `git commit --no-verify`.
 
 ### 5. Start over
@@ -217,6 +226,25 @@ axon token revoke --label my-client   # or by label, if it uniquely identifies o
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance. Supply the token to clients via their config file or environment; see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
+
+For first launch only, an interactive server can mint the first credential from
+the one-time `/bootstrap/<code>` URL printed at startup instead of requiring
+`axon token issue` in another shell. The bootstrap page is loopback-only by
+default. To allow a trusted remote browser during setup, set
+`server.bootstrap_web_allow_remote = true` (or
+`AXON_SERVER__BOOTSTRAP_WEB_ALLOW_REMOTE=true`) and make sure the server is
+fronted by TLS, a proxy, or a trusted network. If `server.web_client_url` is
+set, the bootstrap success page links to that web client after showing the
+token; the token is never placed in the URL.
+
+With `bootstrap_web_allow_remote = true`, any client that can reach the
+bootstrap surface — including one just probing it — shares the same
+six-wrong-URL lockout as the operator: six bad requests to `/bootstrap`,
+`/bootstrap/token`, `/bootstrap/oauth/{provider}`, or a wrong
+`/bootstrap/{code}` permanently close the bootstrap surface for the rest of
+the process, forcing a restart to try again. This is an availability risk on
+top of the confidentiality one, so treat remote bootstrap as no safer than
+any other unauthenticated surface exposed off loopback.
 
 To explicitly retry stored Unable-To-Decrypt events for an active account, call the authenticated API through the CLI wrapper:
 

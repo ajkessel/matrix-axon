@@ -14,7 +14,7 @@ mod common;
 
 use std::sync::Arc;
 
-use axon_api::{AppState, OAuthRuntime, OidcProvider};
+use axon_api::{AppState, BootstrapConfig, OAuthRuntime, OidcProvider};
 use axon_core::{OauthClientConfig, OauthConfig};
 use axon_store::Store;
 use axum::body::Body;
@@ -56,6 +56,13 @@ fn real_verifier(store: Store) -> Arc<dyn axon_api::TokenVerifier> {
 /// `issue_code`/`sign_identity_token` stand-ins for "the browser/native SDK
 /// did its part").
 fn app_with_oauth(store: Store) -> (axum::Router, Arc<TestOidcProvider>) {
+    app_with_oauth_bootstrap(store, None)
+}
+
+fn app_with_oauth_bootstrap(
+    store: Store,
+    bootstrap: Option<BootstrapConfig>,
+) -> (axum::Router, Arc<TestOidcProvider>) {
     let provider = Arc::new(TestOidcProvider::new(
         TEST_PROVIDER,
         TEST_ISSUER,
@@ -79,21 +86,23 @@ fn app_with_oauth(store: Store) -> (axum::Router, Arc<TestOidcProvider>) {
     let runtime = Arc::new(OAuthRuntime::new(&oauth_config, providers));
 
     let (live, _rx) = tokio::sync::broadcast::channel(16);
-    let app = axon_api::router(
-        AppState::new(
-            store.clone(),
-            live,
-            Arc::new(StubSender::ok("$unused:localhost")),
-            Arc::new(StubLifecycle::ok(Uuid::nil())),
-            Arc::new(StubVerification::ok("$unused-flow")),
-            Arc::new(StubTrust::ok()),
-            Arc::new(StubDeviceList::ok()),
-            real_verifier(store),
-            Arc::new(StubMediaProxy),
-            None,
-        )
-        .with_oauth(runtime),
-    );
+    let mut state = AppState::new(
+        store.clone(),
+        live,
+        Arc::new(StubSender::ok("$unused:localhost")),
+        Arc::new(StubLifecycle::ok(Uuid::nil())),
+        Arc::new(StubVerification::ok("$unused-flow")),
+        Arc::new(StubTrust::ok()),
+        Arc::new(StubDeviceList::ok()),
+        real_verifier(store),
+        Arc::new(StubMediaProxy),
+        None,
+    )
+    .with_oauth(runtime);
+    if let Some(bootstrap) = bootstrap {
+        state = state.with_bootstrap(bootstrap);
+    }
+    let app = axon_api::router(state);
     (app, provider)
 }
 
@@ -161,6 +170,147 @@ async fn post_form(app: &axum::Router, uri: &str, form: &[(&str, &str)]) -> (Sta
     (status, json)
 }
 
+async fn post_form_text(
+    app: &axum::Router,
+    uri: &str,
+    form: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(with_fake_connect_info(req))
+        .await
+        .expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body"),
+    )
+}
+
+async fn get_text(app: &axum::Router, uri: &str) -> (StatusCode, String) {
+    let resp = get_no_body(app, uri).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body"),
+    )
+}
+
+/// Like [`with_fake_connect_info`] but lets the caller pick the peer address,
+/// so a test can drive the `require_allowed_peer` gate from a non-loopback
+/// source.
+fn with_connect_info_addr(mut req: Request<Body>, addr: &str) -> Request<Body> {
+    let addr: std::net::SocketAddr = addr.parse().unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(addr));
+    req
+}
+
+async fn get_text_from(app: &axum::Router, uri: &str, peer: &str) -> (StatusCode, String) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(with_connect_info_addr(req, peer))
+        .await
+        .expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body"),
+    )
+}
+
+async fn post_form_text_from(
+    app: &axum::Router,
+    uri: &str,
+    form: &[(&str, &str)],
+    peer: &str,
+) -> (StatusCode, String) {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(with_connect_info_addr(req, peer))
+        .await
+        .expect("request");
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (
+        status,
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body"),
+    )
+}
+
+async fn reset_bootstrap_tables(store: &Store) {
+    for sql in [
+        "DELETE FROM oauth_authorization_requests",
+        "DELETE FROM oauth_bind_requests",
+        "DELETE FROM oauth_refresh_tokens",
+        "DELETE FROM tokens",
+        "DELETE FROM oauth_identities",
+        "DELETE FROM accounts",
+    ] {
+        sqlx_core::query::query(sql)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+}
+
+fn bootstrap_config() -> BootstrapConfig {
+    BootstrapConfig::new(
+        false,
+        "ABC234".to_owned(),
+        Some("https://web.test/app".to_owned()),
+    )
+}
+
+fn bootstrap_config_allow_remote() -> BootstrapConfig {
+    BootstrapConfig::new(true, "ABC234".to_owned(), None)
+}
+
+/// An arbitrary non-loopback address for exercising `bootstrap_web_allow_remote`.
+const REMOTE_PEER: &str = "203.0.113.7:54321";
+
+fn extract_pre(body: &str) -> String {
+    body.split("<pre>")
+        .nth(1)
+        .and_then(|rest| rest.split("</pre>").next())
+        .expect("pre token")
+        .to_owned()
+}
+
 async fn get_authed(app: &axum::Router, uri: &str, token: &str) -> StatusCode {
     let req = Request::builder()
         .method("GET")
@@ -169,6 +319,158 @@ async fn get_authed(app: &axum::Router, uri: &str, token: &str) -> StatusCode {
         .body(Body::empty())
         .unwrap();
     app.clone().oneshot(req).await.expect("request").status()
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn bootstrap_bearer_token_mints_once_and_then_closes() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let (app, _provider) = app_with_oauth_bootstrap(store.clone(), Some(bootstrap_config()));
+
+    let (status, body) = get_text(&app, "/bootstrap/ABC234").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Create bearer token"));
+    assert!(body.contains("Continue with test"));
+
+    let (status, body) = post_form_text(
+        &app,
+        "/bootstrap/ABC234/token",
+        &[("label", "browser setup")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = extract_pre(&body);
+    assert!(token.starts_with("axon_"));
+    assert!(body.contains(r#"href="https://web.test/app""#));
+    assert!(!body.contains(&format!("https://web.test/app?token={token}")));
+    assert!(
+        store.verify_token(&token).await.expect("verify").is_some(),
+        "the browser-shown token should verify"
+    );
+
+    let (status, _body) =
+        post_form_text(&app, "/bootstrap/ABC234/token", &[("label", "second")]).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    reset_bootstrap_tables(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn bootstrap_sso_binds_identity_and_returns_token_pair() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let (app, provider) = app_with_oauth_bootstrap(store.clone(), Some(bootstrap_config()));
+
+    let resp = get_no_body(&app, "/bootstrap/ABC234/oauth/test").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("Location header")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let upstream_url = url::Url::parse(&location).expect("upstream redirect is a URL");
+    let upstream_state = query_param(&upstream_url, "state");
+    let upstream_nonce = query_param(&upstream_url, "nonce");
+    assert!(upstream_state.starts_with("bootstrap:"));
+
+    let subject = format!("bootstrap-subject-{}", Uuid::new_v4());
+    let code = provider.issue_code(&subject, Some("owner@example.com"), &upstream_nonce);
+    let (status, body) = get_text(
+        &app,
+        &format!("/v1/oauth/test/callback?code={code}&state={upstream_state}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("SSO configured"));
+    assert!(body.contains("Access token"));
+    assert!(body.contains("Refresh token"));
+    assert!(body.contains(r#"href="https://web.test/app""#));
+
+    let identity = store
+        .find_identity(TEST_PROVIDER, &subject)
+        .await
+        .expect("find identity")
+        .expect("identity should be bound");
+    assert_eq!(identity.email.as_deref(), Some("owner@example.com"));
+    let listed = store.list_tokens().await.expect("list tokens");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].provider.as_deref(), Some(TEST_PROVIDER));
+
+    let resp = get_no_body(&app, "/bootstrap/ABC234/oauth/test").await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    reset_bootstrap_tables(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn bootstrap_wrong_urls_lock_the_web_surface() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+    let (app, _provider) = app_with_oauth_bootstrap(store.clone(), Some(bootstrap_config()));
+
+    let (status, _body) = post_form_text(&app, "/bootstrap/token", &[("label", "old path")]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for _ in 0..4 {
+        let (status, _body) = get_text(&app, "/bootstrap/WRONG2").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    let (status, _body) = get_text(&app, "/bootstrap/WRONG2").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _body) = get_text(&app, "/bootstrap/ABC234").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _body) =
+        post_form_text(&app, "/bootstrap/ABC234/token", &[("label", "locked")]).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    reset_bootstrap_tables(&store).await;
+}
+
+#[tokio::test]
+#[ignore = "requires empty Postgres"]
+async fn bootstrap_allow_remote_permits_non_loopback_peer() {
+    let store = store().await;
+    reset_bootstrap_tables(&store).await;
+
+    // Default (`allow_remote = false`): a non-loopback peer is turned away
+    // before it ever reaches the handler.
+    let (default_app, _provider) =
+        app_with_oauth_bootstrap(store.clone(), Some(bootstrap_config()));
+    let (status, _body) = get_text_from(&default_app, "/bootstrap/ABC234", REMOTE_PEER).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // `allow_remote = true`: the same peer can walk the full bootstrap flow
+    // and mint the first credential.
+    let (app, _provider) =
+        app_with_oauth_bootstrap(store.clone(), Some(bootstrap_config_allow_remote()));
+
+    let (status, body) = get_text_from(&app, "/bootstrap/ABC234", REMOTE_PEER).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Create bearer token"));
+
+    let (status, body) = post_form_text_from(
+        &app,
+        "/bootstrap/ABC234/token",
+        &[("label", "remote setup")],
+        REMOTE_PEER,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = extract_pre(&body);
+    assert!(
+        store.verify_token(&token).await.expect("verify").is_some(),
+        "the remotely-minted token should verify"
+    );
+
+    reset_bootstrap_tables(&store).await;
 }
 
 #[tokio::test]

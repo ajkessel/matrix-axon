@@ -10,7 +10,22 @@
 
 mod common;
 
-use common::migrated_store;
+use chrono::{Duration, Utc};
+use common::{migrated_store, raw_pool, test_account};
+use sqlx_postgres::PgPool;
+
+async fn reset_bootstrap_tables(pool: &PgPool) {
+    for sql in [
+        "DELETE FROM oauth_authorization_requests",
+        "DELETE FROM oauth_bind_requests",
+        "DELETE FROM oauth_refresh_tokens",
+        "DELETE FROM tokens",
+        "DELETE FROM oauth_identities",
+        "DELETE FROM accounts",
+    ] {
+        sqlx_core::query::query(sql).execute(pool).await.unwrap();
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -83,4 +98,129 @@ async fn revoked_token_no_longer_verifies() {
         !store.revoke_token(issued.id).await.expect("re-revoke"),
         "re-revoking reports no change"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn first_credential_bootstrap_mints_only_once() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    reset_bootstrap_tables(&pool).await;
+
+    assert!(
+        store
+            .first_credential_bootstrap_available()
+            .await
+            .expect("bootstrap state"),
+        "empty DB should allow first-credential bootstrap"
+    );
+    let issued = store
+        .issue_first_bootstrap_token("first")
+        .await
+        .expect("issue first")
+        .expect("first token should mint");
+    assert!(issued.token.starts_with("axon_"));
+    assert!(
+        !store
+            .first_credential_bootstrap_available()
+            .await
+            .expect("bootstrap state"),
+        "any token row closes bootstrap"
+    );
+    assert!(
+        store
+            .issue_first_bootstrap_token("second")
+            .await
+            .expect("issue second")
+            .is_none(),
+        "second bootstrap token should be refused"
+    );
+
+    reset_bootstrap_tables(&pool).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn revoked_token_and_account_rows_block_bootstrap() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    reset_bootstrap_tables(&pool).await;
+
+    let issued = store.issue_token("old").await.expect("issue");
+    store.revoke_token(issued.id).await.expect("revoke");
+    assert!(
+        !store
+            .first_credential_bootstrap_available()
+            .await
+            .expect("bootstrap state"),
+        "revoked historical tokens still close bootstrap"
+    );
+
+    reset_bootstrap_tables(&pool).await;
+    let _account_id = test_account(&store, "bootstrap-block").await;
+    assert!(
+        !store
+            .first_credential_bootstrap_available()
+            .await
+            .expect("bootstrap state"),
+        "any Matrix account row closes bootstrap"
+    );
+
+    reset_bootstrap_tables(&pool).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn first_oauth_bootstrap_binds_identity_and_mints_tokens_once() {
+    let store = migrated_store().await;
+    let pool = raw_pool().await;
+    reset_bootstrap_tables(&pool).await;
+
+    let pair = store
+        .issue_first_oauth_token_pair(
+            "google",
+            "subject-1",
+            Some("owner@example.com"),
+            "bootstrap-web",
+            Utc::now() + Duration::hours(1),
+            Utc::now() + Duration::days(30),
+        )
+        .await
+        .expect("issue oauth")
+        .expect("first oauth bootstrap should mint");
+    assert!(pair.access_token.starts_with("axon_"));
+    assert!(pair.refresh_token.starts_with("axon_rt_"));
+    assert!(
+        store
+            .verify_token(&pair.access_token)
+            .await
+            .expect("verify")
+            .is_some(),
+        "bootstrap OAuth access token should verify"
+    );
+    assert!(
+        store
+            .find_identity("google", "subject-1")
+            .await
+            .expect("find identity")
+            .is_some(),
+        "bootstrap OAuth should bind the first identity"
+    );
+    assert!(
+        store
+            .issue_first_oauth_token_pair(
+                "google",
+                "subject-2",
+                None,
+                "bootstrap-web",
+                Utc::now() + Duration::hours(1),
+                Utc::now() + Duration::days(30),
+            )
+            .await
+            .expect("issue second oauth")
+            .is_none(),
+        "second bootstrap OAuth credential should be refused"
+    );
+
+    reset_bootstrap_tables(&pool).await;
 }

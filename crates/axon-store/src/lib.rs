@@ -43,7 +43,7 @@ pub use search::{
     SEARCH_OUTBOX_ROOM_PURGE_PREFIX,
 };
 pub use state::{AccountDataRow, AccountDataUpsert, RoomStateRow, RoomStateUpsert};
-pub use tokens::{IssuedToken, Token};
+pub use tokens::{IssuedOAuthTokenPair, IssuedToken, Token};
 
 use sqlx_postgres::{PgPool, PgPoolOptions};
 

@@ -87,6 +87,25 @@ pub struct ServerConfig {
     /// trusted-network or testing scenarios. Defaults to `false`.
     #[serde(default)]
     pub allow_insecure_bind: bool,
+    /// Permit the one-time first-credential web bootstrap from non-loopback
+    /// peers. Defaults to `false`, so an armed bootstrap is reachable only from
+    /// localhost unless the operator explicitly opts into remote setup.
+    ///
+    /// The bootstrap surface's six-wrong-URL lockout counter is process-local
+    /// and shared by every caller, not per-peer — enabling this turns that
+    /// counter into a remotely triggerable denial of service against the
+    /// operator's own setup flow (six bad requests from anywhere permanently
+    /// close bootstrap for the rest of the process). Only set this behind
+    /// TLS, a proxy, or a trusted network, same as any other non-loopback
+    /// exposure.
+    #[serde(default)]
+    pub bootstrap_web_allow_remote: bool,
+    /// Optional URL for the human-facing web client. When set, the one-time
+    /// bootstrap success pages link there after showing the freshly minted
+    /// credential. This is deliberately separate from `oauth.external_base_url`,
+    /// which names the Axon API's public callback base.
+    #[serde(default)]
+    pub web_client_url: Option<String>,
 }
 
 /// Postgres connection settings.
@@ -712,6 +731,8 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             allow_insecure_bind: false,
+            bootstrap_web_allow_remote: false,
+            web_client_url: None,
         }
     }
 }
@@ -912,6 +933,53 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_web_allow_remote_defaults_false_and_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(
+                !Config::load(None)
+                    .expect("load")
+                    .server
+                    .bootstrap_web_allow_remote
+            );
+
+            jail.set_env("AXON_SERVER__BOOTSTRAP_WEB_ALLOW_REMOTE", "true");
+            assert!(
+                Config::load(None)
+                    .expect("load")
+                    .server
+                    .bootstrap_web_allow_remote
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn web_client_url_defaults_none_and_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(Config::load(None)
+                .expect("load")
+                .server
+                .web_client_url
+                .is_none());
+
+            jail.set_env("AXON_SERVER__WEB_CLIENT_URL", "https://axon.example/app");
+            assert_eq!(
+                Config::load(None)
+                    .expect("load")
+                    .server
+                    .web_client_url
+                    .as_deref(),
+                Some("https://axon.example/app")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn startup_utd_redecrypt_defaults_false_and_parses_from_env() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
@@ -973,6 +1041,8 @@ mod tests {
                 host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
                 port: 1234,
                 allow_insecure_bind: false,
+                bootstrap_web_allow_remote: false,
+                web_client_url: None,
             },
             database: DatabaseConfig {
                 url: "x".into(),
