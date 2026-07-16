@@ -21,8 +21,40 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
+use crate::dto::ThumbnailQuery;
 use crate::media::{MediaError, MediaProxy, MediaResource};
 use crate::response::ApiError;
+
+/// Dimension clamp bounds for the thumbnail route — a requested `width`/
+/// `height` outside this range is clamped, not rejected (same "clamp, don't
+/// 400" convention as the pagination `limit` in `rooms.rs`/`search.rs`).
+const MIN_THUMBNAIL_DIMENSION: u32 = 16;
+const MAX_THUMBNAIL_DIMENSION: u32 = 1600;
+
+/// Standard sizes a clamped dimension snaps *up* to (never down, so the
+/// served thumbnail is never smaller than requested). Two purposes: it bounds
+/// how many distinct `(width, height, method)` cache entries a single
+/// `mxc_url` can accumulate (an unbounded range would otherwise let a client
+/// multiply cache entries per pixel requested), and it mirrors the small
+/// preset list a homeserver running with on-demand thumbnailing disabled
+/// (e.g. Synapse's default `dynamic_thumbnails: false`) actually serves, so a
+/// request is more likely to match a size the homeserver has pre-generated
+/// instead of failing against every non-preset size. `MAX_THUMBNAIL_DIMENSION`
+/// is included so the clamp's own ceiling is always representable.
+const THUMBNAIL_SIZE_BUCKETS: &[u32] = &[32, 96, 320, 640, 800, MAX_THUMBNAIL_DIMENSION];
+
+/// Clamp `requested` into `[MIN_THUMBNAIL_DIMENSION, MAX_THUMBNAIL_DIMENSION]`,
+/// then snap up to the smallest [`THUMBNAIL_SIZE_BUCKETS`] entry that still
+/// covers it (falling back to the clamp ceiling if none does, which cannot
+/// currently happen since the ceiling is itself the last bucket).
+fn snap_thumbnail_dimension(requested: u32) -> u32 {
+    let clamped = requested.clamp(MIN_THUMBNAIL_DIMENSION, MAX_THUMBNAIL_DIMENSION);
+    THUMBNAIL_SIZE_BUCKETS
+        .iter()
+        .copied()
+        .find(|&bucket| bucket >= clamped)
+        .unwrap_or(MAX_THUMBNAIL_DIMENSION)
+}
 
 /// Return the encrypted-file descriptor whose URL matches the requested MXC.
 ///
@@ -224,11 +256,13 @@ fn if_none_match_matches(header: Option<&str>, etag_quoted: &str) -> bool {
         (status = 206, description = "Partial media bytes for a satisfiable `Range` request (with `Content-Range`)."),
         (status = 304, description = "The `If-None-Match` entity tag matched; body omitted."),
         (status = 400, description = "Syntactically invalid MXC URI components", body = crate::response::ErrorResponse),
+        (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
         (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
         (status = 413, description = "The media object exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
         (status = 416, description = "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).", body = crate::response::ErrorResponse),
         (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
         (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account's homeserver connection is not currently established", body = crate::response::ErrorResponse),
     ),
     tag = "media",
 )]
@@ -240,20 +274,7 @@ pub async fn get_media(
 ) -> Result<Response, ApiError> {
     let mxc_url = format!("mxc://{server_name}/{media_id}");
 
-    // Fail closed: if no event row is found we cannot determine whether the
-    // media is encrypted. Serving ciphertext as plain bytes under 200 is worse
-    // than a 404. Also fail when content is NULL — a redacted or not-yet-
-    // decrypted (UTD) event — for the same reason.
-    let event = store
-        .get_event_by_mxc_url(account_id, &mxc_url)
-        .await?
-        .ok_or_else(|| ApiError::from(MediaError::NotFound(mxc_url.clone())))?;
-
-    let content = event.content.ok_or_else(|| {
-        ApiError::from(MediaError::NotFound(format!(
-            "media unavailable (redacted or not yet decrypted): {mxc_url}"
-        )))
-    })?;
+    let content = resolve_media_content(&store, account_id, &mxc_url).await?;
 
     // Conditional GET: the entity tag is content-addressed (a hash of the MXC
     // URI) and needs no download, so answer `304` *before* fetching. This is
@@ -269,17 +290,192 @@ pub async fn get_media(
     let encrypted_file = encrypted_file_for_mxc(&content, &mxc_url);
     let content_type = content_type_for_mxc(&content, &mxc_url);
 
-    let resource = match proxy.get_media(account_id, &mxc_url, encrypted_file).await {
-        Ok(resource) => resource,
-        Err(err) => {
-            // The 500 body is generic, so log the real cause with the account
-            // before converting (per the structured-logging convention).
-            if let MediaError::Internal(detail) = &err {
-                tracing::error!(%account_id, mxc = %mxc_url, error = %detail, "media proxy internal error");
-            }
-            return Err(err.into());
-        }
-    };
+    let resource = proxy
+        .get_media(account_id, &mxc_url, encrypted_file)
+        .await
+        .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_media", err))?;
+
+    let range = header_str(&headers, header::RANGE);
+    serve_media(account_id, resource, content_type, range, etag).await
+}
+
+/// Validate a thumbnail request against the resolved event content, producing
+/// the [`ThumbnailSpec`](axon_core::media::ThumbnailSpec) to fetch — or a
+/// `400` if the media is encrypted (a homeserver can only thumbnail
+/// plaintext it can see; see the module-level note on
+/// `axon-sync::SdkMediaProxy::download_thumbnail`). Pure — no I/O — so it's
+/// unit-testable without a store or homeserver.
+fn resolve_thumbnail_spec(
+    content: &Value,
+    mxc_url: &str,
+    query: ThumbnailQuery,
+) -> Result<axon_core::media::ThumbnailSpec, ApiError> {
+    if encrypted_file_for_mxc(content, mxc_url).is_some() {
+        return Err(ApiError::bad_request(format!(
+            "cannot generate a homeserver thumbnail of encrypted media: {mxc_url}"
+        )));
+    }
+    let width = snap_thumbnail_dimension(query.width);
+    let height = snap_thumbnail_dimension(query.height);
+    let method = query
+        .method
+        .map(axon_core::media::ThumbnailMethod::from)
+        .unwrap_or(axon_core::media::ThumbnailMethod::Scale);
+    Ok(axon_core::media::ThumbnailSpec {
+        width,
+        height,
+        method,
+    })
+}
+
+/// Recognize a well-known image format from its leading magic bytes. Used to
+/// correct `Content-Type` for a homeserver-generated thumbnail, which may be
+/// re-encoded into a different format than the original's declared mimetype
+/// (e.g. a PNG source thumbnailed to JPEG by Synapse) — sniffing the actual
+/// returned bytes is strictly more trustworthy here than trusting the
+/// original's sender-controlled declaration, since the bytes themselves are
+/// homeserver-generated. Only recognizes formats already in
+/// [`is_inline_safe`]'s allowlist, so a positive match is always safe to
+/// serve with its own declared type.
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Correct `declared` (the original's `Content-Type`, from
+/// [`content_type_for_mxc`]) by sniffing the actual thumbnail bytes' magic
+/// number — see [`sniff_image_mime`]. Falls back to `declared` unchanged when
+/// the bytes don't match a recognized signature (e.g. the homeserver returned
+/// a format this function doesn't recognize).
+///
+/// Reads a few leading bytes and seeks the file back to the start, so it must
+/// run before any other read/seek on `resource.file` — in particular, before
+/// [`serve_media`], which assumes the cursor starts at `0` for a full-body
+/// response.
+async fn correct_thumbnail_content_type(resource: &mut MediaResource, declared: String) -> String {
+    let mut magic = [0u8; 12];
+    let n = resource.file.read(&mut magic).await.unwrap_or(0);
+    let _ = resource.file.seek(SeekFrom::Start(0)).await;
+    sniff_image_mime(&magic[..n])
+        .map(str::to_owned)
+        .unwrap_or(declared)
+}
+
+/// Resolve the event owning `mxc_url` and its content, failing closed (`404`)
+/// if the event is missing, or if its content is `NULL` (redacted or a
+/// not-yet-decrypted UTD event) — we cannot determine whether the media is
+/// encrypted without it, and serving ciphertext as plain bytes under `200`
+/// would be worse than a `404`. Shared by [`get_media`] and
+/// [`get_media_thumbnail`].
+async fn resolve_media_content(
+    store: &Store,
+    account_id: Uuid,
+    mxc_url: &str,
+) -> Result<Value, ApiError> {
+    let event = store
+        .get_event_by_mxc_url(account_id, mxc_url)
+        .await?
+        .ok_or_else(|| ApiError::from(MediaError::NotFound(mxc_url.to_owned())))?;
+
+    event.content.ok_or_else(|| {
+        ApiError::from(MediaError::NotFound(format!(
+            "media unavailable (redacted or not yet decrypted): {mxc_url}"
+        )))
+    })
+}
+
+/// Convert a [`MediaProxy`] failure into the response the client sees,
+/// logging a `MediaError::Internal` detail (with account/mxc context) first
+/// — the `500` body itself is generic, so the real cause must be logged
+/// before converting, per the structured-logging convention. `route`
+/// disambiguates the full-media and thumbnail call sites in the log. Shared
+/// by [`get_media`] and [`get_media_thumbnail`].
+fn log_and_convert_media_error(
+    account_id: Uuid,
+    mxc_url: &str,
+    route: &'static str,
+    err: MediaError,
+) -> ApiError {
+    if let MediaError::Internal(detail) = &err {
+        tracing::error!(%account_id, mxc = %mxc_url, route, error = %detail, "media proxy internal error");
+    }
+    err.into()
+}
+
+/// Proxy a homeserver-generated thumbnail of an `mxc://` object through the
+/// account's homeserver connection.
+///
+/// Shares [`get_media`]'s event lookup (via [`resolve_media_content`]) and
+/// conditional-GET/range-serving machinery, but resolves a resized variant
+/// via [`MediaProxy::get_thumbnail`] instead of the full original, and
+/// corrects `Content-Type` by sniffing the returned bytes (see
+/// [`correct_thumbnail_content_type`]) since a homeserver-regenerated
+/// thumbnail may not match the original's declared mimetype. Encrypted media
+/// is rejected with `400` before the proxy is ever called — see
+/// [`resolve_thumbnail_spec`].
+#[utoipa::path(
+    get,
+    path = "/v1/media/{account_id}/{server_name}/{media_id}/thumbnail",
+    params(
+        ("account_id" = Uuid, Path, description = "Axon account whose credentials are used for the download"),
+        ("server_name" = String, Path, description = "Server-name component of the MXC URI (the part after `mxc://`)"),
+        ("media_id" = String, Path, description = "Media-ID component of the MXC URI"),
+        ThumbnailQuery,
+    ),
+    responses(
+        (status = 200, description = "Thumbnail bytes, generated by the homeserver. `Content-Type` is the original's declared MIME type, corrected by sniffing the returned bytes' magic number if the homeserver re-encoded to a different recognized image format (e.g. a PNG source thumbnailed to JPEG); `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`, and `ETag` are set."),
+        (status = 206, description = "Partial thumbnail bytes for a satisfiable `Range` request (with `Content-Range`)."),
+        (status = 304, description = "The `If-None-Match` entity tag matched; body omitted."),
+        (status = 400, description = "Syntactically invalid MXC URI components, or the media is encrypted — a homeserver cannot thumbnail ciphertext it cannot decrypt", body = crate::response::ErrorResponse),
+        (status = 403, description = "The homeserver denied access to this media object", body = crate::response::ErrorResponse),
+        (status = 404, description = "Account not found, or media not found on the homeserver", body = crate::response::ErrorResponse),
+        (status = 413, description = "The thumbnail exceeds the configured per-object cache limit", body = crate::response::ErrorResponse),
+        (status = 416, description = "The requested `Range` is not satisfiable (with `Content-Range: bytes */len`).", body = crate::response::ErrorResponse),
+        (status = 500, description = "Internal media-metadata lookup failure", body = crate::response::ErrorResponse),
+        (status = 502, description = "The homeserver was unreachable or returned an error", body = crate::response::ErrorResponse),
+        (status = 503, description = "The account's homeserver connection is not currently established", body = crate::response::ErrorResponse),
+    ),
+    tag = "media",
+)]
+pub async fn get_media_thumbnail(
+    State(proxy): State<Arc<dyn MediaProxy>>,
+    State(store): State<Store>,
+    Path((account_id, server_name, media_id)): Path<(Uuid, String, String)>,
+    crate::extract::Query(query): crate::extract::Query<ThumbnailQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let mxc_url = format!("mxc://{server_name}/{media_id}");
+
+    let content = resolve_media_content(&store, account_id, &mxc_url).await?;
+
+    let spec = resolve_thumbnail_spec(&content, &mxc_url, query)?;
+
+    let etag = format!("\"{}\"", proxy.etag_thumbnail(&mxc_url, spec));
+    let if_none_match = header_str(&headers, header::IF_NONE_MATCH);
+    if if_none_match_matches(if_none_match.as_deref(), &etag) {
+        return Ok(not_modified(&etag));
+    }
+
+    let declared_content_type = content_type_for_mxc(&content, &mxc_url);
+
+    let mut resource = proxy
+        .get_thumbnail(account_id, &mxc_url, spec)
+        .await
+        .map_err(|err| log_and_convert_media_error(account_id, &mxc_url, "get_thumbnail", err))?;
+
+    // The homeserver may have re-encoded the thumbnail into a different
+    // format than the original's declared mimetype — see
+    // `correct_thumbnail_content_type`'s doc.
+    let content_type = correct_thumbnail_content_type(&mut resource, declared_content_type).await;
 
     let range = header_str(&headers, header::RANGE);
     serve_media(account_id, resource, content_type, range, etag).await
@@ -433,6 +629,98 @@ mod tests {
     }
 
     #[test]
+    fn resolve_thumbnail_spec_rejects_encrypted_media() {
+        let content = json!({
+            "file": { "url": "mxc://example.org/main", "key": "main" }
+        });
+        let query = ThumbnailQuery {
+            width: 64,
+            height: 64,
+            method: None,
+        };
+        let err = resolve_thumbnail_spec(&content, "mxc://example.org/main", query).unwrap_err();
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn resolve_thumbnail_spec_clamps_and_snaps_dimensions() {
+        let content = json!({ "url": "mxc://example.org/main" });
+        let query = ThumbnailQuery {
+            width: 1,
+            height: 1_000_000,
+            method: None,
+        };
+        let spec = resolve_thumbnail_spec(&content, "mxc://example.org/main", query).unwrap();
+        // width=1 clamps up to MIN_THUMBNAIL_DIMENSION (16), then snaps up to
+        // the smallest covering bucket (32).
+        assert_eq!(spec.width, 32);
+        // height=1_000_000 clamps down to MAX_THUMBNAIL_DIMENSION (1600),
+        // which is itself the last bucket.
+        assert_eq!(spec.height, MAX_THUMBNAIL_DIMENSION);
+    }
+
+    #[test]
+    fn snap_thumbnail_dimension_snaps_up_to_nearest_bucket() {
+        assert_eq!(snap_thumbnail_dimension(1), 32);
+        assert_eq!(snap_thumbnail_dimension(32), 32);
+        assert_eq!(snap_thumbnail_dimension(33), 96);
+        assert_eq!(snap_thumbnail_dimension(96), 96);
+        assert_eq!(snap_thumbnail_dimension(321), 640);
+    }
+
+    #[test]
+    fn snap_thumbnail_dimension_never_undersizes_or_exceeds_the_ceiling() {
+        for requested in [1, 16, 32, 100, 321, 801, 1600, 1_000_000] {
+            let snapped = snap_thumbnail_dimension(requested);
+            assert!(
+                snapped >= requested.clamp(MIN_THUMBNAIL_DIMENSION, MAX_THUMBNAIL_DIMENSION),
+                "snap({requested}) = {snapped} must never undersize the clamped request"
+            );
+            assert!(snapped <= MAX_THUMBNAIL_DIMENSION);
+        }
+    }
+
+    #[test]
+    fn sniff_image_mime_recognizes_common_formats() {
+        assert_eq!(
+            sniff_image_mime(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(sniff_image_mime(b"\xFF\xD8\xFFrest"), Some("image/jpeg"));
+        assert_eq!(sniff_image_mime(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(
+            sniff_image_mime(b"RIFF\x00\x00\x00\x00WEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_image_mime(b"not an image"), None);
+        assert_eq!(sniff_image_mime(b""), None);
+    }
+
+    #[test]
+    fn resolve_thumbnail_spec_defaults_method_to_scale() {
+        let content = json!({ "url": "mxc://example.org/main" });
+        let query = ThumbnailQuery {
+            width: 64,
+            height: 64,
+            method: None,
+        };
+        let spec = resolve_thumbnail_spec(&content, "mxc://example.org/main", query).unwrap();
+        assert_eq!(spec.method, axon_core::media::ThumbnailMethod::Scale);
+    }
+
+    #[test]
+    fn resolve_thumbnail_spec_honors_explicit_crop() {
+        let content = json!({ "url": "mxc://example.org/main" });
+        let query = ThumbnailQuery {
+            width: 64,
+            height: 64,
+            method: Some(crate::dto::ThumbnailMethodDto::Crop),
+        };
+        let spec = resolve_thumbnail_spec(&content, "mxc://example.org/main", query).unwrap();
+        assert_eq!(spec.method, axon_core::media::ThumbnailMethod::Crop);
+    }
+
+    #[test]
     fn ignores_nonmatching_encrypted_descriptors() {
         let content = json!({
             "file": { "url": "mxc://example.org/other" },
@@ -572,6 +860,25 @@ mod tests {
             len: bytes.len() as u64,
             etag: "unused".to_owned(), // serve_media takes the etag as an argument
         }
+    }
+
+    #[tokio::test]
+    async fn correct_thumbnail_content_type_overrides_on_recognized_signature() {
+        let mut resource = resource_from(b"\x89PNG\r\n\x1a\nrest-of-file").await;
+        let corrected =
+            correct_thumbnail_content_type(&mut resource, "image/jpeg".to_owned()).await;
+        assert_eq!(corrected, "image/png");
+        // The cursor must be back at the start for the subsequent full-body serve.
+        let mut buf = Vec::new();
+        resource.file.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"\x89PNG\r\n\x1a\nrest-of-file");
+    }
+
+    #[tokio::test]
+    async fn correct_thumbnail_content_type_falls_back_when_unrecognized() {
+        let mut resource = resource_from(b"not an image").await;
+        let corrected = correct_thumbnail_content_type(&mut resource, "image/png".to_owned()).await;
+        assert_eq!(corrected, "image/png");
     }
 
     #[tokio::test]

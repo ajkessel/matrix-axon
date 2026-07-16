@@ -730,6 +730,19 @@ impl MediaProxy for StubMediaProxy {
     fn etag(&self, mxc_url: &str) -> String {
         format!("stub-{mxc_url}")
     }
+
+    async fn get_thumbnail(
+        &self,
+        _account_id: Uuid,
+        _mxc_url: &str,
+        _spec: axon_core::media::ThumbnailSpec,
+    ) -> Result<MediaResource, MediaError> {
+        Err(MediaError::NotFound("stub: no thumbnail".to_owned()))
+    }
+
+    fn etag_thumbnail(&self, mxc_url: &str, _spec: axon_core::media::ThumbnailSpec) -> String {
+        format!("stub-thumb-{mxc_url}")
+    }
 }
 
 /// Build a [`MediaResource`] backed by an open (then unlinked) temp file, the
@@ -758,6 +771,14 @@ pub struct MediaCall {
     pub encrypted_file: Option<serde_json::Value>,
 }
 
+/// One thumbnail call recorded by [`ConfiguredMediaProxy`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThumbnailCall {
+    pub account_id: Uuid,
+    pub mxc_url: String,
+    pub spec: axon_core::media::ThumbnailSpec,
+}
+
 /// The outcome [`ConfiguredMediaProxy`] returns for every call.
 #[derive(Clone)]
 pub enum MediaOutcome {
@@ -770,6 +791,7 @@ pub enum MediaOutcome {
 pub struct ConfiguredMediaProxy {
     outcome: MediaOutcome,
     calls: Mutex<Vec<MediaCall>>,
+    thumbnail_calls: Mutex<Vec<ThumbnailCall>>,
 }
 
 impl ConfiguredMediaProxy {
@@ -777,6 +799,7 @@ impl ConfiguredMediaProxy {
         Self {
             outcome: MediaOutcome::Ok(data.to_vec()),
             calls: Mutex::new(Vec::new()),
+            thumbnail_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -784,11 +807,27 @@ impl ConfiguredMediaProxy {
         Self {
             outcome,
             calls: Mutex::new(Vec::new()),
+            thumbnail_calls: Mutex::new(Vec::new()),
         }
     }
 
     pub fn calls(&self) -> Vec<MediaCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub fn thumbnail_calls(&self) -> Vec<ThumbnailCall> {
+        self.thumbnail_calls.lock().unwrap().clone()
+    }
+
+    /// The configured outcome, materialized into a result — shared by
+    /// `get_media` and `get_thumbnail`, which differ only in which call log
+    /// they record to before resolving this.
+    async fn resource_from_outcome(&self) -> Result<MediaResource, MediaError> {
+        match &self.outcome {
+            MediaOutcome::Ok(data) => Ok(media_resource_from(data).await),
+            MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
+            MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
+        }
     }
 }
 
@@ -805,15 +844,32 @@ impl MediaProxy for ConfiguredMediaProxy {
             mxc_url: mxc_url.to_owned(),
             encrypted_file,
         });
-        match &self.outcome {
-            MediaOutcome::Ok(data) => Ok(media_resource_from(data).await),
-            MediaOutcome::Forbidden(message) => Err(MediaError::Forbidden(message.clone())),
-            MediaOutcome::NotConnected(message) => Err(MediaError::NotConnected(message.clone())),
-        }
+        self.resource_from_outcome().await
     }
 
     fn etag(&self, mxc_url: &str) -> String {
         format!("configured-{mxc_url}")
+    }
+
+    async fn get_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: axon_core::media::ThumbnailSpec,
+    ) -> Result<MediaResource, MediaError> {
+        self.thumbnail_calls.lock().unwrap().push(ThumbnailCall {
+            account_id,
+            mxc_url: mxc_url.to_owned(),
+            spec,
+        });
+        self.resource_from_outcome().await
+    }
+
+    fn etag_thumbnail(&self, mxc_url: &str, spec: axon_core::media::ThumbnailSpec) -> String {
+        format!(
+            "configured-thumb-{mxc_url}-{}x{}-{}",
+            spec.width, spec.height, spec.method
+        )
     }
 }
 

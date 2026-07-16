@@ -14,9 +14,11 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axon_core::media::{ThumbnailMethod, ThumbnailSpec};
 use axon_media::{FetchError, MediaFetcher};
-use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
 use matrix_sdk::ruma::{
+    api::client::media::get_content_thumbnail::v3::Method as SdkThumbnailMethod,
     api::error::ErrorKind,
     events::room::{EncryptedFile, MediaSource},
 };
@@ -96,6 +98,66 @@ impl SdkMediaProxy {
 
         Ok(data)
     }
+
+    /// Request a homeserver-generated thumbnail of `mxc_url` at `spec`'s
+    /// dimensions/method, bounded by the same fetch timeout as [`download`].
+    ///
+    /// **Plain media only.** `Media::get_media_content` (matrix-sdk 0.18.0)
+    /// only honors `MediaFormat::Thumbnail` when `request.source` is
+    /// `MediaSource::Plain` — the `Encrypted` arm always downloads and
+    /// decrypts the full ciphertext regardless of `format`, since a
+    /// homeserver never sees encrypted-media plaintext to thumbnail. The API
+    /// layer rejects encrypted media with a `400` before this is ever called,
+    /// so there is no `encrypted_file` parameter here.
+    async fn download_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: ThumbnailSpec,
+    ) -> Result<Vec<u8>, GatewayError> {
+        axon_media::parse_mxc(mxc_url)
+            .ok_or_else(|| GatewayError::Invalid(format!("invalid MXC URI: {mxc_url}")))?;
+
+        let client = self.manager.get_or_connect(account_id).await?;
+
+        let request = MediaRequestParameters {
+            source: MediaSource::Plain(mxc_url.into()),
+            format: MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(
+                to_sdk_method(spec.method),
+                spec.width.into(),
+                spec.height.into(),
+            )),
+        };
+
+        let media = client.media();
+        let download = media.get_media_content(&request, false);
+        let data = tokio::time::timeout(self.fetch_timeout, download)
+            .await
+            .map_err(|_| {
+                GatewayError::Upstream(format!(
+                    "media thumbnail download timed out after {}s",
+                    self.fetch_timeout.as_secs()
+                ))
+            })?
+            .map_err(|error| {
+                if error.client_api_error_kind() == Some(&ErrorKind::NotFound) {
+                    GatewayError::MediaNotFound(mxc_url.to_owned())
+                } else {
+                    GatewayError::Upstream(error.to_string())
+                }
+            })?;
+
+        Ok(data)
+    }
+}
+
+/// Map the shared, SDK-free [`ThumbnailMethod`] onto the SDK/ruma `Method`
+/// that [`MediaThumbnailSettings`] needs.
+fn to_sdk_method(method: ThumbnailMethod) -> SdkThumbnailMethod {
+    match method {
+        ThumbnailMethod::Crop => SdkThumbnailMethod::Crop,
+        ThumbnailMethod::Scale => SdkThumbnailMethod::Scale,
+    }
 }
 
 #[async_trait]
@@ -107,6 +169,17 @@ impl MediaFetcher for SdkMediaProxy {
         encrypted_file: Option<serde_json::Value>,
     ) -> Result<Vec<u8>, FetchError> {
         self.download(account_id, mxc_url, encrypted_file)
+            .await
+            .map_err(gateway_to_fetch)
+    }
+
+    async fn fetch_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: ThumbnailSpec,
+    ) -> Result<Vec<u8>, FetchError> {
+        self.download_thumbnail(account_id, mxc_url, spec)
             .await
             .map_err(gateway_to_fetch)
     }

@@ -89,4 +89,23 @@ pub trait MediaProxy: Send + Sync {
     /// URI). The handler uses it to answer a conditional GET (`If-None-Match`)
     /// with `304` before triggering a fetch on a cache miss.
     fn etag(&self, mxc_url: &str) -> String;
+
+    /// Resolve a homeserver-generated thumbnail of `mxc_url` at `spec`'s
+    /// dimensions/method, using the given account's credentials.
+    ///
+    /// **Plain media only** — the thumbnail route handler has already
+    /// rejected encrypted media with a `400` before this is ever invoked (a
+    /// homeserver never sees encrypted-media plaintext, so it cannot
+    /// thumbnail it), so unlike [`get_media`](Self::get_media) there is no
+    /// `encrypted_file` parameter.
+    async fn get_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: axon_core::media::ThumbnailSpec,
+    ) -> Result<MediaResource, MediaError>;
+
+    /// The thumbnail-aware sibling of [`etag`](Self::etag) — content-addressed
+    /// on `(mxc_url, spec)`, computed without any download.
+    fn etag_thumbnail(&self, mxc_url: &str, spec: axon_core::media::ThumbnailSpec) -> String;
 }

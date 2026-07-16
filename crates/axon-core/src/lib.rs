@@ -8,6 +8,7 @@
 pub mod config;
 pub mod error;
 pub mod live;
+pub mod media;
 pub mod message;
 pub mod secret;
 
@@ -20,5 +21,6 @@ pub use live::{
     DeviceStateFrame, LiveEvent, LiveFrame, SenderTrustFrame, VerificationFrame,
     VerificationFrameKind,
 };
+pub use media::{ThumbnailMethod, ThumbnailSpec};
 pub use message::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use secret::{generate_opaque_secret, hash_secret};

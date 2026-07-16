@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use axon_core::config::MediaConfig;
+use axon_core::media::ThumbnailSpec;
 
 /// What the injected downloader can report. The cache passes these through
 /// unchanged so the composition-root adapter maps them onto `axon-api`'s
@@ -74,6 +75,19 @@ pub trait MediaFetcher: Send + Sync {
         mxc_url: &str,
         encrypted_file: Option<Value>,
     ) -> Result<Vec<u8>, FetchError>;
+
+    /// Fetch a homeserver-generated thumbnail of `mxc_url` at `spec`'s
+    /// dimensions/method, using `account_id`'s credentials. Plain
+    /// (unencrypted) media only — the API layer rejects encrypted media with
+    /// a `400` before this is ever called, so there is no `encrypted_file`
+    /// parameter (a homeserver never sees encrypted-media plaintext, so it
+    /// cannot thumbnail it).
+    async fn fetch_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: ThumbnailSpec,
+    ) -> Result<Vec<u8>, FetchError>;
 }
 
 /// A resolved media object, ready to serve. Holds an **open** file handle whose
@@ -84,9 +98,11 @@ pub struct MediaResource {
     pub file: tokio::fs::File,
     /// Total length in bytes.
     pub len: u64,
-    /// A stable, content-addressed entity tag (the sha256 of the MXC URI), used
-    /// for `ETag` / `If-None-Match`. MXC content is immutable, so this never
-    /// changes for a given URI.
+    /// A stable, content-addressed entity tag, used for `ETag` /
+    /// `If-None-Match`: `sha256(mxc_url)` for a full-resolution original (see
+    /// [`etag_for`]), or `sha256("thumb:{mxc_url}:{w}x{h}:{method}")` for a
+    /// thumbnail variant (see [`etag_for_thumbnail`]). MXC content is
+    /// immutable, so this never changes for a given URI (or URI+spec).
     pub etag: String,
     /// Decrements [`Inner::open_handles`] on drop — see that field's doc.
     _open_guard: HandleGuard,
@@ -247,44 +263,80 @@ impl MediaCache {
         fetcher: &dyn MediaFetcher,
     ) -> Result<MediaResource, MediaCacheError> {
         let hash = etag_for(mxc_url);
+        self.get_or_fetch_keyed(account_id, &hash, || {
+            fetcher.fetch(account_id, mxc_url, encrypted_file)
+        })
+        .await
+    }
 
+    /// The thumbnail-aware sibling of [`get_or_fetch`](Self::get_or_fetch):
+    /// same single-flight/LRU/eviction behavior, keyed by `(account_id,
+    /// mxc_url, spec)` via [`etag_for_thumbnail`] rather than the bare
+    /// `mxc_url`, so a thumbnail variant is cached independently of (and
+    /// never collides with) the full-resolution original.
+    pub async fn get_or_fetch_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: ThumbnailSpec,
+        fetcher: &dyn MediaFetcher,
+    ) -> Result<MediaResource, MediaCacheError> {
+        let hash = etag_for_thumbnail(mxc_url, spec);
+        self.get_or_fetch_keyed(account_id, &hash, || {
+            fetcher.fetch_thumbnail(account_id, mxc_url, spec)
+        })
+        .await
+    }
+
+    /// Shared single-flight/cache-or-fetch machinery for both
+    /// [`get_or_fetch`](Self::get_or_fetch) and
+    /// [`get_or_fetch_thumbnail`](Self::get_or_fetch_thumbnail), keyed by a
+    /// pre-computed `hash` (from [`etag_for`] or [`etag_for_thumbnail`]).
+    /// `fetch` performs the network call on a miss; everything else
+    /// (disabled-cache passthrough, fast-path hit, single-flight slot,
+    /// re-check-under-lock, store-and-open, eviction) is identical regardless
+    /// of what `hash` represents.
+    async fn get_or_fetch_keyed<F, Fut>(
+        &self,
+        account_id: Uuid,
+        hash: &str,
+        fetch: F,
+    ) -> Result<MediaResource, MediaCacheError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>, FetchError>>,
+    {
         // Disabled: never read from or write to the cache. Fetch fresh every
         // time and serve from a temp file (unlinked after open) — `store_and_open`
         // retains nothing when disabled. No single-flight (nothing is shared).
         if !self.inner.enabled {
-            let data = self
-                .inner
-                .fetch_capped(account_id, mxc_url, encrypted_file, fetcher)
-                .await?;
-            return self.inner.store_and_open(account_id, &hash, data).await;
+            let data = self.inner.fetch_capped(fetch).await?;
+            return self.inner.store_and_open(account_id, hash, data).await;
         }
 
         // Fast path: already cached.
-        if let Some(resource) = self.inner.try_hit(account_id, &hash).await {
+        if let Some(resource) = self.inner.try_hit(account_id, hash).await {
             return Ok(resource);
         }
 
         // Single-flight: only one task fetches a given key at a time.
-        let slot = self.inner.flight_slot(account_id, &hash);
+        let slot = self.inner.flight_slot(account_id, hash);
         let _guard = slot.lock().await;
 
         // Re-check under the slot — a peer may have populated it while we waited.
-        if let Some(resource) = self.inner.try_hit(account_id, &hash).await {
-            self.inner.release_flight(account_id, &hash, &slot);
+        if let Some(resource) = self.inner.try_hit(account_id, hash).await {
+            self.inner.release_flight(account_id, hash, &slot);
             return Ok(resource);
         }
 
         let result = async {
-            let data = self
-                .inner
-                .fetch_capped(account_id, mxc_url, encrypted_file, fetcher)
-                .await?;
-            self.inner.store_and_open(account_id, &hash, data).await
+            let data = self.inner.fetch_capped(fetch).await?;
+            self.inner.store_and_open(account_id, hash, data).await
         }
         .await;
 
         drop(_guard);
-        self.inner.release_flight(account_id, &hash, &slot);
+        self.inner.release_flight(account_id, hash, &slot);
         result
     }
 
@@ -390,24 +442,23 @@ impl Inner {
         })
     }
 
-    /// Download through `fetcher`, holding a concurrency permit for the duration
-    /// and rejecting an object over the per-object cap. The permit bounds how many
-    /// full objects are buffered in memory at once (the SDK media API is not
-    /// streaming, so the whole object is materialized before the cap can reject
-    /// it — see [`MediaCacheError::TooLarge`]).
-    async fn fetch_capped(
-        &self,
-        account_id: Uuid,
-        mxc_url: &str,
-        encrypted_file: Option<Value>,
-        fetcher: &dyn MediaFetcher,
-    ) -> Result<Vec<u8>, MediaCacheError> {
+    /// Download via `fetch` (a caller-supplied one-shot future — either the
+    /// plain or thumbnail [`MediaFetcher`] call), holding a concurrency permit
+    /// for the duration and rejecting an object over the per-object cap. The
+    /// permit bounds how many full objects are buffered in memory at once (the
+    /// SDK media API is not streaming, so the whole object is materialized
+    /// before the cap can reject it — see [`MediaCacheError::TooLarge`]).
+    async fn fetch_capped<F, Fut>(&self, fetch: F) -> Result<Vec<u8>, MediaCacheError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<u8>, FetchError>>,
+    {
         let _permit = self
             .downloads
             .acquire()
             .await
             .expect("download semaphore never closed");
-        let data = fetcher.fetch(account_id, mxc_url, encrypted_file).await?;
+        let data = fetch().await?;
         let len = data.len() as u64;
         if len > self.max_object_bytes {
             return Err(MediaCacheError::TooLarge {
@@ -801,6 +852,19 @@ pub fn etag_for(mxc_url: &str) -> String {
     hash_hex(mxc_url)
 }
 
+/// The stable, content-addressed cache-key/entity-tag for a thumbnail variant
+/// of `mxc_url` at `spec`'s dimensions/method — the thumbnail-aware sibling of
+/// [`etag_for`]. The `"thumb:"`-prefixed preimage guarantees this can never
+/// collide with the bare `sha256(mxc_url)` [`etag_for`] computes for the
+/// original, even though both live as sibling files in the same per-account
+/// cache directory.
+pub fn etag_for_thumbnail(mxc_url: &str, spec: ThumbnailSpec) -> String {
+    hash_hex(&format!(
+        "thumb:{mxc_url}:{}x{}:{}",
+        spec.width, spec.height, spec.method
+    ))
+}
+
 fn hash_hex(input: &str) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
@@ -815,6 +879,7 @@ fn hash_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axon_core::media::ThumbnailMethod;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::AsyncReadExt;
 
@@ -850,6 +915,19 @@ mod tests {
             }
             Ok(self.payload.clone())
         }
+
+        async fn fetch_thumbnail(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _spec: ThumbnailSpec,
+        ) -> Result<Vec<u8>, FetchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.gate {
+                gate.wait().await;
+            }
+            Ok(self.payload.clone())
+        }
     }
 
     struct FailingFetcher;
@@ -861,6 +939,15 @@ mod tests {
             _account_id: Uuid,
             _mxc_url: &str,
             _encrypted_file: Option<Value>,
+        ) -> Result<Vec<u8>, FetchError> {
+            Err(FetchError::NotFound("nope".into()))
+        }
+
+        async fn fetch_thumbnail(
+            &self,
+            _account_id: Uuid,
+            _mxc_url: &str,
+            _spec: ThumbnailSpec,
         ) -> Result<Vec<u8>, FetchError> {
             Err(FetchError::NotFound("nope".into()))
         }
@@ -907,6 +994,121 @@ mod tests {
 
         // Second call was a cache hit — no extra fetch.
         assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn thumb_spec(width: u32, height: u32, method: ThumbnailMethod) -> ThumbnailSpec {
+        ThumbnailSpec {
+            width,
+            height,
+            method,
+        }
+    }
+
+    #[test]
+    fn plain_and_thumbnail_keys_never_collide() {
+        let url = "mxc://s/one";
+        let spec = thumb_spec(64, 64, ThumbnailMethod::Scale);
+        assert_ne!(etag_for(url), etag_for_thumbnail(url, spec));
+    }
+
+    #[test]
+    fn distinct_thumbnail_specs_produce_distinct_keys() {
+        let url = "mxc://s/one";
+        let a = etag_for_thumbnail(url, thumb_spec(64, 64, ThumbnailMethod::Scale));
+        let b = etag_for_thumbnail(url, thumb_spec(128, 64, ThumbnailMethod::Scale));
+        let c = etag_for_thumbnail(url, thumb_spec(64, 128, ThumbnailMethod::Scale));
+        let d = etag_for_thumbnail(url, thumb_spec(64, 64, ThumbnailMethod::Crop));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_ne!(b, c);
+        assert_ne!(b, d);
+        assert_ne!(c, d);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_miss_fetches_then_hit_serves_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let fetcher = CountingFetcher::new(b"thumbnail bytes".to_vec());
+        let spec = thumb_spec(64, 64, ThumbnailMethod::Scale);
+
+        let mut first = cache
+            .get_or_fetch_thumbnail(account, "mxc://s/one", spec, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(read_all(&mut first).await, b"thumbnail bytes");
+
+        let mut second = cache
+            .get_or_fetch_thumbnail(account, "mxc://s/one", spec, &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(read_all(&mut second).await, b"thumbnail bytes");
+
+        // Second call was a cache hit — no extra fetch.
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn distinct_thumbnail_specs_are_independent_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let fetcher = CountingFetcher::new(b"thumb".to_vec());
+
+        cache
+            .get_or_fetch_thumbnail(
+                account,
+                "mxc://s/one",
+                thumb_spec(64, 64, ThumbnailMethod::Scale),
+                &fetcher,
+            )
+            .await
+            .unwrap();
+        cache
+            .get_or_fetch_thumbnail(
+                account,
+                "mxc://s/one",
+                thumb_spec(128, 128, ThumbnailMethod::Scale),
+                &fetcher,
+            )
+            .await
+            .unwrap();
+
+        // Two distinct specs for the same mxc_url are two independent fetches
+        // (and two independent cache entries), not a shared cache hit.
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_and_full_media_are_independent_cache_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = MediaCache::open(&config_in(dir.path(), 1 << 20, 1 << 20, true))
+            .await
+            .unwrap();
+        let account = Uuid::new_v4();
+        let fetcher = CountingFetcher::new(b"payload".to_vec());
+
+        cache
+            .get_or_fetch(account, "mxc://s/one", None, &fetcher)
+            .await
+            .unwrap();
+        cache
+            .get_or_fetch_thumbnail(
+                account,
+                "mxc://s/one",
+                thumb_spec(64, 64, ThumbnailMethod::Scale),
+                &fetcher,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

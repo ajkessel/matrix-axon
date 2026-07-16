@@ -25,6 +25,17 @@ impl CachingMediaProxy {
     }
 }
 
+/// Convert the cache's SDK-free resource onto the API-layer type. Shared by
+/// [`MediaProxy::get_media`] and [`MediaProxy::get_thumbnail`], which differ
+/// only in which cache entry they resolve.
+fn to_api_resource(resource: axon_media::MediaResource) -> MediaResource {
+    MediaResource {
+        file: resource.file,
+        len: resource.len,
+        etag: resource.etag,
+    }
+}
+
 /// Map a cache/fetch error onto the API-layer media error. The fetcher's
 /// `FetchError` was already collapsed from `axon-sync`'s `GatewayError`; a
 /// too-large object is reported as an upstream failure (we won't proxy it), and
@@ -57,15 +68,28 @@ impl MediaProxy for CachingMediaProxy {
         self.cache
             .get_or_fetch(account_id, mxc_url, encrypted_file, &self.fetcher)
             .await
-            .map(|resource| MediaResource {
-                file: resource.file,
-                len: resource.len,
-                etag: resource.etag,
-            })
+            .map(to_api_resource)
             .map_err(map_err)
     }
 
     fn etag(&self, mxc_url: &str) -> String {
         axon_media::etag_for(mxc_url)
+    }
+
+    async fn get_thumbnail(
+        &self,
+        account_id: Uuid,
+        mxc_url: &str,
+        spec: axon_core::media::ThumbnailSpec,
+    ) -> Result<MediaResource, MediaError> {
+        self.cache
+            .get_or_fetch_thumbnail(account_id, mxc_url, spec, &self.fetcher)
+            .await
+            .map(to_api_resource)
+            .map_err(map_err)
+    }
+
+    fn etag_thumbnail(&self, mxc_url: &str, spec: axon_core::media::ThumbnailSpec) -> String {
+        axon_media::etag_for_thumbnail(mxc_url, spec)
     }
 }

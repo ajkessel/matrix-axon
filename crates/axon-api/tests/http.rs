@@ -45,20 +45,25 @@ fn bearer() -> String {
     format!("Bearer {TEST_TOKEN}")
 }
 
-/// Core request driver: optional JSON body, optional full `Authorization` header
-/// value (the auth tests pass a wrong value or `None`). Returns `(status,
-/// response headers, parsed body)`; the body is `Null` for empty responses
-/// (e.g. a 204 or a pre-handler rejection).
-async fn request_parts(
+/// Lowest-level request driver, shared by [`request_parts`],
+/// [`request_text_parts`], and [`get_media_bytes`]: builds the request
+/// (optional JSON body, optional `Authorization` header, optional one extra
+/// header), runs it, and returns the raw response parts — `(status,
+/// response headers, raw body bytes)`.
+async fn send_request(
     app: &axum::Router,
     method: &str,
     uri: &str,
     body: Option<Value>,
     auth: Option<&str>,
-) -> (StatusCode, HeaderMap, Value) {
+    extra_header: Option<(&str, &str)>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(value) = auth {
         builder = builder.header("authorization", value);
+    }
+    if let Some((name, value)) = extra_header {
+        builder = builder.header(name, value);
     }
     let req = match &body {
         Some(value) => builder
@@ -73,6 +78,21 @@ async fn request_parts(
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("body");
+    (status, headers, bytes.to_vec())
+}
+
+/// Optional JSON body, optional full `Authorization` header value (the auth
+/// tests pass a wrong value or `None`). Returns `(status, response headers,
+/// parsed body)`; the body is `Null` for empty responses (e.g. a 204 or a
+/// pre-handler rejection).
+async fn request_parts(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, Value) {
+    let (status, headers, bytes) = send_request(app, method, uri, body, auth, None).await;
     let json = if bytes.is_empty() {
         Value::Null
     } else {
@@ -89,18 +109,8 @@ async fn request_text_parts(
     uri: &str,
     auth: Option<&str>,
 ) -> (StatusCode, HeaderMap, String) {
-    let mut builder = Request::builder().method(method).uri(uri);
-    if let Some(value) = auth {
-        builder = builder.header("authorization", value);
-    }
-    let req = builder.body(Body::empty()).unwrap();
-    let resp = app.clone().oneshot(req).await.expect("request");
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let body = String::from_utf8(bytes.to_vec()).expect("utf-8 body");
+    let (status, headers, bytes) = send_request(app, method, uri, None, auth, None).await;
+    let body = String::from_utf8(bytes).expect("utf-8 body");
     (status, headers, body)
 }
 
@@ -119,6 +129,25 @@ async fn request(
 /// Authenticated `GET`.
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     request(app, "GET", uri, None, Some(&bearer())).await
+}
+
+/// Authenticated `GET` returning raw response bytes (not JSON) plus headers —
+/// for the media/thumbnail routes' binary `200`/`206`/`304` responses, with an
+/// optional `If-None-Match` request header for conditional-GET tests.
+async fn get_media_bytes(
+    app: &axum::Router,
+    uri: &str,
+    if_none_match: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    send_request(
+        app,
+        "GET",
+        uri,
+        None,
+        Some(&bearer()),
+        if_none_match.map(|etag| ("if-none-match", etag)),
+    )
+    .await
 }
 
 async fn insert_message(
@@ -318,18 +347,30 @@ fn media_app(store: Store, media: Arc<dyn MediaProxy>) -> axum::Router {
     ))
 }
 
+/// `mimetype` is optional: pass `None` when the test doesn't care about
+/// `Content-Type` derivation, or `Some(...)` (e.g. for the thumbnail route's
+/// `Content-Type` assertions) to declare `info.mimetype`.
 async fn insert_media_event(
     store: &Store,
     account_id: Uuid,
     room_id: &str,
     mxc_url: &str,
+    mimetype: Option<&str>,
 ) -> String {
     let event_id = format!("$media-{}:localhost", Uuid::new_v4());
-    let content = json!({
-        "msgtype": "m.image",
-        "body": "image.png",
-        "url": mxc_url
-    });
+    let content = match mimetype {
+        Some(mimetype) => json!({
+            "msgtype": "m.image",
+            "body": "image.png",
+            "url": mxc_url,
+            "info": { "mimetype": mimetype }
+        }),
+        None => json!({
+            "msgtype": "m.image",
+            "body": "image.png",
+            "url": mxc_url
+        }),
+    };
     store
         .upsert_event(&NewEvent {
             event_id: &event_id,
@@ -350,32 +391,45 @@ async fn insert_media_event(
     event_id
 }
 
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn media_route_fails_closed_for_missing_and_redacted_metadata() {
+/// Shared body for `media_route_fails_closed_for_missing_and_redacted_metadata`
+/// and `thumbnail_route_fails_closed_for_missing_and_redacted_metadata`: a
+/// store miss, and a redacted event, must both `404` without the request ever
+/// reaching the proxy. `path_suffix` distinguishes the full-media route
+/// (`""`) from the thumbnail route (`"/thumbnail?width=64&height=64"`);
+/// `calls_are_empty` reads whichever call log (`calls()`/`thumbnail_calls()`)
+/// the route under test records to.
+async fn assert_media_route_fails_closed(
+    name_prefix: &str,
+    path_suffix: &str,
+    calls_are_empty: impl Fn(&ConfiguredMediaProxy) -> bool,
+) {
     let store = store().await;
     let pool = store.pool().clone();
     let account_id = store
         .upsert_account(
-            &format!("@media-closed-{}:localhost", Uuid::new_v4()),
+            &format!("@{name_prefix}-{}:localhost", Uuid::new_v4()),
             "https://hs.example.org",
         )
         .await
         .expect("account")
         .account_id;
-    let room_id = format!("!media-closed-{}:localhost", Uuid::new_v4());
+    let room_id = format!("!{name_prefix}-{}:localhost", Uuid::new_v4());
     let media = Arc::new(ConfiguredMediaProxy::ok(b"must not be returned"));
     let app = media_app(store.clone(), media.clone());
 
     let missing_mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
     let missing_path = missing_mxc.trim_start_matches("mxc://");
-    let (status, body) = get(&app, &format!("/v1/media/{account_id}/{missing_path}")).await;
+    let (status, body) = get(
+        &app,
+        &format!("/v1/media/{account_id}/{missing_path}{path_suffix}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
-    assert!(media.calls().is_empty(), "store miss must not reach proxy");
+    assert!(calls_are_empty(&media), "store miss must not reach proxy");
 
     let redacted_mxc = format!("mxc://example.org/{}", Uuid::new_v4().simple());
-    let target = insert_media_event(&store, account_id, &room_id, &redacted_mxc).await;
+    let target = insert_media_event(&store, account_id, &room_id, &redacted_mxc, None).await;
     let redaction_id = format!("$redact-{}:localhost", Uuid::new_v4());
     store
         .upsert_event(&NewEvent {
@@ -396,11 +450,15 @@ async fn media_route_fails_closed_for_missing_and_redacted_metadata() {
         .expect("insert redaction");
 
     let redacted_path = redacted_mxc.trim_start_matches("mxc://");
-    let (status, body) = get(&app, &format!("/v1/media/{account_id}/{redacted_path}")).await;
+    let (status, body) = get(
+        &app,
+        &format!("/v1/media/{account_id}/{redacted_path}{path_suffix}"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
     assert!(
-        media.calls().is_empty(),
+        calls_are_empty(&media),
         "redacted media must not reach proxy"
     );
 
@@ -413,22 +471,31 @@ async fn media_route_fails_closed_for_missing_and_redacted_metadata() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn media_route_preserves_forbidden_and_not_connected_statuses() {
+async fn media_route_fails_closed_for_missing_and_redacted_metadata() {
+    assert_media_route_fails_closed("media-closed", "", |media| media.calls().is_empty()).await;
+}
+
+/// Shared body for `media_route_preserves_forbidden_and_not_connected_statuses`
+/// and `thumbnail_route_preserves_forbidden_and_not_connected_statuses`:
+/// `Forbidden`/`NotConnected` proxy outcomes must map to `403`/`503`
+/// respectively. `path_suffix` distinguishes the full-media route from the
+/// thumbnail route, as in [`assert_media_route_fails_closed`].
+async fn assert_media_route_preserves_error_statuses(name_prefix: &str, path_suffix: &str) {
     let store = store().await;
     let pool = store.pool().clone();
     let account_id = store
         .upsert_account(
-            &format!("@media-errors-{}:localhost", Uuid::new_v4()),
+            &format!("@{name_prefix}-{}:localhost", Uuid::new_v4()),
             "https://hs.example.org",
         )
         .await
         .expect("account")
         .account_id;
-    let room_id = format!("!media-errors-{}:localhost", Uuid::new_v4());
+    let room_id = format!("!{name_prefix}-{}:localhost", Uuid::new_v4());
     let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
-    insert_media_event(&store, account_id, &room_id, &mxc_url).await;
+    insert_media_event(&store, account_id, &room_id, &mxc_url, None).await;
     let media_path = mxc_url.trim_start_matches("mxc://");
-    let uri = format!("/v1/media/{account_id}/{media_path}");
+    let uri = format!("/v1/media/{account_id}/{media_path}{path_suffix}");
 
     let forbidden = Arc::new(ConfiguredMediaProxy::failing(MediaOutcome::Forbidden(
         "media forbidden".to_owned(),
@@ -449,6 +516,203 @@ async fn media_route_preserves_forbidden_and_not_connected_statuses() {
         .execute(&pool)
         .await
         .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn media_route_preserves_forbidden_and_not_connected_statuses() {
+    assert_media_route_preserves_error_statuses("media-errors", "").await;
+}
+
+/// Insert an event whose primary attachment is *encrypted* (`content.file`
+/// carries the MXC url rather than the plain `content.url`), so
+/// `encrypted_file_for_mxc` matches and the thumbnail route's `400` pre-check
+/// fires.
+async fn insert_encrypted_media_event(
+    store: &Store,
+    account_id: Uuid,
+    room_id: &str,
+    mxc_url: &str,
+) -> String {
+    let event_id = format!("$media-enc-{}:localhost", Uuid::new_v4());
+    let content = json!({
+        "msgtype": "m.image",
+        "body": "image.png",
+        "file": { "url": mxc_url, "key": {}, "iv": "", "hashes": {}, "v": "v2" },
+        "info": { "mimetype": "image/png" }
+    });
+    store
+        .upsert_event(&NewEvent {
+            event_id: &event_id,
+            room_id,
+            account_id,
+            sender: "@alice:localhost",
+            origin_ts: 1_700_000_000_000,
+            event_type: "m.room.message",
+            content: Some(content.clone()),
+            raw_event: json!({ "type": "m.room.message", "content": content }),
+            megolm_session_id: None,
+            redacts: None,
+            relates_to: None,
+            decrypted_body_text: None,
+        })
+        .await
+        .expect("insert encrypted media event");
+    event_id
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thumbnail_route_rejects_encrypted_media_before_reaching_proxy() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@thumb-enc-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!thumb-enc-{}:localhost", Uuid::new_v4());
+    let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    insert_encrypted_media_event(&store, account_id, &room_id, &mxc_url).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"must not be returned"));
+    let app = media_app(store.clone(), media.clone());
+
+    let media_path = mxc_url.trim_start_matches("mxc://");
+    let (status, body) = get(
+        &app,
+        &format!("/v1/media/{account_id}/{media_path}/thumbnail?width=64&height=64"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert!(
+        media.thumbnail_calls().is_empty(),
+        "encrypted media must never reach the proxy's thumbnail method"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thumbnail_route_serves_bytes_and_sets_headers() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@thumb-ok-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!thumb-ok-{}:localhost", Uuid::new_v4());
+    let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    insert_media_event(&store, account_id, &room_id, &mxc_url, Some("image/png")).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"thumbnail bytes"));
+    let app = media_app(store.clone(), media.clone());
+
+    let media_path = mxc_url.trim_start_matches("mxc://");
+    let (status, headers, bytes) = get_media_bytes(
+        &app,
+        &format!("/v1/media/{account_id}/{media_path}/thumbnail?width=64&height=64&method=crop"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"thumbnail bytes");
+    assert_eq!(headers["content-type"], "image/png");
+
+    let calls = media.thumbnail_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].mxc_url, mxc_url);
+    // The requested 64x64 snaps up to the next standard bucket (96) — see
+    // `routes::media::snap_thumbnail_dimension`.
+    assert_eq!(calls[0].spec.width, 96);
+    assert_eq!(calls[0].spec.height, 96);
+    assert_eq!(
+        calls[0].spec.method,
+        axon_core::media::ThumbnailMethod::Crop
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thumbnail_route_conditional_get_short_circuits_before_fetch() {
+    let store = store().await;
+    let pool = store.pool().clone();
+    let account_id = store
+        .upsert_account(
+            &format!("@thumb-304-{}:localhost", Uuid::new_v4()),
+            "https://hs.example.org",
+        )
+        .await
+        .expect("account")
+        .account_id;
+    let room_id = format!("!thumb-304-{}:localhost", Uuid::new_v4());
+    let mxc_url = format!("mxc://example.org/{}", Uuid::new_v4().simple());
+    insert_media_event(&store, account_id, &room_id, &mxc_url, None).await;
+    let media = Arc::new(ConfiguredMediaProxy::ok(b"thumbnail bytes"));
+    let app = media_app(store.clone(), media.clone());
+
+    // The requested 64x64 snaps up to the next standard bucket (96) — see
+    // `routes::media::snap_thumbnail_dimension` — so the etag must be
+    // computed against the *snapped* spec to match what the handler resolves.
+    let spec = axon_core::media::ThumbnailSpec {
+        width: 96,
+        height: 96,
+        method: axon_core::media::ThumbnailMethod::Scale,
+    };
+    let etag = format!("\"{}\"", media.etag_thumbnail(&mxc_url, spec));
+
+    let media_path = mxc_url.trim_start_matches("mxc://");
+    let (status, _headers, bytes) = get_media_bytes(
+        &app,
+        &format!("/v1/media/{account_id}/{media_path}/thumbnail?width=64&height=64"),
+        Some(&etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(bytes.is_empty());
+    assert!(
+        media.thumbnail_calls().is_empty(),
+        "a matching If-None-Match must short-circuit before calling the proxy"
+    );
+
+    sqlx_core::query::query("DELETE FROM accounts WHERE account_id = $1")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thumbnail_route_fails_closed_for_missing_and_redacted_metadata() {
+    assert_media_route_fails_closed("thumb-closed", "/thumbnail?width=64&height=64", |media| {
+        media.thumbnail_calls().is_empty()
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thumbnail_route_preserves_forbidden_and_not_connected_statuses() {
+    assert_media_route_preserves_error_statuses("thumb-errors", "/thumbnail?width=64&height=64")
+        .await;
 }
 
 #[tokio::test]

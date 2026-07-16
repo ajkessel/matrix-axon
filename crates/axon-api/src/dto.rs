@@ -483,6 +483,41 @@ impl MediaUploadKindDto {
     }
 }
 
+/// Query parameters for the thumbnail proxy (`GET
+/// …/media/{account_id}/{server_name}/{media_id}/thumbnail`).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ThumbnailQuery {
+    /// Desired width in pixels. Clamped to a fixed `[min, max]` range and
+    /// snapped up to the nearest of a small set of standard sizes, rather
+    /// than rejected — see `routes::media::snap_thumbnail_dimension`.
+    pub width: u32,
+    /// Desired height in pixels. Same clamp-and-snap as `width`.
+    pub height: u32,
+    /// Resizing method; defaults to `scale` (the Matrix spec default) when
+    /// omitted.
+    pub method: Option<ThumbnailMethodDto>,
+}
+
+/// Wire-shape mirror of [`axon_core::media::ThumbnailMethod`] — kept separate
+/// so `axon-core` stays free of `utoipa`/serde-schema concerns (same split as
+/// [`MediaUploadKindDto`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThumbnailMethodDto {
+    Crop,
+    Scale,
+}
+
+impl From<ThumbnailMethodDto> for axon_core::media::ThumbnailMethod {
+    fn from(dto: ThumbnailMethodDto) -> Self {
+        match dto {
+            ThumbnailMethodDto::Crop => axon_core::media::ThumbnailMethod::Crop,
+            ThumbnailMethodDto::Scale => axon_core::media::ThumbnailMethod::Scale,
+        }
+    }
+}
+
 /// Metadata returned after bytes have been staged successfully.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StagedUploadDto {

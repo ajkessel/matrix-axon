@@ -220,6 +220,15 @@ pub fn router(state: AppState) -> Router {
             "/v1/media/{account_id}/{server_name}/{media_id}",
             get(routes::media::get_media),
         )
+        // Homeserver-generated thumbnail variant of the same object (M17,
+        // ADR 0063): proxies the Matrix C-S thumbnail endpoint via
+        // `matrix_sdk::media::MediaFormat::Thumbnail`, instead of the full
+        // original. Plain media only — encrypted media 400s before this
+        // handler ever calls the proxy.
+        .route(
+            "/v1/media/{account_id}/{server_name}/{media_id}/thumbnail",
+            get(routes::media::get_media_thumbnail),
+        )
         // Keep unmatched `/v1/...` paths inside the authenticated API boundary:
         // they must not fall through to the browser-facing HTML fallback below.
         .route("/v1", get(v1_not_found))

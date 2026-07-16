@@ -10,8 +10,8 @@
 mod cache;
 
 pub use cache::{
-    etag_for, FetchError, MediaCache, MediaCacheError, MediaCacheHandle, MediaFetcher,
-    MediaResource,
+    etag_for, etag_for_thumbnail, FetchError, MediaCache, MediaCacheError, MediaCacheHandle,
+    MediaFetcher, MediaResource,
 };
 
 /// Validate and decompose an `mxc://` URI into `(server_name, media_id)`.
