@@ -328,6 +328,7 @@ Milestones 1–6 shipped as originally numbered. After M6, the sequence was reth
 | **12** Drafts & per-device read state               | old M10                             | Unchanged in substance; renumbered.                                                                                                             |
 | **13** Deployment docs                              | old M12                             | Retargeted at `axon-tui`; first-run flow now uses the M7a account endpoints.                                                                    |
 | **15** Media send/upload                            | — (new)                             | Adds the write-side counterpart to M11: staged uploads plus `m.image` / `m.file` send over Axon's `/v1/` API.                                   |
+| **19** Matrix C-S verb batching (typing/membership/settings/profile) | — (new) | Closes the remaining Matrix C-S parity gaps inventoried in issue #279, stamping ADR 0021's consumer-owned-port pattern once per trait group instead of once per verb; six PRs (M19a–M19f), see ADR 0068. |
 | _(dropped)_                                         | old M11 (Web alpha)                 | `axon-tui` replaced `axon-web` as the alpha/reference client; it is tracked outside the milestone sequence.                                     |
 
 Older docs (`AGENTS.md` "Current state", the ADR log) still reference the original numbers as historical context; this table is the bridge. References to milestone numbers in those frozen/append-only docs are not retro-renumbered.
