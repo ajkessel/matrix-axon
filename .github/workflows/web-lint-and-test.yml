@@ -1,12 +1,63 @@
 name: Web lint and test
 
 on:
-  push:
   workflow_dispatch:
+  # Push on main has no paths filter: the schema-drift gate consumes
+  # openapi/openapi.json, which server-silo PRs change without touching
+  # clients/web — drift they introduce is caught here at merge instead of
+  # failing some later unrelated web PR.
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - "clients/web/**"
+      - ".github/workflows/web-lint-and-test.yml"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  do-nothing:
-    runs-on: ubuntu-latest
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
+  web-lint-and-test:
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+
+    defaults:
+      run:
+        working-directory: clients/web
+
     steps:
-      - name: Empty Step
-        run: echo "No operation"
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check generated API client is in sync with openapi/openapi.json
+        run: |
+          pnpm gen:api
+          git diff --exit-code -- src/api/schema.d.ts
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

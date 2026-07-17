@@ -1,0 +1,153 @@
+import type { components } from './schema'
+
+export type EventDto = components['schemas']['EventDto']
+
+/**
+ * A decoded `/v1/ws` frame: the wire envelope `{ type, account_id, payload }`
+ * (`crates/axon-api/src/ws.rs`), with `account_id` surfaced as `accountId`.
+ *
+ * The `type` tag is kept as an opaque string so the router (M-W6, ADR 0061)
+ * can dispatch by tag and silently ignore kinds this client predates — a new
+ * server frame type reaches no handler until one is added, rather than
+ * breaking decode. Known tags today: `timeline.event`, `verification.*`,
+ * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`.
+ */
+export interface LiveFrame {
+  /** Namespaced tag, e.g. `timeline.event`. */
+  type: string
+  /** The account the frame pertains to; clients self-filter on it (ADR 0020). */
+  accountId: string
+  /** Tag-specific body; narrow it with the tag's accessor before use. */
+  payload: unknown
+}
+
+/** The `type` tag for a live timeline event (`ws.rs` `TIMELINE_EVENT`). */
+export const TIMELINE_EVENT = 'timeline.event'
+
+/** The `type` tag for a per-device state change (`ws.rs` `DEVICE_STATE_CHANGED`). */
+export const DEVICE_STATE_CHANGED = 'device_state.changed'
+
+/** The `type` tag for raw allowlisted ephemeral Matrix events (ADR 0056). */
+export const EPHEMERAL_PASSTHROUGH = 'ephemeral.passthrough'
+
+/**
+ * The payload of a `device_state.changed` frame (M12, ADR 0048): the writing
+ * `deviceId`, the `namespace`, and the written `entries` (a `null` value is a
+ * delete/tombstone). Consumers drop frames whose `deviceId` is their own
+ * (echo suppression) and apply the rest to their cache.
+ */
+export interface DeviceStateChange {
+  deviceId: string
+  namespace: string
+  entries: Record<string, unknown>
+}
+
+/**
+ * The payload of an `ephemeral.passthrough` frame. `roomId` is optional on the
+ * wire because future account-scoped signals such as presence may have none;
+ * the current room UI consumes only room-scoped `m.typing` and `m.receipt`.
+ */
+export interface EphemeralPassthrough {
+  roomId: string | null
+  eventType: string
+  content: unknown
+}
+
+/**
+ * Parse one raw WS message into a [`LiveFrame`], or `null` when it is not a
+ * well-formed envelope (non-JSON, not an object, or a missing/non-string
+ * `type` or `account_id`). Malformed frames are dropped, never thrown: one
+ * unreadable frame must not tear down the socket.
+ */
+export function decodeFrame(raw: string): LiveFrame | null {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof value !== 'object' || value === null) {
+    return null
+  }
+  const {
+    type,
+    account_id: accountId,
+    payload,
+  } = value as Record<string, unknown>
+  if (typeof type !== 'string' || typeof accountId !== 'string') {
+    return null
+  }
+  return { type, accountId, payload }
+}
+
+/**
+ * The `EventDto` payload of a `timeline.event` frame, or `null` for any other
+ * tag (or a payload that isn't an object). The event carries the read API's
+ * shape — decrypted, with a `sender_trust` snapshot and its own `room_id` — so
+ * a consumer can attribute it to a room without extra lookup.
+ */
+export function timelineEvent(frame: LiveFrame): EventDto | null {
+  if (frame.type !== TIMELINE_EVENT) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  return frame.payload as EventDto
+}
+
+/**
+ * The [`DeviceStateChange`] of a `device_state.changed` frame, or `null` for
+ * any other tag (or a malformed payload). The frame's account is on the
+ * envelope (`frame.accountId`), so a consumer keys the change by
+ * `(accountId, namespace, key)`.
+ */
+export function deviceStateChange(frame: LiveFrame): DeviceStateChange | null {
+  if (frame.type !== DEVICE_STATE_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const {
+    device_id: deviceId,
+    namespace,
+    entries,
+  } = frame.payload as Record<string, unknown>
+  if (
+    typeof deviceId !== 'string' ||
+    typeof namespace !== 'string' ||
+    typeof entries !== 'object' ||
+    entries === null
+  ) {
+    return null
+  }
+  return { deviceId, namespace, entries: entries as Record<string, unknown> }
+}
+
+/**
+ * The raw Matrix ephemeral payload forwarded by the server, or `null` for any
+ * other tag or malformed payload. The frame's account is on the envelope.
+ */
+export function ephemeralPassthrough(
+  frame: LiveFrame,
+): EphemeralPassthrough | null {
+  if (frame.type !== EPHEMERAL_PASSTHROUGH) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const {
+    room_id: roomId,
+    event_type: eventType,
+    content,
+  } = frame.payload as Record<string, unknown>
+  if (
+    !(typeof roomId === 'string' || roomId === undefined || roomId === null) ||
+    typeof eventType !== 'string'
+  ) {
+    return null
+  }
+  return { roomId: roomId ?? null, eventType, content }
+}

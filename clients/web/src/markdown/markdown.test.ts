@@ -1,0 +1,55 @@
+import { describe, expect, it } from 'vitest'
+import { markdownToHtmlIfFormatted } from './markdown'
+
+describe('markdownToHtmlIfFormatted', () => {
+  it('returns null for plain prose (TUI parity)', () => {
+    expect(markdownToHtmlIfFormatted('hello world')).toBeNull()
+    expect(markdownToHtmlIfFormatted('line one\nline two')).toBeNull()
+    // Multiple paragraphs are still plain prose.
+    expect(markdownToHtmlIfFormatted('para one\n\npara two')).toBeNull()
+    // Escaped markdown reads as plain text.
+    expect(markdownToHtmlIfFormatted('not \\*bold\\*')).toBeNull()
+  })
+
+  it('converts emphasis, code, links, and headings', () => {
+    expect(markdownToHtmlIfFormatted('**bold** and _italic_')).toBe(
+      '<p><strong>bold</strong> and <em>italic</em></p>',
+    )
+    expect(markdownToHtmlIfFormatted('`code`')).toBe('<p><code>code</code></p>')
+    expect(markdownToHtmlIfFormatted('[x](https://example.org)')).toBe(
+      '<p><a href="https://example.org">x</a></p>',
+    )
+    expect(markdownToHtmlIfFormatted('# heading')).toBe('<h1>heading</h1>')
+  })
+
+  it('converts lists, quotes, and fenced code blocks', () => {
+    expect(markdownToHtmlIfFormatted('- a\n- b')).toContain('<ul>')
+    expect(markdownToHtmlIfFormatted('> quoted')).toContain('<blockquote>')
+    const fenced = markdownToHtmlIfFormatted('```rust\nfn main() {}\n```')
+    expect(fenced).toContain('<pre><code class="language-rust">')
+  })
+
+  it('converts GFM strikethrough and tables', () => {
+    expect(markdownToHtmlIfFormatted('~~gone~~')).toContain('<del>gone</del>')
+    expect(
+      markdownToHtmlIfFormatted('| a | b |\n| - | - |\n| 1 | 2 |'),
+    ).toContain('<table>')
+  })
+
+  it('escapes raw inline HTML instead of passing it through', () => {
+    const out = markdownToHtmlIfFormatted('**x** <script>alert(1)</script>')
+    expect(out).not.toContain('<script>')
+    expect(out).toContain('&lt;script&gt;')
+  })
+
+  it('never emits an active URI scheme in an outgoing href (WCR-15)', () => {
+    const out = markdownToHtmlIfFormatted('[click](javascript:alert(1))')
+    expect(out).not.toContain('javascript:')
+    expect(out).toContain('click')
+
+    // Ordinary links survive the outgoing sanitize untouched.
+    expect(markdownToHtmlIfFormatted('[ok](https://example.org)')).toContain(
+      'href="https://example.org"',
+    )
+  })
+})

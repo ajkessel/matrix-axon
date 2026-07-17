@@ -69,6 +69,20 @@ every existing `device_id` is a *Matrix* device, not a client of axon.
   `device_id` is their own, exactly as they already self-filter by
   `account_id`. This is the only option the bus permits today and matches
   its existing contract (lossy, clients re-read on reconnect).
+- **An incoming value is adopted into a visible input only while that input
+  is "clean": empty, or still holding exactly the value last synced to it.**
+  Anything else is an unsynced local edit, and a sibling's write must never
+  clobber in-progress typing. Crucially, a *clear* (`''`, the tombstone's
+  rendered form) is an ordinary value under this rule, not a special case to
+  be skipped: a device that clears its draft clears its siblings' composers
+  too, or the two clients disagree about what the merged state says. Both
+  clients implement exactly this — `buffer_clean` in the TUI's
+  `handle_draft_frame` (`clients/tui/src/app/drafts.rs`) and the `synced`-ref
+  adoption effect in the web `Composer`. Note the rule keys on the *last
+  synced value*, not on a sticky "has the user ever typed here" flag: such a
+  flag conflates "dirty" with "was touched", so a field that has been typed
+  in and then emptied — or a composer reused across rooms — never adopts
+  again.
 
 ## Consequences
 
@@ -81,6 +95,11 @@ every existing `device_id` is a *Matrix* device, not a client of axon.
 - The merged GET hides which device authored a value unless the client looks
   at the per-entry `device_id` the DTO exposes; tombstoned keys are simply
   absent.
+- The clean-buffer rule makes per-key UI state a correctness concern, not a
+  cosmetic one: a composer shared across rooms (one component instance, an
+  unkeyed route) keeps the previous room's unsent draft, and pressing Enter
+  sends it to the wrong room. Clients must scope the input to its key — the
+  web client keys the composer on `roomId`.
 - Tombstone rows accrete (one per cleared key per device); bounded by
   (devices × namespaces × keys), which for drafts/read-markers is rooms-
   scale. A sweep can be added later if it ever matters.

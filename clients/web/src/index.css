@@ -1,0 +1,2700 @@
+/* Theme tokens. `system` follows prefers-color-scheme (no data-theme
+   attribute); an explicit choice sets data-theme="light|dark" on <html>
+   (see stores/settings.ts applyTheme). */
+:root {
+  --bg: #ffffff;
+  --bg-raised: #f6f6f8;
+  --panel: #ffffff;
+  --fg: #1a1a20;
+  --muted: #6a6a74;
+  --border: #d9d9e0;
+  --accent: #3556c4;
+  /* The open room's row. Hover is `--bg-raised`, a neutral lightness shift, so
+     the selected row differs in *hue* — otherwise the two read the same. */
+  --accent-soft: #e7ebf8;
+  --accent-soft-hover: #dae1f4;
+  --danger: #b3362e;
+  --warn: #9a6700;
+  --ok: #1a7f37;
+  --room-avatar-fg: #ffffff;
+  --room-avatar-border: rgb(0 0 0 / 0.14);
+  --room-avatar-0: #3556c4;
+  --room-avatar-1: #0f766e;
+  --room-avatar-2: #a24d00;
+  --room-avatar-3: #8f3a84;
+  --room-avatar-4: #2f6f31;
+  --room-avatar-5: #9b3a2f;
+  --room-avatar-6: #5a4bb0;
+  --room-avatar-7: #27627a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #16161c;
+    --bg-raised: #1f1f28;
+    --panel: #1f1f28;
+    --fg: #e6e6ec;
+    --muted: #9c9ca8;
+    --border: #34343e;
+    --accent: #7c96ec;
+    --accent-soft: #242839;
+    --accent-soft-hover: #2a3046;
+    --danger: #e5776f;
+    --warn: #d4a72c;
+    --ok: #4ac26b;
+    --room-avatar-fg: #ffffff;
+    --room-avatar-border: rgb(255 255 255 / 0.16);
+    --room-avatar-0: #4868d9;
+    --room-avatar-1: #168178;
+    --room-avatar-2: #b75c0b;
+    --room-avatar-3: #a34c97;
+    --room-avatar-4: #3b7d3e;
+    --room-avatar-5: #ad4a3d;
+    --room-avatar-6: #6b5bc4;
+    --room-avatar-7: #34718a;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #16161c;
+  --bg-raised: #1f1f28;
+  --panel: #1f1f28;
+  --fg: #e6e6ec;
+  --muted: #9c9ca8;
+  --border: #34343e;
+  --accent: #7c96ec;
+  --accent-soft: #242839;
+  --accent-soft-hover: #2a3046;
+  --danger: #e5776f;
+  --warn: #d4a72c;
+  --ok: #4ac26b;
+  --room-avatar-fg: #ffffff;
+  --room-avatar-border: rgb(255 255 255 / 0.16);
+  --room-avatar-0: #4868d9;
+  --room-avatar-1: #168178;
+  --room-avatar-2: #b75c0b;
+  --room-avatar-3: #a34c97;
+  --room-avatar-4: #3b7d3e;
+  --room-avatar-5: #ad4a3d;
+  --room-avatar-6: #6b5bc4;
+  --room-avatar-7: #34718a;
+}
+
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+
+  /* Layout (ADR 0062). */
+  --sidebar-width: 22rem;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ---- shell ---- */
+
+.shell {
+  position: fixed;
+  top: var(--app-viewport-top, 0);
+  left: var(--app-viewport-left, 0);
+  display: flex;
+  flex-direction: column;
+  width: var(--app-viewport-width, 100%);
+  height: calc(
+    var(--app-viewport-height, 100dvh) -
+      var(--app-keyboard-accessory-inset, 0px)
+  );
+  min-height: 0;
+  overflow: hidden;
+}
+
+.topbar {
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  /* Brand, nav, indicator and two buttons do not fit a phone on one line. */
+  flex-wrap: wrap;
+}
+
+.topbar-icon {
+  display: none;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.composer-send-icon {
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+@media (min-width: 48rem) {
+  .composer-send-icon {
+    display: none;
+  }
+}
+
+.topbar-rooms-button,
+.topbar-room-title {
+  display: none;
+}
+
+.topbar-icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.topbar-count-badge {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.45rem;
+  min-width: 1.05rem;
+  height: 1.05rem;
+  padding: 0 0.22rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.05rem;
+  text-align: center;
+}
+
+@media (max-width: 47.99rem) {
+  .topbar {
+    flex-wrap: nowrap;
+    gap: 0.45rem;
+    padding: 0.45rem 0.55rem;
+  }
+
+  .mobile-room-shell .topbar-brand {
+    display: none;
+  }
+
+  .mobile-room-shell .topbar-rooms-button {
+    display: inline-flex;
+    flex: none;
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  .topbar-nav {
+    flex: none;
+  }
+
+  .topbar-label,
+  .conn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .mobile-room-shell .topbar-room-title {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    padding: 0.25rem 0.35rem;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .mobile-room-shell .topbar-room-title span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conn {
+    flex: none;
+    gap: 0;
+    padding-inline: 0.2rem;
+  }
+
+  .topbar nav {
+    flex: none;
+  }
+
+  .topbar nav a,
+  .topbar-icon-button,
+  .help-button {
+    flex: none;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0.35rem;
+  }
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 1rem;
+  flex: 1;
+}
+
+.topbar nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.topbar nav a:hover {
+  color: var(--fg);
+}
+
+@media (max-width: 47.99rem) {
+  .topbar .topbar-icon {
+    display: block;
+  }
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.conn-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.conn-live .conn-dot {
+  background: var(--ok);
+}
+
+.conn-connecting .conn-dot,
+.conn-reconnecting .conn-dot {
+  background: var(--warn);
+}
+
+.conn-offline .conn-dot {
+  background: var(--danger);
+}
+
+.conn-reconnecting .conn-dot {
+  animation: conn-pulse 1s ease-in-out infinite;
+}
+
+@keyframes conn-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-reconnecting .conn-dot {
+    animation: none;
+  }
+}
+
+/* ---- two-pane body (ADR 0062) ----
+
+   Two breakpoints, written as literals because custom properties are not
+   allowed in `@media` conditions:
+
+     48rem — below it only one pane shows, chosen by the route.
+     64rem — below it the thread panel reverts to a fixed overlay drawer.
+
+   Both panes stay mounted at every width; `display: none` decides what is
+   visible, so the sidebar never loses its scroll position or its filters. */
+
+.shell-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* `overflow-x: hidden` is not redundant with `overflow-y: auto`: a box that
+   scrolls on one axis computes `visible` to `auto` on the other, so both panes
+   were horizontal scroll containers by accident. Content that is legitimately
+   wider than the pane (a code block, a table) scrolls inside its own box, so
+   nothing here is unreachable — but sub-pixel layout, which a 3x phone screen
+   produces constantly, made `scrollWidth` exceed `clientWidth` by a pixel and
+   handed the timeline a horizontal scrollbar it should never have had. */
+.sidebar {
+  flex: 0 0 var(--sidebar-width);
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1rem;
+  border-right: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.shell main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1.5rem;
+  box-sizing: border-box;
+}
+
+/* Utility pages (accounts, settings, 404) keep the old centered column and
+   drop the sidebar at every width — they are not room surfaces. */
+.shell-body.mode-utility .sidebar {
+  display: none;
+}
+
+.shell-body.mode-utility main {
+  max-width: 56rem;
+  width: 100%;
+  margin-inline: auto;
+}
+
+/* The sidebar's controls stack: they were laid out for a 56rem column, and
+   the five filter chips do not fit one line of it. */
+.sidebar .room-controls {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.6rem;
+}
+
+.sidebar .filter-group {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+}
+
+.sidebar .name-filter {
+  max-width: none;
+}
+
+.rooms-index {
+  color: var(--muted);
+}
+
+@media (min-width: 48rem) {
+  .shell-body.sidebar-collapsed .sidebar {
+    display: none;
+  }
+}
+
+/* Single pane: the route picks which one. `/` is the room list, a room URL is
+   the timeline — exactly the pre-0062 behavior, reached via the brand link or
+   browser back. */
+@media (max-width: 47.99rem) {
+  .shell.mobile-room-shell main {
+    padding-top: 0.4rem;
+    padding-bottom: 0.35rem;
+  }
+
+  .mobile-room-shell .timeline {
+    margin-top: 0.25rem;
+  }
+
+  .shell-body.mode-room .sidebar {
+    display: none;
+  }
+
+  .shell-body.mode-rooms main {
+    display: none;
+  }
+
+  .shell-body.mode-rooms .sidebar {
+    flex: 1;
+    border-right: none;
+  }
+}
+
+.signin {
+  max-width: 28rem;
+  margin: 4rem auto;
+  padding: 0 1rem;
+}
+
+.signin-options,
+.sso-options {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.signin-divider {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.remember-me {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+}
+
+.sso-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+  gap: 0.75rem;
+  border-radius: 4px;
+  padding: 0 1rem;
+  font:
+    500 14px/20px 'Google Sans',
+    Roboto,
+    Arial,
+    sans-serif;
+}
+
+.sso-button:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+
+.sso-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.sso-icon {
+  display: inline-flex;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+}
+
+.sso-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.sso-google {
+  border-color: #747775;
+  background: #ffffff;
+  color: #1f1f1f;
+}
+
+.sso-microsoft {
+  border-color: #8c8c8c;
+  background: #ffffff;
+  color: #5e5e5e;
+}
+
+.sso-apple {
+  border-color: #000000;
+  background: #000000;
+  color: #ffffff;
+}
+
+.sso-generic {
+  border-color: var(--border);
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.error {
+  color: var(--danger);
+}
+
+/* ---- shared elements ---- */
+
+a {
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.page > h1 {
+  margin-top: 0;
+}
+
+.room-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Row: stream beside thread (ADR 0062). */
+.room-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-stream {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  /* Containing block for the drag-and-drop overlay (M-W8.5). */
+  position: relative;
+}
+
+.room-head h1:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.room-title-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin: 1.25rem 0;
+  background: var(--bg-raised);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.banner.error {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+
+/* ---- account cards ---- */
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.card-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.account-add {
+  margin-top: 1rem;
+}
+
+.account-deactivated .card-head strong {
+  color: var(--muted);
+}
+
+.badge {
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  color: var(--muted);
+}
+
+.badge.state-active {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.state-deleting,
+.badge.sync-offline {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.badge.verified {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.badge.sync-connecting,
+.badge.sync-syncing {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--danger);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.status-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+/* ---- room list ---- */
+
+.room-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.filter-group {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.name-filter {
+  flex: 1;
+  min-width: 10rem;
+  max-width: 16rem;
+}
+
+.sort-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+select {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Only the rows overlapping the viewport are rendered; the rest are stood in
+   for by the list's own top/bottom padding, set inline. `position: relative`
+   anchors the pinned separator, which is taken out of flow so that every row
+   shares one pitch — the windowing math in `virtual-window.ts` assumes it. */
+.room-list {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.room-row {
+  display: flex;
+  align-items: center;
+}
+
+/* The rule between rows is an inset shadow, not a border: a border would make
+   every row but the first 1px taller, and a list of uniform rows is what lets
+   the window be computed from a single measured pitch. */
+.room-row.rule {
+  box-shadow: inset 0 1px 0 var(--border);
+}
+
+/* Two lines: the name, then a muted account/activity line. Side by side, the
+   nowrap meta could not shrink — `min-width: auto` on a flex item is its
+   min-content width — so the name gave up every pixel instead, and once a
+   second account put a user id in the meta the name vanished entirely. */
+.room-link {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.9rem;
+  color: var(--fg);
+  text-decoration: none;
+  min-width: 0;
+}
+
+.room-avatar {
+  --room-avatar-bg: var(--room-avatar-0);
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--room-avatar-bg);
+  color: var(--room-avatar-fg);
+  border: 1px solid var(--room-avatar-border);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.room-avatar-color-1 {
+  --room-avatar-bg: var(--room-avatar-1);
+}
+
+.room-avatar-color-2 {
+  --room-avatar-bg: var(--room-avatar-2);
+}
+
+.room-avatar-color-3 {
+  --room-avatar-bg: var(--room-avatar-3);
+}
+
+.room-avatar-color-4 {
+  --room-avatar-bg: var(--room-avatar-4);
+}
+
+.room-avatar-color-5 {
+  --room-avatar-bg: var(--room-avatar-5);
+}
+
+.room-avatar-color-6 {
+  --room-avatar-bg: var(--room-avatar-6);
+}
+
+.room-avatar-color-7 {
+  --room-avatar-bg: var(--room-avatar-7);
+}
+
+.room-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+}
+
+.room-copy {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.room-link:hover {
+  background: var(--bg-raised);
+}
+
+/* The open room. `aria-current="page"` is the state; the styling just reads it,
+   so assistive tech and the eye learn the same thing. The bar is an inset
+   shadow rather than a border so the row's text does not shift by 3px. */
+.room-link[aria-current='page'] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.room-link[aria-current='page']:hover {
+  background: var(--accent-soft-hover);
+}
+
+.room-link[aria-current='page'] .room-name {
+  font-weight: 600;
+}
+
+/* Arrow keys rove focus through these links (ADR 0063), so the focus ring has
+   to be visible and distinct from the selected row. `outline-offset` is
+   negative because `.room-list` clips overflow. */
+.room-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.room-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.room-title-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+/* `text-overflow` ellipsizes a block's inline content, never a flex item — so
+   the name, not `.room-title`, is what has to own the overflow. Without this
+   the title was hard-clipped with no ellipsis to admit it. */
+.room-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A truncated name is fine; a truncated unread count is not. */
+.room-title .badge,
+.room-title-meta {
+  flex: none;
+}
+
+.room-title-meta,
+.room-meta,
+.room-preview {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-overflow: '...';
+  font-size: 0.85rem;
+}
+
+.room-title-meta {
+  max-width: 45%;
+}
+
+.badge.dm {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.badge.unread-count {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Out of flow (`top` is set inline from the measured pitch), so it marks the
+   pinned boundary without giving that one row a different height. It lands on
+   the boundary row's own rule, which is why that row is asked not to draw one. */
+.room-separator {
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  height: 0;
+  margin: 0;
+  border-top: 1px dashed var(--border);
+  list-style: none;
+  pointer-events: none;
+}
+
+button.pin {
+  font-size: 1rem;
+  padding: 0.35rem 0.7rem;
+}
+
+button.pin[aria-pressed='true'] {
+  color: var(--warn);
+}
+
+/* ---- room timeline ---- */
+
+.room-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.room-head h1 {
+  margin: 0;
+}
+
+@media (max-width: 47.99rem) {
+  .room-head {
+    display: none;
+  }
+}
+
+.room-title-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.room-title-button span {
+  overflow-wrap: anywhere;
+}
+
+.room-title-button::after {
+  content: 'i';
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.room-title-button:hover,
+.room-title-button:focus-visible {
+  color: var(--accent);
+}
+
+.room-title-button:hover::after,
+.room-title-button:focus-visible::after,
+.room-title-button[aria-expanded='true']::after {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* The message scroller — a *nested* scroll container inside `main`, and the
+   element that actually holds the timeline, so it is what a phone scrolls. Its
+   `overflow-y: auto` silently made `overflow-x` compute to `auto` too, so it
+   was a horizontal scroll region as well: content fits on desktop, but iOS
+   rubber-bands a two-axis `auto` container by a sub-pixel, which is the small
+   sideways drift here. `clip` rather than `hidden` because `hidden` still
+   establishes a scroll container iOS can pan — `clip` establishes none. Wide
+   message content (code blocks, tables) carries its own scrollbar, so nothing
+   here becomes unreachable. Matches the `overflow-x: hidden` on `main` and
+   `.sidebar`; `clip` would be marginally stronger but the build's minifier
+   collapses the shorthand and drops a `hidden`→`clip` fallback, which would
+   leave older iOS with no rule at all. */
+.timeline {
+  margin-top: 1rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.timeline-edge {
+  display: block;
+  margin: 0 auto 0.75rem;
+  text-align: center;
+}
+
+p.timeline-edge {
+  color: var(--muted);
+}
+
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.timeline-list-shell {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 0;
+}
+
+.day-separator {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.9rem 0 0.4rem;
+  border-bottom: 1px solid var(--border);
+  line-height: 0.1;
+}
+
+.day-separator::before {
+  content: '';
+}
+
+.event-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  column-gap: 0.55rem;
+  align-items: start;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+}
+
+@media (min-width: 48rem) {
+  .event-row {
+    transition: background-color 120ms ease;
+  }
+
+  .event-row:hover,
+  .event-row:focus-within,
+  .event-row.actions-open {
+    background: var(--bg-raised);
+  }
+
+  .event-row.highlighted:hover,
+  .event-row.highlighted:focus-within,
+  .event-row.highlighted.actions-open {
+    background: var(--accent-soft-hover);
+  }
+}
+
+/* The jump target (`?event=`). Outline alone got lost among busy rows; the
+   tint is the room-list selection's hue-shift trick applied to a message. */
+.event-row.highlighted {
+  outline: 2px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+.event-row:has(.reaction-senders-tooltip) {
+  z-index: 20;
+}
+
+.event-row.state-event {
+  font-size: 0.85rem;
+}
+
+.event-row.pending {
+  opacity: 0.6;
+}
+
+.event-row.failed {
+  border-left: 3px solid var(--danger);
+}
+
+.local-echo-status {
+  font-size: 0.85rem;
+}
+
+.local-echo-status.error {
+  color: var(--danger);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.local-echo-status .ghost {
+  font-size: 0.8rem;
+  padding: 0 0.35rem;
+}
+
+.user-avatar {
+  --user-avatar-bg: var(--room-avatar-0);
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-top: 0.05rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--user-avatar-bg);
+  color: var(--room-avatar-fg);
+  border: 1px solid var(--room-avatar-border);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.user-avatar-color-1 {
+  --user-avatar-bg: var(--room-avatar-1);
+}
+
+.user-avatar-color-2 {
+  --user-avatar-bg: var(--room-avatar-2);
+}
+
+.user-avatar-color-3 {
+  --user-avatar-bg: var(--room-avatar-3);
+}
+
+.user-avatar-color-4 {
+  --user-avatar-bg: var(--room-avatar-4);
+}
+
+.user-avatar-color-5 {
+  --user-avatar-bg: var(--room-avatar-5);
+}
+
+.user-avatar-color-6 {
+  --user-avatar-bg: var(--room-avatar-6);
+}
+
+.user-avatar-color-7 {
+  --user-avatar-bg: var(--room-avatar-7);
+}
+
+.user-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 60%;
+}
+
+.event-content {
+  min-width: 0;
+}
+
+.event-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.event-sender {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.event-head > time,
+.event-head > .local-echo-status {
+  flex: none;
+  white-space: nowrap;
+}
+
+.edited-marker {
+  font-size: 0.8rem;
+  padding: 0 0.25rem;
+}
+
+.event-body {
+  overflow-wrap: anywhere;
+}
+
+.read-receipts {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.body-text {
+  white-space: pre-wrap;
+}
+
+.body-html p {
+  margin: 0.35rem 0;
+}
+
+.body-html p:first-child {
+  margin-top: 0;
+}
+
+.body-html p:last-child {
+  margin-bottom: 0;
+}
+
+.body-html blockquote {
+  border-left: 3px solid var(--border);
+  margin: 0.25rem 0;
+  padding-left: 0.6rem;
+  color: var(--muted);
+}
+
+.body-html pre {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+}
+
+.body-html code {
+  background: var(--bg-raised);
+  border-radius: 4px;
+  padding: 0 0.2rem;
+}
+
+.mention-pill,
+.room-pill {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 0 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.mention-pill:hover,
+.mention-pill:focus-visible,
+.room-pill:hover,
+.room-pill:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  text-decoration: none;
+}
+
+/* A wide table has to carry its own scrollbar. The timeline pane clips on the
+   x-axis, so a table left to overflow would simply lose its right-hand columns.
+   `display: block` is what gives it a scroll box; `width: fit-content` keeps a
+   narrow table from stretching to the full column width as a block would. */
+.body-html table {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.body-html th,
+.body-html td {
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.5rem;
+}
+
+.placeholder {
+  font-style: italic;
+}
+
+.event-inspector {
+  margin-top: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+.event-inspector-title {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.event-inspector pre {
+  margin: 0;
+  padding: 0.6rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+/* Spoilers: hidden until revealed (class toggled by FormattedBody). */
+.spoiler {
+  background: var(--fg);
+  color: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.spoiler.spoiler-revealed {
+  background: var(--bg-raised);
+  color: inherit;
+}
+
+.reply-context {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  border-left: 3px solid var(--accent);
+  margin: 0.15rem 0;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.reply-context-copy {
+  min-width: 0;
+}
+
+.reply-context-body .body-html {
+  display: inline;
+}
+
+.reply-context-body .body-html p {
+  display: inline;
+  margin: 0;
+}
+
+.reactions {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.reaction-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  z-index: 20;
+}
+
+.reaction-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.reaction-chip.mine {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reaction-senders-tooltip {
+  position: absolute;
+  z-index: 20;
+  left: 50%;
+  bottom: calc(100% + 0.4rem);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--panel);
+  box-shadow: 0 0.75rem 1.75rem rgb(0 0 0 / 0.18);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  pointer-events: none;
+  white-space: normal;
+}
+
+/* ---- composer & event actions (M-W7) ---- */
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 60;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  padding: 0.6rem 0;
+  margin-top: 1rem;
+}
+
+.typing-indicator {
+  margin: 0.35rem 0 0;
+  padding: 0 0.55rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.35;
+  min-height: 1.15rem;
+  overflow-wrap: anywhere;
+}
+
+.composer form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+@media (max-width: 47.99rem) {
+  .composer {
+    margin-top: 0.5rem;
+    padding: 0.45rem 0
+      calc(0.15rem + var(--app-standalone-composer-bottom-padding, 0px));
+  }
+
+  .composer form {
+    gap: 0.35rem;
+  }
+
+  .composer-resize {
+    display: none;
+  }
+}
+
+.composer-input-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  resize: none;
+  min-height: 2.4rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  box-sizing: border-box;
+}
+
+@media (max-width: 47.99rem) {
+  .composer textarea {
+    min-height: 2.1rem;
+    padding: 0.3rem 0.5rem;
+    line-height: 1.35;
+  }
+}
+
+.composer-resize {
+  position: absolute;
+  top: -0.35rem;
+  right: 0.25rem;
+  z-index: 2;
+  width: 1.4rem;
+  height: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  cursor: ns-resize;
+}
+
+.composer-resize::before {
+  content: '';
+  position: absolute;
+  left: 0.35rem;
+  right: 0.35rem;
+  top: 0.3rem;
+  border-top: 1px solid var(--muted);
+}
+
+.composer-resize:hover,
+.composer-resize:focus-visible {
+  border-color: var(--accent);
+}
+
+.composer-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.15rem 0.6rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+/* ---- media send (M-W8.5, ADR 0065) ---- */
+
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.25rem 0.6rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.composer-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-preview {
+  height: 2.25rem;
+  width: 2.25rem;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+/* Visually hidden, but still clickable via the paperclip's `.click()` and
+   reachable by tests — `display: none` would break both. */
+.composer-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.composer-attach {
+  line-height: 1;
+  padding: 0.4rem 0.5rem;
+}
+
+.composer-attach-icon {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.composer-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+@media (max-width: 47.99rem) {
+  .composer-attach,
+  .composer-send {
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    padding: 0.35rem;
+  }
+
+  .composer-send-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  font-weight: 600;
+  /* The drop lands on the pane beneath; the overlay is a hint, not a target. */
+  pointer-events: none;
+}
+
+/* An image still uploading, rendered from its local blob (no proxy fetch). */
+.media-preview {
+  max-width: 100%;
+  border-radius: 4px;
+  opacity: 0.75;
+}
+
+.slash-command-menu {
+  position: absolute;
+  left: 0;
+  right: 4.5rem;
+  bottom: calc(100% - 0.2rem);
+  z-index: 80;
+  display: grid;
+  gap: 0.15rem;
+  max-height: min(16rem, 45vh);
+  overflow-y: auto;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--panel);
+  box-shadow: 0 1rem 2rem rgb(0 0 0 / 0.18);
+}
+
+.slash-command-option {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.slash-command-option:hover {
+  background: var(--bg-raised);
+}
+
+.slash-command-option.selected {
+  background: var(--accent-soft);
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 0 0 1px var(--accent);
+}
+
+.slash-command-option.selected:hover {
+  background: var(--accent-soft-hover);
+}
+
+.slash-command-name {
+  font-weight: 700;
+}
+
+.slash-command-description {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.event-actions {
+  display: none;
+  gap: 0.15rem;
+  margin-left: auto;
+  opacity: 0;
+}
+
+.event-row:hover .event-actions,
+.event-row:focus-within .event-actions {
+  display: inline-flex;
+  opacity: 1;
+}
+
+.event-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+}
+
+.event-action-tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.event-action-tooltip {
+  display: none;
+}
+
+.event-action-icon {
+  display: none;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+
+.event-actions .ghost {
+  font-size: 0.8rem;
+  padding: 0 0.35rem;
+}
+
+.event-actions .ghost.danger {
+  color: var(--danger);
+}
+
+@media (max-width: 47.99rem) {
+  .event-actions {
+    gap: 0.1rem;
+  }
+
+  .event-row:hover .event-actions,
+  .event-row:focus-within .event-actions {
+    display: none;
+    opacity: 0;
+  }
+
+  .event-row.actions-open .event-actions {
+    display: inline-flex;
+    opacity: 1;
+  }
+
+  .event-actions .event-action-button {
+    width: 1.75rem;
+    height: 1.75rem;
+    min-width: 1.75rem;
+    padding: 0;
+    border-radius: 6px;
+  }
+
+  .event-actions .confirm {
+    gap: 0.1rem;
+  }
+
+  .event-action-icon {
+    display: block;
+  }
+
+  .event-action-tooltip {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 0.35rem);
+    z-index: 30;
+    display: block;
+    transform: translateX(-50%);
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow);
+    font-size: 0.75rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .event-action-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+.reaction-picker-shell {
+  margin: 0.25rem 0;
+}
+
+.reaction-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.reaction-picker button {
+  padding: 0.15rem 0.45rem;
+}
+
+.reaction-picker button:focus,
+.reaction-picker button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.reaction-more {
+  min-width: 2rem;
+}
+
+.reaction-full-picker {
+  position: fixed;
+  left: 50%;
+  bottom: 5.5rem;
+  z-index: 6;
+  transform: translateX(-50%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(28rem, calc(100vw - 2rem));
+  height: min(34rem, calc(100vh - 8rem));
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  background: var(--panel);
+  box-shadow: 0 1.25rem 3rem rgb(0 0 0 / 0.2);
+}
+
+.reaction-full-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.reaction-full-picker-host {
+  min-height: 0;
+}
+
+.reaction-full-picker-host emoji-picker {
+  display: block;
+  width: 100%;
+  height: 100%;
+  --border-radius: 0.9rem;
+  --border-color: transparent;
+  --outline-color: var(--accent);
+  --input-border-color: var(--border);
+  --input-font-color: var(--text);
+  --input-placeholder-color: var(--muted);
+  --input-border-radius: 0.45rem;
+}
+
+@media (min-width: 48rem) {
+  .reaction-full-picker {
+    left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width)) / 2);
+  }
+}
+
+.reaction-chip {
+  cursor: pointer;
+}
+
+.thread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.unread-thread-badge {
+  font-weight: 700;
+}
+
+.thread-badge-new {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.05rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+/* ---- side panels ---- */
+
+/* Narrow default: an overlay drawer, because there is no room for a third
+   column. Wide viewports promote it to a real pane below (ADR 0062). */
+.side-panel,
+.thread-panel {
+  position: fixed;
+  top: var(--app-viewport-top, 0);
+  right: 0;
+  bottom: auto;
+  /* Above sticky room chrome on narrow screens; below modal overlays. */
+  z-index: 70;
+  width: min(28rem, 90vw);
+  height: calc(
+    var(--app-viewport-height, 100dvh) -
+      var(--app-keyboard-accessory-inset, 0px)
+  );
+  box-sizing: border-box;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  padding: 1rem 1.25rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15);
+}
+
+@media (max-width: 47.99rem) {
+  .side-panel,
+  .thread-panel {
+    width: var(--app-viewport-width, 100%);
+    border-left: 0;
+    box-shadow: none;
+  }
+}
+
+/* Third column: the thread shrinks the timeline instead of covering it. The
+   stream's min-width is what forces the fallback above once three columns no
+   longer fit. */
+@media (min-width: 64rem) {
+  .side-panel,
+  .thread-panel {
+    position: static;
+    flex: 0 0 min(28rem, 40%);
+    width: auto;
+    height: auto;
+    box-shadow: none;
+  }
+
+  .room-stream {
+    min-width: 22rem;
+  }
+}
+
+.thread-root {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.thread-root-copy {
+  min-width: 0;
+}
+
+.thread-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.thread-timeline .timeline-list-shell {
+  justify-content: flex-start;
+}
+
+.thread-list {
+  flex: none;
+}
+
+.room-info-panel {
+  gap: 1rem;
+}
+
+.room-info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.room-info-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.room-info-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.45rem 0.8rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.detail-list dt {
+  color: var(--muted);
+}
+
+.detail-list dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.member-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.member-row {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.member-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.member-name {
+  font-weight: 600;
+}
+
+.member-copy code {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.membership-join {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.membership-invite {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.membership-leave,
+.membership-ban {
+  color: var(--muted);
+}
+
+/* ---- overlay (edit history) ---- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.overlay-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  max-width: 36rem;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.jump-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 24rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.unread-threads-overlay {
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding-top: 4.25rem;
+}
+
+.unread-threads-panel {
+  max-width: 31rem;
+}
+
+.unread-threads-empty {
+  margin: 1.25rem 0 0.25rem;
+}
+
+.unread-thread-list {
+  display: grid;
+  gap: 0.55rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.unread-thread-entry {
+  display: grid;
+  width: 100%;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  text-align: left;
+}
+
+.unread-thread-entry:hover,
+.unread-thread-entry:focus-visible {
+  border-color: var(--accent);
+}
+
+.unread-thread-room {
+  font-weight: 700;
+}
+
+.unread-thread-root,
+.unread-thread-latest,
+.unread-thread-entry time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-thread-root,
+.unread-thread-entry time {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.unread-thread-latest {
+  display: flex;
+  gap: 0.35rem;
+}
+
+@media (max-width: 47.99rem) {
+  .unread-threads-overlay {
+    justify-content: center;
+    padding: 0.75rem;
+  }
+
+  .unread-threads-panel {
+    max-width: none;
+    max-height: calc(var(--app-viewport-height, 100dvh) - 1.5rem);
+  }
+}
+
+/* Block-level, not `inline-flex`: shrink-to-fit would let the label's bare text
+   node — an anonymous flex item — wrap mid-sentence beside the checkbox. */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-version {
+  margin-top: 1.5rem;
+  font-size: 0.85rem;
+}
+
+/* ---- shortcuts help (ADR 0063) ---- */
+
+.help-button {
+  padding-inline: 0.6rem;
+  font-weight: 600;
+}
+
+.shortcut-group h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 1rem 0 0.4rem;
+}
+
+.shortcut-subgroup h4 {
+  margin: 0.65rem 0 0.2rem;
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+
+.shortcut-list {
+  margin: 0;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.2rem 0;
+}
+
+.shortcut-row dt {
+  flex: 0 0 10rem;
+  text-align: right;
+}
+
+.shortcut-row dd {
+  margin: 0;
+}
+
+kbd {
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+
+.overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ---- message search (ADR 0066) ---- */
+
+/* Wider than the reading modals and pinned near the top: result lists are
+   long, and a vertically centered panel would jump as pages load. */
+.search-panel {
+  max-width: 44rem;
+  align-self: flex-start;
+  margin-top: 3rem;
+}
+
+.search-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.search-scope,
+.search-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.search-sort {
+  margin-left: auto;
+}
+
+.search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.3rem 0.1rem 0.6rem;
+  background: var(--bg-raised);
+}
+
+.chip-remove {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: var(--fg);
+}
+
+.search-status {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.search-results {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.search-hit {
+  display: block;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.search-hit:hover,
+.search-hit:focus-visible {
+  background: var(--bg-raised);
+}
+
+.search-hit-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.search-hit-room {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.search-hit-time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.search-hit-body {
+  display: block;
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+}
+
+.search-hit-body.redacted {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.search-hit-body mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.search-load-more {
+  text-align: center;
+  padding: 0.5rem 0;
+}
+
+.overlay-head h2 {
+  margin: 0;
+}
+
+.edit-trail {
+  padding-left: 1.25rem;
+}
+
+.edit-trail li {
+  margin: 0.4rem 0;
+}
+
+/* ---- forms & buttons ---- */
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.ghost,
+a.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+button.ghost:hover,
+a.ghost:hover {
+  color: var(--fg);
+}
+
+form label {
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
+input {
+  font: inherit;
+  display: block;
+  width: 100%;
+  max-width: 26rem;
+  box-sizing: border-box;
+  margin-top: 0.15rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+input[type='radio'] {
+  display: inline;
+  width: auto;
+  margin-right: 0.35rem;
+}
+
+/* The rule above sizes text fields — full width, padded, bordered. A checkbox
+   is not one, and had no reset until it left the room header for Settings. */
+input[type='checkbox'] {
+  display: inline;
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.switch,
+.theme-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  color: var(--muted);
+}
+
+.theme-picker {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.inline-form {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.inline-form label {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+/* Media (ADR 0064). The reservation box holds an image's aspect ratio before
+   its blob resolves, so a late-loading image never shoves scrolled-back
+   content around (the timeline is not re-anchored after mount). */
+.media-figure {
+  margin: 0.25rem 0 0;
+}
+
+.media-image {
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+/* No sender dimensions: reserve a modest fixed height instead of a ratio. */
+.media-image-unsized {
+  min-height: 8rem;
+  max-width: min(320px, 100%);
+}
+
+.media-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.media-open:disabled {
+  cursor: default;
+}
+
+.media-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.media-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.media-caption {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.media-skeleton {
+  width: 100%;
+  height: 100%;
+  min-height: 6rem;
+  background: linear-gradient(
+    100deg,
+    var(--bg-raised) 30%,
+    var(--border) 50%,
+    var(--bg-raised) 70%
+  );
+  background-size: 200% 100%;
+  animation: media-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes media-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-skeleton {
+    animation: none;
+  }
+}
+
+/* Non-image attachment card: icon, filename + size, download. */
+.media-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  max-width: min(360px, 100%);
+}
+
+.media-attachment-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.media-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.media-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Lightbox: full-viewport image over the standard overlay backdrop. */
+.lightbox {
+  flex-direction: column;
+  gap: 1rem;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  font-size: 1.25rem;
+  line-height: 1;
+  color: #fff;
+}
+
+.lightbox-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lightbox-image {
+  display: flex;
+  max-width: 90vw;
+  max-height: 80vh;
+}
+
+.lightbox-image img {
+  max-width: 90vw;
+  max-height: 80vh;
+  object-fit: contain;
+}
+
+.lightbox-caption {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  text-align: center;
+  max-width: min(60ch, 90vw);
+}

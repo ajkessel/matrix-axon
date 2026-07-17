@@ -1,0 +1,3 @@
+# msw's postinstall only prints a support notice; nothing needs building.
+allowBuilds:
+  msw: false

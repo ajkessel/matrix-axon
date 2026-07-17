@@ -1,0 +1,179 @@
+import { useEffect, useState } from 'preact/hooks'
+import type { ComposerAutocompleteOption } from './Composer'
+import {
+  currentEmojiEntries,
+  emojiShortcodeSuggestions,
+  loadEmojiEntries,
+  type EmojiEntry,
+} from '../emoji'
+import { useAttachment, type StagedAttachment } from '../media/use-attachment'
+import { useFileDrop } from '../media/use-file-drop'
+import {
+  formatMessageBody,
+  roomReferenceSuggestions,
+  userMentionSuggestions,
+  type FormattedMessageParts,
+} from '../mentions'
+import type { MembersStore } from '../stores/members'
+import type { RoomDto } from '../stores/room-list'
+import type { EventDto, TimelineStore } from '../stores/timeline'
+
+export type ComposerAction =
+  | { kind: 'reply'; event: EventDto }
+  | { kind: 'edit'; event: EventDto; draft?: string }
+
+export interface MessageComposerOptions {
+  /** The store the composer sends into (room- or thread-scoped). */
+  timeline: TimelineStore
+  accountId: string
+  members: MembersStore
+  rooms: readonly RoomDto[]
+  roomTitles: ReadonlyMap<string, string>
+  ownUserId: string | null
+  /**
+   * Identity of the staged attachment's surface. Must include everything
+   * that distinguishes where a send lands — account, room, and thread root
+   * where applicable — so a staged file never survives into a surface that
+   * would send it from the wrong place.
+   */
+  attachmentScope: string
+}
+
+/**
+ * The composer plumbing RoomPage and ThreadPanel share (reply/edit mode, the
+ * banner, attachment staging, mention/room/emoji completions, and the submit
+ * pipeline with its WCR-10 edit-draft restore). One implementation so a fix
+ * in the send path — the class of bug that loses user text — cannot land in
+ * one panel and miss the other. Scope-specific concerns (slash commands,
+ * draft persistence, focus, the Composer `key`) stay with the caller.
+ */
+export function useMessageComposer(options: MessageComposerOptions): {
+  action: ComposerAction | null
+  setAction: (action: ComposerAction | null) => void
+  banner: { label: string; excerpt: string; onCancel: () => void } | undefined
+  /** False in edit mode: an edit replaces text, not media. */
+  attachable: boolean
+  attachment: StagedAttachment | null
+  stage: (file: File, skipped?: number) => void
+  clearAttachment: () => void
+  dragging: boolean
+  dropHandlers: ReturnType<typeof useFileDrop>['handlers']
+  emojiEntries: readonly EmojiEntry[]
+  formatComposerBody: (body: string) => Promise<FormattedMessageParts>
+  mentionCompletions: (query: string) => ComposerAutocompleteOption[]
+  roomReferenceCompletions: (query: string) => ComposerAutocompleteOption[]
+  emojiCompletions: (query: string) => ComposerAutocompleteOption[]
+  /** The Composer `onSubmit`: media, edit, reply, or plain send. */
+  submitMessage: (body: string) => Promise<boolean>
+} {
+  const { timeline, accountId, members, rooms, roomTitles, ownUserId } = options
+  const [action, setAction] = useState<ComposerAction | null>(null)
+  const [emojiEntries, setEmojiEntries] = useState(() => currentEmojiEntries())
+  const attachable = action?.kind !== 'edit'
+  const {
+    attachment,
+    stage,
+    clear: clearAttachment,
+  } = useAttachment(options.attachmentScope)
+  const { dragging, handlers: dropHandlers } = useFileDrop(stage)
+
+  useEffect(() => {
+    let cancelled = false
+    void loadEmojiEntries().then((entries) => {
+      if (!cancelled) {
+        setEmojiEntries(entries)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const banner =
+    action === null
+      ? undefined
+      : {
+          label: action.kind === 'reply' ? 'Replying to' : 'Editing',
+          excerpt: `${action.event.sender}: ${(action.event.body ?? '').slice(0, 80)}`,
+          onCancel: () => setAction(null),
+        }
+
+  const formatComposerBody = async (body: string) =>
+    formatMessageBody(body, {
+      accountId,
+      members: [...members.members.value.values()],
+      rooms,
+      roomTitles,
+      emojiEntries: await loadEmojiEntries(),
+    })
+
+  const mentionCompletions = (query: string): ComposerAutocompleteOption[] =>
+    userMentionSuggestions([...members.members.value.values()], query)
+
+  const roomReferenceCompletions = (
+    query: string,
+  ): ComposerAutocompleteOption[] =>
+    roomReferenceSuggestions(rooms, roomTitles, query)
+
+  const emojiCompletions = (query: string): ComposerAutocompleteOption[] =>
+    emojiShortcodeSuggestions(emojiEntries, query)
+
+  const submitMessage = async (body: string): Promise<boolean> => {
+    // Dismiss the reply/edit mode immediately — don't hold the banner hostage
+    // to the network round trip; the timeline renders the pending/failed
+    // outcome.
+    const current = action
+    setAction(null)
+    const senderId = ownUserId ?? undefined
+    const replyTo =
+      current?.kind === 'reply' ? current.event.event_id : undefined
+    if (attachment !== null) {
+      // Unstage *before* the caption render: `formatComposerBody` can await a
+      // cold emoji-data fetch, and a second Enter during that window used to
+      // pass the composer's has-attachment guard and send the file twice.
+      const staged = attachment
+      clearAttachment()
+      // The composer's text is the caption; with none, the server uses the
+      // filename as the body (ADR 0065).
+      const caption =
+        body === '' ? undefined : (await formatComposerBody(body)).body
+      return timeline.sendMedia(staged.file, { caption, replyTo, senderId })
+    }
+    const formatted = await formatComposerBody(body)
+    if (current?.kind === 'edit') {
+      const ok = await timeline.edit(current.event.event_id, formatted.body, {
+        formattedBody: formatted.formatted_body ?? null,
+      })
+      if (!ok) {
+        // A failed edit has no retryable echo (sends do), so re-open edit
+        // mode carrying the text the user typed — the error banner alone
+        // would silently discard it (WCR-10).
+        setAction({ ...current, draft: body })
+      }
+      return ok
+    }
+    return timeline.send(formatted.body, {
+      replyTo,
+      senderId,
+      formattedBody: formatted.formatted_body ?? null,
+    })
+  }
+
+  return {
+    action,
+    setAction,
+    banner,
+    attachable,
+    attachment,
+    stage,
+    clearAttachment,
+    dragging,
+    dropHandlers,
+    emojiEntries,
+    formatComposerBody,
+    mentionCompletions,
+    roomReferenceCompletions,
+    emojiCompletions,
+    submitMessage,
+  }
+}
