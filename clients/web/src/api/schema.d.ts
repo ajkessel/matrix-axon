@@ -408,6 +408,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark a room read: sets both the public read receipt and the private
+         *     fully-read marker to `event_id` in one homeserver call.
+         */
+        post: operations["send_read_receipt"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/send": {
         parameters: {
             query?: never;
@@ -505,6 +525,23 @@ export interface paths {
          */
         get: operations["room_timeline"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/typing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set (or clear) this account's typing indicator in a room. */
+        put: operations["send_typing_notice"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1753,6 +1790,15 @@ export interface components {
             senders: string[];
         };
         /**
+         * @description Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR
+         *     0067). Sets both the public read receipt and the private fully-read marker
+         *     to `event_id` in one homeserver call.
+         */
+        ReadReceiptRequest: {
+            /** @description The event id to mark as read. */
+            event_id: string;
+        };
+        /**
          * @description Request body for recovery-key key acquisition
          *     (`POST /v1/accounts/{account_id}/recover`). The Secure-Storage (4S) recovery
          *     key imports the account's megolm key backup + cross-signing keys, self-verifies
@@ -2008,6 +2054,17 @@ export interface components {
             session_id?: string | null;
             /** @description The coarse `verified`/`unverified` verification state at decrypt time. */
             verification_state?: string | null;
+        };
+        /**
+         * @description Request body for setting this account's typing indicator
+         *     (`PUT …/rooms/{room_id}/typing`; ADR 0068 M19a).
+         */
+        TypingRequest: {
+            /**
+             * @description Whether the account is now typing in this room. Setting `false` clears
+             *     an active typing indicator early instead of waiting for it to expire.
+             */
+            typing: boolean;
         };
         /**
          * @description The per-event verification bundle (M7c): the durable at-decrypt trust
@@ -3044,6 +3101,82 @@ export interface operations {
             };
         };
     };
+    send_read_receipt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadReceiptRequest"];
+            };
+        };
+        responses: {
+            /** @description Receipt sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     send_message: {
         parameters: {
             query?: never;
@@ -3341,6 +3474,82 @@ export interface operations {
                 headers: {
                     /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
                     "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    send_typing_notice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TypingRequest"];
+            };
+        };
+        responses: {
+            /** @description Typing notice sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
                     [name: string]: unknown;
                 };
                 content: {
