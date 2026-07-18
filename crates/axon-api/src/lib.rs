@@ -51,7 +51,7 @@ pub use oauth::{
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
-pub use sender::{MessageSender, SendError};
+pub use sender::{EphemeralSender, MessageSender, SendError};
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
@@ -195,6 +195,17 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}/reactions",
             post(routes::messages::react),
+        )
+        // Ephemeral outbound signals: real Matrix read receipts (ADR 0067) and
+        // typing notices (ADR 0068, M19a). Best-effort from the caller's
+        // perspective; server-side these behave like any other mutation.
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/read",
+            post(routes::ephemeral::send_read_receipt),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/typing",
+            put(routes::ephemeral::send_typing_notice),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

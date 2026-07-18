@@ -225,7 +225,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let sender = Arc::new(GatewayAdapter::new(
         sync_engine.gateway(),
         std::time::Duration::from_secs(config.media.upstream_upload_timeout_secs),
+        std::time::Duration::from_secs(config.sync.ephemeral_send_timeout_secs),
     ));
+    // Same adapter, unsized onto the ephemeral-outbound port (read receipts /
+    // typing notices, ADR 0067 / ADR 0068 M19a) alongside `MessageSender` below.
+    let ephemeral: Arc<dyn axon_api::EphemeralSender> = sender.clone();
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
@@ -273,7 +277,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     )
     .with_backfill_status(backfill_status)
     .with_member_profiles(member_profiles)
-    .with_staged_uploads(uploads);
+    .with_staged_uploads(uploads)
+    .with_ephemeral(ephemeral);
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }

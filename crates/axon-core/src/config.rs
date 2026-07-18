@@ -182,6 +182,12 @@ pub struct SyncConfig {
     /// anyway, since it would otherwise silently never be forwarded.
     #[serde(default = "default_ephemeral_event_types")]
     pub ephemeral_event_types: Vec<String>,
+    /// Per-call timeout for an outbound ephemeral send — a read receipt (ADR
+    /// 0067) or a typing notice (ADR 0068, M19a) — in seconds. Bounds a hung
+    /// homeserver response so the request-handling task can't block on it
+    /// unbounded. Defaults to 10.
+    #[serde(default = "default_ephemeral_send_timeout_secs")]
+    pub ephemeral_send_timeout_secs: u64,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
     /// task that pages each joined room's pre-existing history backward through
     /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
@@ -632,6 +638,10 @@ fn default_ephemeral_event_types() -> Vec<String> {
     vec!["m.typing".to_owned(), "m.receipt".to_owned()]
 }
 
+fn default_ephemeral_send_timeout_secs() -> u64 {
+    10
+}
+
 fn default_backfill_enabled() -> bool {
     true
 }
@@ -776,6 +786,7 @@ impl Default for SyncConfig {
             timeline_limit: default_timeline_limit(),
             live_event_buffer: default_live_event_buffer(),
             ephemeral_event_types: default_ephemeral_event_types(),
+            ephemeral_send_timeout_secs: default_ephemeral_send_timeout_secs(),
             backfill_enabled: default_backfill_enabled(),
             always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),

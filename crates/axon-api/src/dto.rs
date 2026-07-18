@@ -455,6 +455,24 @@ pub struct SendResultDto {
     pub event_id: String,
 }
 
+/// Request body for marking a room read (`POST …/rooms/{room_id}/read`; ADR
+/// 0067). Sets both the public read receipt and the private fully-read marker
+/// to `event_id` in one homeserver call.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReadReceiptRequest {
+    /// The event id to mark as read.
+    pub event_id: String,
+}
+
+/// Request body for setting this account's typing indicator
+/// (`PUT …/rooms/{room_id}/typing`; ADR 0068 M19a).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TypingRequest {
+    /// Whether the account is now typing in this room. Setting `false` clears
+    /// an active typing indicator early instead of waiting for it to expire.
+    pub typing: bool,
+}
+
 /// Query parameters for staging a media upload (`POST …/media/uploads`).
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

@@ -15,13 +15,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
-    DeviceListService, FlowStage, FlowSummary, Formatted, LoginError, LogoutError, MediaAttachment,
-    MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile, MemberProfileError,
-    MemberProfileService, MessageSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats,
-    Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
-    VerifyError,
+    DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
+    MediaAttachment, MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile,
+    MemberProfileError, MemberProfileService, MessageSender, RecoverError, RedecryptUtdsError,
+    RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError,
+    SearchQueryParams, SendError, SenderTrustService, StageUploadError, StageUploadRequest,
+    StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
+    UploadStream, VerificationService, VerifyError,
 };
 use futures_util::StreamExt;
 use uuid::Uuid;
@@ -242,6 +242,107 @@ impl StubSender {
     /// The calls recorded so far, in order.
     pub fn calls(&self) -> Vec<Call> {
         self.calls.lock().unwrap().clone()
+    }
+}
+
+/// One recorded call to [`StubEphemeral`], with the arguments the handler
+/// passed through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EphemeralCall {
+    ReadReceipt {
+        account_id: Uuid,
+        room_id: String,
+        event_id: String,
+    },
+    Typing {
+        account_id: Uuid,
+        room_id: String,
+        typing: bool,
+    },
+}
+
+/// The outcome [`StubEphemeral`] returns for every call. `Clone` (unlike
+/// [`SendError`]) so one stub can answer repeated calls.
+#[derive(Clone)]
+pub enum EphemeralOutcome {
+    Ok,
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl EphemeralOutcome {
+    fn to_result(&self) -> Result<(), SendError> {
+        match self {
+            EphemeralOutcome::Ok => Ok(()),
+            EphemeralOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            EphemeralOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            EphemeralOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            EphemeralOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            EphemeralOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+}
+
+/// An in-memory [`EphemeralSender`] for tests.
+pub struct StubEphemeral {
+    outcome: EphemeralOutcome,
+    calls: Mutex<Vec<EphemeralCall>>,
+}
+
+impl StubEphemeral {
+    /// A stub that returns `Ok(())` for every call.
+    pub fn ok() -> Self {
+        Self {
+            outcome: EphemeralOutcome::Ok,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every call.
+    pub fn failing(outcome: EphemeralOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<EphemeralCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl EphemeralSender for StubEphemeral {
+    async fn send_read_receipt(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(EphemeralCall::ReadReceipt {
+            account_id,
+            room_id: room_id.to_owned(),
+            event_id: event_id.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn send_typing_notice(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        typing: bool,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(EphemeralCall::Typing {
+            account_id,
+            room_id: room_id.to_owned(),
+            typing,
+        });
+        self.outcome.to_result()
     }
 }
 

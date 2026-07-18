@@ -15,13 +15,14 @@
 use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
+use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::message::{
     AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
 };
-use matrix_sdk::ruma::{EventId, RoomId, UInt};
+use matrix_sdk::ruma::{EventId, OwnedEventId, RoomId, UInt};
 use matrix_sdk::Room;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -38,6 +39,14 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
         Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
+}
+
+/// Parse a Matrix event id targeted by a mutation, mapping a malformed one to
+/// [`GatewayError::Invalid`] (a clean `400`) instead of letting it reach the
+/// homeserver. Shared by every method that addresses an existing event: edit,
+/// redact, react, and the read-receipt send.
+fn parse_event_id(event_id: &str) -> Result<OwnedEventId, GatewayError> {
+    EventId::parse(event_id).map_err(|e| GatewayError::Invalid(format!("event id: {e}")))
 }
 
 fn effective_mime(
@@ -261,8 +270,7 @@ impl SdkGateway {
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
         // Validate the target id up front so a bad id is a clean 400, not a 502.
-        let target_id = EventId::parse(event_id)
-            .map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
+        let target_id = parse_event_id(event_id)?;
 
         // A Matrix edit (m.replace) is only valid from the *original author*, but
         // the homeserver does not enforce that — it accepts an m.replace pointing
@@ -308,8 +316,7 @@ impl SdkGateway {
         reason: Option<&str>,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        let event_id = EventId::parse(event_id)
-            .map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
+        let event_id = parse_event_id(event_id)?;
         let resp = room
             .redact(&event_id, reason, None)
             .await
@@ -327,11 +334,43 @@ impl SdkGateway {
         key: &str,
     ) -> Result<String, GatewayError> {
         let room = self.room(account_id, room_id).await?;
-        let event_id = EventId::parse(event_id)
-            .map_err(|e| GatewayError::Invalid(format!("event id: {e}")))?;
+        let event_id = parse_event_id(event_id)?;
         let content = ReactionEventContent::new(Annotation::new(event_id, key.to_owned()));
         let resp = room.send(content).await.map_err(map_sdk_err)?;
         Ok(resp.response.event_id.to_string())
+    }
+
+    /// Mark `event_id` read: sets the public read receipt (`m.read`) and the
+    /// private fully-read marker to the same event in a single
+    /// `POST /rooms/{roomId}/read_markers` call, so third-party Matrix clients
+    /// reading standard receipt state see the room as read (ADR 0067).
+    pub async fn send_read_receipt(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let event_id = parse_event_id(event_id)?;
+        let receipts = Receipts::new()
+            .fully_read_marker(event_id.clone())
+            .public_read_receipt(event_id);
+        room.send_multiple_receipts(receipts)
+            .await
+            .map_err(map_sdk_err)
+    }
+
+    /// Set (or clear) this account's typing indicator in a room (ADR 0068,
+    /// M19a). The SDK debounces/expires the underlying `m.typing` event itself;
+    /// this issues one `PUT /rooms/{roomId}/typing/{userId}` per call.
+    pub async fn send_typing_notice(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        typing: bool,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        room.typing_notice(typing).await.map_err(map_sdk_err)
     }
 }
 

@@ -23,7 +23,7 @@ use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
-use crate::sender::MessageSender;
+use crate::sender::{EphemeralSender, MessageSender, SendError};
 use crate::trust::SenderTrustService;
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
@@ -51,6 +51,11 @@ pub struct AppState {
     /// implementation (the sync engine's SDK gateway) is injected by the binary
     /// via an adapter, so this crate stays free of `axon-sync`/`matrix-sdk`.
     pub sender: Arc<dyn MessageSender>,
+    /// Outbound-ephemeral port for the read-receipt and typing-notice routes
+    /// (ADR 0067 / ADR 0068 M19a). Defaults to a no-op so tests and
+    /// non-sync configurations that don't inject one keep compiling; the
+    /// binary overrides it via [`with_ephemeral`](Self::with_ephemeral).
+    pub ephemeral: Arc<dyn EphemeralSender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -220,6 +225,7 @@ impl AppState {
             store,
             live,
             sender,
+            ephemeral: Arc::new(NoopEphemeralSender),
             lifecycle,
             verify,
             trust,
@@ -260,6 +266,15 @@ impl AppState {
         self
     }
 
+    /// Inject the ephemeral-outbound port (read receipts, typing notices;
+    /// ADR 0067 / ADR 0068 M19a). The binary calls this with an adapter over
+    /// the sync engine's gateway, same as `sender`; tests that don't touch
+    /// these routes keep the default no-op.
+    pub fn with_ephemeral(mut self, ephemeral: Arc<dyn EphemeralSender>) -> Self {
+        self.ephemeral = ephemeral;
+        self
+    }
+
     /// Inject cached room-member profile enrichment for `/members`.
     pub fn with_member_profiles(mut self, profiles: Arc<dyn MemberProfileService>) -> Self {
         self.member_profiles = profiles;
@@ -278,6 +293,36 @@ impl AppState {
     pub fn with_bootstrap(mut self, bootstrap: BootstrapConfig) -> Self {
         self.bootstrap = Some(bootstrap);
         self
+    }
+}
+
+/// The default `ephemeral` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_ephemeral`] replaces it with a real adapter.
+struct NoopEphemeralSender;
+
+#[async_trait::async_trait]
+impl EphemeralSender for NoopEphemeralSender {
+    async fn send_read_receipt(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _event_id: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "ephemeral-outbound port is not configured".to_owned(),
+        ))
+    }
+
+    async fn send_typing_notice(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _typing: bool,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "ephemeral-outbound port is not configured".to_owned(),
+        ))
     }
 }
 
@@ -351,6 +396,12 @@ impl FromRef<AppState> for broadcast::Sender<LiveFrame> {
 impl FromRef<AppState> for Arc<dyn MessageSender> {
     fn from_ref(state: &AppState) -> Arc<dyn MessageSender> {
         state.sender.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn EphemeralSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn EphemeralSender> {
+        state.ephemeral.clone()
     }
 }
 

@@ -98,3 +98,31 @@ pub trait MessageSender: Send + Sync {
         key: &str,
     ) -> Result<String, SendError>;
 }
+
+/// Sends ephemeral, homeserver-facing signals that have no lasting timeline
+/// presence: read receipts and typing notices (ADR 0067, ADR 0068 M19a). Split
+/// from [`MessageSender`] because callers treat these as best-effort — a client
+/// fire-and-forgets them from its existing read-marker/typing debounce and never
+/// surfaces a failure as a user-facing error — whereas a failed message send is
+/// never silently swallowed.
+#[async_trait]
+pub trait EphemeralSender: Send + Sync {
+    /// Mark `event_id` read: sets both the public read receipt (`m.read`) and
+    /// the private fully-read marker to the same event in one request
+    /// (`Room::send_multiple_receipts`), so third-party Matrix clients see the
+    /// room as read.
+    async fn send_read_receipt(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<(), SendError>;
+
+    /// Set (or clear) this account's typing indicator in a room.
+    async fn send_typing_notice(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        typing: bool,
+    ) -> Result<(), SendError>;
+}

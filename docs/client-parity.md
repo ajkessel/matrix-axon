@@ -42,8 +42,8 @@ yet)
 | Drafts (cross-device) | Done (M12, ADR 0048) | Done | Done | Not started | |
 | Read markers (cross-device, Axon-internal) | Done (M12, ADR 0048) — the underlying `device_state` store was dropped by a force-push and restored in PR 226; the TUI read-marker feature itself was separately reverted (`116b3cb`) and re-landed in PR 217 (`clients/tui/src/app/read_markers.rs`) | Done | Done, plus a `thread_read_markers` namespace TUI doesn't have | Not started | Reverse gap: web is ahead here |
 | Inbound ephemeral passthrough (typing, receipts) | Done (M18, ADR 0056) | **Gap** — no consumption found in `clients/tui/src` (verified by grep, 2026-07-17) | Done (`stores/ephemeral.ts`) | Not started | Adam's motivating example |
-| Outbound read receipts to homeserver | Planned (#278, ADR 0067) | Not started | Not started | Not started | |
-| Outbound typing notice | Planned (M19a, ADR 0068) | Not started | Not started | Not started | |
+| Outbound read receipts to homeserver | Done (#278, ADR 0067) — `POST .../rooms/{room_id}/read` | Not started | Not started | Not started | Server-only; client debounce/trigger wiring is separate follow-up work |
+| Outbound typing notice | Done (M19a, ADR 0068) — `PUT .../rooms/{room_id}/typing` | Not started | Not started | Not started | Server-only; landed alongside read receipts since neither had code yet |
 | Interactive SAS device verification | Done (7a-6, ADR 0027/0028) | Done — full emoji-modal flow | **Gap** — `AccountsPage.tsx` only mentions SAS in a placeholder label; no verification flow implemented | Not started | Verified by grep, 2026-07-17 |
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
 | Room membership (leave/forget/invite/kick/ban/unban) | Planned (M19b, ADR 0068) | Not started | Not started | Not started | |

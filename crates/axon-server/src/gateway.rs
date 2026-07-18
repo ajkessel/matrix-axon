@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axon_api::{Formatted, MediaAttachment, MessageSender, Relation, SendError};
+use axon_api::{EphemeralSender, Formatted, MediaAttachment, MessageSender, Relation, SendError};
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
@@ -19,13 +19,19 @@ use uuid::Uuid;
 pub struct GatewayAdapter {
     gateway: SdkGateway,
     upstream_upload_timeout: Duration,
+    ephemeral_send_timeout: Duration,
 }
 
 impl GatewayAdapter {
-    pub fn new(gateway: SdkGateway, upstream_upload_timeout: Duration) -> Self {
+    pub fn new(
+        gateway: SdkGateway,
+        upstream_upload_timeout: Duration,
+        ephemeral_send_timeout: Duration,
+    ) -> Self {
         Self {
             gateway,
             upstream_upload_timeout,
+            ephemeral_send_timeout,
         }
     }
 }
@@ -127,5 +133,49 @@ impl MessageSender for GatewayAdapter {
             .react(account_id, room_id, event_id, key)
             .await
             .map_err(map_err)
+    }
+}
+
+#[async_trait]
+impl EphemeralSender for GatewayAdapter {
+    async fn send_read_receipt(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.ephemeral_send_timeout,
+            self.gateway
+                .send_read_receipt(account_id, room_id, event_id),
+        )
+        .await
+        .map_err(|_| {
+            SendError::Upstream(format!(
+                "read receipt timed out after {}s",
+                self.ephemeral_send_timeout.as_secs()
+            ))
+        })?
+        .map_err(map_err)
+    }
+
+    async fn send_typing_notice(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        typing: bool,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.ephemeral_send_timeout,
+            self.gateway.send_typing_notice(account_id, room_id, typing),
+        )
+        .await
+        .map_err(|_| {
+            SendError::Upstream(format!(
+                "typing notice timed out after {}s",
+                self.ephemeral_send_timeout.as_secs()
+            ))
+        })?
+        .map_err(map_err)
     }
 }
