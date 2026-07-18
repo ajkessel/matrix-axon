@@ -212,6 +212,26 @@ for production remediation, so it is only compiled into `axon-server` when the
 | [AGENTS.md](AGENTS.md)                            | Orientation for contributors (human and agentic) |
 | [ADRs](docs/adr/)                                 | Decisions made during implementation             |
 
+## Environment variables
+
+Two kinds of `AXON_`-prefixed environment variables exist:
+
+**Standalone vars** — not tied to any config field, used by the CLI directly:
+
+| Variable         | Used by                              | Meaning                                                                                          |
+| ---------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `AXON_CONFIG`    | server, all CLI subcommands           | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir. |
+| `DATABASE_URL`   | server, all CLI subcommands           | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.             |
+| `AXON_BASE_URL`  | `axon utd redecrypt` (HTTP CLI calls) | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
+| `AXON_TOKEN`     | `axon utd redecrypt`, TUI             | Bearer token sent with the request, in place of `--token` (web does not consume token from env)     |
+| `RUST_LOG`       | server                                | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                    |
+
+TUI-specific display vars (`AXON_FONT_SIZE`, `AXON_IMAGE_PROTOCOL`, `AXON_NO_IMAGE_QUERY`) are documented in [`clients/tui/README.md`](clients/tui/README.md).
+
+**Structured config overrides** — every field in `axon.toml` can also be set via `AXON_<SECTION>__<FIELD>` (double underscore between nesting levels), e.g. `AXON_SERVER__PORT=9090` or `AXON_MEDIA__MAX_BYTES=1048576`. Precedence (lowest to highest): built-in defaults < `axon.toml` < bare `DATABASE_URL` < `AXON_`-prefixed vars.
+
+[`axon.toml.example`](axon.toml.example) is the full reference for every section and field, with the corresponding env var noted alongside each one. [`.env.example`](.env.example) mirrors the same fields in env-var form for anyone who prefers configuring entirely through the environment.
+
 ## Deployment
 
 ### Authentication
@@ -249,8 +269,10 @@ any other unauthenticated surface exposed off loopback.
 To explicitly retry stored Unable-To-Decrypt events for an active account, call the authenticated API through the CLI wrapper:
 
 ```bash
-AXON_TOKEN=<token> axon utd redecrypt --account-id <account-id>
+AXON_TOKEN=<token> AXON_BASE_URL=<axon-server-url> axon utd redecrypt --account-id <account-id>
 ```
+
+`AXON_BASE_URL` defaults to `http://127.0.0.1:8080` if unset — set it explicitly whenever the server isn't on localhost, or the request silently goes nowhere useful and fails with a 401 (the token is fine; it's just being checked against the wrong server). See [Environment variables](#environment-variables) below for the full list of vars axon reads.
 
 ### TLS
 

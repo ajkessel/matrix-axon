@@ -126,6 +126,7 @@ Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 ## Testing and documentation
 
 - **Isolate platform-default state in tests and docs.** Any integration test, smoke guide, or manual repro that expects throwaway state must set `AXON_SYNC__DATA_DIR`, `AXON_SEARCH__INDEX_PATH`, and `AXON_MEDIA__CACHE_DIR` explicitly — otherwise it reads and writes the real platform dirs (ADR 0050) and leaks state between runs.
+- **Document config.** Each silo must have documentation of configuration and examples. For the server, README.md should list the most common config options, and .env.example should include examples of every option that can be set via environmental variables. Update these files when config options are added or changed.
 
 ## Design guardrails
 
