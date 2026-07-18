@@ -115,6 +115,7 @@ export function RoomPage() {
     activeThread,
     live,
     ephemeral,
+    ephemeralSender,
     deviceState,
     threadUnread,
     composerFocus,
@@ -252,6 +253,10 @@ export function RoomPage() {
         last.event_id,
         last.origin_ts,
       )
+      // Second, fire-and-forget action alongside the cross-device marker
+      // (ADR 0067): tell the homeserver too, so third-party Matrix clients see
+      // the room as read. Forward-only + debounced inside the sender.
+      ephemeralSender.noteRead(accountId, roomId, last.event_id, last.origin_ts)
     }
   }, [
     timeline.events.value,
@@ -260,7 +265,16 @@ export function RoomPage() {
     roomId,
     deviceState,
     threadUnread,
+    ephemeralSender,
   ])
+
+  // Clear any live typing notice when leaving this room (RoomPage does not
+  // remount on a route change, so the cleanup runs with the room being left).
+  useEffect(() => {
+    return () => {
+      ephemeralSender.stopTyping(accountId, roomId)
+    }
+  }, [ephemeralSender, accountId, roomId])
 
   useEffect(() => {
     activeThread.value =
@@ -800,7 +814,20 @@ export function RoomPage() {
             onDraftChange={
               action?.kind === 'edit'
                 ? undefined
-                : (text) => deviceState.setDraft(accountId, roomId, text)
+                : (text) => {
+                    deviceState.setDraft(accountId, roomId, text)
+                    // `onDraftChange` is not called for slash-command drafts
+                    // (Composer suppresses them), so a non-empty text here is
+                    // genuine composition worth a typing notice. An empty text
+                    // clears it — this is also the send path, since
+                    // `Composer.submit` fires `onDraftChange('')` before
+                    // `onSubmit`.
+                    if (text === '') {
+                      ephemeralSender.stopTyping(accountId, roomId)
+                    } else {
+                      ephemeralSender.noteTyping(accountId, roomId)
+                    }
+                  }
             }
             onCommand={handleComposerCommand}
             roomCompletions={roomCompletions}

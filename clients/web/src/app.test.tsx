@@ -40,6 +40,14 @@ const server = setupServer(
       data: { backfill: { paused: false, free_bytes: 0, accounts: [] } },
     }),
   ),
+  // Outbound read receipts + typing notices (ADR 0067/0068) fire from the room
+  // read/compose choke points; accepted as no-ops by default.
+  http.post(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
+  http.put(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/typing`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
 )
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {

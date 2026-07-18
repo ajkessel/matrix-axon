@@ -131,6 +131,13 @@ const server = setupServer(
   http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
     HttpResponse.json({ data: { updated_at: '2026-06-01T12:00:00Z' } }),
   ),
+  // Outbound read receipts + typing notices (ADR 0067/0068); no-op by default.
+  http.post(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
+  http.put(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/typing`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
 )
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {

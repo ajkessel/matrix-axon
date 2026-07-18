@@ -14,6 +14,7 @@ import {
 import { createAccountsStore } from '../stores/accounts'
 import { createDeviceStateStore } from '../stores/device-state'
 import { createEphemeralStore } from '../stores/ephemeral'
+import { createEphemeralSender } from '../stores/ephemeral-sender'
 import { createMediaService } from '../media/media-service'
 import { createLiveConnection } from '../stores/live-connection'
 import { createRoomsStore } from '../stores/rooms'
@@ -68,6 +69,7 @@ export function testServices(
   const unread = createUnreadStore()
   const threadUnread = createThreadUnreadStore()
   const ephemeral = createEphemeralStore()
+  const ephemeralSender = createEphemeralSender(api)
   // An inert socket: `start()` builds one but nothing drives its handshake, so
   // no frames flow unless a test reaches for the fake and emits them. jsdom has
   // no real `WebSocket`, so this keeps the graph constructible everywhere.
@@ -104,6 +106,7 @@ export function testServices(
     live,
     deviceState,
     ephemeral,
+    ephemeralSender,
     activeRoom,
     activeThread,
     composerFocus,

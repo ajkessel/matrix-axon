@@ -87,6 +87,14 @@ const server = setupServer(
   http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
     HttpResponse.json({ data: { updated_at: '2026-06-01T12:00:00Z' } }),
   ),
+  // Outbound read receipts + typing notices (ADR 0067/0068) fire from the same
+  // read/compose choke points; accepted as no-ops by default.
+  http.post(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
+  http.put(`${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/typing`, () =>
+    HttpResponse.json({ data: {} }),
+  ),
   http.post(`${TEST_BASE_URL}/v1/accounts/:accountId/utds/redecrypt`, () =>
     HttpResponse.json({
       data: {

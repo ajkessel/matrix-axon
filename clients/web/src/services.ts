@@ -22,6 +22,10 @@ import {
   type DeviceStateStore,
 } from './stores/device-state'
 import { createEphemeralStore, type EphemeralStore } from './stores/ephemeral'
+import {
+  createEphemeralSender,
+  type EphemeralSender,
+} from './stores/ephemeral-sender'
 import { createMediaService, type MediaService } from './media/media-service'
 import {
   createLiveConnection,
@@ -55,6 +59,8 @@ export interface AppServices {
   live: LiveConnection
   deviceState: DeviceStateStore
   ephemeral: EphemeralStore
+  /** Outbound read receipts + typing notices to the homeserver (ADR 0067/0068). */
+  ephemeralSender: EphemeralSender
   media: MediaService
   /**
    * The room the user is currently viewing (`accountId/roomId`), or `null`.
@@ -292,6 +298,7 @@ export function createServices(
   const unread = createUnreadStore()
   const threadUnread = createThreadUnreadStore()
   const ephemeral = createEphemeralStore()
+  const ephemeralSender = createEphemeralSender(api)
   // Same-origin by default (the dev/reverse proxy); a cross-origin base is set
   // for separately-hosted deployments, exactly as the HTTP client resolves it.
   const live = createLiveConnection({
@@ -330,6 +337,7 @@ export function createServices(
     live,
     deviceState,
     ephemeral,
+    ephemeralSender,
     activeRoom,
     activeThread,
     composerFocus,

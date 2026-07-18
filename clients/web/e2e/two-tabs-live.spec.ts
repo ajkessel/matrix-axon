@@ -44,6 +44,30 @@ test('two tabs see each other messages live', async ({ browser }) => {
   await contextB.close()
 })
 
+test('typing in one tab surfaces the indicator in another', async ({
+  browser,
+}) => {
+  const contextA = await browser.newContext()
+  const contextB = await browser.newContext()
+
+  const tabA = await openRoom(contextA)
+  const tabB = await openRoom(contextB)
+
+  // A real keystroke in tab A drives onDraftChange → the outbound typing
+  // notice (ADR 0068 M19a). The mock echoes it as a peer's `m.typing`
+  // passthrough, which tab B renders live.
+  const composer = tabA.getByRole('textbox', { name: /^Message/ })
+  await composer.fill('drafting a reply')
+  await expect(tabB.getByText(/is typing/)).toBeVisible()
+
+  // Sending clears the notice (typing:false), so the indicator disappears.
+  await composer.press('Enter')
+  await expect(tabB.getByText(/is typing/)).toBeHidden()
+
+  await contextA.close()
+  await contextB.close()
+})
+
 test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   browser,
   request,

@@ -335,6 +335,32 @@ async function handleApi(req, res, url) {
   if (method === 'PUT' && /\/devices\/[^/]+\/state\/[^/]+$/.test(pathname)) {
     return json(res, { data: { updated_at: new Date().toISOString() } })
   }
+  // Outbound read receipt (ADR 0067): accepted, nothing to echo back.
+  if (method === 'POST' && /\/rooms\/[^/]+\/read$/.test(pathname)) {
+    return json(res, { data: {} })
+  }
+  // Outbound typing notice (ADR 0068 M19a). Echo it to every tab as an
+  // ephemeral passthrough attributed to a *peer* user, so another tab renders
+  // the indicator — a tab filters its own user id out of its own view, so
+  // echoing the sender's id would show nothing.
+  if (method === 'PUT' && /\/rooms\/[^/]+\/typing$/.test(pathname)) {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      const typing = JSON.parse(raw || '{}').typing === true
+      broadcast({
+        type: 'ephemeral.passthrough',
+        account_id: ACCOUNT_ID,
+        payload: {
+          room_id: ROOM_ID,
+          event_type: 'm.typing',
+          content: { user_ids: typing ? [USER_ID_2] : [] },
+        },
+      })
+      json(res, { data: {} })
+    })
+    return
+  }
   if (method === 'GET' && /\/events\/[^/]+$/.test(pathname)) {
     const id = decodeURIComponent(pathname.split('/').pop())
     const event = events.get(id)
