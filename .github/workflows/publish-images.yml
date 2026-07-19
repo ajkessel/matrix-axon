@@ -1,0 +1,11 @@
+name: Publish images
+
+on:
+  workflow_dispatch:
+
+jobs:
+  placeholder-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Placeholder
+        run: echo "This is a placeholder workflow for testing M13."
