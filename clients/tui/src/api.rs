@@ -345,6 +345,50 @@ impl AxonClient {
         self.send(request).await
     }
 
+    /// Send a real Matrix read receipt to the homeserver (ADR 0067,
+    /// `POST …/rooms/{room_id}/read`): sets both the public `m.read` receipt and
+    /// the private `m.fully_read` marker to `event_id`. Best-effort — the caller
+    /// fires this alongside the internal read-marker PUT and never surfaces its
+    /// failure. Empty success body.
+    pub async fn send_read_receipt(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .post(format!(
+                "{}/v1/accounts/{}/rooms/{}/read",
+                self.base_url,
+                account_id,
+                path_segment(room_id)
+            ))
+            .json(&serde_json::json!({ "event_id": event_id }));
+        self.send_no_body(message_mutation(request)).await
+    }
+
+    /// Send a typing notice to the homeserver (ADR 0068 M19a,
+    /// `PUT …/rooms/{room_id}/typing`). `typing = false` clears it early.
+    /// Best-effort fire-and-forget; empty success body.
+    pub async fn send_typing_notice(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        typing: bool,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .put(format!(
+                "{}/v1/accounts/{}/rooms/{}/typing",
+                self.base_url,
+                account_id,
+                path_segment(room_id)
+            ))
+            .json(&serde_json::json!({ "typing": typing }));
+        self.send_no_body(message_mutation(request)).await
+    }
+
     /// Stage raw upload bytes ahead of a `send_media` call (ADR 0059/0062,
     /// `POST …/media/uploads`). `kind` is `"image"` or `"file"`; the server
     /// rejects `"image"` unless `content_type` is `image/*`. `filename` is
@@ -796,6 +840,16 @@ fn decode_ws_frame(text: &str) -> Option<LiveFrame> {
                 payload,
             })
         }
+        "ephemeral.passthrough" => {
+            let payload: EphemeralPassthroughDto = match serde_json::from_value(envelope.payload) {
+                Ok(payload) => payload,
+                Err(err) => return Some(LiveFrame::ProtocolError(err.to_string())),
+            };
+            Some(LiveFrame::Ephemeral {
+                account_id: envelope.account_id,
+                payload,
+            })
+        }
         _ => None,
     }
 }
@@ -829,6 +883,13 @@ pub enum LiveFrame {
     DeviceState {
         account_id: Uuid,
         payload: DeviceStateChangedDto,
+    },
+    /// An `ephemeral.passthrough` frame (M18, ADR 0056): an allowlisted raw
+    /// ephemeral event (typing, receipts) forwarded from the homeserver. Lossy
+    /// like the rest of the bus, so typing overlays are cleared on reconnect.
+    Ephemeral {
+        account_id: Uuid,
+        payload: EphemeralPassthroughDto,
     },
 }
 
@@ -903,6 +964,19 @@ pub struct DeviceStateChangedDto {
     pub namespace: String,
     #[serde(default)]
     pub entries: HashMap<String, Value>,
+}
+
+/// The wire payload for an `ephemeral.passthrough` frame (M18, ADR 0056): an
+/// allowlisted raw Matrix ephemeral event (`m.typing`, `m.receipt`) forwarded
+/// verbatim. `room_id` is absent for account-scoped signals (none today);
+/// `content` is the untouched Matrix `content`, parsed by the ephemeral store.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EphemeralPassthroughDto {
+    #[serde(default)]
+    pub room_id: Option<String>,
+    pub event_type: String,
+    #[serde(default)]
+    pub content: Value,
 }
 
 /// One namespace of per-device state as returned by
@@ -1751,6 +1825,30 @@ mod tests {
                 assert!(payload.verification_violation);
             }
             other => panic!("expected trust violation frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn demux_routes_ephemeral_passthrough_frame() {
+        let body = r#"{
+            "type": "ephemeral.passthrough",
+            "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "payload": {
+                "room_id": "!r:localhost",
+                "event_type": "m.typing",
+                "content": { "user_ids": ["@bob:localhost"] }
+            }
+        }"#;
+        match decode_ws_frame(body) {
+            Some(LiveFrame::Ephemeral { payload, .. }) => {
+                assert_eq!(payload.room_id.as_deref(), Some("!r:localhost"));
+                assert_eq!(payload.event_type, "m.typing");
+                assert_eq!(
+                    payload.content,
+                    serde_json::json!({ "user_ids": ["@bob:localhost"] })
+                );
+            }
+            other => panic!("expected ephemeral frame, got {other:?}"),
         }
     }
 

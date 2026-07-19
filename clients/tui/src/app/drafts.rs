@@ -127,13 +127,31 @@ impl App {
             // half-typed command's text is never flushed once the buffer no
             // longer tracks a real draft.
             self.cancel_pending_draft_put(&room);
+            // A command is not composing a message — clear any typing notice.
+            self.stop_typing_for_room(&room);
             return;
         }
         let value = (!text.is_empty()).then(|| text.to_owned());
         if self.drafts.get(&room) == value.as_ref() {
-            // Back in sync (e.g. the user undid their edit): nothing to PUT.
+            // Back in sync: nothing to PUT. An empty buffer here (typed then
+            // cleared before the draft debounce ever stored anything) still
+            // means the user isn't composing, so clear any typing notice. A
+            // non-empty match is either an undo-to-synced or a just-restored
+            // draft — not new composition — so the notice is left as it is (a
+            // restore must not spuriously announce typing; a rare undo-then-idle
+            // is cleared by the idle timeout).
             self.cancel_pending_draft_put(&room);
+            if value.is_none() {
+                self.stop_typing_for_room(&room);
+            }
             return;
+        }
+        // The buffer diverged from the synced draft: the user is actively
+        // editing. Drive the outbound typing notice off that (ADR 0068 M19a) —
+        // an emptied buffer clears it, live text (re)starts it.
+        match &value {
+            Some(_) => self.note_typing(room.clone(), Instant::now()),
+            None => self.stop_typing_for_room(&room),
         }
         self.pending_draft_put = Some(PendingDraftPut {
             room,
@@ -341,6 +359,8 @@ impl App {
             // Same room (e.g. a timeline reload): leave the live buffer alone.
             return;
         }
+        // Leaving the previous room: stop telling its peers we're typing.
+        self.stop_typing_now();
         // Settle the previous room's draft before leaving it behind.
         self.flush_pending_draft_now();
         self.input.buffer.clear();

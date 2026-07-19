@@ -22,6 +22,7 @@ use ratatui::style::Modifier;
 use std::path::PathBuf;
 mod completion;
 mod drafts;
+mod ephemeral;
 pub(crate) use drafts::{load_or_create_device_id, DraftOutcome};
 mod lifecycle;
 mod read_markers;
@@ -37,6 +38,7 @@ mod render;
 mod rooms;
 mod search_flow;
 mod timeline;
+mod typing;
 
 pub(crate) use reactions::{collect_reactions, emoji_matches, unreact_selection_status};
 pub(crate) use render::{
@@ -878,6 +880,11 @@ pub(crate) struct App {
     /// A read-marker advance waiting out its debounce window before being PUT
     /// (M12). One slot; arming for a different room flushes the old one.
     pub(crate) pending_marker_put: Option<read_markers::PendingMarkerPut>,
+    /// The active outbound typing notice (ADR 0068 M19a), or `None` when not
+    /// composing. One slot: only one room is typed in at a time.
+    pub(crate) typing: Option<typing::TypingNotice>,
+    /// Inbound typing + read-receipt overlays from other users (M18, ADR 0056).
+    pub(crate) ephemeral: ephemeral::EphemeralState,
     /// TUI-local unread attention state for thread roots (ADR 0049). This is
     /// populated only from live events observed by this process and cleared when
     /// the user opens the corresponding thread panel.
@@ -1075,6 +1082,8 @@ impl App {
             drafts_tx: None,
             read_markers: HashMap::new(),
             pending_marker_put: None,
+            typing: None,
+            ephemeral: ephemeral::EphemeralState::default(),
         }
     }
 

@@ -46,6 +46,10 @@ impl App {
                 // (ADR 0028 §3).
                 self.resync_active_verification();
                 self.discover_incoming_verification();
+                // Typing overlays are live-only and the bus is lossy: a
+                // "stopped typing" frame may have been missed while down, so
+                // drop stale typing rather than leave a peer "typing" forever.
+                self.clear_typing_overlays();
                 LiveFrameAction::None
             }
             LiveFrame::Reconnecting { reason, delay } => {
@@ -53,6 +57,7 @@ impl App {
                     reason: reason.clone(),
                     delay,
                 };
+                self.clear_typing_overlays();
                 if !self.is_mid_command() {
                     self.status = Status::Info(format!(
                         "live WebSocket reconnecting in {}s: {reason}",
@@ -85,6 +90,13 @@ impl App {
                 account_id,
                 payload,
             } => self.handle_device_state_frame(account_id, payload),
+            LiveFrame::Ephemeral {
+                account_id,
+                payload,
+            } => {
+                self.handle_ephemeral_frame(account_id, payload, std::time::Instant::now());
+                LiveFrameAction::None
+            }
         }
     }
 

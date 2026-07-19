@@ -510,6 +510,11 @@ async fn run_app(
                 // (M12 debounce).
                 app.flush_due_draft_put(now);
                 app.flush_due_marker_put(now);
+                // Send typing:false once the compose buffer has been idle
+                // (ADR 0068 M19a).
+                app.flush_due_typing(now);
+                // Expire stale inbound typing overlays (M18, ADR 0056).
+                app.prune_typing(now);
                 if inside_tmux()
                     && app.picker.protocol_type() == ProtocolType::Sixel
                     && now >= next_sixel_inline_refresh

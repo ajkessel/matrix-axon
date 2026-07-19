@@ -171,6 +171,21 @@ impl App {
         };
         let client = self.client.clone();
         let device_id = self.device_id;
+        // Second, fire-and-forget action alongside the internal device-state PUT
+        // (ADR 0067): tell the homeserver too, so third-party Matrix clients see
+        // the room as read. Same debounced/monotonic choke point, best-effort —
+        // a failed receipt is never surfaced (the local read UX must not depend
+        // on it, and the TUI has no in-session log surface to write to).
+        {
+            let client = client.clone();
+            let room = room.clone();
+            let event_id = marker.event_id.clone();
+            tokio::spawn(async move {
+                let _ = client
+                    .send_read_receipt(room.account_id, &room.room_id, &event_id)
+                    .await;
+            });
+        }
         tokio::spawn(async move {
             let entries: HashMap<String, Option<Value>> =
                 HashMap::from([(room.room_id.clone(), Some(marker_value(&marker)))]);

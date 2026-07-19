@@ -496,22 +496,29 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         title
     };
-    let messages = Paragraph::new(message_lines).block(
-        Block::default()
-            .style(
-                Style::default()
-                    .fg(app.colors.messages_foreground)
-                    .bg(app.colors.messages_background),
-            )
-            .title(messages_title.as_str())
-            .borders(Borders::ALL)
-            .border_type(if messages_active {
-                BorderType::Double
-            } else {
-                BorderType::Plain
-            })
-            .border_style(messages_border),
-    );
+    let mut messages_block = Block::default()
+        .style(
+            Style::default()
+                .fg(app.colors.messages_foreground)
+                .bg(app.colors.messages_background),
+        )
+        .title(messages_title.as_str())
+        .borders(Borders::ALL)
+        .border_type(if messages_active {
+            BorderType::Double
+        } else {
+            BorderType::Plain
+        })
+        .border_style(messages_border);
+    // Live typing / read-receipt overlay for the open room (M18, ADR 0056),
+    // rendered as a bottom border title so it never shifts the message layout.
+    if let Some(status) = app.ephemeral_status_line() {
+        messages_block = messages_block.title_bottom(Line::from(Span::styled(
+            format!(" {status} "),
+            Style::default().fg(app.colors.status),
+        )));
+    }
+    let messages = Paragraph::new(message_lines).block(messages_block);
     frame.render_widget(messages, messages_area);
 
     // Media cards keep their caption on the normal message row and reserve six
@@ -3465,6 +3472,55 @@ mod tests {
         assert!(
             !input_text.contains("This command response"),
             "overflowing command response should render in the popup, not the input bar"
+        );
+    }
+
+    #[test]
+    fn inbound_typing_overlay_renders_on_the_message_pane() {
+        let mut app = App::new(
+            crate::api::AxonClient::new("http://127.0.0.1:8080".to_owned(), None),
+            None,
+            TuiConfig::test_default(),
+            ratatui_image::picker::Picker::halfblocks(),
+        );
+        app.rooms.rooms = vec![crate::api::RoomDto {
+            account_id: uuid::Uuid::nil(),
+            account_user_id: Some("@me:hs".to_owned()),
+            room_id: "!r:hs".to_owned(),
+            name: Some("Room".to_owned()),
+            topic: None,
+            avatar_url: None,
+            canonical_alias: None,
+            last_activity_ts: 0,
+            last_event_id: None,
+        }];
+        app.rooms.selected = Some(0);
+        app.seed_own_senders_from_rooms();
+        app.handle_ephemeral_frame(
+            uuid::Uuid::nil(),
+            crate::api::EphemeralPassthroughDto {
+                room_id: Some("!r:hs".to_owned()),
+                event_type: "m.typing".to_owned(),
+                content: serde_json::json!({ "user_ids": ["@bob:hs"] }),
+            },
+            std::time::Instant::now(),
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("terminal");
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("draw succeeds");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..buffer.area.height)
+            .flat_map(|y| {
+                (0..buffer.area.width)
+                    .filter_map(move |x| buffer.cell((x, y)).map(|c| c.symbol().to_owned()))
+            })
+            .collect::<String>();
+        assert!(
+            rendered.contains("@bob:hs is typing"),
+            "typing overlay should be visible on the message pane"
         );
     }
 
