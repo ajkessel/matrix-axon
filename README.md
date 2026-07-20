@@ -6,6 +6,42 @@ Matrix's encrypted and decentralized architecture can make full client usability
 
 See [`docs/mvp/prd.md`](docs/mvp/prd.md) for the full product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and https://axon.bostoncoop.net for the OpenAPI specification.
 
+## User quick start with Docker
+
+Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Intended for beta testers who've been granted access to the private images.
+
+**Prereqs:** Docker, plus a GitHub token with `read:packages` that the maintainer has granted access to the beta images. The repo is private, so the same token also needs `contents:read` to fetch the Compose file (a fine-grained token scoped to this repo works; or ask the maintainer to send you `deploy/docker-compose.beta.yml` directly and skip step 2). Once this repo is open-source and public, no login will be required and you can go from zero to a full stack with just two lines.
+
+```sh
+# 1. Sign in to the image registry
+echo "$PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
+
+# 2. Fetch the one-file Compose, then start it (images pull automatically)
+curl -fsSL -H "Authorization: Bearer $PAT" -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/matrix-axon/matrix-axon/contents/deploy/docker-compose.beta.yml?ref=main" \
+  -o docker-compose.yml
+docker compose up -d
+
+# 3. Open the printed one-time setup URL in your browser (if installation hasn't yet finished, try again after a minute):
+docker compose logs axon-server | grep 'bootstrap is armed'
+```
+
+Opening that `http://<host>:8080/bootstrap/<code>` URL mints your first credential and signs the web client in with nothing to paste. Update later with `docker compose pull && docker compose up -d`; stop with `docker compose down` (add `-v` to wipe data too). For encrypted remote access, run `tailscale serve http://localhost:8080` on the host. The build-from-source stack, TLS profiles, token management, and operations live in [`deploy/README.md`](deploy/README.md).
+
+### TUI
+
+This quick start can also drive the terminal client. Download the latest [axon-tui](https://github.com/matrix-axon/matrix-axon/releases) for your platform, then point it at the same running stack — no repo needed, since the token comes from the container's own CLI:
+
+```sh
+# 1. Mint a token from the running stack:
+docker compose exec axon-server axon token issue --label tui
+
+# 2. Run the TUI against the front door, pasting that token:
+axon-tui --base-url http://127.0.0.1:8080 --token <token>
+```
+
+The TUI reaches the API through the same `web` front door as the browser (use your `AXON_PORT` if you changed it). The flags are the quickest path; `axon-tui` also reads `AXON_BASE_URL` / `AXON_TOKEN`, or a `~/.config/axon-tui/config.toml` with a `[server]` block (`base_url` / `bearer_token`). Note: minting a token creates a credential, which consumes the one-time web bootstrap if you haven't used it yet — so do the browser sign-in first if you want both the web client and the TUI.
+
 ## Architecture overview
 
 ```
