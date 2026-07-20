@@ -20,6 +20,18 @@ export type AccountDto = components['schemas']['AccountDto']
 export type SyncState = 'connecting' | 'syncing' | 'ready' | 'offline'
 export type Account = AccountDto & { sync_state?: SyncState }
 
+/**
+ * Outcome of a recover call. `verified` is the cross-signing state the server
+ * re-derives and returns on success (ADR 0026); it distinguishes a full
+ * recovery from a partial Secure-Backup that imported the megolm key but not
+ * the cross-signing keys (keys unlocked, device still unverified). Absent when
+ * the call failed — the reason is on the store's `error` signal, as usual.
+ */
+export interface RecoverResult {
+  ok: boolean
+  verified?: boolean | null
+}
+
 /** One in-flight lifecycle action, so the UI can disable just that control. */
 export type PendingAction =
   | { kind: 'login' }
@@ -45,7 +57,7 @@ export interface AccountsStore {
   /** POST /v1/accounts/{id}/logout — deactivate. */
   logout(accountId: string): Promise<boolean>
   /** POST /v1/accounts/{id}/recover — import keys with a 4S recovery key. */
-  recover(accountId: string, recoveryKey: string): Promise<boolean>
+  recover(accountId: string, recoveryKey: string): Promise<RecoverResult>
   /** DELETE /v1/accounts/{id} — permanent removal. */
   remove(accountId: string): Promise<boolean>
 }
@@ -171,13 +183,38 @@ export function createAccountsStore(api: ApiClient): AccountsStore {
         }),
       ),
 
-    recover: (accountId, recoveryKey) =>
-      run({ kind: 'recover', accountId }, () =>
-        api.POST('/v1/accounts/{account_id}/recover', {
-          params: { path: { account_id: accountId } },
-          body: { recovery_key: recoveryKey },
-        }),
-      ),
+    // Not routed through `run()` (unlike logout/delete): recover is the one
+    // mutation whose success payload the UI reads — the re-derived `verified`
+    // flag — so it owns its request to return that, while keeping the shared
+    // shape (pending flag, error surfacing, refresh-on-success). The key is
+    // trimmed here so a pasted trailing newline is not a spurious 400.
+    recover: async (accountId, recoveryKey) => {
+      if (pending.value !== null) {
+        return { ok: false }
+      }
+      pending.value = { kind: 'recover', accountId }
+      try {
+        const { data, error: apiError } = await api.POST(
+          '/v1/accounts/{account_id}/recover',
+          {
+            params: { path: { account_id: accountId } },
+            body: { recovery_key: recoveryKey.trim() },
+          },
+        )
+        if (apiError !== undefined) {
+          error.value = apiErrorMessage(apiError)
+          return { ok: false }
+        }
+        error.value = null
+        await refresh()
+        return { ok: true, verified: data.data.verified }
+      } catch (cause) {
+        error.value = cause instanceof Error ? cause.message : String(cause)
+        return { ok: false }
+      } finally {
+        pending.value = null
+      }
+    },
 
     remove: (accountId) =>
       run({ kind: 'delete', accountId }, () =>

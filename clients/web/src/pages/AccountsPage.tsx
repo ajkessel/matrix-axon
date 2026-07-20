@@ -1,5 +1,8 @@
-import { useEffect, useState } from 'preact/hooks'
+import { signal } from '@preact/signals'
+import { useEffect, useMemo, useState } from 'preact/hooks'
 import { ErrorBanner } from '../components/ErrorBanner'
+import { NoticeBanner, type Notice } from '../components/NoticeBanner'
+import { isValidRecoveryKey } from '../recovery-key'
 import { useServices } from '../services'
 import type { Account } from '../stores/accounts'
 import { ServerStatus } from './ServerStatus'
@@ -70,11 +73,16 @@ function AccountCard({ account }: { account: Account }) {
   const { accounts, settings } = useServices()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [recoverKey, setRecoverKey] = useState<string | null>(null)
+  // Per-card recovery outcome, held in a signal so it survives the form closing
+  // on success; `NoticeBanner` reads and dismisses it (same idiom as the store
+  // error signals feeding `ErrorBanner`).
+  const notice = useMemo(() => signal<Notice | null>(null), [])
 
   const id = account.account_id
   const pending = accounts.pending.value
   const busy = pending !== null
   const isActiveChoice = settings.activeAccountId.value === id
+  const keyValid = recoverKey !== null && isValidRecoveryKey(recoverKey)
 
   return (
     <li class={`card account-${account.state}`}>
@@ -105,7 +113,10 @@ function AccountCard({ account }: { account: Account }) {
             <button
               type="button"
               disabled={busy}
-              onClick={() => setRecoverKey(recoverKey === null ? '' : null)}
+              onClick={() => {
+                notice.value = null
+                setRecoverKey(recoverKey === null ? '' : null)
+              }}
             >
               Recover keys
             </button>
@@ -151,29 +162,52 @@ function AccountCard({ account }: { account: Account }) {
       </div>
 
       {recoverKey !== null && account.state === 'active' && (
-        <form
-          class="inline-form"
-          onSubmit={(event) => {
-            event.preventDefault()
-            void accounts
-              .recover(id, recoverKey)
-              .then((ok) => ok && setRecoverKey(null))
-          }}
-        >
-          <label>
-            Recovery key
-            <input
-              type="password"
-              value={recoverKey}
-              placeholder="EsTc …"
-              onInput={(event) => setRecoverKey(event.currentTarget.value)}
-            />
-          </label>
-          <button type="submit" disabled={busy || recoverKey.trim() === ''}>
-            Recover
-          </button>
-        </form>
+        <>
+          <form
+            class="inline-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void accounts.recover(id, recoverKey).then((result) => {
+                if (!result.ok) {
+                  return
+                }
+                setRecoverKey(null)
+                notice.value = result.verified
+                  ? {
+                      tone: 'success',
+                      message: 'Keys recovered — this device is now verified.',
+                    }
+                  : {
+                      tone: 'info',
+                      message:
+                        'Keys recovered. This device is still unverified — the ' +
+                        'recovery data may not include cross-signing keys.',
+                    }
+              })
+            }}
+          >
+            <label>
+              Recovery key
+              <input
+                type="password"
+                value={recoverKey}
+                placeholder="EsTc …"
+                onInput={(event) => setRecoverKey(event.currentTarget.value)}
+              />
+            </label>
+            <button type="submit" disabled={busy || !keyValid}>
+              Recover
+            </button>
+          </form>
+          {recoverKey.trim() !== '' && !keyValid && (
+            <p class="field-hint error">
+              That doesn&rsquo;t look like a valid recovery key — check for a
+              missing or extra character.
+            </p>
+          )}
+        </>
       )}
+      <NoticeBanner notice={notice} />
     </li>
   )
 }
@@ -185,6 +219,9 @@ function AddAccountForm() {
   const [recoveryKey, setRecoveryKey] = useState('')
   const [homeserver, setHomeserver] = useState('')
   const busy = accounts.pending.value !== null
+  // The key is optional here (SAS or a later recover can supply it), so an
+  // empty field is fine; a non-empty one must be well-formed before submit.
+  const keyOk = recoveryKey.trim() === '' || isValidRecoveryKey(recoveryKey)
 
   return (
     <div class="account-add">
@@ -238,6 +275,12 @@ function AddAccountForm() {
             onInput={(event) => setRecoveryKey(event.currentTarget.value)}
           />
         </label>
+        {recoveryKey.trim() !== '' && !keyOk && (
+          <p class="field-hint error">
+            That doesn&rsquo;t look like a valid recovery key — check for a
+            missing or extra character, or leave it blank to skip.
+          </p>
+        )}
         <label>
           Homeserver URL{' '}
           <span class="muted">(optional — autodiscovered when omitted)</span>
@@ -249,7 +292,7 @@ function AddAccountForm() {
         </label>
         <button
           type="submit"
-          disabled={busy || username.trim() === '' || password === ''}
+          disabled={busy || username.trim() === '' || password === '' || !keyOk}
         >
           Log in
         </button>

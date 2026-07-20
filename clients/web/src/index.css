@@ -626,6 +626,26 @@ h2 {
   color: var(--danger);
 }
 
+.banner.notice.success {
+  border: 1px solid var(--ok);
+  color: var(--ok);
+}
+
+.banner.notice.info {
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+/* Inline validation hint under a form field (e.g. the recovery-key form). */
+.field-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.85em;
+}
+
+.field-hint.error {
+  color: var(--danger);
+}
+
 /* ---- account cards ---- */
 
 .cards {

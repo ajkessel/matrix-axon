@@ -6,7 +6,8 @@ lockfile.
 
 **Status (through M-W5 + M-W7):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
-lifecycle (under `/accounts`), theme +
+lifecycle (under `/accounts`, including 4S recovery-key import with offline
+key-format validation and success/error feedback), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters

@@ -39,6 +39,10 @@ const STATUS = {
   },
 }
 
+// A structurally valid Matrix recovery key (see recovery-key.test.ts); the
+// Recover button gates on this shape, so the form tests must use a real one.
+const VALID_KEY = 'EsT1 t3bE JPZs Bz9H xApv jfQh PY9X gmGM bhbN Kz2L 2t9n aeKB'
+
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -107,7 +111,7 @@ describe('AccountsPage', () => {
       target: { value: 'hunter2' },
     })
     fireEvent.input(getByLabelText(/Matrix Recovery Key/), {
-      target: { value: ' EsTc secret ' },
+      target: { value: ` ${VALID_KEY} ` },
     })
     fireEvent.click(getByRole('button', { name: 'Log in' }))
 
@@ -118,7 +122,39 @@ describe('AccountsPage', () => {
         homeserver_url: null,
       }),
     )
-    expect(recoverBody).toEqual({ recovery_key: 'EsTc secret' })
+    expect(recoverBody).toEqual({ recovery_key: VALID_KEY })
+  })
+
+  it('accepts login without a recovery key but blocks a malformed one', async () => {
+    const { findByText, getByLabelText, getByRole, queryByText } = renderPage(
+      [],
+    )
+    await findByText('No accounts yet — add one below.')
+
+    fireEvent.input(getByLabelText(/Matrix user ID/), {
+      target: { value: '@alice:example.org' },
+    })
+    fireEvent.input(getByLabelText('Password'), {
+      target: { value: 'hunter2' },
+    })
+    const login = getByRole('button', { name: 'Log in' }) as HTMLButtonElement
+    // Optional field left blank: login stays enabled.
+    expect(login.disabled).toBe(false)
+    expect(queryByText(/valid recovery key/i)).toBeNull()
+
+    // A non-empty malformed key blocks submit and hints.
+    fireEvent.input(getByLabelText(/Matrix Recovery Key/), {
+      target: { value: 'not-a-real-key' },
+    })
+    expect(login.disabled).toBe(true)
+    expect(queryByText(/valid recovery key/i)).toBeTruthy()
+
+    // Clearing it again re-enables (still optional).
+    fireEvent.input(getByLabelText(/Matrix Recovery Key/), {
+      target: { value: '' },
+    })
+    expect(login.disabled).toBe(false)
+    expect(queryByText(/valid recovery key/i)).toBeNull()
   })
 
   it('delete requires a confirmation step', async () => {
@@ -161,28 +197,78 @@ describe('AccountsPage', () => {
     await waitFor(() => expect(loggedOut).toBe(true))
   })
 
-  it('recover reveals the key form and submits it', async () => {
+  it('recover reveals the form, submits a valid key, and reports success', async () => {
     let recoverBody: unknown
-    const { findByRole, getByLabelText, getByRole } = renderPage([ALICE])
+    const { findByRole, getByLabelText, getByRole, findByText } = renderPage([
+      ALICE,
+    ])
     server.use(
       http.post(
         `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
         async ({ request }) => {
           recoverBody = await request.json()
-          return HttpResponse.json({ data: ALICE })
+          return HttpResponse.json({ data: { ...ALICE, verified: true } })
         },
       ),
     )
 
     fireEvent.click(await findByRole('button', { name: 'Recover keys' }))
     fireEvent.input(getByLabelText('Recovery key'), {
-      target: { value: 'EsTc aaaa bbbb' },
+      target: { value: VALID_KEY },
     })
     fireEvent.click(getByRole('button', { name: 'Recover' }))
 
     await waitFor(() =>
-      expect(recoverBody).toEqual({ recovery_key: 'EsTc aaaa bbbb' }),
+      expect(recoverBody).toEqual({ recovery_key: VALID_KEY }),
     )
+    // Success surfaces an inline notice; the form input is gone.
+    expect(await findByText(/this device is now verified/i)).toBeTruthy()
+  })
+
+  it('reports keys imported but device still unverified', async () => {
+    const { findByRole, getByLabelText, getByRole, findByText } = renderPage([
+      ALICE,
+    ])
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
+        () => HttpResponse.json({ data: { ...ALICE, verified: false } }),
+      ),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Recover keys' }))
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: VALID_KEY },
+    })
+    fireEvent.click(getByRole('button', { name: 'Recover' }))
+
+    expect(await findByText(/still unverified/i)).toBeTruthy()
+  })
+
+  it('gates the Recover button and hints on a malformed key', async () => {
+    const { findByRole, getByLabelText, getByRole, queryByText } = renderPage([
+      ALICE,
+    ])
+
+    fireEvent.click(await findByRole('button', { name: 'Recover keys' }))
+    const recover = getByRole('button', {
+      name: 'Recover',
+    }) as HTMLButtonElement
+    // Empty: disabled, no hint yet (an untouched field is not an error).
+    expect(recover.disabled).toBe(true)
+    expect(queryByText(/valid recovery key/i)).toBeNull()
+
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: 'not-a-real-key' },
+    })
+    expect(recover.disabled).toBe(true)
+    expect(queryByText(/valid recovery key/i)).toBeTruthy()
+
+    fireEvent.input(getByLabelText('Recovery key'), {
+      target: { value: VALID_KEY },
+    })
+    expect(recover.disabled).toBe(false)
+    expect(queryByText(/valid recovery key/i)).toBeNull()
   })
 
   it('the account switch persists to settings', async () => {

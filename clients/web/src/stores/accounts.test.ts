@@ -218,7 +218,44 @@ describe('logout / recover / remove', () => {
     expect(counter.calls).toBe(1)
   })
 
-  it('recover sends the recovery key and surfaces a wrong-key 400', async () => {
+  it('recover trims the key, refreshes, and reports the re-derived verified', async () => {
+    let body: unknown
+    const counter = listAccounts([{ ...ALICE, verified: true }])
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ALICE.account_id}/recover`,
+        async ({ request }) => {
+          body = await request.json()
+          return HttpResponse.json({ data: { ...ALICE, verified: true } })
+        },
+      ),
+    )
+
+    const store = makeStore()
+    const result = await store.recover(ALICE.account_id, '  EsTc secret \n')
+
+    expect(result).toEqual({ ok: true, verified: true })
+    expect(body).toEqual({ recovery_key: 'EsTc secret' })
+    expect(counter.calls).toBe(1)
+    expect(store.error.value).toBeNull()
+  })
+
+  it('recover reports the unverified partial-backup case', async () => {
+    listAccounts([{ ...ALICE, verified: false }])
+    server.use(
+      http.post(`${BASE_URL}/v1/accounts/${ALICE.account_id}/recover`, () =>
+        HttpResponse.json({ data: { ...ALICE, verified: false } }),
+      ),
+    )
+
+    const store = makeStore()
+    expect(await store.recover(ALICE.account_id, 'EsTc secret')).toEqual({
+      ok: true,
+      verified: false,
+    })
+  })
+
+  it('recover surfaces a wrong-key 400 without refreshing', async () => {
     server.use(
       http.post(`${BASE_URL}/v1/accounts/${ALICE.account_id}/recover`, () =>
         HttpResponse.json(
@@ -229,7 +266,7 @@ describe('logout / recover / remove', () => {
     )
 
     const store = makeStore()
-    expect(await store.recover(ALICE.account_id, 'EsTc bad')).toBe(false)
+    expect((await store.recover(ALICE.account_id, 'EsTc bad')).ok).toBe(false)
     expect(store.error.value).toBe('wrong recovery key')
   })
 
