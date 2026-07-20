@@ -18,8 +18,8 @@ export function LicensesPage() {
       <h1>Open-source licenses</h1>
       <p class="muted">
         The Axon web client is built with the open-source software listed below.
-        We are grateful to its authors. Each package is distributed under its own
-        license, reproduced in full.
+        We are grateful to its authors. Each package is distributed under its
+        own license, reproduced in full.
       </p>
       <p class="muted">
         {count === 0

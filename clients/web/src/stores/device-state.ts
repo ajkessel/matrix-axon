@@ -62,7 +62,10 @@ export interface DeviceStateStore {
   /** Fetch an account's read markers once. */
   hydrateReadMarkers(accountId: string): void
   /** Seed missing read markers to current room summaries, without read receipts. */
-  baselineReadMarkers(accountId: string, rooms: readonly RoomDto[]): Promise<void>
+  baselineReadMarkers(
+    accountId: string,
+    rooms: readonly RoomDto[],
+  ): Promise<void>
   /** Mark current room summaries read and schedule the device-state write. */
   markRoomSummariesRead(
     accountId: string,
@@ -424,7 +427,9 @@ export function createDeviceStateStore(
       hydrate(accountId, READ_MARKERS_NAMESPACE)
     },
     async baselineReadMarkers(accountId, rooms) {
-      if (!hydratedScopes.value.has(scopeKey(accountId, READ_MARKERS_NAMESPACE))) {
+      if (
+        !hydratedScopes.value.has(scopeKey(accountId, READ_MARKERS_NAMESPACE))
+      ) {
         return
       }
       const batch = new Map<string, unknown>()

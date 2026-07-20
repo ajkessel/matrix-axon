@@ -105,14 +105,8 @@ function roomAvatarColor(roomKeyValue: string): number {
  * scroll position survive every room switch.
  */
 export function RoomList() {
-  const {
-    rooms,
-    settings,
-    unread,
-    activeRoom,
-    composerFocus,
-    deviceState,
-  } = useServices()
+  const { rooms, settings, unread, activeRoom, composerFocus, deviceState } =
+    useServices()
   const location = useLocation()
   // Session-only name filter (ADR 0042: never persisted). `null` = category
   // mode; a string means the name input is active and overrides the category.

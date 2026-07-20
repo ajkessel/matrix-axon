@@ -272,7 +272,8 @@ export function RoomPage() {
     if (
       room?.last_event_id !== null &&
       room?.last_event_id !== undefined &&
-      (unreadThreadCutoff === null || room.last_activity_ts < unreadThreadCutoff)
+      (unreadThreadCutoff === null ||
+        room.last_activity_ts < unreadThreadCutoff)
     ) {
       deviceState.advanceReadMarker(
         accountId,

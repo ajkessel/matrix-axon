@@ -1,7 +1,15 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -151,7 +159,9 @@ describe('SettingsPage', () => {
     await waitFor(() =>
       expect(services.unread.count(`${ACCOUNT}/${ROOM}`)).toBe(0),
     )
-    expect(await findByRole('button', { name: 'Mark all as read' })).toBeTruthy()
+    expect(
+      await findByRole('button', { name: 'Mark all as read' }),
+    ).toBeTruthy()
   })
 
   it('clears local unread badges when the mark-read write is requeued', async () => {
@@ -197,7 +207,9 @@ describe('SettingsPage', () => {
       expect(services.unread.count(`${ACCOUNT}/${ROOM}`)).toBe(0),
     )
     expect(puts).toBe(1)
-    expect(await findByRole('button', { name: 'Mark all as read' })).toBeTruthy()
+    expect(
+      await findByRole('button', { name: 'Mark all as read' }),
+    ).toBeTruthy()
     vi.clearAllTimers()
     vi.useRealTimers()
   })

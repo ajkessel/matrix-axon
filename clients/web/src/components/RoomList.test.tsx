@@ -3,7 +3,15 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { options } from 'preact'
 import { LocationProvider } from 'preact-iso'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -62,8 +70,7 @@ function renderPage(
         HttpResponse.json({
           data: {
             namespace: params.namespace,
-            entries:
-              params.namespace === 'read_markers' ? readMarkers : {},
+            entries: params.namespace === 'read_markers' ? readMarkers : {},
           },
         }),
     ),
@@ -328,17 +335,13 @@ describe('RoomList', () => {
       last_activity_ts: 200,
       last_event_id: '$ops-new',
     }
-    const { findByText, getByRole } = renderPage(
-      [freshOps],
-      undefined,
-      {
-        '!ops:hs': {
-          value: { event_id: '$ops-read', origin_ts: 100 },
-          device_id: '00000000-0000-4000-8000-000000000001',
-          updated_at: '2026-07-20T12:00:00Z',
-        },
+    const { findByText, getByRole } = renderPage([freshOps], undefined, {
+      '!ops:hs': {
+        value: { event_id: '$ops-read', origin_ts: 100 },
+        device_id: '00000000-0000-4000-8000-000000000001',
+        updated_at: '2026-07-20T12:00:00Z',
       },
-    )
+    })
     await findByText('Ops')
 
     fireEvent.click(getByRole('button', { name: 'Unread' }))

@@ -85,7 +85,9 @@ export function buildDisclosure(
   }
 
   const byKey = new Map<string, ThirdPartyLicense>()
-  for (const entries of Object.values(grouped as Record<string, PnpmLicenseEntry[]>)) {
+  for (const entries of Object.values(
+    grouped as Record<string, PnpmLicenseEntry[]>,
+  )) {
     for (const entry of entries) {
       const version = entry.versions?.[0] ?? '0.0.0'
       const key = `${entry.name}@${version}`
@@ -127,7 +129,10 @@ export function collectDisclosure(
   try {
     raw = runPnpm()
   } catch (error) {
-    warn('[thirdparty] `pnpm licenses list` failed; disclosure will be empty:', error)
+    warn(
+      '[thirdparty] `pnpm licenses list` failed; disclosure will be empty:',
+      error,
+    )
     return []
   }
   try {

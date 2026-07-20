@@ -7,7 +7,9 @@ import {
 
 describe('pickLicenseFile', () => {
   it('returns null when no license-like file is present', () => {
-    expect(pickLicenseFile(['index.js', 'package.json', 'readme.md'])).toBeNull()
+    expect(
+      pickLicenseFile(['index.js', 'package.json', 'readme.md']),
+    ).toBeNull()
   })
 
   it('prefers a bare LICENSE over an extensioned one, regardless of order', () => {
@@ -23,8 +25,12 @@ describe('pickLicenseFile', () => {
   it('is deterministic for dual-licensed packages via an alphabetical tie-break', () => {
     // Same rank (both extensioned LICENSE variants) → stable alphabetical pick,
     // independent of readdir order.
-    expect(pickLicenseFile(['LICENSE-MIT', 'LICENSE-APACHE'])).toBe('LICENSE-APACHE')
-    expect(pickLicenseFile(['LICENSE-APACHE', 'LICENSE-MIT'])).toBe('LICENSE-APACHE')
+    expect(pickLicenseFile(['LICENSE-MIT', 'LICENSE-APACHE'])).toBe(
+      'LICENSE-APACHE',
+    )
+    expect(pickLicenseFile(['LICENSE-APACHE', 'LICENSE-MIT'])).toBe(
+      'LICENSE-APACHE',
+    )
   })
 
   it('matches case-insensitively (LICENCE spelling, COPYING.txt)', () => {
@@ -36,8 +42,18 @@ describe('pickLicenseFile', () => {
 describe('buildDisclosure', () => {
   const raw = JSON.stringify({
     MIT: [
-      { name: 'beta', versions: ['2.0.0'], paths: ['/pkgs/beta'], license: 'MIT' },
-      { name: 'alpha', versions: ['1.0.0'], paths: ['/pkgs/alpha'], license: 'MIT' },
+      {
+        name: 'beta',
+        versions: ['2.0.0'],
+        paths: ['/pkgs/beta'],
+        license: 'MIT',
+      },
+      {
+        name: 'alpha',
+        versions: ['1.0.0'],
+        paths: ['/pkgs/alpha'],
+        license: 'MIT',
+      },
     ],
     ISC: [{ name: 'gamma', versions: ['3.0.0'], license: 'ISC' }],
   })
@@ -66,7 +82,12 @@ describe('buildDisclosure', () => {
     const dup = JSON.stringify({
       MIT: [
         { name: 'alpha', versions: ['1.0.0'], paths: ['/a'], license: 'MIT' },
-        { name: 'alpha', versions: ['1.0.0'], paths: ['/a-copy'], license: 'MIT' },
+        {
+          name: 'alpha',
+          versions: ['1.0.0'],
+          paths: ['/a-copy'],
+          license: 'MIT',
+        },
       ],
     })
     const result = buildDisclosure(dup, (dir) => dir)
@@ -98,7 +119,11 @@ describe('collectDisclosure', () => {
 
   it('degrades to an empty list and warns when the output is not valid JSON', () => {
     const warn = vi.fn()
-    const result = collectDisclosure(() => 'WARN: something\n{bad', readLicense, warn)
+    const result = collectDisclosure(
+      () => 'WARN: something\n{bad',
+      readLicense,
+      warn,
+    )
     expect(result).toEqual([])
     expect(warn).toHaveBeenCalledOnce()
   })
@@ -106,7 +131,9 @@ describe('collectDisclosure', () => {
   it('returns the parsed disclosure on success', () => {
     const warn = vi.fn()
     const raw = JSON.stringify({
-      MIT: [{ name: 'alpha', versions: ['1.0.0'], paths: ['/a'], license: 'MIT' }],
+      MIT: [
+        { name: 'alpha', versions: ['1.0.0'], paths: ['/a'], license: 'MIT' },
+      ],
     })
     const result = collectDisclosure(() => raw, readLicense, warn)
     expect(result).toHaveLength(1)
