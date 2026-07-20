@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'preact/hooks'
+
 /**
  * Which of the three shell layouts the current path wants (ADR 0062):
  * `room` and `rooms` are the two-pane surfaces (sidebar + right pane), while
@@ -23,4 +25,18 @@ export function layoutMode(path: string): LayoutMode {
     return 'room'
   }
   return path === '/' ? 'rooms' : 'utility'
+}
+
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const onChange = () => setMatches(media.matches)
+    setMatches(media.matches)
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [query])
+
+  return matches
 }

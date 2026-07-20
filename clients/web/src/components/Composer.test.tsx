@@ -310,6 +310,80 @@ describe('Composer drafts (M-W6 step 5b)', () => {
   })
 })
 
+describe('Composer Enter-key behavior (mobile newline vs. desktop send)', () => {
+  it('submits on Enter without Shift when the viewport is wide (desktop)', () => {
+    const { textarea, onSubmit } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hello there' } })
+
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(onSubmit).toHaveBeenCalledWith('hello there')
+  })
+
+  it('still inserts a newline on Shift+Enter when the viewport is wide', () => {
+    const { textarea, onSubmit } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hello there' } })
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    textarea.dispatchEvent(event)
+
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('inserts a newline on Enter instead of submitting when the viewport is narrow', () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: mobileMatchMedia(true),
+    })
+    const { textarea, onSubmit } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hello there' } })
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    })
+    textarea.dispatchEvent(event)
+
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('does not submit on an IME-composing Enter', () => {
+    const { textarea, onSubmit } = renderComposer()
+    fireEvent.input(textarea, { target: { value: 'hello there' } })
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    textarea.dispatchEvent(event)
+
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it("sets enterKeyHint to 'send' on wide viewport and 'enter' on narrow viewport", () => {
+    const { textarea: wideTextarea } = renderComposer()
+    expect(wideTextarea.getAttribute('enterkeyhint')).toBe('send')
+    cleanup()
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: mobileMatchMedia(true),
+    })
+    const { textarea: narrowTextarea } = renderComposer()
+    expect(narrowTextarea.getAttribute('enterkeyhint')).toBe('enter')
+  })
+})
+
 describe('Composer slash command autocomplete', () => {
   it('filters slash commands by the typed prefix', () => {
     const { textarea, getByRole, queryByRole } = renderComposer({
@@ -336,6 +410,23 @@ describe('Composer slash command autocomplete', () => {
   })
 
   it('completes the selected partial command with Enter', () => {
+    const { textarea, queryByRole } = renderComposer({ onCommand: vi.fn() })
+
+    fireEvent.input(textarea, { target: { value: '/re' } })
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(textarea.value).toBe('/reply ')
+    expect(queryByRole('listbox', { name: 'Slash commands' })).toBeNull()
+  })
+
+  it('completes the selected partial command with Enter on a narrow viewport too', () => {
+    // The mobile "Enter inserts a newline" branch must not shadow autocomplete
+    // completion, which claims Enter earlier in the keydown chain.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: mobileMatchMedia(true),
+    })
     const { textarea, queryByRole } = renderComposer({ onCommand: vi.fn() })
 
     fireEvent.input(textarea, { target: { value: '/re' } })

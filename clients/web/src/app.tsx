@@ -12,7 +12,7 @@ import { RoomList } from './components/RoomList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
-import { layoutMode, SINGLE_PANE_QUERY } from './layout'
+import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
 import { withSearchParam } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
 import { AccountsPage } from './pages/AccountsPage'
@@ -595,18 +595,4 @@ function SettingsIcon() {
       />
     </svg>
   )
-}
-
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
-
-  useEffect(() => {
-    const media = window.matchMedia(query)
-    const onChange = () => setMatches(media.matches)
-    setMatches(media.matches)
-    media.addEventListener('change', onChange)
-    return () => media.removeEventListener('change', onChange)
-  }, [query])
-
-  return matches
 }

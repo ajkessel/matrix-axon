@@ -1,6 +1,6 @@
 import type { JSX } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
-import { SINGLE_PANE_QUERY } from '../layout'
+import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { humanSize } from '../media/human-size'
 import { hasModifier } from '../shortcuts'
 import {
@@ -164,6 +164,7 @@ export function Composer({
   const synced = useRef(initialValue)
   const textarea = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const singlePane = useMediaQuery(SINGLE_PANE_QUERY)
   /** Only a composer with a command handler treats a leading `/` as a command. */
   const commandsEnabled = onCommand !== undefined
   const commandQuery = commandsEnabled ? slashCommandQuery(draft) : null
@@ -709,6 +710,7 @@ export function Composer({
             aria-expanded={autocompleteOpen}
             aria-activedescendant={activeOptionId}
             rows={1}
+            enterkeyhint={singlePane ? 'enter' : 'send'}
             onInput={(event) =>
               change(
                 event.currentTarget.value,
@@ -808,7 +810,12 @@ export function Composer({
                 setAutocompleteDismissedFor(
                   dismissKey(autocomplete.kind, autocomplete.query),
                 )
-              } else if (event.key === 'Enter' && !event.shiftKey) {
+              } else if (
+                event.key === 'Enter' &&
+                !event.shiftKey &&
+                !event.isComposing &&
+                !singlePane
+              ) {
                 event.preventDefault()
                 submit()
               } else if (event.key === 'Escape' && banner !== undefined) {
