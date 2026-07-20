@@ -11,6 +11,9 @@ publish = false
 name = "axon"
 path = "src/main.rs"
 
+[build-dependencies]
+chrono = { workspace = true, features = ["clock"] }
+
 [features]
 default = []
 dev-tools = ["dep:sqlx-core", "dep:crc"]

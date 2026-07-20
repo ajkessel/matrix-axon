@@ -124,8 +124,11 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        git_hash = env!("GIT_HASH"),
-        "axon starting",
+        git_hash = env!("AXON_GIT_HASH"),
+        profile = env!("AXON_PROFILE"),
+        build_time = env!("AXON_BUILD_TIME"),
+        rustc_version = env!("AXON_RUSTC_VERSION"),
+        "axon starting"
     );
     log_fd_limit();
 

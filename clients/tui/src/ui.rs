@@ -2419,11 +2419,7 @@ pub(crate) fn popup_status_lines(app: &App) -> Vec<String> {
         "Auth: none (insecure, unauthenticated)".to_owned()
     };
 
-    let version = format!(
-        "Version: {} ({})",
-        env!("CARGO_PKG_VERSION"),
-        env!("GIT_HASH"),
-    );
+    let version = format!("Version: {}", env!("BUILD_INFO"));
 
     let graphics_line = {
         use ratatui_image::picker::ProtocolType;
