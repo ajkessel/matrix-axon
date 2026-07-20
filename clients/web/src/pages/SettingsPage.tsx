@@ -124,6 +124,8 @@ export function SettingsPage() {
       <footer class="settings-version muted">
         Web client <code>{BUILD_INFO.version}</code> · built{' '}
         <time dateTime={BUILD_INFO.builtAt}>{BUILD_INFO.builtAtLabel}</time>
+        {' · '}
+        <a href="/licenses">Open-source licenses</a>
       </footer>
     </div>
   )

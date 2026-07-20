@@ -16,6 +16,7 @@ import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
 import { withSearchParam } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
 import { AccountsPage } from './pages/AccountsPage'
+import { LicensesPage } from './pages/LicensesPage'
 import { NotFound } from './pages/NotFound'
 import { RoomPage } from './pages/RoomPage'
 import { RoomsIndex } from './pages/RoomsIndex'
@@ -509,6 +510,7 @@ function ShellChrome() {
               <Route path="/" component={RoomsIndex} />
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
+              <Route path="/licenses" component={LicensesPage} />
               <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
               <Route default component={NotFound} />
             </Router>

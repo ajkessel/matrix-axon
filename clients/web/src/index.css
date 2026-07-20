@@ -2260,6 +2260,38 @@ p.timeline-edge {
   font-size: 0.85rem;
 }
 
+/* ---- third-party license disclosure ---- */
+
+.license-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--bg-raised);
+}
+
+.license-entry > summary {
+  cursor: pointer;
+}
+
+.license-entry .license-name {
+  font-weight: 600;
+}
+
+.license-text {
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.75rem;
+  max-height: 24rem;
+  overflow: auto;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+}
+
 /* ---- shortcuts help (ADR 0063) ---- */
 
 .help-button {
