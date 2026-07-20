@@ -46,7 +46,7 @@ yet)
 | Outbound typing notice | Done (M19a, ADR 0068) — `PUT .../rooms/{room_id}/typing` | Done — `app/typing.rs`, driven by `note_draft_activity` + a `flush_due_typing` tick | Done (`stores/ephemeral-sender.ts`, driven by the composer) | Not started | Throttled true, cleared on empty/command/submit/room-switch/idle |
 | Interactive SAS device verification | Done (7a-6, ADR 0027/0028) | Done — full emoji-modal flow | **Gap** — `AccountsPage.tsx` only mentions SAS in a placeholder label; no verification flow implemented | Not started | Verified by grep, 2026-07-17 |
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
-| Room membership (leave/forget/invite/kick/ban/unban) | Planned (M19b, ADR 0068) | Not started | Not started | Not started | |
+| Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Not started | Not started | Server-only; client UI (leave-room action, member-list kick/ban) is separate follow-up work |
 | Room entry (join/knock/create) | Planned (M19c, ADR 0068) | Not started | Not started | Not started | |
 | Room settings (name/topic/avatar/tags) | Planned (M19d, ADR 0068) | Not started | Not started | Not started | |
 | Power levels | Planned (M19e, ADR 0068) | Not started | Not started | Not started | |

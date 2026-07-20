@@ -351,6 +351,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/ban": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ban a user from this room, optionally with a reason. */
+        post: operations["ban_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
         parameters: {
             query?: never;
@@ -380,6 +397,74 @@ export interface paths {
         put?: never;
         /** React to an event with an emoji/short key. */
         post: operations["react"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/forget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Forget a left or banned-from room. */
+        post: operations["forget_room"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/invite": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Invite a user to this room. */
+        post: operations["invite_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/kick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Kick a user from this room, optionally with a reason. */
+        post: operations["kick_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/leave": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Leave this room. */
+        post: operations["leave_room"];
         delete?: never;
         options?: never;
         head?: never;
@@ -543,6 +628,23 @@ export interface paths {
         /** Set (or clear) this account's typing indicator in a room. */
         put: operations["send_typing_notice"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/{room_id}/unban": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Unban a user from this room, optionally with a reason. */
+        post: operations["unban_user"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1692,6 +1794,14 @@ export interface components {
          */
         FlowStageDto: "requested" | "ready" | "keys_exchanged" | "confirmed" | "done" | "cancelled";
         /**
+         * @description Request body for inviting a user to a room
+         *     (`POST …/rooms/{room_id}/invite`; ADR 0068 M19b).
+         */
+        InviteRequest: {
+            /** @description The invited user's Matrix id (`@user:server`). */
+            user_id: string;
+        };
+        /**
          * @description Request body for runtime login (`POST /v1/accounts/login`). Adds or
          *     reactivates a Matrix account keyed by its Matrix `username`. The
          *     password is used once to authenticate and is never stored or echoed back.
@@ -1719,6 +1829,17 @@ export interface components {
          * @enum {string}
          */
         MediaUploadKindDto: "image" | "file";
+        /**
+         * @description Request body shared by the user-targeted membership actions that carry an
+         *     optional reason — `kick`, `ban`, `unban` (ADR 0068 M19b). Matrix models all
+         *     three with the same `{user_id, reason?}` shape.
+         */
+        MemberActionRequest: {
+            /** @description Optional human-readable reason recorded on the membership change. */
+            reason?: string | null;
+            /** @description The target user's Matrix id (`@user:server`). */
+            user_id: string;
+        };
         /**
          * @description One member of a room as returned by `GET …/rooms/{room_id}/members`. Derived
          *     from the current resolved `m.room.member` state row for the user.
@@ -2832,6 +2953,91 @@ export interface operations {
             };
         };
     };
+    ban_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemberActionRequest"];
+            };
+        };
+        responses: {
+            /** @description User banned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     edit_message: {
         parameters: {
             query?: never;
@@ -3038,6 +3244,338 @@ export interface operations {
             };
             /** @description Operation not permitted */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    forget_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Room forgotten */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request, or the room isn't left/banned */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    invite_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Invite sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    kick_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemberActionRequest"];
+            };
+        };
+        responses: {
+            /** @description User kicked */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    leave_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Left the room */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3531,6 +4069,91 @@ export interface operations {
             };
             /** @description Operation not permitted */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unban_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemberActionRequest"];
+            };
+        };
+        responses: {
+            /** @description User unbanned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

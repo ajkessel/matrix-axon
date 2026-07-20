@@ -51,7 +51,7 @@ pub use oauth::{
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
-pub use sender::{EphemeralSender, MessageSender, SendError};
+pub use sender::{EphemeralSender, MembershipSender, MessageSender, SendError};
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
@@ -206,6 +206,34 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/typing",
             put(routes::ephemeral::send_typing_notice),
+        )
+        // Existing-room membership (ADR 0068, M19b): leave/forget this
+        // account's own membership, and invite/kick/ban/unban other users.
+        // All resolve through `SdkGateway::room()` exactly like the M6
+        // mutations above; none return an event id (see `MembershipSender`).
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/leave",
+            post(routes::membership::leave_room),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/forget",
+            post(routes::membership::forget_room),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/invite",
+            post(routes::membership::invite_user),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/kick",
+            post(routes::membership::kick_user),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/ban",
+            post(routes::membership::ban_user),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/unban",
+            post(routes::membership::unban_user),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

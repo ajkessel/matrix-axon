@@ -199,6 +199,13 @@ pub struct SyncConfig {
     /// unbounded. Defaults to 10.
     #[serde(default = "default_ephemeral_send_timeout_secs")]
     pub ephemeral_send_timeout_secs: u64,
+    /// Per-call timeout for an outbound room-membership mutation — `leave`,
+    /// `forget`, `invite`, `kick`, `ban`, `unban` (ADR 0068, M19b) — in
+    /// seconds. Bounds a hung homeserver response so the request-handling
+    /// task can't block on it unbounded (AGENTS.md's "every outbound call
+    /// gets one" boundary-robustness rule). Defaults to 15.
+    #[serde(default = "default_membership_mutation_timeout_secs")]
+    pub membership_mutation_timeout_secs: u64,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
     /// task that pages each joined room's pre-existing history backward through
     /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
@@ -653,6 +660,10 @@ fn default_ephemeral_send_timeout_secs() -> u64 {
     10
 }
 
+fn default_membership_mutation_timeout_secs() -> u64 {
+    15
+}
+
 fn default_backfill_enabled() -> bool {
     true
 }
@@ -799,6 +810,7 @@ impl Default for SyncConfig {
             live_event_buffer: default_live_event_buffer(),
             ephemeral_event_types: default_ephemeral_event_types(),
             ephemeral_send_timeout_secs: default_ephemeral_send_timeout_secs(),
+            membership_mutation_timeout_secs: default_membership_mutation_timeout_secs(),
             backfill_enabled: default_backfill_enabled(),
             always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),
@@ -1250,6 +1262,8 @@ mod tests {
             }
             assert!(config.sync.store_key.is_none());
             assert!(config.sync.account.is_none());
+            assert_eq!(config.sync.ephemeral_send_timeout_secs, 10);
+            assert_eq!(config.sync.membership_mutation_timeout_secs, 15);
             Ok(())
         });
     }

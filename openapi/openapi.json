@@ -1069,6 +1069,126 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/ban": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Ban a user from this room, optionally with a reason.",
+        "operationId": "ban_user",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User banned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/events/{event_id}": {
       "put": {
         "tags": [
@@ -1392,6 +1512,466 @@
           },
           "403": {
             "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/forget": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Forget a left or banned-from room.",
+        "operationId": "forget_room",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Room forgotten",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request, or the room isn't left/banned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/invite": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Invite a user to this room.",
+        "operationId": "invite_user",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Invite sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/kick": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Kick a user from this room, optionally with a reason.",
+        "operationId": "kick_user",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User kicked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/leave": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Leave this room.",
+        "operationId": "leave_room",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Left the room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2160,6 +2740,126 @@
           },
           "403": {
             "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/{room_id}/unban": {
+      "post": {
+        "tags": [
+          "membership"
+        ],
+        "summary": "Unban a user from this room, optionally with a reason.",
+        "operationId": "unban_user",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User unbanned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5060,6 +5760,19 @@
           "cancelled"
         ]
       },
+      "InviteRequest": {
+        "type": "object",
+        "description": "Request body for inviting a user to a room\n(`POST …/rooms/{room_id}/invite`; ADR 0068 M19b).",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "The invited user's Matrix id (`@user:server`)."
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by its Matrix `username`. The\npassword is used once to authenticate and is never stored or echoed back.",
@@ -5092,6 +5805,26 @@
           "image",
           "file"
         ]
+      },
+      "MemberActionRequest": {
+        "type": "object",
+        "description": "Request body shared by the user-targeted membership actions that carry an\noptional reason — `kick`, `ban`, `unban` (ADR 0068 M19b). Matrix models all\nthree with the same `{user_id, reason?}` shape.",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable reason recorded on the membership change."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The target user's Matrix id (`@user:server`)."
+          }
+        }
       },
       "MemberDto": {
         "type": "object",
@@ -5778,6 +6511,10 @@
     {
       "name": "ephemeral",
       "description": "Outbound read receipts and typing notices sent to the homeserver"
+    },
+    {
+      "name": "membership",
+      "description": "Existing-room membership: leave, forget, invite, kick, ban, unban"
     },
     {
       "name": "verification",

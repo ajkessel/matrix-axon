@@ -126,3 +126,51 @@ pub trait EphemeralSender: Send + Sync {
         typing: bool,
     ) -> Result<(), SendError>;
 }
+
+/// Mutates this account's own or another user's membership in an
+/// already-joined room (ADR 0068, M19b): `leave`, `forget`, `invite`, `kick`,
+/// `ban`, `unban`. Split from [`MessageSender`] because these produce no event
+/// id a caller needs back — the resulting `m.room.member` state event round-trips
+/// through sync like any other state change — so every method here returns
+/// `()` on success, same shape as [`EphemeralSender`].
+#[async_trait]
+pub trait MembershipSender: Send + Sync {
+    /// Leave this room (and any predecessor rooms via tombstone, per the SDK).
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError>;
+
+    /// Forget a left or banned-from room, clearing it from the account's room
+    /// list. The homeserver rejects forgetting a room this account is still
+    /// joined to or invited to.
+    async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError>;
+
+    /// Invite `user_id` to this room.
+    async fn invite(&self, account_id: Uuid, room_id: &str, user_id: &str)
+        -> Result<(), SendError>;
+
+    /// Kick `user_id` from this room, optionally with a reason.
+    async fn kick(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError>;
+
+    /// Ban `user_id` from this room, optionally with a reason.
+    async fn ban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError>;
+
+    /// Unban `user_id` from this room, optionally with a reason.
+    async fn unban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError>;
+}

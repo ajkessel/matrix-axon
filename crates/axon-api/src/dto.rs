@@ -473,6 +473,26 @@ pub struct TypingRequest {
     pub typing: bool,
 }
 
+/// Request body for inviting a user to a room
+/// (`POST …/rooms/{room_id}/invite`; ADR 0068 M19b).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct InviteRequest {
+    /// The invited user's Matrix id (`@user:server`).
+    pub user_id: String,
+}
+
+/// Request body shared by the user-targeted membership actions that carry an
+/// optional reason — `kick`, `ban`, `unban` (ADR 0068 M19b). Matrix models all
+/// three with the same `{user_id, reason?}` shape.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MemberActionRequest {
+    /// The target user's Matrix id (`@user:server`).
+    pub user_id: String,
+    /// Optional human-readable reason recorded on the membership change.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// Query parameters for staging a media upload (`POST …/media/uploads`).
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

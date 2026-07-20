@@ -23,7 +23,7 @@ use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
-use crate::sender::{EphemeralSender, MessageSender, SendError};
+use crate::sender::{EphemeralSender, MembershipSender, MessageSender, SendError};
 use crate::trust::SenderTrustService;
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
@@ -56,6 +56,11 @@ pub struct AppState {
     /// non-sync configurations that don't inject one keep compiling; the
     /// binary overrides it via [`with_ephemeral`](Self::with_ephemeral).
     pub ephemeral: Arc<dyn EphemeralSender>,
+    /// Room-membership port for the leave/forget/invite/kick/ban/unban routes
+    /// (ADR 0068 M19b). Defaults to a no-op so tests and non-sync
+    /// configurations that don't inject one keep compiling; the binary
+    /// overrides it via [`with_membership`](Self::with_membership).
+    pub membership: Arc<dyn MembershipSender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -226,6 +231,7 @@ impl AppState {
             live,
             sender,
             ephemeral: Arc::new(NoopEphemeralSender),
+            membership: Arc::new(NoopMembershipSender),
             lifecycle,
             verify,
             trust,
@@ -272,6 +278,15 @@ impl AppState {
     /// these routes keep the default no-op.
     pub fn with_ephemeral(mut self, ephemeral: Arc<dyn EphemeralSender>) -> Self {
         self.ephemeral = ephemeral;
+        self
+    }
+
+    /// Inject the room-membership port (leave/forget/invite/kick/ban/unban;
+    /// ADR 0068 M19b). The binary calls this with an adapter over the sync
+    /// engine's gateway, same as `sender`; tests that don't touch these routes
+    /// keep the default no-op.
+    pub fn with_membership(mut self, membership: Arc<dyn MembershipSender>) -> Self {
+        self.membership = membership;
         self
     }
 
@@ -322,6 +337,73 @@ impl EphemeralSender for NoopEphemeralSender {
     ) -> Result<(), SendError> {
         Err(SendError::Unavailable(
             "ephemeral-outbound port is not configured".to_owned(),
+        ))
+    }
+}
+
+/// The default `membership` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_membership`] replaces it with a real adapter.
+struct NoopMembershipSender;
+
+#[async_trait::async_trait]
+impl MembershipSender for NoopMembershipSender {
+    async fn leave(&self, _account_id: uuid::Uuid, _room_id: &str) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
+        ))
+    }
+
+    async fn forget(&self, _account_id: uuid::Uuid, _room_id: &str) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
+        ))
+    }
+
+    async fn invite(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _user_id: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
+        ))
+    }
+
+    async fn kick(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _user_id: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
+        ))
+    }
+
+    async fn ban(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _user_id: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
+        ))
+    }
+
+    async fn unban(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _user_id: &str,
+        _reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "membership port is not configured".to_owned(),
         ))
     }
 }
@@ -402,6 +484,12 @@ impl FromRef<AppState> for Arc<dyn MessageSender> {
 impl FromRef<AppState> for Arc<dyn EphemeralSender> {
     fn from_ref(state: &AppState) -> Arc<dyn EphemeralSender> {
         state.ephemeral.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn MembershipSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn MembershipSender> {
+        state.membership.clone()
     }
 }
 

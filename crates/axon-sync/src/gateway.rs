@@ -22,8 +22,8 @@ use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::message::{
     AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, RoomId, UInt};
-use matrix_sdk::Room;
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, RoomId, UInt, UserId};
+use matrix_sdk::{Room, RoomState};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -32,11 +32,15 @@ use crate::manager::ClientManager;
 
 /// Map an SDK error from a send/fetch into a [`GatewayError`]. A homeserver
 /// `M_FORBIDDEN` (e.g. redacting without the required power level) becomes
-/// [`GatewayError::Forbidden`] so it surfaces as `403`, not a generic `502`;
-/// everything else is an upstream failure.
+/// [`GatewayError::Forbidden`] so it surfaces as `403`; `M_BAD_STATE` (e.g.
+/// unbanning a user who isn't banned, ADR 0068 M19b's `kick`/`ban`/`unban`) is
+/// a caller mistake, not a homeserver fault, so it becomes
+/// [`GatewayError::Invalid`] (`400`) rather than falling into the generic
+/// upstream `502`; everything else is an upstream failure.
 fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
     match err.client_api_error_kind() {
         Some(ErrorKind::Forbidden) => GatewayError::Forbidden(err.to_string()),
+        Some(ErrorKind::BadState) => GatewayError::Invalid(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
 }
@@ -47,6 +51,13 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
 /// redact, react, and the read-receipt send.
 fn parse_event_id(event_id: &str) -> Result<OwnedEventId, GatewayError> {
     EventId::parse(event_id).map_err(|e| GatewayError::Invalid(format!("event id: {e}")))
+}
+
+/// Parse a Matrix user id targeted by a membership mutation (invite/kick/
+/// ban/unban), mapping a malformed one to [`GatewayError::Invalid`] instead of
+/// letting it reach the homeserver.
+fn parse_user_id(user_id: &str) -> Result<OwnedUserId, GatewayError> {
+    UserId::parse(user_id).map_err(|e| GatewayError::Invalid(format!("user id: {e}")))
 }
 
 fn effective_mime(
@@ -372,6 +383,84 @@ impl SdkGateway {
         let room = self.room(account_id, room_id).await?;
         room.typing_notice(typing).await.map_err(map_sdk_err)
     }
+
+    /// Leave this room (ADR 0068, M19b). The `m.room.member` leave event this
+    /// produces already drives existing downstream handling — the ADR 0037
+    /// membership filter and ADR 0044's opt-in `purge_on_leave` — via the sync
+    /// path's own `persist_state_event`; this method only issues the call.
+    pub async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        room.leave().await.map_err(map_sdk_err)
+    }
+
+    /// Forget a left or banned-from room (ADR 0068, M19b). The homeserver only
+    /// accepts this for a room in `Left`/`Banned` state; a still-joined or
+    /// -invited room is rejected up front as a clean 400 rather than round-
+    /// tripping to the SDK for a `WrongRoomState` error that `map_sdk_err`
+    /// can't distinguish from an upstream failure.
+    pub async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        match room.state() {
+            RoomState::Left | RoomState::Banned => {}
+            other => {
+                return Err(GatewayError::Invalid(format!(
+                    "cannot forget a room in state {other:?}; only left or banned rooms can be forgotten"
+                )))
+            }
+        }
+        room.forget().await.map_err(map_sdk_err)
+    }
+
+    /// Invite `user_id` to this room (ADR 0068, M19b).
+    pub async fn invite(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        room.invite_user_by_id(&user_id).await.map_err(map_sdk_err)
+    }
+
+    /// Kick `user_id` from this room, optionally with a reason (ADR 0068, M19b).
+    pub async fn kick(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        room.kick_user(&user_id, reason).await.map_err(map_sdk_err)
+    }
+
+    /// Ban `user_id` from this room, optionally with a reason (ADR 0068, M19b).
+    pub async fn ban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        room.ban_user(&user_id, reason).await.map_err(map_sdk_err)
+    }
+
+    /// Unban `user_id` from this room, optionally with a reason (ADR 0068, M19b).
+    pub async fn unban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        room.unban_user(&user_id, reason).await.map_err(map_sdk_err)
+    }
 }
 
 #[cfg(test)]
@@ -382,11 +471,25 @@ mod tests {
     use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
     use serde_json::json;
 
-    use super::{attachment_info, attachment_reply, effective_mime, message_relates_to};
+    use super::{
+        attachment_info, attachment_reply, effective_mime, message_relates_to, parse_user_id,
+    };
     use crate::error::GatewayError;
 
     const REPLY_EVENT: &str = "$reply:example.org";
     const THREAD_ROOT: &str = "$thread:example.org";
+
+    #[test]
+    fn parse_user_id_accepts_a_valid_id() {
+        let user_id = parse_user_id("@alice:example.org").expect("valid user id");
+        assert_eq!(user_id.as_str(), "@alice:example.org");
+    }
+
+    #[test]
+    fn parse_user_id_rejects_a_malformed_id() {
+        let err = parse_user_id("not-a-user-id").expect_err("malformed user id should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("user id:")));
+    }
 
     #[test]
     fn effective_mime_uses_kind_defaults() {

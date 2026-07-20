@@ -7,6 +7,7 @@ pub mod devices;
 pub mod ephemeral;
 pub mod events;
 pub mod media;
+pub mod membership;
 pub mod messages;
 pub mod oauth;
 pub mod rooms;

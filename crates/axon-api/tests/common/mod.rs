@@ -17,11 +17,11 @@ use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
     DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
     MediaAttachment, MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile,
-    MemberProfileError, MemberProfileService, MessageSender, RecoverError, RedecryptUtdsError,
-    RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery, SearchQueryError,
-    SearchQueryParams, SendError, SenderTrustService, StageUploadError, StageUploadRequest,
-    StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
-    UploadStream, VerificationService, VerifyError,
+    MemberProfileError, MemberProfileService, MembershipSender, MessageSender, RecoverError,
+    RedecryptUtdsError, RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery,
+    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
+    StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError,
+    TrustSnapshot, UploadStream, VerificationService, VerifyError,
 };
 use futures_util::StreamExt;
 use uuid::Uuid;
@@ -341,6 +341,178 @@ impl EphemeralSender for StubEphemeral {
             account_id,
             room_id: room_id.to_owned(),
             typing,
+        });
+        self.outcome.to_result()
+    }
+}
+
+/// One recorded call to [`StubMembership`], with the arguments the handler
+/// passed through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MembershipCall {
+    Leave {
+        account_id: Uuid,
+        room_id: String,
+    },
+    Forget {
+        account_id: Uuid,
+        room_id: String,
+    },
+    Invite {
+        account_id: Uuid,
+        room_id: String,
+        user_id: String,
+    },
+    Kick {
+        account_id: Uuid,
+        room_id: String,
+        user_id: String,
+        reason: Option<String>,
+    },
+    Ban {
+        account_id: Uuid,
+        room_id: String,
+        user_id: String,
+        reason: Option<String>,
+    },
+    Unban {
+        account_id: Uuid,
+        room_id: String,
+        user_id: String,
+        reason: Option<String>,
+    },
+}
+
+/// The outcome [`StubMembership`] returns for every call. `Clone` (unlike
+/// [`SendError`]) so one stub can answer repeated calls.
+#[derive(Clone)]
+pub enum MembershipOutcome {
+    Ok,
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl MembershipOutcome {
+    fn to_result(&self) -> Result<(), SendError> {
+        match self {
+            MembershipOutcome::Ok => Ok(()),
+            MembershipOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            MembershipOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            MembershipOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            MembershipOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            MembershipOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+}
+
+/// An in-memory [`MembershipSender`] for tests.
+pub struct StubMembership {
+    outcome: MembershipOutcome,
+    calls: Mutex<Vec<MembershipCall>>,
+}
+
+impl StubMembership {
+    /// A stub that returns `Ok(())` for every call.
+    pub fn ok() -> Self {
+        Self {
+            outcome: MembershipOutcome::Ok,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every call.
+    pub fn failing(outcome: MembershipOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<MembershipCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MembershipSender for StubMembership {
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Leave {
+            account_id,
+            room_id: room_id.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Forget {
+            account_id,
+            room_id: room_id.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn invite(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Invite {
+            account_id,
+            room_id: room_id.to_owned(),
+            user_id: user_id.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn kick(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Kick {
+            account_id,
+            room_id: room_id.to_owned(),
+            user_id: user_id.to_owned(),
+            reason: reason.map(ToOwned::to_owned),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn ban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Ban {
+            account_id,
+            room_id: room_id.to_owned(),
+            user_id: user_id.to_owned(),
+            reason: reason.map(ToOwned::to_owned),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn unban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(MembershipCall::Unban {
+            account_id,
+            room_id: room_id.to_owned(),
+            user_id: user_id.to_owned(),
+            reason: reason.map(ToOwned::to_owned),
         });
         self.outcome.to_result()
     }

@@ -1,5 +1,6 @@
 //! Composition-root adapter: binds `axon-sync`'s concrete [`SdkGateway`] to
-//! `axon-api`'s [`MessageSender`] port.
+//! `axon-api`'s [`MessageSender`], [`EphemeralSender`], and [`MembershipSender`]
+//! ports.
 //!
 //! `axon-api` and `axon-sync` never depend on each other; this binary is the one
 //! place that knows both, so the adapter lives here. It delegates each call to
@@ -10,7 +11,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axon_api::{EphemeralSender, Formatted, MediaAttachment, MessageSender, Relation, SendError};
+use axon_api::{
+    EphemeralSender, Formatted, MediaAttachment, MembershipSender, MessageSender, Relation,
+    SendError,
+};
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
@@ -20,6 +24,7 @@ pub struct GatewayAdapter {
     gateway: SdkGateway,
     upstream_upload_timeout: Duration,
     ephemeral_send_timeout: Duration,
+    membership_mutation_timeout: Duration,
 }
 
 impl GatewayAdapter {
@@ -27,12 +32,23 @@ impl GatewayAdapter {
         gateway: SdkGateway,
         upstream_upload_timeout: Duration,
         ephemeral_send_timeout: Duration,
+        membership_mutation_timeout: Duration,
     ) -> Self {
         Self {
             gateway,
             upstream_upload_timeout,
             ephemeral_send_timeout,
+            membership_mutation_timeout,
         }
+    }
+
+    /// The `SendError::Upstream` a membership mutation reports when it hits
+    /// `membership_mutation_timeout` before the homeserver responds.
+    fn membership_timed_out(&self, verb: &str) -> SendError {
+        SendError::Upstream(format!(
+            "{verb} timed out after {}s",
+            self.membership_mutation_timeout.as_secs()
+        ))
     }
 }
 
@@ -176,6 +192,92 @@ impl EphemeralSender for GatewayAdapter {
                 self.ephemeral_send_timeout.as_secs()
             ))
         })?
+        .map_err(map_err)
+    }
+}
+
+#[async_trait]
+impl MembershipSender for GatewayAdapter {
+    async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.leave(account_id, room_id),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("leave"))?
+        .map_err(map_err)
+    }
+
+    async fn forget(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.forget(account_id, room_id),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("forget"))?
+        .map_err(map_err)
+    }
+
+    async fn invite(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.invite(account_id, room_id, user_id),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("invite"))?
+        .map_err(map_err)
+    }
+
+    async fn kick(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.kick(account_id, room_id, user_id, reason),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("kick"))?
+        .map_err(map_err)
+    }
+
+    async fn ban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.ban(account_id, room_id, user_id, reason),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("ban"))?
+        .map_err(map_err)
+    }
+
+    async fn unban(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.unban(account_id, room_id, user_id, reason),
+        )
+        .await
+        .map_err(|_| self.membership_timed_out("unban"))?
         .map_err(map_err)
     }
 }
