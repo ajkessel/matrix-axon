@@ -327,4 +327,45 @@ describe('createDeviceStateStore', () => {
     expect(bodies.at(-1)).toEqual({ entries: { [ROOM]: { text: 'second' } } })
     vi.useRealTimers()
   })
+
+  it('re-queues a network-failed batch read-marker PUT', async () => {
+    vi.useFakeTimers()
+    const bodies: unknown[] = []
+    let failNext = true
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        bodies.push(await request.json())
+        if (failNext) {
+          failNext = false
+          return HttpResponse.error()
+        }
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+
+    await store.markRoomSummariesRead(ACCT, [
+      {
+        account_id: ACCT,
+        room_id: ROOM,
+        last_event_id: '$latest',
+        last_activity_ts: 200,
+      } as never,
+    ])
+
+    expect(bodies).toHaveLength(1)
+    expect(store.readMarker(ACCT, ROOM)).toEqual({
+      eventId: '$latest',
+      originTs: 200,
+    })
+
+    await vi.advanceTimersByTimeAsync(800)
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toEqual({
+      entries: { [ROOM]: { event_id: '$latest', origin_ts: 200 } },
+    })
+    vi.useRealTimers()
+  })
 })

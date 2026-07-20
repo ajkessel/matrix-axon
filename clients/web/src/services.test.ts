@@ -26,17 +26,65 @@ function harness() {
     },
   })
   const unread = createUnreadStore()
+  const api = createApiClient(
+    {
+      getToken: () => 't',
+      onAuthFailure: () => {},
+      LoginBootstrap: () => null,
+    },
+    'http://axon.test',
+  )
+  const accounts = {
+    accounts: signal([{ account_id: ACCT, user_id: '@me:hs' }]),
+  }
+  const rooms = {
+    rooms: signal([
+      { account_id: ACCT, room_id: ROOM, account_user_id: '@me:hs' },
+    ]),
+  }
+  const deviceState = createDeviceStateStore(api, live, memoryStorage())
   const activeRoom = signal<string | null>(null)
-  connectLiveUnread(live, unread, activeRoom)
+  connectLiveUnread(
+    live,
+    unread,
+    activeRoom,
+    rooms as never,
+    accounts as never,
+    deviceState,
+  )
   live.start()
-  return { live, unread, activeRoom, socket: () => socket! }
+  return { live, unread, activeRoom, deviceState, socket: () => socket! }
 }
 
-const timelineFrame = (accountId: string, roomId: string) =>
+const timelineFrame = (
+  accountId: string,
+  roomId: string,
+  options: {
+    sender?: string
+    eventId?: string
+    originTs?: number
+    type?: string
+    body?: string | null
+    redacted?: boolean
+    stateKey?: string | null
+    relatesTo?: unknown
+  } = {},
+) =>
   JSON.stringify({
     type: TIMELINE_EVENT,
     account_id: accountId,
-    payload: { event_id: '$e', account_id: accountId, room_id: roomId },
+    payload: {
+      event_id: options.eventId ?? '$e',
+      account_id: accountId,
+      room_id: roomId,
+      sender: options.sender ?? '@alice:hs',
+      origin_ts: options.originTs ?? 100,
+      type: options.type ?? 'm.room.message',
+      body: options.body === undefined ? 'hello' : options.body,
+      redacted: options.redacted ?? false,
+      state_key: options.stateKey ?? null,
+      relates_to: options.relatesTo ?? null,
+    },
   })
 
 describe('connectLiveUnread', () => {
@@ -51,6 +99,78 @@ describe('connectLiveUnread', () => {
     activeRoom.value = KEY
     socket().emitMessage(timelineFrame(ACCT, ROOM))
     expect(unread.count(KEY)).toBe(0)
+  })
+
+  it('does not badge the user’s own live event in another room', () => {
+    const { unread, deviceState, socket } = harness()
+    socket().emitMessage(timelineFrame(ACCT, ROOM, { sender: '@me:hs' }))
+    expect(unread.count(KEY)).toBe(0)
+    expect(deviceState.readMarker(ACCT, ROOM)).toEqual({
+      eventId: '$e',
+      originTs: 100,
+    })
+  })
+
+  it('does not badge reactions, redactions, state events, or edits', () => {
+    const { unread, deviceState, socket } = harness()
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, {
+        eventId: '$reaction',
+        originTs: 101,
+        type: 'm.reaction',
+        body: null,
+        relatesTo: { rel_type: 'm.annotation', event_id: '$message' },
+      }),
+    )
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, {
+        eventId: '$redaction',
+        originTs: 102,
+        type: 'm.room.redaction',
+        body: null,
+      }),
+    )
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, {
+        eventId: '$state',
+        originTs: 103,
+        type: 'm.room.topic',
+        body: 'topic',
+        stateKey: '',
+      }),
+    )
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, {
+        eventId: '$edit',
+        originTs: 104,
+        relatesTo: { rel_type: 'm.replace', event_id: '$message' },
+      }),
+    )
+
+    expect(unread.count(KEY)).toBe(0)
+    expect(deviceState.readMarker(ACCT, ROOM)).toEqual({
+      eventId: '$edit',
+      originTs: 104,
+    })
+  })
+
+  it('does not let ignored events clear an existing unread message', () => {
+    const { unread, deviceState, socket } = harness()
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, { eventId: '$message', originTs: 100 }),
+    )
+    socket().emitMessage(
+      timelineFrame(ACCT, ROOM, {
+        eventId: '$reaction',
+        originTs: 101,
+        type: 'm.reaction',
+        body: null,
+        relatesTo: { rel_type: 'm.annotation', event_id: '$message' },
+      }),
+    )
+
+    expect(unread.count(KEY)).toBe(1)
+    expect(deviceState.readMarker(ACCT, ROOM)).toBeNull()
   })
 
   it('ignores non-timeline frames', () => {

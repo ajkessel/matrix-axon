@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import { options } from 'preact'
 import { LocationProvider } from 'preact-iso'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -50,10 +50,25 @@ afterAll(() => server.close())
 function renderPage(
   rooms: unknown[] = [OPS, LOUNGE, DM, OTHER],
   configure?: (services: ReturnType<typeof testServices>) => void,
+  readMarkers: Record<string, unknown> = {},
 ) {
   server.use(
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({ data: rooms }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
+      ({ params }) =>
+        HttpResponse.json({
+          data: {
+            namespace: params.namespace,
+            entries:
+              params.namespace === 'read_markers' ? readMarkers : {},
+          },
+        }),
+    ),
+    http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
+      HttpResponse.json({ data: { updated_at: '2026-07-20T12:00:00Z' } }),
     ),
     // DM title resolution for the unnamed room.
     http.get(
@@ -153,6 +168,29 @@ describe('RoomList', () => {
     expect(location.pathname).toBe(
       `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
     )
+  })
+
+  it('opens a room click with one history entry', async () => {
+    history.replaceState(null, '', '/')
+    const { findByText } = renderPage()
+    const ops = await findByText('Ops')
+    const link = ops.closest('a.room-link')!
+    const pushState = vi.spyOn(history, 'pushState')
+
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true })
+    link.dispatchEvent(click)
+
+    await waitFor(() =>
+      expect(location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+      ),
+    )
+    expect(click.defaultPrevented).toBe(true)
+    expect(pushState).toHaveBeenCalledTimes(1)
+    pushState.mockRestore()
+
+    history.back()
+    await waitFor(() => expect(location.pathname).toBe('/'))
   })
 
   it('does not open a room when a mobile touch scrolls the list', async () => {
@@ -267,6 +305,46 @@ describe('RoomList', () => {
     services.unread.recordEvent(roomKey(OPS as never))
     expect(await findByText('Ops')).toBeTruthy()
     expect(await findByText('1')).toBeTruthy() // badge
+  })
+
+  it('does not treat missing read markers as unread after reload', async () => {
+    const freshOps = {
+      ...OPS,
+      last_activity_ts: 200,
+      last_event_id: '$ops-new',
+    }
+    const { findByText, getByRole, queryByText } = renderPage([freshOps])
+    await findByText('Ops')
+
+    fireEvent.click(getByRole('button', { name: 'Unread' }))
+
+    expect(queryByText('Ops')).toBeNull()
+    expect(await findByText('No rooms match the current filter.')).toBeTruthy()
+  })
+
+  it('unread filter includes rooms newer than a hydrated read marker', async () => {
+    const freshOps = {
+      ...OPS,
+      last_activity_ts: 200,
+      last_event_id: '$ops-new',
+    }
+    const { findByText, getByRole } = renderPage(
+      [freshOps],
+      undefined,
+      {
+        '!ops:hs': {
+          value: { event_id: '$ops-read', origin_ts: 100 },
+          device_id: '00000000-0000-4000-8000-000000000001',
+          updated_at: '2026-07-20T12:00:00Z',
+        },
+      },
+    )
+    await findByText('Ops')
+
+    fireEvent.click(getByRole('button', { name: 'Unread' }))
+
+    expect(await findByText('Ops')).toBeTruthy()
+    expect(await findByText('•')).toBeTruthy()
   })
 
   it('pinning floats a room to the top with a separator, persisted', async () => {

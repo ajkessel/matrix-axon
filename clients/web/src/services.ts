@@ -40,6 +40,7 @@ import {
   type ActiveThread,
   type ThreadUnreadStore,
 } from './stores/thread-unread'
+import { isRoomUnreadEvent, type EventDto } from './stores/timeline'
 import { createUnreadStore, type UnreadStore } from './stores/unread'
 
 /**
@@ -93,17 +94,43 @@ function oauthClientId(): string {
   return import.meta.env.VITE_AXON_OAUTH_CLIENT_ID ?? 'axon-web'
 }
 
+function roomAlreadyUnread(
+  event: EventDto,
+  key: string,
+  unread: UnreadStore,
+  rooms: RoomsStore,
+  deviceState: DeviceStateStore,
+): boolean {
+  if (unread.count(key) > 0) {
+    return true
+  }
+  const marker = deviceState.readMarker(event.account_id, event.room_id)
+  if (marker === null) {
+    return false
+  }
+  const room = rooms.rooms.value.find(
+    (candidate) =>
+      candidate.account_id === event.account_id &&
+      candidate.room_id === event.room_id,
+  )
+  return room?.last_event_id != null && room.last_activity_ts > marker.originTs
+}
+
 /**
  * Feed live timeline events into the unread store (M-W6, ADR 0046): every
- * `timeline.event` for a room other than the open one raises that room's
- * client-derived badge. The open room is skipped via `activeRoom` — it is
- * marked seen on open and its live events belong in its timeline, not a badge.
- * Returns the unsubscribe; the app graph keeps the subscription for its life.
+ * unread-worthy message for a room other than the open one raises that room's
+ * client-derived badge. Reactions, redactions, edits, state events, and other
+ * non-visible rows are skipped. When such an ignored event lands in a clean
+ * room, the read marker advances so a reload does not derive a stale unread dot
+ * from `last_activity_ts`; an already-unread room is left unread.
  */
 export function connectLiveUnread(
   live: LiveConnection,
   unread: UnreadStore,
   activeRoom: Signal<string | null>,
+  rooms: RoomsStore,
+  accounts: AccountsStore,
+  deviceState: DeviceStateStore,
 ): () => void {
   return live.subscribe((frame) => {
     const event = timelineEvent(frame)
@@ -112,6 +139,37 @@ export function connectLiveUnread(
     }
     const key = roomKey(event)
     if (key === activeRoom.value) {
+      return
+    }
+    if (!isRoomUnreadEvent(event)) {
+      if (!roomAlreadyUnread(event, key, unread, rooms, deviceState)) {
+        deviceState.advanceReadMarker(
+          event.account_id,
+          event.room_id,
+          event.event_id,
+          event.origin_ts,
+        )
+      }
+      return
+    }
+    const ownUserId =
+      accounts.accounts.value.find(
+        (account) => account.account_id === event.account_id,
+      )?.user_id ??
+      rooms.rooms.value.find(
+        (room) =>
+          room.account_id === event.account_id &&
+          room.room_id === event.room_id,
+      )?.account_user_id ??
+      null
+    if (ownUserId !== null && event.sender === ownUserId) {
+      unread.markSeen(key)
+      deviceState.advanceReadMarker(
+        event.account_id,
+        event.room_id,
+        event.event_id,
+        event.origin_ts,
+      )
       return
     }
     unread.recordEvent(key)
@@ -317,11 +375,11 @@ export function createServices(
   const activeRoom = signal<string | null>(null)
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
-  connectLiveUnread(live, unread, activeRoom)
+  const deviceState = createDeviceStateStore(api, live, storage)
+  connectLiveUnread(live, unread, activeRoom, rooms, accounts, deviceState)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
-  const deviceState = createDeviceStateStore(api, live, storage)
   connectReadMarkers(live, unread, deviceState)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   return {

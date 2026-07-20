@@ -172,7 +172,7 @@ export function filterRooms(
   rooms: RoomDto[],
   filter: ActiveFilter,
   context: {
-    hasUnread: (key: string) => boolean
+    hasUnread: (key: string, room: RoomDto) => boolean
     isPinned: (key: string) => boolean
     title: (room: RoomDto) => string
   },
@@ -181,7 +181,7 @@ export function filterRooms(
     case 'all':
       return rooms
     case 'unread':
-      return rooms.filter((room) => context.hasUnread(roomKey(room)))
+      return rooms.filter((room) => context.hasUnread(roomKey(room), room))
     case 'dms':
       return rooms.filter(isLikelyDm)
     case 'groups':

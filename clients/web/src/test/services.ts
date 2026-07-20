@@ -86,11 +86,11 @@ export function testServices(
   const activeRoom = signal<string | null>(null)
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
-  connectLiveUnread(live, unread, activeRoom)
+  const deviceState = createDeviceStateStore(api, live, storage)
+  connectLiveUnread(live, unread, activeRoom, rooms, accounts, deviceState)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
-  const deviceState = createDeviceStateStore(api, live, storage)
   connectReadMarkers(live, unread, deviceState)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   return {

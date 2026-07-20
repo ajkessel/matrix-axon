@@ -2,6 +2,7 @@ import { effect, signal } from '@preact/signals'
 import type { ApiClient } from '../api/client'
 import { deviceStateChange } from '../api/frames'
 import type { LiveConnection } from './live-connection'
+import type { RoomDto } from './room-list'
 
 /** localStorage key for this install's stable device id (ADR 0048). */
 const DEVICE_ID_KEY = 'axon.device_id'
@@ -35,6 +36,8 @@ export interface DeviceStateStore {
   set(accountId: string, namespace: string, key: string, value: unknown): void
   /** Fetch a `(accountId, namespace)` merged view once (idempotent). */
   hydrate(accountId: string, namespace: string): void
+  /** Whether a `(accountId, namespace)` merged view has successfully loaded. */
+  hydrated(accountId: string, namespace: string): boolean
 
   /** Draft text for a room (`''` when none) — the `drafts` namespace. */
   draft(accountId: string, roomId: string): string
@@ -58,6 +61,13 @@ export interface DeviceStateStore {
   ): void
   /** Fetch an account's read markers once. */
   hydrateReadMarkers(accountId: string): void
+  /** Seed missing read markers to current room summaries, without read receipts. */
+  baselineReadMarkers(accountId: string, rooms: readonly RoomDto[]): Promise<void>
+  /** Mark current room summaries read and schedule the device-state write. */
+  markRoomSummariesRead(
+    accountId: string,
+    rooms: readonly RoomDto[],
+  ): Promise<void>
 
   /** A thread's read marker, or `null` — the `thread_read_markers` namespace. */
   threadReadMarker(
@@ -169,6 +179,7 @@ export function createDeviceStateStore(
 ): DeviceStateStore {
   const deviceId = loadDeviceId(storage)
   const entries = signal<ReadonlyMap<string, unknown>>(new Map())
+  const hydratedScopes = signal<ReadonlySet<string>>(new Set())
   /** `(account, namespace)` scopes already fetched (or in flight). */
   const hydrated = new Set<string>()
   /** Debounced pending writes per scope: `key -> value | null`. */
@@ -217,6 +228,35 @@ export function createDeviceStateStore(
       next.set(cacheKey(accountId, namespace, key), entry.value)
     }
     entries.value = next
+    hydratedScopes.value = new Set(hydratedScopes.value).add(
+      scopeKey(accountId, namespace),
+    )
+  }
+
+  async function putEntries(
+    accountId: string,
+    namespace: string,
+    batch: Map<string, unknown>,
+  ): Promise<void> {
+    if (batch.size === 0) {
+      return
+    }
+    const sk = scopeKey(accountId, namespace)
+    const timer = timers.get(sk)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      timers.delete(sk)
+    }
+    const pendingBatch = pending.get(sk)
+    if (pendingBatch !== undefined) {
+      for (const [key, value] of pendingBatch) {
+        if (!batch.has(key)) {
+          batch.set(key, value)
+        }
+      }
+      pending.delete(sk)
+    }
+    await putBatch(accountId, namespace, batch)
   }
 
   function flush(accountId: string, namespace: string): void {
@@ -227,8 +267,15 @@ export function createDeviceStateStore(
     if (batch === undefined || batch.size === 0) {
       return
     }
-    // `null` entries are sent verbatim as tombstones (ADR 0048).
-    const body = { entries: Object.fromEntries(batch) }
+    void putBatch(accountId, namespace, batch)
+  }
+
+  async function putBatch(
+    accountId: string,
+    namespace: string,
+    batch: Map<string, unknown>,
+  ): Promise<void> {
+    const sk = scopeKey(accountId, namespace)
     const requeue = () => {
       // The PUT never reached the server (network-level rejection): put the
       // batch back so the write isn't silently lost — the local cache already
@@ -250,13 +297,14 @@ export function createDeviceStateStore(
         )
       }
     }
-    api
+    // `null` entries are sent verbatim as tombstones (ADR 0048).
+    await api
       .PUT('/v1/devices/{device_id}/state/{namespace}', {
         params: {
           path: { device_id: deviceId, namespace },
           query: { account_id: accountId },
         },
-        body,
+        body: { entries: Object.fromEntries(batch) },
       })
       .then(() => {}, requeue)
   }
@@ -340,6 +388,9 @@ export function createDeviceStateStore(
       schedulePut(accountId, namespace, key, value)
     },
     hydrate,
+    hydrated(accountId, namespace) {
+      return hydratedScopes.value.has(scopeKey(accountId, namespace))
+    },
     draft(accountId, roomId) {
       return draftText(
         entries.value.get(cacheKey(accountId, DRAFTS_NAMESPACE, roomId)),
@@ -371,6 +422,60 @@ export function createDeviceStateStore(
     },
     hydrateReadMarkers(accountId) {
       hydrate(accountId, READ_MARKERS_NAMESPACE)
+    },
+    async baselineReadMarkers(accountId, rooms) {
+      if (!hydratedScopes.value.has(scopeKey(accountId, READ_MARKERS_NAMESPACE))) {
+        return
+      }
+      const batch = new Map<string, unknown>()
+      for (const room of rooms) {
+        if (
+          room.account_id !== accountId ||
+          room.last_event_id === null ||
+          room.last_event_id === undefined ||
+          parseMarker(
+            entries.value.get(
+              cacheKey(accountId, READ_MARKERS_NAMESPACE, room.room_id),
+            ),
+          ) !== null
+        ) {
+          continue
+        }
+        const value = {
+          event_id: room.last_event_id,
+          origin_ts: room.last_activity_ts,
+        }
+        writeCache(accountId, READ_MARKERS_NAMESPACE, room.room_id, value)
+        batch.set(room.room_id, value)
+      }
+      await putEntries(accountId, READ_MARKERS_NAMESPACE, batch)
+    },
+    async markRoomSummariesRead(accountId, rooms) {
+      const batch = new Map<string, unknown>()
+      for (const room of rooms) {
+        if (
+          room.account_id !== accountId ||
+          room.last_event_id === null ||
+          room.last_event_id === undefined
+        ) {
+          continue
+        }
+        const current = parseMarker(
+          entries.value.get(
+            cacheKey(accountId, READ_MARKERS_NAMESPACE, room.room_id),
+          ),
+        )
+        if (current !== null && current.originTs >= room.last_activity_ts) {
+          continue
+        }
+        const value = {
+          event_id: room.last_event_id,
+          origin_ts: room.last_activity_ts,
+        }
+        writeCache(accountId, READ_MARKERS_NAMESPACE, room.room_id, value)
+        batch.set(room.room_id, value)
+      }
+      await putEntries(accountId, READ_MARKERS_NAMESPACE, batch)
     },
     threadReadMarker(accountId, roomId, rootEventId) {
       return parseThreadReadMarker(

@@ -1,5 +1,7 @@
+import { useState } from 'preact/hooks'
 import { BUILD_INFO } from '../build-info'
 import { useServices } from '../services'
+import { roomKey } from '../stores/room-list'
 import type { Theme, TimeFormat } from '../stores/settings'
 import { AccountLifecycle } from './AccountsPage'
 
@@ -16,7 +18,34 @@ const TIME_FORMATS: { value: TimeFormat; label: string }[] = [
 
 /** Theme + (schema-versioned) local settings (ADR 0046, M-W3). */
 export function SettingsPage() {
-  const { auth, settings } = useServices()
+  const { auth, settings, rooms, deviceState, unread } = useServices()
+  const [markingRead, setMarkingRead] = useState(false)
+
+  const markAllRead = async () => {
+    setMarkingRead(true)
+    let current = rooms.rooms.value
+    try {
+      if (current.length === 0) {
+        await rooms.refresh()
+        current = rooms.rooms.value
+      }
+      const accounts = new Set(current.map((room) => room.account_id))
+      await Promise.all(
+        [...accounts].map((accountId) =>
+          deviceState.markRoomSummariesRead(accountId, current),
+        ),
+      )
+    } catch {
+      // The device-state store keeps the optimistic read-marker cache and
+      // requeues network-failed writes; the command should still clear local
+      // badges instead of throwing from a fire-and-forget click handler.
+    } finally {
+      for (const room of current) {
+        unread.markSeen(roomKey(room))
+      }
+      setMarkingRead(false)
+    }
+  }
 
   return (
     <div class="page">
@@ -103,6 +132,9 @@ export function SettingsPage() {
         <p class="muted">
           Show the latest message excerpt under each room name.
         </p>
+        <button type="button" onClick={() => void markAllRead()}>
+          {markingRead ? 'Marking…' : 'Mark all as read'}
+        </button>
       </section>
       <section class="panel">
         <h2>Accounts</h2>

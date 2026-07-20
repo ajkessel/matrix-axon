@@ -1771,4 +1771,15 @@ describe('RoomPage', () => {
     render(routedRoomPage(services))
     await waitFor(() => expect(services.unread.count(key)).toBe(0))
   })
+
+  it('opening the room advances the read marker from the room summary', async () => {
+    const { services } = renderRoom([])
+
+    await waitFor(() =>
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+        eventId: '$last',
+        originTs: T0,
+      }),
+    )
+  })
 })

@@ -192,6 +192,19 @@ function collapsedRelationTargetId(event: EventDto): string | null {
   return null
 }
 
+/** A room event that should create a room-level unread indicator. */
+export function isRoomUnreadEvent(event: EventDto): boolean {
+  const relates = event.relates_to as { rel_type?: unknown } | null
+  return (
+    event.type === 'm.room.message' &&
+    event.state_key == null &&
+    !event.redacted &&
+    relates?.rel_type !== 'm.replace' &&
+    typeof event.body === 'string' &&
+    event.body.trim() !== ''
+  )
+}
+
 /** The event id a raw redaction event redacts, when the live payload exposes it. */
 function redactsEventId(event: EventDto): string | null {
   if (event.type !== 'm.room.redaction') {

@@ -1,3 +1,4 @@
+import { computed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import {
   useCallback,
@@ -10,6 +11,7 @@ import {
 import { layoutMode } from '../layout'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
+import { READ_MARKERS_NAMESPACE } from '../stores/device-state'
 import { ErrorBanner } from './ErrorBanner'
 import { perfMark, perfMarkFrames } from '../perf'
 import { hasModifier, hint, keyAria, KEYS, useShortcuts } from '../shortcuts'
@@ -103,7 +105,14 @@ function roomAvatarColor(roomKeyValue: string): number {
  * scroll position survive every room switch.
  */
 export function RoomList() {
-  const { rooms, settings, unread, activeRoom, composerFocus } = useServices()
+  const {
+    rooms,
+    settings,
+    unread,
+    activeRoom,
+    composerFocus,
+    deviceState,
+  } = useServices()
   const location = useLocation()
   // Session-only name filter (ADR 0042: never persisted). `null` = category
   // mode; a string means the name input is active and overrides the category.
@@ -127,6 +136,35 @@ export function RoomList() {
     return [...byId.entries()]
   }, [allRooms])
   const labels = useMemo(() => accountLabels(accounts), [accounts])
+  const readMarkerState = useMemo(
+    () =>
+      computed(() =>
+        allRooms
+          .map((room) => {
+            const marker = deviceState.readMarker(room.account_id, room.room_id)
+            return `${roomKey(room)}:${marker?.originTs ?? ''}:${deviceState.hydrated(
+              room.account_id,
+              READ_MARKERS_NAMESPACE,
+            )}`
+          })
+          .join('\0'),
+      ),
+    [allRooms, deviceState],
+  ).value
+
+  useEffect(() => {
+    for (const [accountId] of accounts) {
+      deviceState.hydrateReadMarkers(accountId)
+    }
+  }, [accounts, deviceState])
+
+  useEffect(() => {
+    for (const [accountId] of accounts) {
+      if (deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE)) {
+        void deviceState.baselineReadMarkers(accountId, allRooms)
+      }
+    }
+  }, [accounts, allRooms, deviceState, readMarkerState])
 
   const roomFilter = settings.roomFilter.value
   const roomSort = settings.roomSort.value
@@ -150,6 +188,7 @@ export function RoomList() {
       filter: roomFilter,
       sort: roomSort,
       name: nameQuery !== null,
+      readMarkers: readMarkerState.length,
     })
     const next = visibleRooms(allRooms, {
       accountFilter,
@@ -158,7 +197,15 @@ export function RoomList() {
       roomSort,
       pinnedRooms,
       roomTitles,
-      unreadKeys,
+      hasUnread: (room) =>
+        hasRoomUnread(room, {
+          liveUnreadKeys: unreadKeys,
+          readMarkersHydrated: deviceState.hydrated(
+            room.account_id,
+            READ_MARKERS_NAMESPACE,
+          ),
+          readMarker: deviceState.readMarker(room.account_id, room.room_id),
+        }),
     })
     perfMark('room-list:visible-compute:end', { visible: next.length })
     return next
@@ -171,6 +218,8 @@ export function RoomList() {
     pinnedRooms,
     roomTitles,
     unreadKeys,
+    deviceState,
+    readMarkerState,
   ])
   const pinnedCount = useMemo(
     () => visible.filter((room) => pinnedRooms.includes(roomKey(room))).length,
@@ -260,7 +309,7 @@ export function RoomList() {
       container.removeEventListener('scroll', onScroll)
       observer?.disconnect()
     }
-  }, [hasRows, measure, visible.length])
+  }, [hasRows, measure])
 
   // Measure the row pitch from two adjacent rows — their height plus whatever
   // rule or gap separates them. Both are windowed rows, so this holds at any
@@ -661,7 +710,7 @@ function visibleRooms(
     roomSort: RoomSort
     pinnedRooms: readonly string[]
     roomTitles: ReadonlyMap<string, string>
-    unreadKeys: ReadonlySet<string>
+    hasUnread: (room: RoomDto) => boolean
   },
 ): RoomDto[] {
   const {
@@ -671,7 +720,7 @@ function visibleRooms(
     roomSort,
     pinnedRooms,
     roomTitles,
-    unreadKeys,
+    hasUnread,
   } = context
   const title = (room: RoomDto) => roomTitle(room, roomTitles)
   const filter: ActiveFilter =
@@ -688,11 +737,33 @@ function visibleRooms(
   // filter+sort behind every incoming message. The set changes only when a
   // room crosses 0 ↔ unread, which is exactly when this filter's output can.
   const filtered = filterRooms(scoped, filter, {
-    hasUnread: (key) => unreadKeys.has(key),
+    hasUnread: (_key, room) => hasUnread(room),
     isPinned: (key) => pinnedRooms.includes(key),
     title,
   })
   return sortRooms(filtered, pinnedRooms, roomSort, title)
+}
+
+function hasRoomUnread(
+  room: RoomDto,
+  context: {
+    liveUnreadKeys: ReadonlySet<string>
+    readMarkersHydrated: boolean
+    readMarker: { originTs: number } | null
+  },
+): boolean {
+  if (context.liveUnreadKeys.has(roomKey(room))) {
+    return true
+  }
+  if (
+    !context.readMarkersHydrated ||
+    room.last_event_id === null ||
+    room.last_event_id === undefined ||
+    context.readMarker === null
+  ) {
+    return false
+  }
+  return room.last_activity_ts > context.readMarker.originTs
 }
 
 /**
@@ -718,12 +789,22 @@ function RoomRow({
   /** Navigate on touch taps, but leave touch scroll gestures to the browser. */
   onNavigate: (key: string, href: string) => void
 }) {
-  const { rooms, settings, unread, activeRoom } = useServices()
+  const { rooms, settings, unread, activeRoom, deviceState } = useServices()
   const key = roomKey(room)
   const pinned = settings.pinnedRooms.value.includes(key)
   // Reads this room's own count signal, so a message elsewhere leaves this row
   // alone. With one shared map signal, every row woke for every event.
   const count = unread.count(key)
+  const hasUnread =
+    count > 0 ||
+    hasRoomUnread(room, {
+      liveUnreadKeys: EMPTY_UNREAD_KEYS,
+      readMarkersHydrated: deviceState.hydrated(
+        room.account_id,
+        READ_MARKERS_NAMESPACE,
+      ),
+      readMarker: deviceState.readMarker(room.account_id, room.room_id),
+    })
   const title = roomTitle(room, rooms.titles.value)
   const href = `/${room.account_id}/rooms/${encodeURIComponent(room.room_id)}`
   const suppressNextClick = useRef(false)
@@ -772,7 +853,7 @@ function RoomRow({
       perfMark('room-row:hydrate-preview', { key })
       rooms.hydratePreview(room)
     }
-  }, [key, previewEnabled, rooms, room])
+  }, [previewEnabled, rooms, room])
 
   return (
     <li class={rule ? 'room-row rule' : 'room-row'}>
@@ -847,12 +928,11 @@ function RoomRow({
             clearSyntheticClickSuppression()
             return
           }
-          // Side effects only. Routing belongs to preact-iso's global click
-          // interceptor (plain click) or the browser (modifier click):
-          // calling `location.route` here *as well* pushed two history
-          // entries per click, and Back returned to the same room.
           if (!hasModifier(click)) {
-            perfMark('room-list:navigate-to-room', { key })
+            click.preventDefault()
+            click.stopPropagation()
+            onNavigate(key, href)
+            return
           }
           unread.markSeen(key)
         }}
@@ -870,10 +950,16 @@ function RoomRow({
                 inline content, never a flex item, so the badges cannot share it. */}
               <span class="room-name">{title}</span>
               {isLikelyDm(room) && <span class="badge dm">DM</span>}
-              {count > 0 && (
+              {count > 0 ? (
                 <span class="badge unread-count" aria-label={`${count} unread`}>
                   {count}
                 </span>
+              ) : (
+                hasUnread && (
+                  <span class="badge unread-count" aria-label="Unread">
+                    •
+                  </span>
+                )
               )}
             </span>
             {previewEnabled && (

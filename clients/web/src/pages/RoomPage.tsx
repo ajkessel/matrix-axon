@@ -181,6 +181,13 @@ export function RoomPage() {
   const swipeLocked = useRef(false)
   const highlighted = typeof query.event === 'string' ? query.event : null
   const openThread = typeof query.thread === 'string' ? query.thread : null
+  const unreadThreadCutoff = threadUnread.entries.value
+    .filter((entry) => entry.accountId === accountId && entry.roomId === roomId)
+    .reduce<number | null>(
+      (oldest, entry) =>
+        oldest === null ? entry.latestTs : Math.min(oldest, entry.latestTs),
+      null,
+    )
 
   const openJump = useCallback(() => setJumpOpen(true), [])
   useEffect(() => {
@@ -254,21 +261,34 @@ export function RoomPage() {
     deviceState.hydrateThreadReadMarkers(accountId)
   }, [deviceState, accountId])
 
+  // Clear summary-derived room-list unread as soon as the room opens. The
+  // timeline may not have loaded the newest summary event yet, especially on
+  // quick mobile switches.
+  useEffect(() => {
+    const room = rooms.rooms.value.find(
+      (candidate) =>
+        candidate.account_id === accountId && candidate.room_id === roomId,
+    )
+    if (
+      room?.last_event_id !== null &&
+      room?.last_event_id !== undefined &&
+      (unreadThreadCutoff === null || room.last_activity_ts < unreadThreadCutoff)
+    ) {
+      deviceState.advanceReadMarker(
+        accountId,
+        roomId,
+        room.last_event_id,
+        room.last_activity_ts,
+      )
+    }
+  }, [accountId, roomId, rooms.rooms.value, deviceState, unreadThreadCutoff])
+
   // Advance this room's read marker to the newest event while it is open, so
   // sibling devices see it as read (M-W6 step 5c, ADR 0048). Hidden unread
   // thread replies are a hard stop: the user has opened the room, not that
   // thread panel, so a room marker must not silently consume them.
   useEffect(() => {
     const events = timeline.events.value
-    const unreadThreadCutoff = threadUnread.entries.value
-      .filter(
-        (entry) => entry.accountId === accountId && entry.roomId === roomId,
-      )
-      .reduce<number | null>(
-        (oldest, entry) =>
-          oldest === null ? entry.latestTs : Math.min(oldest, entry.latestTs),
-        null,
-      )
     const last = events.findLast(
       (event) =>
         !event.event_id.startsWith('local:') &&
@@ -288,11 +308,10 @@ export function RoomPage() {
     }
   }, [
     timeline.events.value,
-    threadUnread.entries.value,
+    unreadThreadCutoff,
     accountId,
     roomId,
     deviceState,
-    threadUnread,
     ephemeralSender,
   ])
 
