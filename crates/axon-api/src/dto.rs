@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use axon_core::{CreateRoomRequest, RoomPreset};
 use axon_store::{
     Account, AccountState, DeviceStateRow, ReactionTally, RoomSummary, ThreadSummary, TimelineRow,
 };
@@ -491,6 +492,116 @@ pub struct MemberActionRequest {
     /// Optional human-readable reason recorded on the membership change.
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Request body for joining a room by id or alias (`POST …/rooms/join`;
+/// ADR 0068 M19c).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct JoinRoomRequest {
+    /// The room id (`!room:server`) or alias (`#room:server`) to join.
+    pub room_id_or_alias: String,
+    /// Federation-resolution hints (ruma's `via`) for an alias/id this
+    /// account's client has no direct path to.
+    #[serde(default)]
+    pub server_names: Vec<String>,
+}
+
+/// Request body for knocking on a room (`POST …/rooms/knock`; ADR 0068 M19c).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct KnockRoomRequest {
+    /// The room id (`!room:server`) or alias (`#room:server`) to knock on.
+    pub room_id_or_alias: String,
+    /// Optional human-readable reason shown to the room's members.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Federation-resolution hints (ruma's `via`) for an alias/id this
+    /// account's client has no direct path to.
+    #[serde(default)]
+    pub server_names: Vec<String>,
+}
+
+/// Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateDmRequest {
+    /// The other participant's Matrix id (`@user:server`).
+    pub user_id: String,
+}
+
+/// A room-creation preset (see `axon_core::RoomPreset`), mirroring the three
+/// Matrix defines. Variant names deliberately drop the shared `Chat` suffix
+/// the Matrix spec's own vocabulary uses; the wire values (`private_chat`,
+/// `public_chat`, `trusted_private_chat`) are preserved via explicit renames.
+#[derive(Debug, Deserialize, ToSchema)]
+pub enum RoomPresetDto {
+    #[serde(rename = "private_chat")]
+    Private,
+    #[serde(rename = "public_chat")]
+    Public,
+    #[serde(rename = "trusted_private_chat")]
+    TrustedPrivate,
+}
+
+impl From<RoomPresetDto> for RoomPreset {
+    fn from(preset: RoomPresetDto) -> Self {
+        match preset {
+            RoomPresetDto::Private => RoomPreset::Private,
+            RoomPresetDto::Public => RoomPreset::Public,
+            RoomPresetDto::TrustedPrivate => RoomPreset::TrustedPrivate,
+        }
+    }
+}
+
+/// Request body for creating a room (`POST …/rooms`; ADR 0068 M19c) — the
+/// minimal-but-useful subset of the Matrix `createRoom` endpoint exposed to
+/// API clients. An empty body is valid: it creates a private, unencrypted,
+/// unnamed room.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateRoomRequestDto {
+    /// Room name (`m.room.name`), if set.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Room topic (`m.room.topic`), if set.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Users to invite on creation (`@user:server`).
+    #[serde(default)]
+    pub invite: Vec<String>,
+    /// Whether to set the `is_direct` flag on the invites this creates.
+    #[serde(default)]
+    pub is_direct: bool,
+    /// Whether the room is published in the room directory. Defaults to
+    /// `false` (private).
+    #[serde(default)]
+    pub public: bool,
+    /// Convenience default-state-events preset.
+    #[serde(default)]
+    pub preset: Option<RoomPresetDto>,
+    /// When true, an `m.room.encryption` event is included in the room's
+    /// initial state, so it is encrypted from its first transaction rather
+    /// than via a later, racier `enable_encryption` call.
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+impl From<CreateRoomRequestDto> for CreateRoomRequest {
+    fn from(dto: CreateRoomRequestDto) -> Self {
+        CreateRoomRequest {
+            name: dto.name,
+            topic: dto.topic,
+            invite: dto.invite,
+            is_direct: dto.is_direct,
+            public: dto.public,
+            preset: dto.preset.map(Into::into),
+            encrypted: dto.encrypted,
+        }
+    }
+}
+
+/// Response for the four room-entry mutations (`join`/`knock`/`create_room`/
+/// `create_dm`; ADR 0068 M19c): the resulting room's id.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RoomEntryResultDto {
+    pub room_id: String,
 }
 
 /// Query parameters for staging a media upload (`POST …/media/uploads`).

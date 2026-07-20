@@ -12,17 +12,25 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
-use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
+use axon_core::{
+    CreateRoomRequest, Formatted, MediaAttachment, MediaSendKind, Relation, RoomPreset,
+};
 use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
+use matrix_sdk::ruma::api::client::room::{create_room, Visibility};
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
+use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
     AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, RoomId, UInt, UserId};
+use matrix_sdk::ruma::events::InitialStateEvent;
+use matrix_sdk::ruma::{
+    EventId, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId,
+    ServerName, UInt, UserId,
+};
 use matrix_sdk::{Room, RoomState};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -58,6 +66,73 @@ fn parse_event_id(event_id: &str) -> Result<OwnedEventId, GatewayError> {
 /// letting it reach the homeserver.
 fn parse_user_id(user_id: &str) -> Result<OwnedUserId, GatewayError> {
     UserId::parse(user_id).map_err(|e| GatewayError::Invalid(format!("user id: {e}")))
+}
+
+/// Parse a room id or alias targeted by a room-entry mutation (join/knock;
+/// ADR 0068, M19c), mapping a malformed one to [`GatewayError::Invalid`]
+/// instead of letting it reach the homeserver. `RoomOrAliasId` accepts both a
+/// bare room id (`!...`) and an alias (`#...`), so callers don't need to
+/// distinguish the two up front.
+fn parse_room_id_or_alias(id: &str) -> Result<OwnedRoomOrAliasId, GatewayError> {
+    RoomOrAliasId::parse(id).map_err(|e| GatewayError::Invalid(format!("room id or alias: {e}")))
+}
+
+/// Parse the `server_names` hints a join/knock caller supplies for federation
+/// resolution (ruma's `via`) of an alias/id this account's client has no
+/// direct path to.
+fn parse_server_names(names: &[String]) -> Result<Vec<OwnedServerName>, GatewayError> {
+    names
+        .iter()
+        .map(|name| {
+            ServerName::parse(name)
+                .map_err(|e| GatewayError::Invalid(format!("server name {name:?}: {e}")))
+        })
+        .collect()
+}
+
+fn map_preset(preset: RoomPreset) -> create_room::v3::RoomPreset {
+    match preset {
+        RoomPreset::Private => create_room::v3::RoomPreset::PrivateChat,
+        RoomPreset::Public => create_room::v3::RoomPreset::PublicChat,
+        RoomPreset::TrustedPrivate => create_room::v3::RoomPreset::TrustedPrivateChat,
+    }
+}
+
+/// Build the ruma create-room request from Axon's own request shape
+/// (ADR 0068, M19c). `encrypted` becomes an `m.room.encryption` entry in
+/// `initial_state` rather than a post-hoc `Room::enable_encryption()` call,
+/// so an encrypted room is encrypted from its very first (`m.room.create`)
+/// transaction — there is no window where the room exists but isn't yet
+/// encrypted. Pure function: unit-testable without a live `Client`/`Room`.
+fn build_create_room_request(
+    request: CreateRoomRequest,
+) -> Result<create_room::v3::Request, GatewayError> {
+    let invite = request
+        .invite
+        .iter()
+        .map(|user_id| parse_user_id(user_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let initial_state = if request.encrypted {
+        vec![InitialStateEvent::with_empty_state_key(
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        )
+        .to_raw_any()]
+    } else {
+        Vec::new()
+    };
+    let mut built = create_room::v3::Request::new();
+    built.name = request.name;
+    built.topic = request.topic;
+    built.invite = invite;
+    built.is_direct = request.is_direct;
+    built.visibility = if request.public {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    };
+    built.preset = request.preset.map(map_preset);
+    built.initial_state = initial_state;
+    Ok(built)
 }
 
 fn effective_mime(
@@ -461,18 +536,121 @@ impl SdkGateway {
         let user_id = parse_user_id(user_id)?;
         room.unban_user(&user_id, reason).await.map_err(map_sdk_err)
     }
+
+    /// Join a room by id or alias (ADR 0068, M19c). No `Room` handle exists
+    /// yet, so this resolves via `ClientManager::get_or_connect` directly
+    /// rather than `Self::room()`. `server_names` supplies federation-
+    /// resolution hints for an alias this account's client has no direct path
+    /// to. Returns the joined room's id.
+    pub async fn join(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        server_names: &[String],
+    ) -> Result<String, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let id = parse_room_id_or_alias(room_id_or_alias)?;
+        let server_names = parse_server_names(server_names)?;
+        let room = client
+            .join_room_by_id_or_alias(&id, &server_names)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(room.room_id().to_string())
+    }
+
+    /// Knock on a room, optionally with a reason (ADR 0068, M19c). Returns
+    /// the id of the room knocked on.
+    pub async fn knock(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        reason: Option<&str>,
+        server_names: &[String],
+    ) -> Result<String, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let id = parse_room_id_or_alias(room_id_or_alias)?;
+        let server_names = parse_server_names(server_names)?;
+        let room = client
+            .knock(id, reason.map(ToOwned::to_owned), server_names)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(room.room_id().to_string())
+    }
+
+    /// Create a new room (ADR 0068, M19c). See [`build_create_room_request`]
+    /// for the `encrypted` → `initial_state` translation. Returns the created
+    /// room's id.
+    ///
+    /// **Not idempotent.** Matrix's `createRoom` endpoint has no idempotency
+    /// key, so a caller that retries this call after an
+    /// `axon.sync.room_entry_timeout_secs` timeout — believing the first
+    /// attempt failed, when it may have actually succeeded upstream after
+    /// Axon's client-side future was dropped — will create a second, distinct
+    /// room. This is an accepted, documented risk rather than a solved one;
+    /// there is no Matrix-spec-level fix available at this layer.
+    pub async fn create_room(
+        &self,
+        account_id: Uuid,
+        request: CreateRoomRequest,
+    ) -> Result<String, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let built = build_create_room_request(request)?;
+        let is_direct = built.is_direct;
+        let invite = built.invite.clone();
+        let room = client.create_room(built).await.map_err(map_sdk_err)?;
+        // `Client::create_room` already attempts `mark_as_dm` internally when
+        // `is_direct` and `invite` are both set, but it only logs a failure
+        // there rather than surfacing it — so double-check the outcome and
+        // retry explicitly (propagating any error through our own structured
+        // logging) if it didn't actually land.
+        if is_direct && !invite.is_empty() && !room.is_direct().await.unwrap_or(false) {
+            client
+                .account()
+                .mark_as_dm(room.room_id(), &invite)
+                .await
+                .map_err(map_sdk_err)?;
+        }
+        Ok(room.room_id().to_string())
+    }
+
+    /// Create a DM with `user_id` (ADR 0068, M19c). Delegates to
+    /// the SDK's `Client::create_dm`, which — with the `e2e-encryption`
+    /// feature this crate already enables — bundles `m.room.encryption` into
+    /// `initial_state` and attempts `mark_as_dm` internally. That internal
+    /// attempt only logs a failure rather than surfacing it, so this method
+    /// double-checks the outcome and retries explicitly (propagating any
+    /// error through our own structured logging) if it didn't land. Returns
+    /// the DM room's id.
+    ///
+    /// Shares `create_room`'s non-idempotency risk: a client retry after an
+    /// Axon-side timeout can create a second DM room upstream.
+    pub async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        let room = client.create_dm(&user_id).await.map_err(map_sdk_err)?;
+        if !room.is_direct().await.unwrap_or(false) {
+            client
+                .account()
+                .mark_as_dm(room.room_id(), std::slice::from_ref(&user_id))
+                .await
+                .map_err(map_sdk_err)?;
+        }
+        Ok(room.room_id().to_string())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use axon_core::{MediaSendKind, Relation};
+    use axon_core::{CreateRoomRequest, MediaSendKind, Relation, RoomPreset};
     use matrix_sdk::attachment::AttachmentInfo;
     use matrix_sdk::room::reply::EnforceThread;
+    use matrix_sdk::ruma::api::client::room::Visibility;
     use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
     use serde_json::json;
 
     use super::{
-        attachment_info, attachment_reply, effective_mime, message_relates_to, parse_user_id,
+        attachment_info, attachment_reply, build_create_room_request, effective_mime,
+        message_relates_to, parse_room_id_or_alias, parse_server_names, parse_user_id,
     };
     use crate::error::GatewayError;
 
@@ -488,6 +666,100 @@ mod tests {
     #[test]
     fn parse_user_id_rejects_a_malformed_id() {
         let err = parse_user_id("not-a-user-id").expect_err("malformed user id should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("user id:")));
+    }
+
+    #[test]
+    fn parse_room_id_or_alias_accepts_a_room_id() {
+        let id = parse_room_id_or_alias("!room:example.org").expect("valid room id");
+        assert_eq!(id.as_str(), "!room:example.org");
+    }
+
+    #[test]
+    fn parse_room_id_or_alias_accepts_an_alias() {
+        let id = parse_room_id_or_alias("#room:example.org").expect("valid room alias");
+        assert_eq!(id.as_str(), "#room:example.org");
+    }
+
+    #[test]
+    fn parse_room_id_or_alias_rejects_a_malformed_id() {
+        let err = parse_room_id_or_alias("not-a-room-id").expect_err("malformed id should fail");
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message.starts_with("room id or alias:"))
+        );
+    }
+
+    #[test]
+    fn parse_server_names_accepts_a_valid_list() {
+        let names = parse_server_names(&["example.org".to_owned(), "matrix.org".to_owned()])
+            .expect("valid server names");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].as_str(), "example.org");
+    }
+
+    #[test]
+    fn parse_server_names_rejects_one_bad_entry() {
+        let err = parse_server_names(&["example.org".to_owned(), "not a server name".to_owned()])
+            .expect_err("a malformed entry should fail the whole list");
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message.starts_with("server name"))
+        );
+    }
+
+    #[test]
+    fn build_create_room_request_maps_fields() {
+        let request = CreateRoomRequest {
+            name: Some("Room".to_owned()),
+            topic: Some("Topic".to_owned()),
+            invite: vec!["@alice:example.org".to_owned()],
+            is_direct: true,
+            public: true,
+            preset: Some(RoomPreset::TrustedPrivate),
+            encrypted: false,
+        };
+        let built = build_create_room_request(request).expect("valid request");
+        assert_eq!(built.name.as_deref(), Some("Room"));
+        assert_eq!(built.topic.as_deref(), Some("Topic"));
+        assert_eq!(built.invite.len(), 1);
+        assert!(built.is_direct);
+        assert_eq!(built.visibility, Visibility::Public);
+        assert_eq!(
+            built.preset,
+            Some(matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset::TrustedPrivateChat)
+        );
+    }
+
+    #[test]
+    fn build_create_room_request_encrypted_true_adds_encryption_initial_state() {
+        let request = CreateRoomRequest {
+            encrypted: true,
+            ..Default::default()
+        };
+        let built = build_create_room_request(request).expect("valid request");
+        assert_eq!(built.initial_state.len(), 1);
+        let event_type: Option<String> = built.initial_state[0]
+            .get_field("type")
+            .expect("event has a type field");
+        assert_eq!(event_type.as_deref(), Some("m.room.encryption"));
+    }
+
+    #[test]
+    fn build_create_room_request_encrypted_false_has_empty_initial_state() {
+        let request = CreateRoomRequest {
+            encrypted: false,
+            ..Default::default()
+        };
+        let built = build_create_room_request(request).expect("valid request");
+        assert!(built.initial_state.is_empty());
+    }
+
+    #[test]
+    fn build_create_room_request_rejects_bad_invite_user_id() {
+        let request = CreateRoomRequest {
+            invite: vec!["not-a-user-id".to_owned()],
+            ..Default::default()
+        };
+        let err = build_create_room_request(request).expect_err("bad invite id should fail");
         assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("user id:")));
     }
 

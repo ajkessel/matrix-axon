@@ -18,11 +18,12 @@ use axon_api::{
     DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
     MediaAttachment, MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile,
     MemberProfileError, MemberProfileService, MembershipSender, MessageSender, RecoverError,
-    RedecryptUtdsError, RedecryptUtdsStats, Relation, SearchHit, SearchHits, SearchQuery,
-    SearchQueryError, SearchQueryParams, SendError, SenderTrustService, StageUploadError,
-    StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError,
-    TrustSnapshot, UploadStream, VerificationService, VerifyError,
+    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, SearchHit, SearchHits,
+    SearchQuery, SearchQueryError, SearchQueryParams, SendError, SenderTrustService,
+    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier,
+    TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService, VerifyError,
 };
+use axon_core::CreateRoomRequest;
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -513,6 +514,139 @@ impl MembershipSender for StubMembership {
             room_id: room_id.to_owned(),
             user_id: user_id.to_owned(),
             reason: reason.map(ToOwned::to_owned),
+        });
+        self.outcome.to_result()
+    }
+}
+
+/// One recorded call to [`StubRoomEntry`], with the arguments the handler
+/// passed through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomEntryCall {
+    Join {
+        account_id: Uuid,
+        room_id_or_alias: String,
+        server_names: Vec<String>,
+    },
+    Knock {
+        account_id: Uuid,
+        room_id_or_alias: String,
+        reason: Option<String>,
+        server_names: Vec<String>,
+    },
+    CreateRoom {
+        account_id: Uuid,
+        request: CreateRoomRequest,
+    },
+    CreateDm {
+        account_id: Uuid,
+        user_id: String,
+    },
+}
+
+/// The outcome [`StubRoomEntry`] returns for every call. `Clone` (unlike
+/// [`SendError`]) so one stub can answer repeated calls. `Ok` carries the
+/// room id to return.
+#[derive(Clone)]
+pub enum RoomEntryOutcome {
+    Ok(String),
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl RoomEntryOutcome {
+    fn to_result(&self) -> Result<String, SendError> {
+        match self {
+            RoomEntryOutcome::Ok(room_id) => Ok(room_id.clone()),
+            RoomEntryOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            RoomEntryOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            RoomEntryOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            RoomEntryOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            RoomEntryOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+}
+
+/// An in-memory [`RoomEntrySender`] for tests.
+pub struct StubRoomEntry {
+    outcome: RoomEntryOutcome,
+    calls: Mutex<Vec<RoomEntryCall>>,
+}
+
+impl StubRoomEntry {
+    /// A stub that returns a fixed room id for every call.
+    pub fn ok() -> Self {
+        Self {
+            outcome: RoomEntryOutcome::Ok("!created:localhost".to_owned()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every call.
+    pub fn failing(outcome: RoomEntryOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<RoomEntryCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RoomEntrySender for StubRoomEntry {
+    async fn join(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        server_names: &[String],
+    ) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(RoomEntryCall::Join {
+            account_id,
+            room_id_or_alias: room_id_or_alias.to_owned(),
+            server_names: server_names.to_vec(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn knock(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        reason: Option<&str>,
+        server_names: &[String],
+    ) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(RoomEntryCall::Knock {
+            account_id,
+            room_id_or_alias: room_id_or_alias.to_owned(),
+            reason: reason.map(ToOwned::to_owned),
+            server_names: server_names.to_vec(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn create_room(
+        &self,
+        account_id: Uuid,
+        request: CreateRoomRequest,
+    ) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(RoomEntryCall::CreateRoom {
+            account_id,
+            request,
+        });
+        self.outcome.to_result()
+    }
+
+    async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, SendError> {
+        self.calls.lock().unwrap().push(RoomEntryCall::CreateDm {
+            account_id,
+            user_id: user_id.to_owned(),
         });
         self.outcome.to_result()
     }

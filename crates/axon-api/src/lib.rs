@@ -51,7 +51,7 @@ pub use oauth::{
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
-pub use sender::{EphemeralSender, MembershipSender, MessageSender, SendError};
+pub use sender::{EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, SendError};
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
@@ -234,6 +234,28 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/unban",
             post(routes::membership::unban_user),
+        )
+        // Room entry (ADR 0068, M19c): join, knock, create, create-DM. Unlike
+        // the M19b membership block above, none of these resolve via
+        // `SdkGateway::room()` — there is no `Room` handle until one of these
+        // calls produces it — so they go through `RoomEntrySender` straight
+        // to `ClientManager::get_or_connect`. Every response carries the
+        // resulting room's id (`RoomEntryResultDto`).
+        .route(
+            "/v1/accounts/{account_id}/rooms/join",
+            post(routes::room_entry::join_room),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/knock",
+            post(routes::room_entry::knock_room),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/dm",
+            post(routes::room_entry::create_dm),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms",
+            post(routes::room_entry::create_room),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

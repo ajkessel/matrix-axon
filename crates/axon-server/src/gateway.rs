@@ -1,6 +1,6 @@
 //! Composition-root adapter: binds `axon-sync`'s concrete [`SdkGateway`] to
-//! `axon-api`'s [`MessageSender`], [`EphemeralSender`], and [`MembershipSender`]
-//! ports.
+//! `axon-api`'s [`MessageSender`], [`EphemeralSender`], [`MembershipSender`],
+//! and [`RoomEntrySender`] ports.
 //!
 //! `axon-api` and `axon-sync` never depend on each other; this binary is the one
 //! place that knows both, so the adapter lives here. It delegates each call to
@@ -13,8 +13,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axon_api::{
     EphemeralSender, Formatted, MediaAttachment, MembershipSender, MessageSender, Relation,
-    SendError,
+    RoomEntrySender, SendError,
 };
+use axon_core::CreateRoomRequest;
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
@@ -25,6 +26,7 @@ pub struct GatewayAdapter {
     upstream_upload_timeout: Duration,
     ephemeral_send_timeout: Duration,
     membership_mutation_timeout: Duration,
+    room_entry_timeout: Duration,
 }
 
 impl GatewayAdapter {
@@ -33,23 +35,25 @@ impl GatewayAdapter {
         upstream_upload_timeout: Duration,
         ephemeral_send_timeout: Duration,
         membership_mutation_timeout: Duration,
+        room_entry_timeout: Duration,
     ) -> Self {
         Self {
             gateway,
             upstream_upload_timeout,
             ephemeral_send_timeout,
             membership_mutation_timeout,
+            room_entry_timeout,
         }
     }
+}
 
-    /// The `SendError::Upstream` a membership mutation reports when it hits
-    /// `membership_mutation_timeout` before the homeserver responds.
-    fn membership_timed_out(&self, verb: &str) -> SendError {
-        SendError::Upstream(format!(
-            "{verb} timed out after {}s",
-            self.membership_mutation_timeout.as_secs()
-        ))
-    }
+/// The `SendError::Upstream` an outbound call reports when it hits its
+/// configured per-call `timeout` before the homeserver responds. Shared by
+/// every timeout site in this adapter (media upload, ephemeral sends,
+/// membership mutations, room-entry mutations) so the message format has one
+/// definition instead of one per port.
+fn timed_out(verb: &str, timeout: Duration) -> SendError {
+    SendError::Upstream(format!("{verb} timed out after {}s", timeout.as_secs()))
 }
 
 /// Map a sync-layer gateway error onto the API-layer send error (and thus an
@@ -102,12 +106,7 @@ impl MessageSender for GatewayAdapter {
                 .send_media(account_id, room_id, attachment, caption, relation),
         )
         .await
-        .map_err(|_| {
-            SendError::Upstream(format!(
-                "media send timed out after {}s",
-                self.upstream_upload_timeout.as_secs()
-            ))
-        })?
+        .map_err(|_| timed_out("media send", self.upstream_upload_timeout))?
         .map_err(map_err)
     }
 
@@ -166,12 +165,7 @@ impl EphemeralSender for GatewayAdapter {
                 .send_read_receipt(account_id, room_id, event_id),
         )
         .await
-        .map_err(|_| {
-            SendError::Upstream(format!(
-                "read receipt timed out after {}s",
-                self.ephemeral_send_timeout.as_secs()
-            ))
-        })?
+        .map_err(|_| timed_out("read receipt", self.ephemeral_send_timeout))?
         .map_err(map_err)
     }
 
@@ -186,12 +180,7 @@ impl EphemeralSender for GatewayAdapter {
             self.gateway.send_typing_notice(account_id, room_id, typing),
         )
         .await
-        .map_err(|_| {
-            SendError::Upstream(format!(
-                "typing notice timed out after {}s",
-                self.ephemeral_send_timeout.as_secs()
-            ))
-        })?
+        .map_err(|_| timed_out("typing notice", self.ephemeral_send_timeout))?
         .map_err(map_err)
     }
 }
@@ -204,7 +193,7 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.leave(account_id, room_id),
         )
         .await
-        .map_err(|_| self.membership_timed_out("leave"))?
+        .map_err(|_| timed_out("leave", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 
@@ -214,7 +203,7 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.forget(account_id, room_id),
         )
         .await
-        .map_err(|_| self.membership_timed_out("forget"))?
+        .map_err(|_| timed_out("forget", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 
@@ -229,7 +218,7 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.invite(account_id, room_id, user_id),
         )
         .await
-        .map_err(|_| self.membership_timed_out("invite"))?
+        .map_err(|_| timed_out("invite", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 
@@ -245,7 +234,7 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.kick(account_id, room_id, user_id, reason),
         )
         .await
-        .map_err(|_| self.membership_timed_out("kick"))?
+        .map_err(|_| timed_out("kick", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 
@@ -261,7 +250,7 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.ban(account_id, room_id, user_id, reason),
         )
         .await
-        .map_err(|_| self.membership_timed_out("ban"))?
+        .map_err(|_| timed_out("ban", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 
@@ -277,7 +266,67 @@ impl MembershipSender for GatewayAdapter {
             self.gateway.unban(account_id, room_id, user_id, reason),
         )
         .await
-        .map_err(|_| self.membership_timed_out("unban"))?
+        .map_err(|_| timed_out("unban", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+}
+
+#[async_trait]
+impl RoomEntrySender for GatewayAdapter {
+    async fn join(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        server_names: &[String],
+    ) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.room_entry_timeout,
+            self.gateway
+                .join(account_id, room_id_or_alias, server_names),
+        )
+        .await
+        .map_err(|_| timed_out("join", self.room_entry_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn knock(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        reason: Option<&str>,
+        server_names: &[String],
+    ) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.room_entry_timeout,
+            self.gateway
+                .knock(account_id, room_id_or_alias, reason, server_names),
+        )
+        .await
+        .map_err(|_| timed_out("knock", self.room_entry_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn create_room(
+        &self,
+        account_id: Uuid,
+        request: CreateRoomRequest,
+    ) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.room_entry_timeout,
+            self.gateway.create_room(account_id, request),
+        )
+        .await
+        .map_err(|_| timed_out("create_room", self.room_entry_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, SendError> {
+        tokio::time::timeout(
+            self.room_entry_timeout,
+            self.gateway.create_dm(account_id, user_id),
+        )
+        .await
+        .map_err(|_| timed_out("create_dm", self.room_entry_timeout))?
         .map_err(map_err)
     }
 }

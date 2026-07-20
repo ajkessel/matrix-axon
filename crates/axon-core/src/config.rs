@@ -206,6 +206,13 @@ pub struct SyncConfig {
     /// gets one" boundary-robustness rule). Defaults to 15.
     #[serde(default = "default_membership_mutation_timeout_secs")]
     pub membership_mutation_timeout_secs: u64,
+    /// Per-call timeout for an outbound room-entry mutation — `join`,
+    /// `knock`, `create_room`, `create_dm` (ADR 0068, M19c) — in seconds.
+    /// Longer than `membership_mutation_timeout_secs` because these can
+    /// involve federation resolution (an alias/`server_names` join) rather
+    /// than a purely local-room state write. Defaults to 30.
+    #[serde(default = "default_room_entry_timeout_secs")]
+    pub room_entry_timeout_secs: u64,
     /// Enable the M10 history-backfill engine: a continuous, throttled background
     /// task that pages each joined room's pre-existing history backward through
     /// the same ingestion path as live sync (ADR 0043). Defaults to `true`.
@@ -664,6 +671,10 @@ fn default_membership_mutation_timeout_secs() -> u64 {
     15
 }
 
+fn default_room_entry_timeout_secs() -> u64 {
+    30
+}
+
 fn default_backfill_enabled() -> bool {
     true
 }
@@ -811,6 +822,7 @@ impl Default for SyncConfig {
             ephemeral_event_types: default_ephemeral_event_types(),
             ephemeral_send_timeout_secs: default_ephemeral_send_timeout_secs(),
             membership_mutation_timeout_secs: default_membership_mutation_timeout_secs(),
+            room_entry_timeout_secs: default_room_entry_timeout_secs(),
             backfill_enabled: default_backfill_enabled(),
             always_redecrypt_utds_on_startup: false,
             backfill_page_size: default_backfill_page_size(),
@@ -1264,6 +1276,7 @@ mod tests {
             assert!(config.sync.account.is_none());
             assert_eq!(config.sync.ephemeral_send_timeout_secs, 10);
             assert_eq!(config.sync.membership_mutation_timeout_secs, 15);
+            assert_eq!(config.sync.room_entry_timeout_secs, 30);
             Ok(())
         });
     }

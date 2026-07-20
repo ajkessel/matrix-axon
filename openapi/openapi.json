@@ -1069,6 +1069,452 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms": {
+      "post": {
+        "tags": [
+          "room-entry"
+        ],
+        "summary": "Create a new room.",
+        "description": "**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_room`).",
+        "operationId": "create_room",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoomRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Room created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomEntryResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/dm": {
+      "post": {
+        "tags": [
+          "room-entry"
+        ],
+        "summary": "Create a DM with another user.",
+        "description": "**Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,\nso retrying this call after a client-side timeout can create a second DM\nroom upstream if the first attempt actually succeeded after Axon's own\ntimeout fired (see `SdkGateway::create_dm`). This route always creates a\nnew room; it does not check for or reuse an existing DM with the target\nuser.",
+        "operationId": "create_dm",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "DM room created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomEntryResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/join": {
+      "post": {
+        "tags": [
+          "room-entry"
+        ],
+        "summary": "Join a room by id or alias.",
+        "operationId": "join_room",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinRoomRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Joined the room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomEntryResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/accounts/{account_id}/rooms/knock": {
+      "post": {
+        "tags": [
+          "room-entry"
+        ],
+        "summary": "Knock on a room, optionally with a reason.",
+        "operationId": "knock_room",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnockRoomRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Knocked on the room",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RoomEntryResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted (e.g. the room doesn't allow knocking)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/ban": {
       "post": {
         "tags": [
@@ -4623,6 +5069,27 @@
           }
         }
       },
+      "ApiResponse_RoomEntryResultDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for the four room-entry mutations (`join`/`knock`/`create_room`/\n`create_dm`; ADR 0068 M19c): the resulting room's id.",
+            "required": [
+              "room_id"
+            ],
+            "properties": {
+              "room_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_SearchPage": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -5333,6 +5800,69 @@
           }
         }
       },
+      "CreateDmRequest": {
+        "type": "object",
+        "description": "Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c).",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "The other participant's Matrix id (`@user:server`)."
+          }
+        }
+      },
+      "CreateRoomRequestDto": {
+        "type": "object",
+        "description": "Request body for creating a room (`POST …/rooms`; ADR 0068 M19c) — the\nminimal-but-useful subset of the Matrix `createRoom` endpoint exposed to\nAPI clients. An empty body is valid: it creates a private, unencrypted,\nunnamed room.",
+        "properties": {
+          "encrypted": {
+            "type": "boolean",
+            "description": "When true, an `m.room.encryption` event is included in the room's\ninitial state, so it is encrypted from its first transaction rather\nthan via a later, racier `enable_encryption` call."
+          },
+          "invite": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Users to invite on creation (`@user:server`)."
+          },
+          "is_direct": {
+            "type": "boolean",
+            "description": "Whether to set the `is_direct` flag on the invites this creates."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room name (`m.room.name`), if set."
+          },
+          "preset": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RoomPresetDto",
+                "description": "Convenience default-state-events preset."
+              }
+            ]
+          },
+          "public": {
+            "type": "boolean",
+            "description": "Whether the room is published in the room directory. Defaults to\n`false` (private)."
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Room topic (`m.room.topic`), if set."
+          }
+        }
+      },
       "CurrentTrustDto": {
         "type": "object",
         "description": "The live evidence half of a [`VerificationBundleDto`].",
@@ -5773,6 +6303,53 @@
           }
         }
       },
+      "JoinRoomRequest": {
+        "type": "object",
+        "description": "Request body for joining a room by id or alias (`POST …/rooms/join`;\nADR 0068 M19c).",
+        "required": [
+          "room_id_or_alias"
+        ],
+        "properties": {
+          "room_id_or_alias": {
+            "type": "string",
+            "description": "The room id (`!room:server`) or alias (`#room:server`) to join."
+          },
+          "server_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Federation-resolution hints (ruma's `via`) for an alias/id this\naccount's client has no direct path to."
+          }
+        }
+      },
+      "KnockRoomRequest": {
+        "type": "object",
+        "description": "Request body for knocking on a room (`POST …/rooms/knock`; ADR 0068 M19c).",
+        "required": [
+          "room_id_or_alias"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable reason shown to the room's members."
+          },
+          "room_id_or_alias": {
+            "type": "string",
+            "description": "The room id (`!room:server`) or alias (`#room:server`) to knock on."
+          },
+          "server_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Federation-resolution hints (ruma's `via`) for an alias/id this\naccount's client has no direct path to."
+          }
+        }
+      },
       "LoginRequest": {
         "type": "object",
         "description": "Request body for runtime login (`POST /v1/accounts/login`). Adds or\nreactivates a Matrix account keyed by its Matrix `username`. The\npassword is used once to authenticate and is never stored or echoed back.",
@@ -6062,6 +6639,27 @@
             "description": "Room topic (`m.room.topic`), if set."
           }
         }
+      },
+      "RoomEntryResultDto": {
+        "type": "object",
+        "description": "Response for the four room-entry mutations (`join`/`knock`/`create_room`/\n`create_dm`; ADR 0068 M19c): the resulting room's id.",
+        "required": [
+          "room_id"
+        ],
+        "properties": {
+          "room_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RoomPresetDto": {
+        "type": "string",
+        "description": "A room-creation preset (see `axon_core::RoomPreset`), mirroring the three\nMatrix defines. Variant names deliberately drop the shared `Chat` suffix\nthe Matrix spec's own vocabulary uses; the wire values (`private_chat`,\n`public_chat`, `trusted_private_chat`) are preserved via explicit renames.",
+        "enum": [
+          "private_chat",
+          "public_chat",
+          "trusted_private_chat"
+        ]
       },
       "SearchPage": {
         "type": "object",
@@ -6515,6 +7113,10 @@
     {
       "name": "membership",
       "description": "Existing-room membership: leave, forget, invite, kick, ban, unban"
+    },
+    {
+      "name": "room-entry",
+      "description": "Joining, knocking on, and creating rooms"
     },
     {
       "name": "verification",

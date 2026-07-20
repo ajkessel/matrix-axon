@@ -12,7 +12,7 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
-use axon_core::{Formatted, MediaAttachment, Relation};
+use axon_core::{CreateRoomRequest, Formatted, MediaAttachment, Relation};
 use uuid::Uuid;
 
 /// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
@@ -173,4 +173,42 @@ pub trait MembershipSender: Send + Sync {
         user_id: &str,
         reason: Option<&str>,
     ) -> Result<(), SendError>;
+}
+
+/// Enters a new room on behalf of an account — join, knock, create, or create
+/// a DM (ADR 0068, M19c). Split from [`MembershipSender`] because none of
+/// these four resolve through an existing room handle — there is no room yet
+/// — and unlike the M19b verbs, every method here returns the resulting
+/// room's id rather than `()`.
+#[async_trait]
+pub trait RoomEntrySender: Send + Sync {
+    /// Join a room by id or alias. `server_names` are federation-resolution
+    /// hints (ruma's `via`) for an alias/id this account's client has no
+    /// direct path to. Returns the joined room's id.
+    async fn join(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        server_names: &[String],
+    ) -> Result<String, SendError>;
+
+    /// Knock on a room, optionally with a reason. Returns the id of the room
+    /// knocked on.
+    async fn knock(
+        &self,
+        account_id: Uuid,
+        room_id_or_alias: &str,
+        reason: Option<&str>,
+        server_names: &[String],
+    ) -> Result<String, SendError>;
+
+    /// Create a new room. Returns the created room's id.
+    async fn create_room(
+        &self,
+        account_id: Uuid,
+        request: CreateRoomRequest,
+    ) -> Result<String, SendError>;
+
+    /// Create a DM with `user_id`. Returns the DM room's id.
+    async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, SendError>;
 }

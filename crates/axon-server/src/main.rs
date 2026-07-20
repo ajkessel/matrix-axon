@@ -230,6 +230,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         std::time::Duration::from_secs(config.media.upstream_upload_timeout_secs),
         std::time::Duration::from_secs(config.sync.ephemeral_send_timeout_secs),
         std::time::Duration::from_secs(config.sync.membership_mutation_timeout_secs),
+        std::time::Duration::from_secs(config.sync.room_entry_timeout_secs),
     ));
     // Same adapter, unsized onto the ephemeral-outbound port (read receipts /
     // typing notices, ADR 0067 / ADR 0068 M19a) alongside `MessageSender` below.
@@ -237,6 +238,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Same adapter again, unsized onto the room-membership port (leave/forget/
     // invite/kick/ban/unban, ADR 0068 M19b).
     let membership: Arc<dyn axon_api::MembershipSender> = sender.clone();
+    // Same adapter again, unsized onto the room-entry port (join/knock/
+    // create_room/create_dm, ADR 0068 M19c).
+    let room_entry: Arc<dyn axon_api::RoomEntrySender> = sender.clone();
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
@@ -286,7 +290,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_member_profiles(member_profiles)
     .with_staged_uploads(uploads)
     .with_ephemeral(ephemeral)
-    .with_membership(membership);
+    .with_membership(membership)
+    .with_room_entry(room_entry);
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }

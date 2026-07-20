@@ -47,7 +47,7 @@ yet)
 | Interactive SAS device verification | Done (7a-6, ADR 0027/0028) | Done — full emoji-modal flow | **Gap** — `AccountsPage.tsx` only mentions SAS in a placeholder label; no verification flow implemented | Not started | Verified by grep, 2026-07-17 |
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
 | Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Not started | Not started | Server-only; client UI (leave-room action, member-list kick/ban) is separate follow-up work |
-| Room entry (join/knock/create) | Planned (M19c, ADR 0068) | Not started | Not started | Not started | |
+| Room entry (join/knock/create) | Done (M19c, ADR 0068) — `POST .../rooms/{join,knock,dm}` and `POST .../rooms` | Not started | Not started | Not started | Server-only; client UI (join-room dialog, create-room flow) is separate follow-up work |
 | Room settings (name/topic/avatar/tags) | Planned (M19d, ADR 0068) | Not started | Not started | Not started | |
 | Power levels | Planned (M19e, ADR 0068) | Not started | Not started | Not started | |
 | Account actions (profile/ignore/directory search) | Planned (M19f, ADR 0068) | Not started | Not started | Not started | |

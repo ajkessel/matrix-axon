@@ -23,7 +23,7 @@ use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
-use crate::sender::{EphemeralSender, MembershipSender, MessageSender, SendError};
+use crate::sender::{EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, SendError};
 use crate::trust::SenderTrustService;
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
@@ -61,6 +61,11 @@ pub struct AppState {
     /// configurations that don't inject one keep compiling; the binary
     /// overrides it via [`with_membership`](Self::with_membership).
     pub membership: Arc<dyn MembershipSender>,
+    /// Room-entry port for the join/knock/create_room/create_dm routes
+    /// (ADR 0068 M19c). Defaults to a no-op so tests and non-sync
+    /// configurations that don't inject one keep compiling; the binary
+    /// overrides it via [`with_room_entry`](Self::with_room_entry).
+    pub room_entry: Arc<dyn RoomEntrySender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -232,6 +237,7 @@ impl AppState {
             sender,
             ephemeral: Arc::new(NoopEphemeralSender),
             membership: Arc::new(NoopMembershipSender),
+            room_entry: Arc::new(NoopRoomEntrySender),
             lifecycle,
             verify,
             trust,
@@ -287,6 +293,15 @@ impl AppState {
     /// keep the default no-op.
     pub fn with_membership(mut self, membership: Arc<dyn MembershipSender>) -> Self {
         self.membership = membership;
+        self
+    }
+
+    /// Inject the room-entry port (join/knock/create_room/create_dm;
+    /// ADR 0068 M19c). The binary calls this with an adapter over the sync
+    /// engine's gateway, same as `sender`; tests that don't touch these
+    /// routes keep the default no-op.
+    pub fn with_room_entry(mut self, room_entry: Arc<dyn RoomEntrySender>) -> Self {
+        self.room_entry = room_entry;
         self
     }
 
@@ -408,6 +423,57 @@ impl MembershipSender for NoopMembershipSender {
     }
 }
 
+/// The default `room_entry` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_room_entry`] replaces it with a real adapter.
+struct NoopRoomEntrySender;
+
+#[async_trait::async_trait]
+impl RoomEntrySender for NoopRoomEntrySender {
+    async fn join(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id_or_alias: &str,
+        _server_names: &[String],
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable(
+            "room-entry port is not configured".to_owned(),
+        ))
+    }
+
+    async fn knock(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id_or_alias: &str,
+        _reason: Option<&str>,
+        _server_names: &[String],
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable(
+            "room-entry port is not configured".to_owned(),
+        ))
+    }
+
+    async fn create_room(
+        &self,
+        _account_id: uuid::Uuid,
+        _request: axon_core::CreateRoomRequest,
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable(
+            "room-entry port is not configured".to_owned(),
+        ))
+    }
+
+    async fn create_dm(
+        &self,
+        _account_id: uuid::Uuid,
+        _user_id: &str,
+    ) -> Result<String, SendError> {
+        Err(SendError::Unavailable(
+            "room-entry port is not configured".to_owned(),
+        ))
+    }
+}
+
 struct DisabledStagedUploads;
 
 #[async_trait::async_trait]
@@ -490,6 +556,12 @@ impl FromRef<AppState> for Arc<dyn EphemeralSender> {
 impl FromRef<AppState> for Arc<dyn MembershipSender> {
     fn from_ref(state: &AppState) -> Arc<dyn MembershipSender> {
         state.membership.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn RoomEntrySender> {
+    fn from_ref(state: &AppState) -> Arc<dyn RoomEntrySender> {
+        state.room_entry.clone()
     }
 }
 

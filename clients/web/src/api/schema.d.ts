@@ -351,6 +351,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a new room.
+         * @description **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
+         *     so retrying this call after a client-side timeout can create a second
+         *     room upstream if the first attempt actually succeeded after Axon's own
+         *     timeout fired (see `SdkGateway::create_room`).
+         */
+        post: operations["create_room"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/dm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a DM with another user.
+         * @description **Not idempotent**: Matrix's `createRoom` endpoint has no idempotency key,
+         *     so retrying this call after a client-side timeout can create a second DM
+         *     room upstream if the first attempt actually succeeded after Axon's own
+         *     timeout fired (see `SdkGateway::create_dm`). This route always creates a
+         *     new room; it does not check for or reuse an existing DM with the target
+         *     user.
+         */
+        post: operations["create_dm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/join": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Join a room by id or alias. */
+        post: operations["join_room"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/accounts/{account_id}/rooms/knock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Knock on a room, optionally with a reason. */
+        post: operations["knock_room"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/ban": {
         parameters: {
             query?: never;
@@ -1217,6 +1299,16 @@ export interface components {
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_RoomEntryResultDto: {
+            /**
+             * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
+             *     `create_dm`; ADR 0068 M19c): the resulting room's id.
+             */
+            data: {
+                room_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_SearchPage: {
             /**
              * @description One page of search results (M9b): the ranked hits, the total match count
@@ -1547,6 +1639,39 @@ export interface components {
              */
             reason?: string | null;
         };
+        /** @description Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c). */
+        CreateDmRequest: {
+            /** @description The other participant's Matrix id (`@user:server`). */
+            user_id: string;
+        };
+        /**
+         * @description Request body for creating a room (`POST …/rooms`; ADR 0068 M19c) — the
+         *     minimal-but-useful subset of the Matrix `createRoom` endpoint exposed to
+         *     API clients. An empty body is valid: it creates a private, unencrypted,
+         *     unnamed room.
+         */
+        CreateRoomRequestDto: {
+            /**
+             * @description When true, an `m.room.encryption` event is included in the room's
+             *     initial state, so it is encrypted from its first transaction rather
+             *     than via a later, racier `enable_encryption` call.
+             */
+            encrypted?: boolean;
+            /** @description Users to invite on creation (`@user:server`). */
+            invite?: string[];
+            /** @description Whether to set the `is_direct` flag on the invites this creates. */
+            is_direct?: boolean;
+            /** @description Room name (`m.room.name`), if set. */
+            name?: string | null;
+            preset?: null | components["schemas"]["RoomPresetDto"];
+            /**
+             * @description Whether the room is published in the room directory. Defaults to
+             *     `false` (private).
+             */
+            public?: boolean;
+            /** @description Room topic (`m.room.topic`), if set. */
+            topic?: string | null;
+        };
         /** @description The live evidence half of a [`VerificationBundleDto`]. */
         CurrentTrustDto: {
             /**
@@ -1802,6 +1927,31 @@ export interface components {
             user_id: string;
         };
         /**
+         * @description Request body for joining a room by id or alias (`POST …/rooms/join`;
+         *     ADR 0068 M19c).
+         */
+        JoinRoomRequest: {
+            /** @description The room id (`!room:server`) or alias (`#room:server`) to join. */
+            room_id_or_alias: string;
+            /**
+             * @description Federation-resolution hints (ruma's `via`) for an alias/id this
+             *     account's client has no direct path to.
+             */
+            server_names?: string[];
+        };
+        /** @description Request body for knocking on a room (`POST …/rooms/knock`; ADR 0068 M19c). */
+        KnockRoomRequest: {
+            /** @description Optional human-readable reason shown to the room's members. */
+            reason?: string | null;
+            /** @description The room id (`!room:server`) or alias (`#room:server`) to knock on. */
+            room_id_or_alias: string;
+            /**
+             * @description Federation-resolution hints (ruma's `via`) for an alias/id this
+             *     account's client has no direct path to.
+             */
+            server_names?: string[];
+        };
+        /**
          * @description Request body for runtime login (`POST /v1/accounts/login`). Adds or
          *     reactivates a Matrix account keyed by its Matrix `username`. The
          *     password is used once to authenticate and is never stored or echoed back.
@@ -1973,6 +2123,21 @@ export interface components {
             /** @description Room topic (`m.room.topic`), if set. */
             topic?: string | null;
         };
+        /**
+         * @description Response for the four room-entry mutations (`join`/`knock`/`create_room`/
+         *     `create_dm`; ADR 0068 M19c): the resulting room's id.
+         */
+        RoomEntryResultDto: {
+            room_id: string;
+        };
+        /**
+         * @description A room-creation preset (see `axon_core::RoomPreset`), mirroring the three
+         *     Matrix defines. Variant names deliberately drop the shared `Chat` suffix
+         *     the Matrix spec's own vocabulary uses; the wire values (`private_chat`,
+         *     `public_chat`, `trusted_private_chat`) are preserved via explicit renames.
+         * @enum {string}
+         */
+        RoomPresetDto: "private_chat" | "public_chat" | "trusted_private_chat";
         /**
          * @description One page of search results (M9b): the ranked hits, the total match count
          *     across all pages, and the cursor to fetch the next page. `next_cursor` is
@@ -2944,6 +3109,338 @@ export interface operations {
             };
             /** @description The account is not active (logged out — log in first) or is being deleted */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    create_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRoomRequestDto"];
+            };
+        };
+        responses: {
+            /** @description Room created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEntryResultDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    create_dm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDmRequest"];
+            };
+        };
+        responses: {
+            /** @description DM room created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEntryResultDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    join_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JoinRoomRequest"];
+            };
+        };
+        responses: {
+            /** @description Joined the room */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEntryResultDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    knock_room: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["KnockRoomRequest"];
+            };
+        };
+        responses: {
+            /** @description Knocked on the room */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_RoomEntryResultDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted (e.g. the room doesn't allow knocking) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
