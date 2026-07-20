@@ -106,6 +106,17 @@ pub struct ServerConfig {
     /// which names the Axon API's public callback base.
     #[serde(default)]
     pub web_client_url: Option<String>,
+    /// Arm the one-time first-credential web bootstrap **non-interactively**,
+    /// for headless / container deployments. Normally the bootstrap is offered
+    /// only on an interactive TTY (the operator answers a yes/no prompt); in a
+    /// detached container there is no TTY, so it would never arm. When this is
+    /// true and no credential yet exists, the server arms the bootstrap at
+    /// startup without prompting and logs its URL. Defaults to `false`,
+    /// preserving the interactive behavior. The loopback / `allow_remote`
+    /// gate still applies — behind a reverse proxy every peer looks remote, so
+    /// a proxied deployment also needs `bootstrap_web_allow_remote = true`.
+    #[serde(default)]
+    pub bootstrap_web_auto: bool,
 }
 
 /// Postgres connection settings.
@@ -765,6 +776,7 @@ impl Default for ServerConfig {
             allow_insecure_bind: false,
             bootstrap_web_allow_remote: false,
             web_client_url: None,
+            bootstrap_web_auto: false,
         }
     }
 }
@@ -990,6 +1002,19 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_web_auto_defaults_false_and_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("DATABASE_URL", "postgres://u:p@localhost/db");
+            assert!(!Config::load(None).expect("load").server.bootstrap_web_auto);
+
+            jail.set_env("AXON_SERVER__BOOTSTRAP_WEB_AUTO", "true");
+            assert!(Config::load(None).expect("load").server.bootstrap_web_auto);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn web_client_url_defaults_none_and_parses_from_env() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
@@ -1077,6 +1102,7 @@ mod tests {
                 allow_insecure_bind: false,
                 bootstrap_web_allow_remote: false,
                 web_client_url: None,
+                bootstrap_web_auto: false,
             },
             database: DatabaseConfig {
                 url: "x".into(),

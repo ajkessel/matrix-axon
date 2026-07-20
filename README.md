@@ -257,6 +257,19 @@ fronted by TLS, a proxy, or a trusted network. If `server.web_client_url` is
 set, the bootstrap success page links to that web client after showing the
 token; the token is never placed in the URL.
 
+The bootstrap is offered only on an interactive TTY by default (the operator
+answers a prompt). Headless or containerized deployments have no TTY, so they
+can arm it non-interactively with `server.bootstrap_web_auto = true`
+(`AXON_SERVER__BOOTSTRAP_WEB_AUTO=true`); it still only arms when no credential
+exists yet, and the loopback / `bootstrap_web_allow_remote` gate is unchanged.
+When `server.web_client_url` resolves to the **same origin** as the bootstrap
+page (e.g. a reverse proxy that serves the web client and proxies `/bootstrap`
+on one host), the bearer success page writes the freshly minted token into the
+web client's `localStorage` and redirects there — signing the operator in with
+nothing to copy, and still without the token ever appearing in a URL. (This
+same-origin hand-off is bearer-token only; the SSO flow shows its tokens to
+copy.)
+
 With `bootstrap_web_allow_remote = true`, any client that can reach the
 bootstrap surface — including one just probing it — shares the same
 six-wrong-URL lockout as the operator: six bad requests to `/bootstrap`,

@@ -342,9 +342,6 @@ async fn maybe_offer_web_bootstrap(
     store: &Store,
     config: &Config,
 ) -> anyhow::Result<Option<axon_api::BootstrapConfig>> {
-    if !std::io::stdin().is_terminal() {
-        return Ok(None);
-    }
     if !store
         .first_credential_bootstrap_available()
         .await
@@ -353,13 +350,27 @@ async fn maybe_offer_web_bootstrap(
         return Ok(None);
     }
 
-    let allowed = init::prompt_yes_no(
-        "No Matrix accounts or client credentials were found. Allow one first credential to be created through the web interface?",
-        true,
-    )?;
-    if !allowed {
-        tracing::info!("first-credential web bootstrap declined by operator");
-        return Ok(None);
+    if config.server.bootstrap_web_auto {
+        // Headless / container path (ADR 0052): there is no TTY to answer the
+        // prompt in a detached container, so an explicit opt-in arms the
+        // bootstrap directly. The access code is still unguessable and the
+        // loopback/allow_remote gate still applies.
+        tracing::info!(
+            "first-credential web bootstrap armed non-interactively (server.bootstrap_web_auto)"
+        );
+    } else {
+        // Interactive path: offer it only on a TTY, and only if the operator agrees.
+        if !std::io::stdin().is_terminal() {
+            return Ok(None);
+        }
+        let allowed = init::prompt_yes_no(
+            "No Matrix accounts or client credentials were found. Allow one first credential to be created through the web interface?",
+            true,
+        )?;
+        if !allowed {
+            tracing::info!("first-credential web bootstrap declined by operator");
+            return Ok(None);
+        }
     }
 
     tracing::info!(

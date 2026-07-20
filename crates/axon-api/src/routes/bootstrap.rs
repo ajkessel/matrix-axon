@@ -391,8 +391,45 @@ fn web_client_link(bootstrap: &BootstrapConfig) -> String {
     )
 }
 
+/// The web client's `localStorage` slot for a bearer token — the exact key the
+/// token-paste auth provider reads on load (`clients/web/src/auth/token-paste.tsx`,
+/// `STORAGE_KEY`). The same-origin handoff below writes here so the SPA comes up
+/// already signed in; keep it in sync with the client.
+const WEB_CLIENT_TOKEN_STORAGE_KEY: &str = "axon.token";
+
+/// Same-origin handoff for the web client (ADR 0052). When `web_client_url`
+/// resolves to *this* origin — the case behind the deployment front door, which
+/// serves the SPA and proxies `/bootstrap` on one origin — write the freshly
+/// minted token into the client's `localStorage` slot and redirect there, so the
+/// operator lands signed in with nothing to copy. The check runs in the browser
+/// (`new URL(...).origin`), so a cross-origin or JS-disabled client simply falls
+/// back to the copyable token and the "Open web client" link above.
+fn web_client_handoff_script(bootstrap: &BootstrapConfig) -> String {
+    let Some(url) = bootstrap.web_client_url.as_deref() else {
+        return String::new();
+    };
+    format!(
+        r#"<div id="axon-bootstrap" data-web-client-url="{url}" hidden></div>
+      <script>(function () {{
+  var host = document.getElementById('axon-bootstrap');
+  var tokenEl = document.getElementById('axon-bootstrap-token');
+  if (!host || !tokenEl) return;
+  var url = host.dataset.webClientUrl;
+  if (!url) return;
+  try {{
+    if (new URL(url, location.href).origin !== location.origin) return;
+    localStorage.setItem('{key}', tokenEl.textContent.trim());
+    location.replace(url);
+  }} catch (e) {{}}
+}})();</script>"#,
+        url = html_escape(url),
+        key = WEB_CLIENT_TOKEN_STORAGE_KEY,
+    )
+}
+
 fn bearer_token_page(token: &str, bootstrap: &BootstrapConfig) -> String {
     let client_link = web_client_link(bootstrap);
+    let handoff = web_client_handoff_script(bootstrap);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -406,8 +443,9 @@ fn bearer_token_page(token: &str, bootstrap: &BootstrapConfig) -> String {
     <main>
       <h1>Bearer token created</h1>
       <p>Copy this token now. Axon stores only its hash and cannot show it again.</p>
-      <pre>{token}</pre>
+      <pre id="axon-bootstrap-token">{token}</pre>
       {client_link}
+      {handoff}
     </main>
   </body>
 </html>"#,
@@ -417,6 +455,12 @@ fn bearer_token_page(token: &str, bootstrap: &BootstrapConfig) -> String {
 
 fn oauth_token_page(pair: TokenPair, bootstrap: &BootstrapConfig) -> String {
     let client_link = web_client_link(bootstrap);
+    // No same-origin localStorage hand-off here (unlike `bearer_token_page`): the
+    // OAuth access token is short-lived (`expires_in`) and the web client's
+    // token-paste slot stores a single bearer with no refresh handling, so
+    // silently landing it there would sign the operator out on expiry. SSO users
+    // copy the tokens (or use the web client's own OAuth/PKCE flow, which manages
+    // refresh); only the long-lived bearer path gets the zero-paste hand-off.
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -546,6 +590,37 @@ mod tests {
         let bootstrap = BootstrapConfig::new(false, "ABC234".to_owned(), None);
         let page = bearer_token_page("<script>evil</script>", &bootstrap);
         assert!(!page.contains("<script>evil</script>"));
+        assert!(page.contains("&lt;script&gt;evil&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn bearer_token_page_omits_handoff_without_web_client_url() {
+        let bootstrap = BootstrapConfig::new(false, "ABC234".to_owned(), None);
+        let page = bearer_token_page("tok", &bootstrap);
+        assert!(!page.contains("localStorage"));
+        assert!(!page.contains("data-web-client-url"));
+    }
+
+    #[test]
+    fn bearer_token_page_adds_same_origin_handoff_with_web_client_url() {
+        let bootstrap = BootstrapConfig::new(false, "ABC234".to_owned(), Some("/".to_owned()));
+        let page = bearer_token_page("tok", &bootstrap);
+        // The token holder the handoff script reads, the storage key it writes,
+        // and the origin guard are all present.
+        assert!(page.contains(r#"id="axon-bootstrap-token""#));
+        assert!(page.contains("localStorage.setItem('axon.token'"));
+        assert!(page.contains("location.origin"));
+    }
+
+    #[test]
+    fn bearer_token_page_escapes_the_web_client_url() {
+        let bootstrap = BootstrapConfig::new(
+            false,
+            "ABC234".to_owned(),
+            Some(r#"https://x/"><script>evil</script>"#.to_owned()),
+        );
+        let page = bearer_token_page("tok", &bootstrap);
+        assert!(!page.contains(r#""><script>evil</script>"#));
         assert!(page.contains("&lt;script&gt;evil&lt;/script&gt;"));
     }
 
