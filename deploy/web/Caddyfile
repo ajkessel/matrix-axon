@@ -1,0 +1,42 @@
+# Front-door Caddy config for the full-stack deployment (ADR 0052).
+#
+# One origin for the whole stack: serve the built web SPA (/srv) and reverse-
+# proxy the API to axon-server on the compose bridge. Same-origin means the
+# browser needs no CORS, and the web client's default base URL ("/") works
+# unchanged. axon-server itself is NOT published to the host — this is the only
+# HTTP entry point, used by the browser AND by non-browser clients (the TUI).
+#
+# Plain HTTP on :8080 — fine on a trusted LAN. For remote/public access put a
+# TLS terminator in front (the `tailscale` or `caddy` compose profiles, which
+# proxy to this service), and set AXON_PUBLISH_ADDR=127.0.0.1 in .env so only
+# the proxy is reachable from outside the host.
+
+:8080 {
+	# The API surface goes to axon. /healthz lives OUTSIDE /v1, so it needs its
+	# own route — otherwise it would fall through to the SPA and return
+	# index.html instead of the {"status":"ok"} liveness JSON. reverse_proxy
+	# forwards the Authorization header and upgrades /v1/ws transparently, so
+	# both browser (Sec-WebSocket-Protocol token) and TUI (bearer header) auth
+	# survive the hop; Caddy imposes no request-body cap, so media uploads pass.
+	handle /v1/* {
+		reverse_proxy axon-server:8080
+	}
+	handle /healthz {
+		reverse_proxy axon-server:8080
+	}
+	# First-credential web bootstrap (ADR 0052): axon serves the setup page at
+	# /bootstrap/<code>. Proxying it here keeps it same-origin with the SPA, so
+	# its success page can drop the freshly minted token into the SPA's
+	# localStorage and redirect — zero-paste first sign-in.
+	handle /bootstrap/* {
+		reverse_proxy axon-server:8080
+	}
+
+	# Everything else is the SPA. try_files rewrites unknown paths to
+	# index.html so client-side routes (deep links, /oauth/callback) resolve.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

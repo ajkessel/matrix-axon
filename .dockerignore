@@ -1,0 +1,38 @@
+# Keep the build context small and reproducible. GIT_HASH is passed as a build
+# arg (see Dockerfile), so .git need not be in context. build.rs falls back to
+# "unknown" when .git is absent.
+.git
+.gitignore
+.jj
+
+# Build output — the image builds fresh inside the builder stage.
+target/
+
+# Web client build artifacts — the web image runs a fresh `pnpm install` +
+# `pnpm build`, so these on-disk dirs must never enter the context.
+clients/web/node_modules/
+clients/web/dist/
+clients/web/test-results/
+smoke-artifacts/
+
+# Deployment/runtime state that must never leak into an image layer.
+axon-data/
+axon-pgdata/
+deploy/.env
+.env
+**/*.log
+
+# Docs and the dev Synapse assets aren't needed to build the server binary.
+# NOTE: clients/ and smoke/ are Cargo workspace members — excluding them would
+# break `cargo build -p axon-server` (the whole workspace must parse), so they
+# stay in the context even though the server image never runs them.
+docs/
+docker/
+
+# Agent worktrees hold full duplicate source checkouts — never build inputs.
+.claude/
+
+# Editor / OS cruft.
+.idea/
+.vscode/
+.DS_Store

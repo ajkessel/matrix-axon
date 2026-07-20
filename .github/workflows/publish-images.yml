@@ -1,11 +1,123 @@
 name: Publish images
 
+# Build + push the axon-server and axon-web images to GHCR for beta distribution
+# (ADR 0052). Runs on the self-hosted binary-builder (unlimited minutes; it has a
+# Docker daemon — see cross-build.yml), so a push trigger is allowed per AGENTS.md.
+# Keep the packages PRIVATE in the org's Packages settings and grant beta testers
+# Read; the images link to this repo via the Dockerfiles' image.source label.
+#
+# Trigger by hand (Actions → Publish images → Run workflow) or by pushing a
+# `beta-*` tag. arm64 is built via QEMU on the runner; if that isn't available,
+# dispatch with platforms = linux/amd64.
+#
+# Runner prerequisite: a headless-friendly Docker credential store (macOS uses
+# `pass`, not `osxkeychain`) so `docker login` works non-interactively — see the
+# login step below.
+
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Moving tag to publish (e.g. beta, rc1)"
+        type: string
+        default: beta
+      platforms:
+        description: "buildx platforms (arm64 needs QEMU on the runner)"
+        type: string
+        default: linux/amd64,linux/arm64
+      runner:
+        description: "Select a specific runner"
+        required: false
+        type: choice
+        default: self-hosted
+        options:
+          - self-hosted
+          - server
+          - imac
+          - boslb015672
+          - boslb015700
+  push:
+    tags:
+      - 'beta-*'
+
+env:
+  # JS actions (docker/*) need Node on the self-hosted runner (matches cross-build.yml).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  placeholder-job:
-    runs-on: ubuntu-latest
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+    with:
+      runner-label: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
+
+  publish:
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - name: Run Placeholder
-        run: echo "This is a placeholder workflow for testing M13."
+      - uses: actions/checkout@v4
+
+      - name: Compute registry, tag, and hash
+        id: meta
+        shell: bash
+        run: |
+          # GHCR requires a lowercase owner; fork-friendly (publishes to the
+          # fork owner's namespace, burning their own quota, off matrix-axon).
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          hash="$(git rev-parse --short HEAD)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            moving="${GITHUB_REF_NAME#beta-}"   # tag `beta-rc1` -> `rc1`
+            [ -n "$moving" ] && [ "$moving" != "${GITHUB_REF_NAME}" ] || moving="beta"
+          else
+            moving="${{ inputs.tag }}"
+          fi
+          {
+            echo "registry=$registry"
+            echo "hash=$hash"
+            echo "moving=$moving"
+            echo "platforms=${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # No isolated-DOCKER_CONFIG workaround here by design: the self-hosted
+      # runners use a headless-friendly Docker credential store (macOS is on
+      # `pass`, not `osxkeychain`), so `docker login` persists the token without
+      # the "-25308 User interaction is not allowed" keychain failure. A new or
+      # reset runner must be configured the same way (`docker-credential-pass`);
+      # otherwise re-add an isolated, credsStore-free DOCKER_CONFIG step here.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push axon-server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ steps.meta.outputs.platforms }}
+          push: true
+          build-args: |
+            GIT_HASH=${{ steps.meta.outputs.hash }}
+          tags: |
+            ${{ steps.meta.outputs.registry }}/axon-server:${{ steps.meta.outputs.moving }}
+            ${{ steps.meta.outputs.registry }}/axon-server:${{ steps.meta.outputs.hash }}
+
+      - name: Build + push axon-web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/web/Dockerfile
+          platforms: ${{ steps.meta.outputs.platforms }}
+          push: true
+          build-args: |
+            GIT_HASH=${{ steps.meta.outputs.hash }}
+          tags: |
+            ${{ steps.meta.outputs.registry }}/axon-web:${{ steps.meta.outputs.moving }}
+            ${{ steps.meta.outputs.registry }}/axon-web:${{ steps.meta.outputs.hash }}

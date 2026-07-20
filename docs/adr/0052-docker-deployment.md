@@ -60,8 +60,13 @@ decisions shape it:
 
 `docker compose up` brings up Postgres and `axon-server` together and yields a fully running
 Axon. The image is also usable standalone (operator supplies their own `DATABASE_URL`).
-Publishing a multi-arch image to a registry (GHCR) is deliberately deferred to a follow-up;
-the Dockerfile is structured so that addition is easy.
+Multi-arch publishing to a registry is done as beta distribution: both images push to a
+**private** GHCR package (`ghcr.io/matrix-axon/axon-{server,web}`, linked to the repo via an
+`org.opencontainers.image.source` label) via `deploy/publish.sh` or the `publish-images.yml`
+workflow (self-hosted runner, `workflow_dispatch` + `beta-*` tag). The compose image refs are
+env-overridable (`AXON_SERVER_IMAGE` / `AXON_WEB_IMAGE`) so testers `docker compose pull`
+prebuilt images while contributors keep building from source. A public GHCR/Docker Hub
+release remains a later step.
 
 ### 2. The TUI is not in the server image
 
@@ -94,11 +99,14 @@ holds only db url + store_key). Both are overridable.
 `init`'s `--start-postgres` helper is loopback-guarded and only fires when the DB is
 unreachable; in Compose the `postgres` service is up before `axon-server` starts
 (`depends_on: service_healthy`) and is not a loopback host, so it never engages — **Compose
-owns Postgres, `init` owns config.** Bearer tokens are minted out-of-band with
-`axon token issue` to keep secrets out of logs (with an opt-in `AXON_INIT_PRINT_TOKEN` to
-surface the first token in `docker compose logs` for convenience). Matrix accounts are
-provisioned at runtime (`POST /v1/accounts/login`) or via `AXON_SYNC__ACCOUNT__*`, per
-ADR 0051.
+owns Postgres, `init` owns config.** The first bearer token is **minted and printed to the
+logs on first boot by default** (`AXON_INIT_PRINT_TOKEN` defaults on): the operator is
+bootstrapping their own single-admin box and can do nothing without a token, so the
+"secrets don't belong in logs" principle yields to bootstrap usability here. It prints once
+(first boot only); operators who ship logs off-box set `AXON_INIT_PRINT_TOKEN=false` and mint
+out-of-band with `axon token issue`, and any exposed token is revocable with `axon token
+revoke`. Matrix accounts are provisioned at runtime (`POST /v1/accounts/login`) or via
+`AXON_SYNC__ACCOUNT__*`, per ADR 0051.
 
 ### 4. TLS / remote access as optional Compose profiles
 
@@ -118,6 +126,44 @@ common self-host situations:
 In both profiles the server's port 8080 is **not** published to the host; only the proxy is
 reachable. axon keeps `0.0.0.0` + `ALLOW_INSECURE_BIND=true`, bridge-internal only.
 
+### 5. The web client rides the stack behind a same-origin front door
+
+The browser web client (`clients/web`, a Preact/Vite SPA) joins the stack as a `web`
+service that becomes the **single HTTP front door**. It is a `caddy:2` image built in two
+stages — a Node/pnpm stage runs `pnpm build` to produce the static `dist/`, copied into the
+Caddy runtime — that serves the SPA and reverse-proxies the API (`/v1/*` and `/healthz`,
+including the `/v1/ws` WebSocket) to `axon-server:8080` on the bridge. Three properties of
+the client force this shape (established by reading `clients/web`):
+
+- **Same-origin by default.** The client's API base URL defaults to `/` and it has no baked-in
+  server URL; the server serves **no CORS headers** and no static assets (it returns a "no web
+  interface here" stub at `/`). Serving the SPA and the API from one origin sidesteps CORS
+  entirely and needs zero client build config — the alternative (cross-origin + a server CORS
+  allow-list) is not implemented and would be more fragile.
+- **Browser-compatible auth passes through a proxy.** The client authenticates the WebSocket
+  via `Sec-WebSocket-Protocol` (browsers can't set `Authorization`); the TUI uses the
+  `Authorization` header. Caddy forwards both and upgrades `/v1/ws` transparently, so a TUI
+  (local or remote) can use the **same** front-door URL. `/healthz` gets its own proxied route
+  because it lives outside `/v1`.
+- **Consequence for the topology.** `axon-server` loses its published host port — `web` owns
+  the host-facing `:8080` for the whole stack — and the `tailscale`/`caddy` TLS profiles now
+  front `web` (not `axon-server`), so both the browser and the TUI work over TLS same-origin.
+
+Default web sign-in is the **one-time first-credential web bootstrap** (#265), made
+zero-paste here. The entrypoint arms it non-interactively (`bootstrap_web_auto`, a new
+`ServerConfig` field that skips the TTY prompt for headless runs) and uses `axon init
+--no-token` so the bootstrap owns the first credential. Because requests reach axon
+*through* the `web` proxy — so axon sees the proxy's bridge IP, never loopback — the
+stack also sets `bootstrap_web_allow_remote`; the unguessable one-time code and wrong-URL
+lockout remain the protection. The bootstrap's bearer success page, served same-origin
+with the SPA via the front door, writes the freshly minted token into the client's
+`localStorage` slot and redirects — so the operator lands signed in with nothing to copy,
+and the token never travels in a URL. Token paste (any `axon token issue` token) stays
+available as a fallback, and OAuth/SSO is an optional upgrade; both are documented in the
+deploy README. Minting a token consumes an unused bootstrap (it *is* the first
+credential), so `run-docker.sh` defaults to surfacing the bootstrap URL and makes TUI
+token minting an explicit `--tui` opt-in.
+
 ## Consequences
 
 - One command (`docker compose up`) yields a working, migrated, self-configuring Axon;
@@ -133,6 +179,11 @@ reachable. axon keeps `0.0.0.0` + `ALLOW_INSECURE_BIND=true`, bridge-internal on
 - Because the implementation depends on `axon init`, the implementation PR must be based on a
   branch that contains ADR 0051's code (the `axon/platform-dirs` stack) or on `main` after
   that stack lands.
+- The `web` front door adds a Node/pnpm build stage and puts a reverse proxy in front of all
+  API traffic (including the TUI's). The extra in-container hop is negligible; Caddy imposes no
+  request-body cap, so media uploads are unaffected. The web-client integration likewise
+  depends on `clients/web` being present in the tree, so it lands after the web client reaches
+  `main` (or on a branch that combines the two).
 
 ## Implementation plan (for the follow-up M13 PR — `deploy/` silo)
 
@@ -145,6 +196,11 @@ Assets (all new; the dev `docker-compose.yml` is untouched):
   `AXON_SEARCH__INDEX_PATH` / `AXON_MEDIA__CACHE_DIR` under it, `VOLUME /var/lib/axon`,
   `EXPOSE 8080`, `HEALTHCHECK curl -fsS localhost:8080/healthz`, entrypoint script.
 - **`deploy/entrypoint.sh`** — the thin idempotent `axon init` wrapper described in Decision 3.
+- **`deploy/run-docker.sh`** — one-shot operator bootstrap: brings the stack up (`--wait`),
+  mints a labelled `tui` token from the running server, and writes a ready-to-use `axon-tui`
+  config (`[server].base_url` + `bearer_token`) at the client's platform path, then points the
+  operator at the TUI download. Refuses to clobber an existing TUI config (warn + confirm +
+  timestamped `.bak` backup on overwrite); `--no-tui` / `--yes` flags.
 - **`deploy/docker-compose.yml`** — `postgres` (image `postgres:16`, `pg_isready` healthcheck,
   named volume) + `axon-server` (build/image, `depends_on: service_healthy`, `env_file`,
   `DATABASE_URL=postgres://…@postgres:5432/axon`, `axon-data` volume, `ports 8080:8080` by

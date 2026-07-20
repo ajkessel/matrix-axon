@@ -1,0 +1,190 @@
+# Full-stack Axon deployment (ADR 0052). `docker compose up` brings up Postgres,
+# axon-server, and the web client together and yields a fully configured, migrated,
+# self-bootstrapping Axon with a browser UI. Separate from the repo-root dev
+# docker-compose.yml (Postgres-only).
+#
+#   cd deploy && cp .env.example .env
+#   GIT_HASH=$(git -C .. rev-parse --short HEAD) docker compose up --build -d
+#
+# The `web` service is the single HTTP front door: it serves the SPA and reverse-
+# proxies the API (/v1 + /healthz, incl. /v1/ws) to axon-server on the compose bridge.
+# Same origin, so the browser needs no CORS; the TUI can point at the same URL too.
+# axon-server has no published port — `web` is the only way in. Open the browser at
+# http://<host>:8080 (or the AXON_PORT you set).
+#
+# The front door serves PLAIN HTTP on :8080 — fine on a trusted LAN. Put a TLS proxy
+# in front before exposing it: `--profile tailscale` or `--profile caddy` (they reach
+# `web` over the compose bridge; set AXON_PUBLISH_ADDR=127.0.0.1 in .env so only the
+# proxy is reachable from outside the host).
+
+services:
+  postgres:
+    image: postgres:16
+    # Postgres is NOT published to the host (no `ports:`) — it is reachable only on
+    # the internal compose bridge, by axon-server. The password is therefore a
+    # formality between two containers on a private network, and the default below
+    # is fine for the standard stack. Override POSTGRES_PASSWORD in .env only if you
+    # publish 5432 to the host or otherwise widen the DB's reachability.
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-axon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-axon}
+      POSTGRES_DB: ${POSTGRES_DB:-axon}
+    volumes:
+      - axon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Report ready only once initdb has finished and the real server accepts
+      # connections. `$$VAR` escapes compose interpolation so the container shell
+      # reads its own env. Lets axon-server's depends_on block on real readiness.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  axon-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        # Stamp the image with the current commit; falls back to "unknown".
+        GIT_HASH: ${GIT_HASH:-unknown}
+    # Built locally by default. Beta testers instead point this at a published
+    # image (e.g. AXON_SERVER_IMAGE=ghcr.io/matrix-axon/axon-server:beta in .env)
+    # and `docker compose pull` — see deploy/README.md. `build:` above is ignored
+    # by `pull`/`up` once the named image is present locally.
+    image: ${AXON_SERVER_IMAGE:-axon-server:local}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      # Optional: the stack runs with built-in defaults if .env is absent. Create
+      # one (cp .env.example .env) only to override credentials, publish settings,
+      # a Matrix account, or the TLS profiles.
+      - path: .env
+        required: false
+    environment:
+      # Compose owns Postgres; the entrypoint's `axon init` writes this URL into the
+      # generated config. Host is the compose service name (not loopback), so init's
+      # --start-postgres never engages.
+      DATABASE_URL: postgres://${POSTGRES_USER:-axon}:${POSTGRES_PASSWORD:-axon}@postgres:5432/${POSTGRES_DB:-axon}
+      # First-credential web bootstrap (ADR 0052): zero-paste first web sign-in.
+      # - _AUTO arms it without the interactive TTY prompt (there's no TTY here);
+      #   the entrypoint then uses `init --no-token` so the bootstrap owns the
+      #   first credential.
+      # - _ALLOW_REMOTE is required because requests arrive via the `web` proxy,
+      #   so axon sees the proxy's bridge IP (not loopback). The one-time,
+      #   unguessable access code + wrong-URL lockout remain the protection; on a
+      #   TLS profile also set AXON_PUBLISH_ADDR=127.0.0.1. Set _AUTO=false to opt
+      #   out (then mint a token and use token-paste instead).
+      # - WEB_CLIENT_URL="/" makes the setup page hand the token to the SPA on
+      #   this same origin (front door) and redirect there — no copy/paste.
+      AXON_SERVER__BOOTSTRAP_WEB_AUTO: "${AXON_BOOTSTRAP_WEB:-true}"
+      AXON_SERVER__BOOTSTRAP_WEB_ALLOW_REMOTE: "${AXON_BOOTSTRAP_WEB:-true}"
+      AXON_SERVER__WEB_CLIENT_URL: "/"
+    volumes:
+      - axon-data:/var/lib/axon
+    # No published port: axon-server is reachable only on the internal compose
+    # bridge, by `web` (which fronts it) and by Postgres. The `web` service owns
+    # the host-facing :8080. Its in-container HEALTHCHECK (see Dockerfile) still
+    # probes localhost:8080 inside this container.
+    restart: unless-stopped
+
+  # --- web client front door ------------------------------------------------
+  # Serves the built SPA and reverse-proxies the API (/v1 + /healthz, incl.
+  # /v1/ws) to axon-server on the bridge (deploy/web/Caddyfile). Single origin →
+  # no CORS for the browser; the TUI can use the same URL. This is the only
+  # host-published HTTP port for the whole stack.
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web/Dockerfile
+      args:
+        # Stamp the SPA's visible build id (Settings page); "unknown" otherwise.
+        GIT_HASH: ${GIT_HASH:-unknown}
+    # Built locally by default; set AXON_WEB_IMAGE=ghcr.io/matrix-axon/axon-web:beta
+    # (and `docker compose pull`) to run a published image instead. See deploy/README.md.
+    image: ${AXON_WEB_IMAGE:-axon-web:local}
+    depends_on:
+      axon-server:
+        condition: service_healthy
+    # Published on all interfaces by default (plain HTTP, for trusted-LAN use).
+    # When you enable a TLS profile below, the proxy reaches `web` over the
+    # compose bridge, so set AXON_PUBLISH_ADDR=127.0.0.1 in .env to keep :8080
+    # off external interfaces (only the proxy stays reachable). Compose profiles
+    # cannot remove a published port, so this is env-controlled, not automatic.
+    ports:
+      - "${AXON_PUBLISH_ADDR:-0.0.0.0}:${AXON_PORT:-8080}:8080"
+    healthcheck:
+      # End-to-end: /healthz is proxied to axon, so a pass means the SPA is
+      # served AND axon is reachable. Lets `docker compose up --wait` block until
+      # the whole chain is live. caddy:2 is alpine-based; busybox provides wget.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+
+  # --- optional: Tailscale sidecar (profile `tailscale`) --------------------
+  # Encrypted remote access over your tailnet (or public via Funnel) with no router
+  # port-forwarding and nothing exposed to the public internet. Reaches the `web`
+  # front door over the compose bridge, so remote browsers AND a remote TUI both work
+  # (web proxies the API onward to axon). Requires TS_AUTHKEY. This sidecar is its own
+  # tailnet node and coexists with a tailscaled on the host — see deploy/README.md.
+  tailscale:
+    image: tailscale/tailscale:latest
+    profiles: ["tailscale"]
+    hostname: ${TS_HOSTNAME:-axon}
+    environment:
+      # Required for this profile — set TS_AUTHKEY in .env. (Kept a soft default so
+      # interpolation of the whole file doesn't break the default, profile-less
+      # stack; tailscaled errors clearly if it's empty when the profile is used.)
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      # `tailscale serve` config: HTTPS on the tailnet → axon on the bridge.
+      TS_SERVE_CONFIG: /config/serve.json
+      # Extra `tailscale up` args (e.g. --advertise-tags=tag:axon if your ACLs
+      # define it, or --hostname=…). Empty by default to avoid auth failures from
+      # advertising a tag the tailnet doesn't grant.
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:-}
+    volumes:
+      - axon-tsstate:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - web
+    restart: unless-stopped
+
+  # --- optional: Caddy reverse proxy (profile `caddy`) ----------------------
+  # Automatic Let's Encrypt HTTPS for operators with a public domain who will
+  # forward :443 at their router. Fronts the `web` service (SPA + proxied API),
+  # so the browser and TUI both work over TLS. Requires DOMAIN (ACME_EMAIL recommended).
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    environment:
+      # Required for this profile — set DOMAIN in .env. (Soft default so the
+      # default, profile-less stack still interpolates; Caddy errors clearly if
+      # DOMAIN is empty when the profile is used.)
+      DOMAIN: ${DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - axon-caddy-data:/data
+      - axon-caddy-config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  axon-pgdata:
+  axon-data:
+  axon-tsstate:
+  axon-caddy-data:
+  axon-caddy-config:
