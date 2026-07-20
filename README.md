@@ -21,7 +21,7 @@ One Rust binary, one Postgres database, media cached to local disk. See the [arc
 | Client | Platform | Status |
 | --- | --- | --- |
 | [`axon-tui`](clients/tui/README.md) | Terminal | Active (MVP reference client) |
-| `axon-web` | Web browser + Windows/Linux desktop (Tauri) | Planned |
+| [`axon-web`](clients/web/README.md) | Web browser + Windows/Linux/Mac desktop (Tauri) | Active (nearing MVP) |
 | `axon-apple` | iOS + macOS (shared Swift Package) | Planned |
 | `axon-android` | Android | Planned |
 
