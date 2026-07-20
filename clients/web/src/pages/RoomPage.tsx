@@ -69,6 +69,11 @@ const REACTION_COMMAND_ALIASES = new Map([
 const SWIPE_RIGHT_MIN_X = 72
 const SWIPE_RIGHT_MAX_Y = 64
 const SWIPE_RIGHT_AXIS_RATIO = 1.4
+// How far a touch has to travel before we commit to a direction. Small
+// enough to claim the gesture (via preventDefault) well before the
+// browser's own edge-swipe-back recognizer does, large enough not to
+// mistake a tap's jitter for a swipe.
+const SWIPE_DECISION_THRESHOLD = 10
 
 type SwipeStart = {
   x: number
@@ -86,6 +91,28 @@ function isGestureControl(target: EventTarget | null): boolean {
       'a, button, input, textarea, select, summary, [contenteditable="true"], [role="button"], [role="textbox"], emoji-picker',
     ) !== null
   )
+}
+
+/**
+ * True if `target` sits inside an element that scrolls horizontally on its
+ * own (a wide code block or table, ADR 0046's message rendering) — those
+ * need real touch panning, so the swipe-to-room-list gesture must not claim
+ * touches that start inside them. Stops walking at `.room-body`, the swipe
+ * region's own boundary.
+ */
+function isHorizontallyScrollable(target: EventTarget | null): boolean {
+  let el = target instanceof Element ? target : null
+  while (el !== null && !el.classList.contains('room-body')) {
+    if (
+      el instanceof HTMLElement &&
+      el.scrollWidth > el.clientWidth &&
+      /(auto|scroll)/.test(getComputedStyle(el).overflowX)
+    ) {
+      return true
+    }
+    el = el.parentElement
+  }
+  return false
 }
 
 /**
@@ -151,6 +178,7 @@ export function RoomPage() {
   const { setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
   const swipeStart = useRef<SwipeStart | null>(null)
+  const swipeLocked = useRef(false)
   const highlighted = typeof query.event === 'string' ? query.event : null
   const openThread = typeof query.thread === 'string' ? query.thread : null
 
@@ -571,6 +599,7 @@ export function RoomPage() {
       const base = location.path
       location.route(
         rootId === null ? base : `${base}?thread=${encodeURIComponent(rootId)}`,
+        true,
       )
     },
     [location],
@@ -599,10 +628,12 @@ export function RoomPage() {
   }
 
   const handleTouchStart = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
+    swipeLocked.current = false
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
-      isGestureControl(event.target)
+      isGestureControl(event.target) ||
+      isHorizontallyScrollable(event.target)
     ) {
       swipeStart.current = null
       return
@@ -611,9 +642,45 @@ export function RoomPage() {
     swipeStart.current = { x: touch.clientX, y: touch.clientY }
   }
 
+  /**
+   * Claims the gesture as soon as it looks like a rightward swipe, well
+   * before the touch travels far enough to satisfy the touchend thresholds.
+   * `preventDefault` here is what actually stops the browser's native
+   * edge-swipe-back from taking over on a slow drag — CSS `touch-action`
+   * can't do this without also disabling touch-scrolling for the code
+   * blocks/tables nested inside the timeline (both need real horizontal
+   * panning), so this has to be a targeted, per-gesture opt-out instead.
+   */
+  const handleTouchMove = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
+    const start = swipeStart.current
+    if (start === null || event.touches.length !== 1) {
+      return
+    }
+    if (swipeLocked.current) {
+      event.preventDefault()
+      return
+    }
+    const touch = event.touches[0]
+    const dx = touch.clientX - start.x
+    const dy = touch.clientY - start.y
+    const absX = Math.abs(dx)
+    const absY = Math.abs(dy)
+    if (absX < SWIPE_DECISION_THRESHOLD && absY < SWIPE_DECISION_THRESHOLD) {
+      return
+    }
+    if (dx > 0 && absX > absY * SWIPE_RIGHT_AXIS_RATIO) {
+      swipeLocked.current = true
+      event.preventDefault()
+    } else {
+      // Vertical scroll or a leftward drag: not ours, leave it to the browser.
+      swipeStart.current = null
+    }
+  }
+
   const handleTouchEnd = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
     const start = swipeStart.current
     swipeStart.current = null
+    swipeLocked.current = false
     if (
       start === null ||
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
@@ -735,9 +802,11 @@ export function RoomPage() {
       <div
         class="room-body"
         onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
         onTouchCancel={() => {
           swipeStart.current = null
+          swipeLocked.current = false
         }}
       >
         {/* Drop scoped to this pane, not the page: a file dropped on the thread

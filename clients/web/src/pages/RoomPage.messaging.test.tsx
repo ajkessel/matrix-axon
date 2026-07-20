@@ -995,6 +995,41 @@ describe('threads', () => {
     }
   })
 
+  it('closing the thread panel via its Close button does not add a history entry, so a subsequent back goes to the room list', async () => {
+    const media = mockSinglePane()
+    function RoomListStub() {
+      return <p>Rooms list</p>
+    }
+    const roomUrl = `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`
+    try {
+      // Mirror the real flow: RoomList's navigateToRoom pushes the room URL
+      // on top of the room-list entry, rather than replacing it.
+      window.history.replaceState(null, '', '/')
+      window.history.pushState(null, '', roomUrl)
+
+      const { findAllByRole, findByLabelText, findByRole, findByText } =
+        renderRoom([event('$root', 100)], roomUrl, RoomListStub)
+      await findByLabelText('Message Ops')
+      const historyLengthBeforeThread = window.history.length
+
+      fireEvent.click((await findAllByRole('button', { name: 'Thread' }))[0])
+      await findByLabelText('Thread')
+
+      fireEvent.click(await findByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(window.location.search).toBe(''))
+
+      // Opening and closing the thread pane must not have pushed any new
+      // history entries — it's pane state, not a page.
+      expect(window.history.length).toBe(historyLengthBeforeThread)
+
+      window.history.back()
+
+      expect(await findByText('Rooms list')).toBeTruthy()
+    } finally {
+      media.mockRestore()
+    }
+  })
+
   it('opening room information closes the thread panel', async () => {
     const { findByLabelText, findByRole, queryByLabelText } = renderRoom(
       [event('$root', 100)],
@@ -1059,6 +1094,55 @@ describe('threads', () => {
       swipeRight(composer)
 
       expect(window.location.pathname).toContain('/rooms/')
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  it('mobile swipe-right starting inside a horizontally scrollable element (e.g. a wide code block) does not navigate', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+
+      const scrollable = container.querySelector('.room-stream') as HTMLElement
+      scrollable.style.overflowX = 'auto'
+      Object.defineProperty(scrollable, 'scrollWidth', {
+        value: 400,
+        configurable: true,
+      })
+      Object.defineProperty(scrollable, 'clientWidth', {
+        value: 200,
+        configurable: true,
+      })
+
+      swipeRight(scrollable)
+
+      expect(window.location.pathname).toContain('/rooms/')
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  it('mobile swipe-right claims the touchmove once a rightward drag is detected, so a slow drag cannot fall through to the browser back gesture', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 24, clientY: 220 }] })
+      const notPrevented = fireEvent.touchMove(body, {
+        touches: [{ clientX: 60, clientY: 222 }],
+      })
+
+      expect(notPrevented).toBe(false)
     } finally {
       media.mockRestore()
     }
