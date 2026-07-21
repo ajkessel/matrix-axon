@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import { EMOJI_PICKER_DATA_SOURCE } from '../emoji'
 import { parseMedia } from '../media/parse-media'
@@ -38,6 +44,50 @@ type EventActionIconName =
 type EmojiPickerClickDetail = {
   unicode?: string
   emoji?: { unicode?: string }
+}
+
+type PickerPosition = {
+  left: number
+  top: number
+}
+
+interface PickerRect {
+  top: number
+  right: number
+  bottom: number
+}
+
+interface PickerSize {
+  width: number
+  height: number
+}
+
+export function fullReactionPickerPosition({
+  anchor,
+  dialog,
+  viewport,
+  margin = 8,
+  gap = 8,
+}: {
+  anchor: PickerRect
+  dialog: PickerSize
+  viewport: PickerSize
+  margin?: number
+  gap?: number
+}): PickerPosition {
+  const maxLeft = Math.max(margin, viewport.width - dialog.width - margin)
+  const maxTop = Math.max(margin, viewport.height - dialog.height - margin)
+  const left = Math.min(Math.max(anchor.right, margin), maxLeft)
+  const preferredAbove = anchor.top - dialog.height
+  const preferredBelow = anchor.bottom + gap
+  const top =
+    preferredAbove >= margin
+      ? preferredAbove
+      : preferredBelow + dialog.height <= viewport.height - margin
+        ? preferredBelow
+        : Math.min(Math.max(preferredAbove, margin), maxTop)
+
+  return { left, top }
 }
 
 /**
@@ -358,6 +408,10 @@ export function MessageEventRow({
   const hasMessageActions = !isState && !event.redacted && !pending && !failed
   const senderDisplay = members.displayName(event.sender)
   const canOpenThread = showThreadAction && onOpenThread !== undefined
+  const visibleReadReceipts = readReceipts.filter(
+    (receipt) =>
+      receipt.userId !== ownUserId && receipt.userId !== event.sender,
+  )
 
   return (
     <li
@@ -506,9 +560,9 @@ export function MessageEventRow({
             ))}
           </div>
         )}
-        {readReceipts.length > 0 && (
+        {visibleReadReceipts.length > 0 && (
           <p class="read-receipts">
-            {formatReadReceipts(readReceipts, members)}
+            {formatReadReceipts(visibleReadReceipts, members)}
           </p>
         )}
         {reactionPickerOpen && (
@@ -610,13 +664,25 @@ function ReactionPicker({
   onReact: (key: string) => void
 }) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
+  const fullPickerDialogRef = useRef<HTMLDivElement>(null)
   const fullPickerHostRef = useRef<HTMLDivElement>(null)
+  const moreButtonRef = useRef<HTMLButtonElement>(null)
   const [mode, setMode] = useState<'compact' | 'full'>('compact')
+  const [anchorRect, setAnchorRect] = useState<DOMRectReadOnly | null>(null)
+  const [pickerPosition, setPickerPosition] = useState<PickerPosition | null>(
+    null,
+  )
   const recentReactions = settings.recentReactions.value
   const quickReactions = [
     ...QUICK_REACTIONS,
     ...recentReactions.filter((key) => !QUICK_REACTIONS.includes(key)),
   ]
+
+  const openFullPicker = useCallback((anchor: HTMLElement | null) => {
+    setAnchorRect(anchor?.getBoundingClientRect() ?? null)
+    setPickerPosition(null)
+    setMode('full')
+  }, [])
 
   useShortcuts(
     {
@@ -625,7 +691,7 @@ function ReactionPicker({
           return
         }
         event.preventDefault()
-        setMode('full')
+        openFullPicker(moreButtonRef.current)
       },
       Escape: (event) => {
         event.preventDefault()
@@ -658,6 +724,69 @@ function ReactionPicker({
       inline: 'nearest',
     })
   }, [containerRef])
+
+  useLayoutEffect(() => {
+    if (mode !== 'full') {
+      return
+    }
+    const dialog = fullPickerDialogRef.current
+    if (dialog === null) {
+      return
+    }
+    document.body.append(dialog)
+    return () => dialog.remove()
+  }, [mode])
+
+  const positionFullPicker = useCallback(() => {
+    if (mode !== 'full') {
+      return
+    }
+    const dialog = fullPickerDialogRef.current
+    if (dialog === null) {
+      return
+    }
+    const dialogBox = dialog.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const fallbackAnchor = {
+      top: viewportHeight / 2,
+      right: viewportWidth / 2,
+      bottom: viewportHeight / 2,
+    }
+    const anchor = anchorRect ?? fallbackAnchor
+
+    setPickerPosition(
+      fullReactionPickerPosition({
+        anchor,
+        dialog: dialogBox,
+        viewport: { width: viewportWidth, height: viewportHeight },
+      }),
+    )
+  }, [anchorRect, mode])
+
+  useLayoutEffect(() => {
+    positionFullPicker()
+  }, [positionFullPicker])
+
+  useEffect(() => {
+    if (mode !== 'full') {
+      return
+    }
+    window.addEventListener('resize', positionFullPicker)
+    window.addEventListener('scroll', positionFullPicker, true)
+    return () => {
+      window.removeEventListener('resize', positionFullPicker)
+      window.removeEventListener('scroll', positionFullPicker, true)
+    }
+  }, [mode, positionFullPicker])
+
+  const setFullPickerDialogRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      fullPickerDialogRef.current = element
+      containerRef.current = element
+    },
+    [containerRef],
+  )
 
   useEffect(() => {
     if (mode !== 'full') {
@@ -713,9 +842,35 @@ function ReactionPicker({
     }
   }, [mode])
 
+  const fullPickerDialog =
+    mode === 'full' ? (
+      <div
+        ref={setFullPickerDialogRef}
+        class="reaction-full-picker"
+        style={
+          pickerPosition === null
+            ? undefined
+            : {
+                left: `${pickerPosition.left}px`,
+                top: `${pickerPosition.top}px`,
+              }
+        }
+        role="dialog"
+        aria-label="Emoji picker"
+      >
+        <div class="reaction-full-picker-head">
+          <span>Emoji picker</span>
+          <button type="button" class="ghost" onClick={onClose}>
+            Close picker
+          </button>
+        </div>
+        <div ref={fullPickerHostRef} class="reaction-full-picker-host" />
+      </div>
+    ) : null
+
   return (
     <div
-      ref={containerRef}
+      ref={mode === 'compact' ? containerRef : null}
       class="reaction-picker-shell"
       role="group"
       aria-label="React with"
@@ -728,30 +883,17 @@ function ReactionPicker({
         ))}
         {mode === 'compact' ? (
           <button
+            ref={moreButtonRef}
             type="button"
             class="reaction-more"
             aria-label="More reactions"
-            onClick={() => setMode('full')}
+            onClick={(event) => openFullPicker(event.currentTarget)}
           >
             +
           </button>
         ) : null}
       </div>
-      {mode === 'full' && (
-        <div
-          class="reaction-full-picker"
-          role="dialog"
-          aria-label="Emoji picker"
-        >
-          <div class="reaction-full-picker-head">
-            <span>Emoji picker</span>
-            <button type="button" class="ghost" onClick={onClose}>
-              Close picker
-            </button>
-          </div>
-          <div ref={fullPickerHostRef} class="reaction-full-picker-host" />
-        </div>
-      )}
+      {fullPickerDialog}
     </div>
   )
 }

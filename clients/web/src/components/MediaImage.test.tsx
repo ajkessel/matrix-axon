@@ -46,10 +46,10 @@ function serveBytes() {
   )
 }
 
-function renderImage(media: ParsedMedia) {
+function renderImage(media: ParsedMedia, previewUrl?: string | null) {
   return render(
     <ServicesContext.Provider value={testServices()}>
-      <MediaImage accountId={ACCOUNT} media={media} />
+      <MediaImage accountId={ACCOUNT} media={media} previewUrl={previewUrl} />
     </ServicesContext.Provider>,
   )
 }
@@ -79,6 +79,48 @@ describe('MediaImage', () => {
     const { container } = renderImage(image({ w: 100, h: 80 }))
     const box = container.querySelector('.media-image') as HTMLElement
     expect(box.style.width).toBe('100px')
+  })
+
+  it('caps a dimensionless image to the thumbnail box', () => {
+    serveBytes()
+    const { container } = renderImage(image({ w: undefined, h: undefined }))
+    const box = container.querySelector('.media-image') as HTMLElement
+    const thumbnail = container.querySelector('.media-thumbnail') as HTMLElement
+    expect(thumbnail.classList.contains('media-thumbnail-unsized')).toBe(true)
+    expect(box.style.width).toBe('320px')
+    expect(box.style.maxWidth).toBe('100%')
+    expect(box.style.maxHeight).toBe('320px')
+  })
+
+  it('caps an uploading local preview to the thumbnail box', () => {
+    const { container } = renderImage(
+      image({ url: null, w: undefined, h: undefined }),
+      'blob:preview',
+    )
+    const box = container.querySelector('.media-image') as HTMLElement
+    const thumbnail = container.querySelector('.media-thumbnail') as HTMLElement
+    const img = container.querySelector('img') as HTMLImageElement
+    expect(thumbnail.classList.contains('media-thumbnail-unsized')).toBe(true)
+    expect(box.style.width).toBe('320px')
+    expect(box.style.maxWidth).toBe('100%')
+    expect(box.style.maxHeight).toBe('320px')
+    expect(img.className).toBe('media-preview')
+    expect(img.src).toBe('blob:preview')
+  })
+
+  it('opens a dimensionless image in a lightbox outside the thumbnail frame', async () => {
+    serveBytes()
+    const { findByRole } = renderImage(image({ w: undefined, h: undefined }))
+    const img = await findByRole('img')
+    fireEvent.click(img)
+
+    const dialog = await findByRole('dialog')
+    expect(dialog.closest('.media-thumbnail')).toBeNull()
+    expect(dialog.closest('.media-image')).toBeNull()
+    expect(dialog.parentElement?.parentElement).toBe(document.body)
+    await waitFor(() =>
+      expect(document.body.querySelector('.lightbox-image img')).toBeTruthy(),
+    )
   })
 
   it('renders a blob-backed image once the download resolves', async () => {

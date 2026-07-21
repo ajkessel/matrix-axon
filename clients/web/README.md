@@ -195,7 +195,7 @@ can still slot in later behind the same seam.
 | `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec |
 | `pnpm test`                         | Vitest, single run                             |
 | `pnpm test:watch`                   | Vitest, watch mode                             |
-| `pnpm lint`                         | ESLint                                         |
+| `pnpm lint`                         | ESLint + Prettier check                        |
 | `pnpm format` / `pnpm format:check` | Prettier write / check                         |
 
 An optional live round-trip suite runs against a real server when

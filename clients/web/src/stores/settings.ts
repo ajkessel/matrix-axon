@@ -66,6 +66,8 @@ export interface SettingsV1 {
    * — the TUI hides them too.
    */
   showStateEvents: boolean
+  /** Whether redacted timeline events are hidden entirely. Off by default. */
+  hideRedactedEvents: boolean
   /** Whether room-list rows show a one-line latest-message preview. */
   previewRoom: boolean
   /** Timeline timestamp format (Settings → Timeline). */
@@ -90,7 +92,8 @@ const DEFAULTS: SettingsV1 = {
   roomFilter: 'all',
   sidebarCollapsed: false,
   showStateEvents: false,
-  previewRoom: false,
+  hideRedactedEvents: false,
+  previewRoom: true,
   timeFormat: '12h',
   messageComposerHeight: null,
   recentReactions: [],
@@ -174,6 +177,10 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.showStateEvents === 'boolean'
         ? v1.showStateEvents
         : DEFAULTS.showStateEvents,
+    hideRedactedEvents:
+      typeof v1.hideRedactedEvents === 'boolean'
+        ? v1.hideRedactedEvents
+        : DEFAULTS.hideRedactedEvents,
     previewRoom:
       typeof v1.previewRoom === 'boolean'
         ? v1.previewRoom
@@ -206,6 +213,7 @@ export interface SettingsStore {
   roomFilter: Signal<RoomFilter>
   sidebarCollapsed: Signal<boolean>
   showStateEvents: Signal<boolean>
+  hideRedactedEvents: Signal<boolean>
   previewRoom: Signal<boolean>
   timeFormat: Signal<TimeFormat>
   messageComposerHeight: Signal<number | null>
@@ -237,6 +245,7 @@ export function createSettingsStore(
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
   const sidebarCollapsed = signal<boolean>(initial.sidebarCollapsed)
   const showStateEvents = signal<boolean>(initial.showStateEvents)
+  const hideRedactedEvents = signal<boolean>(initial.hideRedactedEvents)
   const previewRoom = signal<boolean>(initial.previewRoom)
   const timeFormat = signal<TimeFormat>(initial.timeFormat)
   const messageComposerHeight = signal<number | null>(
@@ -255,6 +264,7 @@ export function createSettingsStore(
       roomFilter: roomFilter.value,
       sidebarCollapsed: sidebarCollapsed.value,
       showStateEvents: showStateEvents.value,
+      hideRedactedEvents: hideRedactedEvents.value,
       previewRoom: previewRoom.value,
       timeFormat: timeFormat.value,
       messageComposerHeight: messageComposerHeight.value,
@@ -277,6 +287,7 @@ export function createSettingsStore(
     roomFilter,
     sidebarCollapsed,
     showStateEvents,
+    hideRedactedEvents,
     previewRoom,
     timeFormat,
     messageComposerHeight,

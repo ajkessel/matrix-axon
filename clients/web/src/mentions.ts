@@ -1,4 +1,5 @@
 import { sanitizeOutgoingHtml } from './html/sanitize'
+import { matrixToLink, matrixToRoomReferenceLink } from './matrix-to'
 import { markdownToHtmlIfFormatted } from './markdown/markdown'
 import { replaceEmojiShortcodes, type EmojiEntry } from './emoji'
 import type { MemberDto, RoomDto } from './stores/room-list'
@@ -38,6 +39,7 @@ interface UserCandidate {
 interface RoomCandidate {
   accountId: string
   roomId: string
+  canonicalAlias: string | null
   token: string
   title: string
 }
@@ -174,6 +176,7 @@ function roomCandidates(
     result.push({
       accountId: room.account_id,
       roomId: room.room_id,
+      canonicalAlias: room.canonical_alias ?? null,
       token,
       title,
     })
@@ -271,7 +274,7 @@ function findLinkMatches(
     const match =
       char === '@'
         ? matchUser(text, index, users)
-        : matchRoom(text, index, rooms, context.accountId)
+        : matchRoom(text, index, rooms)
     if (match === null) {
       index += 1
       continue
@@ -315,7 +318,6 @@ function matchRoom(
   text: string,
   start: number,
   rooms: readonly RoomCandidate[],
-  accountId: string,
 ): LinkMatch | null {
   for (const room of rooms) {
     for (const token of roomMatchTokens(room)) {
@@ -338,7 +340,7 @@ function matchRoom(
       return {
         start,
         end,
-        html: `<a class="room-pill" href="/${escapeAttr(accountId)}/rooms/${escapeAttr(encodeURIComponent(unique.roomId))}">${escapeText(text.slice(start, end))}</a>`,
+        html: `<a class="room-pill" href="${escapeAttr(matrixToRoomReferenceLink(unique.roomId, unique.canonicalAlias))}">${escapeText(text.slice(start, end))}</a>`,
       }
     }
   }
@@ -411,10 +413,6 @@ function equalsIgnoreCase(left: string, right: string): boolean {
 
 function trimTrailingPunctuation(token: string): string {
   return token.replace(/[.,!?;]+$/, '')
-}
-
-function matrixToLink(mxid: string): string {
-  return `https://matrix.to/#/${encodeURIComponent(mxid)}`
 }
 
 function escapeText(text: string): string {

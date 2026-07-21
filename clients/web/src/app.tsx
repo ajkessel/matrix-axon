@@ -22,6 +22,7 @@ import { RoomPage } from './pages/RoomPage'
 import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
 import { perfMark, perfMarkFrames } from './perf'
+import { setupInstallPromptCapture } from './install-prompt'
 import {
   createServices,
   ServicesContext,
@@ -54,6 +55,7 @@ export function App({ services }: { services?: AppServices }) {
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
   useVisualViewportShell()
   useStandaloneKeyboardAccessoryInset()
+  useInstallPromptCapture()
 
   // Hold the live socket open only while signed in; sign-out tears it down
   // (M-W6, ADR 0061). Reconnect/backoff on unexpected drops arrives in step 3.
@@ -76,6 +78,10 @@ export function App({ services }: { services?: AppServices }) {
       )}
     </ServicesContext.Provider>
   )
+}
+
+function useInstallPromptCapture(): void {
+  useEffect(() => setupInstallPromptCapture(window), [])
 }
 
 function useVisualViewportShell(): void {
@@ -294,6 +300,7 @@ function ShellChrome() {
     () => ({
       jumpAction,
       setJumpAction,
+      openUnreadThreads: () => setUnreadThreadsOpen(true),
       roomTitle: roomChrome.title,
       roomInfoAction: roomChrome.action,
       setRoomChrome,

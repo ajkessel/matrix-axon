@@ -90,50 +90,60 @@ export function MediaImage({
         width: `${thumbnailWidth(media.w!, media.h!)}px`,
         maxWidth: '100%',
       }
-    : undefined
+    : {
+        width: `${THUMBNAIL_MAX}px`,
+        maxWidth: '100%',
+        maxHeight: `${THUMBNAIL_MAX}px`,
+      }
 
   const alt = media.caption ?? media.filename
   const canOpen =
     state.status === 'ready' && !decodeFailed && media.url !== null
 
-  return (
+  const figure = (
     <figure class="media-figure">
-      <div
-        ref={ref}
-        class={`media-image${hasDimensions ? '' : ' media-image-unsized'}`}
-        style={boxStyle}
-      >
-        {previewUrl !== undefined && previewUrl !== null ? (
-          // Still uploading: the local file, not the proxy. No open/lightbox —
-          // there is nothing on the server to open yet.
-          <img class="media-preview" src={previewUrl} alt={alt} />
-        ) : decodeFailed ? (
-          <p class="muted placeholder">
-            Encrypted media — server could not decrypt
-          </p>
-        ) : state.status === 'error' ? (
-          <p class="muted placeholder">Could not load image</p>
-        ) : state.status === 'ready' && state.url !== undefined ? (
-          <button
-            type="button"
-            class="media-open"
-            aria-label={`Open ${media.kind}: ${media.filename}`}
-            disabled={!canOpen}
-            onClick={() => setLightboxOpen(true)}
-          >
-            <img
-              src={state.url}
-              alt={alt}
-              onError={() => setDecodeFailed(true)}
-            />
-          </button>
-        ) : (
-          <div class="media-skeleton" aria-hidden="true" />
-        )}
+      <div ref={ref} class="media-image" style={boxStyle}>
+        <div
+          class={`media-thumbnail${hasDimensions ? '' : ' media-thumbnail-unsized'}`}
+        >
+          {previewUrl !== undefined && previewUrl !== null ? (
+            // Still uploading: the local file, not the proxy. No open/lightbox —
+            // there is nothing on the server to open yet.
+            <img class="media-preview" src={previewUrl} alt={alt} />
+          ) : decodeFailed ? (
+            <p class="muted placeholder">
+              Encrypted media — server could not decrypt
+            </p>
+          ) : state.status === 'error' ? (
+            <p class="muted placeholder">Could not load image</p>
+          ) : state.status === 'ready' && state.url !== undefined ? (
+            <button
+              type="button"
+              class="media-open"
+              aria-label={`Open ${media.kind}: ${media.filename}`}
+              disabled={!canOpen}
+              onClick={() => setLightboxOpen(true)}
+            >
+              <img
+                src={state.url}
+                alt={alt}
+                onError={() => setDecodeFailed(true)}
+              />
+            </button>
+          ) : (
+            <div class="media-skeleton" aria-hidden="true" />
+          )}
+        </div>
       </div>
       {media.caption !== null && (
         <figcaption class="media-caption">{media.caption}</figcaption>
       )}
+    </figure>
+  )
+
+  return (
+    <>
+      {figure}
       {lightboxOpen && media.url !== null && (
         <Lightbox
           accountId={accountId}
@@ -143,6 +153,6 @@ export function MediaImage({
           onClose={() => setLightboxOpen(false)}
         />
       )}
-    </figure>
+    </>
   )
 }

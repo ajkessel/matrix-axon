@@ -114,6 +114,28 @@ describe('parseMedia', () => {
     expect(file).toMatchObject({ kind: 'file', filename: 'report.pdf' })
   })
 
+  it('uses an Element-X PDF body as the caption when filename is distinct', () => {
+    const media = parseMedia(
+      event({
+        body: 'Seems bad',
+        file: { url: 'mxc://bostoncoop.net/pByvspuicZsxIJPdDOlMzsyt' },
+        filename: 'Firefox.pdf',
+        info: { mimetype: 'application/pdf', size: 2077976 },
+        msgtype: 'm.file',
+      }),
+    )
+
+    expect(media).toMatchObject({
+      kind: 'file',
+      url: 'mxc://bostoncoop.net/pByvspuicZsxIJPdDOlMzsyt',
+      filename: 'Firefox.pdf',
+      caption: 'Seems bad',
+      encrypted: true,
+      mimetype: 'application/pdf',
+      size: 2077976,
+    })
+  })
+
   it('reads a sender-embedded thumbnail url', () => {
     const media = parseMedia(
       event({

@@ -165,7 +165,9 @@ describe('App', () => {
   })
 
   it('reserves the standalone iOS keyboard accessory strip while editing', async () => {
-    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('iPhone')
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+    )
     vi.spyOn(window, 'matchMedia').mockImplementation(
       (query: string) =>
         ({
@@ -460,7 +462,9 @@ describe('shell keyboard shortcuts (ADR 0063)', () => {
   })
 
   it('renders shortcut help with macOS modifier labels on Apple platforms', async () => {
-    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel')
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    )
     const { findByRole } = render(<App services={testServices()} />)
 
     fireEvent.keyDown(document.body, { key: '?', shiftKey: true })

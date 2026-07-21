@@ -1,11 +1,22 @@
 export const SLASH_COMMAND = {
   help: '/help',
+  html: '/html',
   jump: '/jump',
+  literal: '/literal',
+  pin: '/pin',
+  rainbow: '/rainbow',
   react: '/react',
+  refresh: '/refresh',
   reply: '/reply',
+  rooms: '/rooms',
   room: '/room',
   search: '/search',
+  shortcuts: '/shortcuts',
+  sort: '/sort',
+  spoiler: '/spoiler',
   thread: '/thread',
+  unreadthreads: '/unreadthreads',
+  unpin: '/unpin',
   whereami: '/whereami',
 } as const
 
@@ -14,13 +25,35 @@ export type SlashCommandName =
 
 export interface SlashCommandSpec {
   name: SlashCommandName
+  aliases?: readonly string[]
   usage: string
   description: string
 }
 
 export const SLASH_COMMANDS: SlashCommandSpec[] = [
   {
+    name: SLASH_COMMAND.html,
+    usage: '/html <html>',
+    description: 'Send raw HTML as a formatted message',
+  },
+  {
+    name: SLASH_COMMAND.literal,
+    usage: '/literal <text>',
+    description: 'Send plaintext without Markdown formatting',
+  },
+  {
+    name: SLASH_COMMAND.rainbow,
+    usage: '/rainbow <text>',
+    description: 'Send colored rainbow text',
+  },
+  {
+    name: SLASH_COMMAND.spoiler,
+    usage: '/spoiler [reason |] <text>',
+    description: 'Send hidden spoiler text',
+  },
+  {
     name: SLASH_COMMAND.react,
+    aliases: ['/+'],
     usage: '/react [emoji]',
     description: 'React to the latest visible message',
   },
@@ -36,8 +69,36 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   },
   {
     name: SLASH_COMMAND.room,
+    aliases: ['/switch'],
     usage: '/room <room>',
     description: 'Switch rooms by name, alias, ID, or number',
+  },
+  {
+    name: SLASH_COMMAND.pin,
+    usage: '/pin [room]',
+    description: 'Pin a room to the top of the list',
+  },
+  {
+    name: SLASH_COMMAND.unpin,
+    usage: '/unpin [room]',
+    description: 'Unpin a room',
+  },
+  {
+    name: SLASH_COMMAND.sort,
+    usage: '/sort <recent|oldest|az|za>',
+    description: 'Set room-list sort order',
+  },
+  {
+    name: SLASH_COMMAND.refresh,
+    aliases: ['/rooms'],
+    usage: '/refresh',
+    description: 'Refresh rooms',
+  },
+  {
+    name: SLASH_COMMAND.unreadthreads,
+    aliases: ['/ut'],
+    usage: '/unreadthreads',
+    description: 'Open unread threads',
   },
   {
     name: SLASH_COMMAND.search,
@@ -56,10 +117,30 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   },
   {
     name: SLASH_COMMAND.help,
-    usage: '/help',
+    aliases: ['/?'],
+    usage: '/help, /?',
     description: 'Show this list',
   },
+  {
+    name: SLASH_COMMAND.shortcuts,
+    usage: '/shortcuts',
+    description: 'Show keyboard shortcuts',
+  },
 ]
+
+export function slashCommandSpecForInput(
+  input: string,
+): SlashCommandSpec | undefined {
+  return SLASH_COMMANDS.find(
+    (command) => command.name === input || command.aliases?.includes(input),
+  )
+}
+
+export function canonicalSlashCommandName(
+  input: string,
+): SlashCommandName | null {
+  return slashCommandSpecForInput(input)?.name ?? null
+}
 
 /** The usage line for a command, for the error a misused command answers with. */
 export function slashCommandUsage(name: SlashCommandName): string {

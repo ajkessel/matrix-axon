@@ -649,6 +649,31 @@ describe('Composer slash command autocomplete', () => {
     expect(queryByRole('listbox', { name: 'Emoji matches' })).toBeNull()
   })
 
+  it('offers emoji shortcode completion for /+ reaction aliases', () => {
+    const { textarea, getByRole, queryByRole } = renderComposer({
+      onCommand: vi.fn(),
+      emojiCompletions: (query) =>
+        query === 'pa'
+          ? [
+              {
+                value: ':partying:',
+                label: '🥳 :partying:',
+                description: 'partying face',
+              },
+            ]
+          : [],
+    })
+
+    fireEvent.input(textarea, { target: { value: '/+ pa' } })
+
+    const menu = getByRole('listbox', { name: 'Emoji matches' })
+    expect(menu.textContent).toContain(':partying:')
+    fireEvent.keyDown(textarea, { key: 'Tab' })
+
+    expect(textarea.value).toBe('/+ :partying: ')
+    expect(queryByRole('listbox', { name: 'Emoji matches' })).toBeNull()
+  })
+
   it('submits an exact /react emoji shortcode without requiring completion first', () => {
     const onCommand = vi.fn(() => true)
     const { textarea } = renderComposer({

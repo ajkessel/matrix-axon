@@ -28,6 +28,9 @@ md.use({
   },
 })
 
+const BLOCK_END =
+  /<\/(?:blockquote|br|dd|div|dl|dt|h[1-6]|li|ol|p|pre|table|td|th|tr|ul)>/gi
+
 /** Block-level tokens that plain prose produces. */
 const PLAIN_BLOCKS = new Set(['paragraph', 'space'])
 /** Inline tokens that plain prose produces (`br` = trailing-space break). */
@@ -61,4 +64,12 @@ export function markdownToHtmlIfFormatted(text: string): string | null {
   // `[x](javascript:…)` href through live. Receivers must sanitize anyway;
   // this keeps our own output honest.
   return sanitizeOutgoingHtml((md.parser(tokens) as string).trim())
+}
+
+/** Convert Markdown input to compact, display-only text for one-line previews. */
+export function markdownToPlainText(text: string): string {
+  const html = md.parser(md.lexer(text)) as string
+  const separated = html.replace(BLOCK_END, '$& ')
+  const parsed = new DOMParser().parseFromString(separated, 'text/html')
+  return (parsed.body.textContent ?? '').replace(/\s+/g, ' ').trim()
 }

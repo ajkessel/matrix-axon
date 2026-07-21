@@ -3,6 +3,7 @@ import { apiErrorMessage } from '../api/client'
 import { useServices } from '../services'
 import { useShortcuts } from '../shortcuts'
 import type { EventDto } from '../stores/timeline'
+import { BodyPortal } from './BodyPortal'
 import { FormattedBody } from './FormattedBody'
 import { useModalFocus } from './use-modal-focus'
 
@@ -68,43 +69,45 @@ export function EditHistory({
   }, [api, accountId, eventId])
 
   return (
-    <div
-      ref={containerRef}
-      class="overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Edit history"
-    >
-      <div class="overlay-panel">
-        <div class="overlay-head">
-          <h2>Edit history</h2>
-          <button type="button" class="ghost" onClick={onClose}>
-            Close
-          </button>
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit history"
+      >
+        <div class="overlay-panel">
+          <div class="overlay-head">
+            <h2>Edit history</h2>
+            <button type="button" class="ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
+          {error !== null && <p class="muted">Could not load edits: {error}</p>}
+          {edits === null && error === null && <p class="muted">Loading…</p>}
+          {edits !== null && edits.length === 0 && (
+            <p class="muted">No edit events stored for this message.</p>
+          )}
+          {edits !== null && edits.length > 0 && (
+            <ol class="edit-trail">
+              {edits.map((edit) => (
+                <li key={edit.event_id}>
+                  <span class="muted">
+                    {new Date(edit.origin_ts).toLocaleString()}
+                  </span>{' '}
+                  <FormattedBody
+                    accountId={accountId}
+                    body={newContentBody(edit) ?? edit.body}
+                    content={newContent(edit)}
+                  />
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
-        {error !== null && <p class="muted">Could not load edits: {error}</p>}
-        {edits === null && error === null && <p class="muted">Loading…</p>}
-        {edits !== null && edits.length === 0 && (
-          <p class="muted">No edit events stored for this message.</p>
-        )}
-        {edits !== null && edits.length > 0 && (
-          <ol class="edit-trail">
-            {edits.map((edit) => (
-              <li key={edit.event_id}>
-                <span class="muted">
-                  {new Date(edit.origin_ts).toLocaleString()}
-                </span>{' '}
-                <FormattedBody
-                  accountId={accountId}
-                  body={newContentBody(edit) ?? edit.body}
-                  content={newContent(edit)}
-                />
-              </li>
-            ))}
-          </ol>
-        )}
       </div>
-    </div>
+    </BodyPortal>
   )
 }
 

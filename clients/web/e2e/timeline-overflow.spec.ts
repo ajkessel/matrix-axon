@@ -195,3 +195,46 @@ test('formatted reply anchors stay compact on tablet width', async ({
   expect(metrics.paragraphMarginBottom).toBe('0px')
   expect(metrics.quoteHeight).toBeLessThan(40)
 })
+
+test('reply-context links use the same no-underline style as message links', async ({
+  page,
+}) => {
+  await signIn(page)
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await page.route('**/timeline*', (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          events: [
+            message(
+              '$target',
+              100,
+              'https://example.org/docs',
+              '<p><a href="https://example.org/docs">https://example.org/docs</a></p>',
+            ),
+            {
+              ...message('$reply', 200, 'reply body'),
+              relates_to: { 'm.in_reply_to': { event_id: '$target' } },
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+    }),
+  )
+  await page.goto(`/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`)
+  await expect(page.getByText('reply body')).toBeVisible()
+
+  const styles = await page.evaluate(() => {
+    const replyLink = document.querySelector<HTMLElement>(
+      '.reply-context a[href="https://example.org/docs"]',
+    )!
+    return {
+      textDecorationLine: getComputedStyle(replyLink).textDecorationLine,
+      fontWeight: getComputedStyle(replyLink).fontWeight,
+    }
+  })
+
+  expect(styles.textDecorationLine).toBe('none')
+  expect(Number(styles.fontWeight)).toBeGreaterThanOrEqual(500)
+})

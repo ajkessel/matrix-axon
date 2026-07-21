@@ -45,6 +45,21 @@ describe('EditHistory', () => {
     expect(await findByRole('dialog', { name: 'Edit history' })).toBeTruthy()
   })
 
+  it('portals outside the message row so timeline containment cannot trap it', async () => {
+    const { findByRole, container } = render(
+      <ServicesContext.Provider value={testServices()}>
+        <li class="event-row" data-event-id="$1">
+          <EditHistory accountId={ACCOUNT} eventId="$1" onClose={vi.fn()} />
+        </li>
+      </ServicesContext.Provider>,
+    )
+
+    const dialog = await findByRole('dialog', { name: 'Edit history' })
+    expect(dialog.closest('.event-row')).toBeNull()
+    expect(container.querySelector('.overlay')).toBeNull()
+    expect(dialog.parentElement?.parentElement).toBe(document.body)
+  })
+
   it('closes on Escape (ADR 0063) and marks the event handled', async () => {
     const { onClose, findByRole } = renderHistory()
     await findByRole('dialog', { name: 'Edit history' })

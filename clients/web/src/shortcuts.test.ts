@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   chordOf,
+  currentPlatform,
   hint,
   isTypingTarget,
   keyLabel,
@@ -8,6 +9,11 @@ import {
   shortcutLabel,
   SHORTCUTS,
 } from './shortcuts'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 /** A keydown that only carries what `chordOf` reads. */
 function key(init: KeyboardEventInit & { key: string }): KeyboardEvent {
@@ -115,5 +121,16 @@ describe('hint', () => {
     expect(keyLabel(KEYS.showHelp, 'iPhone')).toBe('? or ⌘-/')
     expect(keyLabel(KEYS.search, 'MacIntel')).toBe('/ or ⌘-G')
     expect(shortcutLabel(KEYS.toggleSidebar.label, 'Win32')).toBe('Ctrl-B')
+  })
+
+  it('prefers User-Agent Client Hints when available', () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64)',
+      userAgentData: { platform: 'macOS' },
+    })
+
+    expect(currentPlatform()).toBe('macOS')
+    expect(shortcutLabel(KEYS.toggleSidebar.label)).toBe('⌘-B')
   })
 })

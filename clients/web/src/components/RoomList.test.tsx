@@ -47,6 +47,42 @@ const OTHER = makeRoom({
   name: 'Work',
 })
 
+function makeAccount(
+  accountId: string,
+  userId: string,
+): Record<string, unknown> {
+  return {
+    account_id: accountId,
+    user_id: userId,
+    homeserver_url: 'https://matrix.example.org',
+    state: 'active',
+    device_id: 'AXONWEB',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  }
+}
+
+function activeAccountsForRooms(rooms: unknown[]): Record<string, unknown>[] {
+  const byId = new Map<string, string>()
+  for (const room of rooms) {
+    if (
+      typeof room === 'object' &&
+      room !== null &&
+      typeof (room as { account_id?: unknown }).account_id === 'string' &&
+      typeof (room as { account_user_id?: unknown }).account_user_id ===
+        'string'
+    ) {
+      byId.set(
+        (room as { account_id: string }).account_id,
+        (room as { account_user_id: string }).account_user_id,
+      )
+    }
+  }
+  return [...byId.entries()].map(([accountId, userId]) =>
+    makeAccount(accountId, userId),
+  )
+}
+
 const server = setupServer()
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -58,9 +94,17 @@ afterAll(() => server.close())
 function renderPage(
   rooms: unknown[] = [OPS, LOUNGE, DM, OTHER],
   configure?: (services: ReturnType<typeof testServices>) => void,
-  readMarkers: Record<string, unknown> = {},
+  options: {
+    activeAccounts?: unknown[]
+    readMarkers?: Record<string, unknown>
+  } = {},
 ) {
+  const activeAccounts = options.activeAccounts ?? activeAccountsForRooms(rooms)
+  const readMarkers = options.readMarkers ?? {}
   server.use(
+    http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
+      HttpResponse.json({ data: activeAccounts }),
+    ),
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({ data: rooms }),
     ),
@@ -336,10 +380,12 @@ describe('RoomList', () => {
       last_event_id: '$ops-new',
     }
     const { findByText, getByRole } = renderPage([freshOps], undefined, {
-      '!ops:hs': {
-        value: { event_id: '$ops-read', origin_ts: 100 },
-        device_id: '00000000-0000-4000-8000-000000000001',
-        updated_at: '2026-07-20T12:00:00Z',
+      readMarkers: {
+        '!ops:hs': {
+          value: { event_id: '$ops-read', origin_ts: 100 },
+          device_id: '00000000-0000-4000-8000-000000000001',
+          updated_at: '2026-07-20T12:00:00Z',
+        },
       },
     })
     await findByText('Ops')
@@ -393,6 +439,7 @@ describe('RoomList', () => {
     const { findByText, getByLabelText, queryByText } = renderPage()
     await findByText('Work')
 
+    await waitFor(() => expect(getByLabelText('Account')).toBeTruthy())
     fireEvent.change(getByLabelText('Account'), {
       target: { value: OTHER_ACCOUNT },
     })
@@ -501,6 +548,37 @@ describe('RoomList keyboard shortcuts (ADR 0063)', () => {
 
     expect(services.composerFocus.value).toBe(before + 1)
   })
+
+  it('Enter on a focused room row asks the new room composer for focus', async () => {
+    const { services, findByText } = renderPage()
+    const rowText = await findByText('Ops')
+    const row = rowText.closest<HTMLAnchorElement>('a.room-link')!
+    const before = services.composerFocus.value
+
+    row.focus()
+    fireEvent.keyDown(row, { key: 'Enter' })
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+    )
+  })
+
+  it('Enter in the name filter opens the only matching room and asks for composer focus', async () => {
+    const { services, findByText, getByLabelText } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    const before = services.composerFocus.value
+
+    fireEvent.input(filter, { target: { value: 'lou' } })
+    expect(await findByText('#lounge:hs')).toBeTruthy()
+    fireEvent.keyDown(filter, { key: 'Enter' })
+
+    await waitFor(() => expect(services.composerFocus.value).toBe(before + 1))
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent('!lounge:hs')}`,
+    )
+  })
 })
 
 describe('RoomList account labels', () => {
@@ -508,9 +586,9 @@ describe('RoomList account labels', () => {
     const { findByText, container, getByLabelText } = renderPage()
     await findByText('Ops')
 
-    const metas = [...container.querySelectorAll('.room-meta')].map(
-      (el) => el.textContent ?? '',
-    )
+    const metas = [
+      ...container.querySelectorAll('.room-meta, .room-title-meta'),
+    ].map((el) => el.textContent ?? '')
     expect(metas.some((m) => m.startsWith('@me ·'))).toBe(true)
     expect(metas.some((m) => m.startsWith('@work ·'))).toBe(true)
     expect(metas.some((m) => m.includes('example.org'))).toBe(false)
@@ -526,10 +604,46 @@ describe('RoomList account labels', () => {
     const { findByText, container } = renderPage([OPS, LOUNGE])
     await findByText('Ops')
 
-    const metas = [...container.querySelectorAll('.room-meta')].map(
-      (el) => el.textContent ?? '',
-    )
+    const metas = [
+      ...container.querySelectorAll('.room-meta, .room-title-meta'),
+    ].map((el) => el.textContent ?? '')
     expect(metas.every((m) => !m.includes('@me'))).toBe(true)
+  })
+
+  it('omits the account selector when stored rooms belong to one active account', async () => {
+    const { findByText, queryByLabelText, queryByText } = renderPage(
+      [OPS, OTHER],
+      undefined,
+      { activeAccounts: [makeAccount(ACCOUNT, '@me:example.org')] },
+    )
+    await findByText('Ops')
+
+    await waitFor(() => {
+      expect(queryByLabelText('Account')).toBeNull()
+      expect(queryByText('Work')).toBeNull()
+    })
+  })
+
+  it('hides rooms and account filters for logged-out accounts', async () => {
+    const { findByText, queryByLabelText, queryByText } = renderPage(
+      [OPS, OTHER],
+      undefined,
+      {
+        activeAccounts: [
+          makeAccount(ACCOUNT, '@me:example.org'),
+          {
+            ...makeAccount(OTHER_ACCOUNT, '@work:example.org'),
+            state: 'deactivated',
+          },
+        ],
+      },
+    )
+    await findByText('Ops')
+
+    await waitFor(() => {
+      expect(queryByLabelText('Account')).toBeNull()
+      expect(queryByText('Work')).toBeNull()
+    })
   })
 
   it('gives the room name its own ellipsizable box', async () => {
@@ -541,7 +655,7 @@ describe('RoomList account labels', () => {
     expect(names.map((el) => el.textContent)).toContain('Ops')
   })
 
-  it('shows latest-message previews when enabled', async () => {
+  it('shows stripped latest-message previews by default', async () => {
     const previewRoom = {
       ...OPS,
       last_event_id: '$latest',
@@ -561,10 +675,10 @@ describe('RoomList account labels', () => {
                   sender: '@bob:example.org',
                   origin_ts: previewRoom.last_activity_ts,
                   type: 'm.room.message',
-                  body: 'this is the start of the message and more text',
+                  body: '**this** is the [start](https://example.org) of the message',
                   content: {
                     msgtype: 'm.text',
-                    body: 'this is the start of the message and more text',
+                    body: '**this** is the [start](https://example.org) of the message',
                   },
                   redacted: false,
                   edited: false,
@@ -576,12 +690,10 @@ describe('RoomList account labels', () => {
           }),
       ),
     )
-    const { findByText, container } = renderPage([previewRoom], (services) => {
-      services.settings.previewRoom.value = true
-    })
+    const { findByText, container } = renderPage([previewRoom])
 
     expect(
-      await findByText('Bob: this is the start of the message and more text'),
+      await findByText('Bob: this is the start of the message'),
     ).toBeTruthy()
     expect(container.querySelector('.room-title-meta')?.textContent).toBe('1m')
     expect(container.querySelector('.room-meta')).toBeNull()
@@ -759,8 +871,9 @@ describe('RoomList selection and shortcut hints', () => {
     const group = container.querySelector('.filter-group')!
     expect(group.getAttribute('aria-keyshortcuts')).toBe('Control+Shift+Y')
     const dms = [...group.querySelectorAll('button')].find(
-      (b) => b.textContent === 'DMs',
+      (b) => b.textContent === 'DM',
     )!
+    expect(dms.getAttribute('aria-label')).toBe('DMs')
     expect(dms.getAttribute('title')).toBe(
       'Show DMs — cycle filters (Ctrl-Shift-Y)',
     )

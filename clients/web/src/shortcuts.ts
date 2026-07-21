@@ -180,12 +180,27 @@ export const KEYS = {
   },
 } as const
 
-function currentPlatform(): string {
-  return navigator.platform
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: {
+    platform?: string
+  }
 }
 
-export function isApplePlatform(platform = currentPlatform()): boolean {
-  return /\b(Mac|iPhone|iPad|iPod)/i.test(platform)
+export function currentPlatform(): string {
+  return (
+    (navigator as NavigatorWithUserAgentData).userAgentData?.platform ??
+    navigator.userAgent
+  )
+}
+
+export function isApplePlatform(
+  platform = currentPlatform(),
+  touchPoints = navigator.maxTouchPoints ?? 0,
+): boolean {
+  return (
+    /\b(Mac|iPhone|iPad|iPod|macOS|iOS)/i.test(platform) ||
+    (/Macintosh/i.test(platform) && touchPoints > 1)
+  )
 }
 
 export function shortcutLabel(

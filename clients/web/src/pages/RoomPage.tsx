@@ -24,6 +24,13 @@ import {
 } from '../components/MessageEventRow'
 import { RoomInfoPanel } from '../components/RoomInfoPanel'
 import { ThreadPanel } from '../components/ThreadPanel'
+import {
+  literalMessage,
+  rainbowMessage,
+  rawHtmlMessage,
+  spoilerMessage,
+  type FormattedMessage,
+} from '../html/send-format'
 import { useMessageComposer } from '../components/use-message-composer'
 import { useModalFocus } from '../components/use-modal-focus'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
@@ -33,14 +40,23 @@ import { withSearchParam } from '../search-tokens'
 import { useServices } from '../services'
 import { useShellActions } from '../shell-actions'
 import { SHOW_HELP_EVENT, useShortcuts } from '../shortcuts'
-import { SLASH_COMMAND, slashCommandUsage } from '../slash-commands'
+import {
+  SLASH_COMMAND,
+  canonicalSlashCommandName,
+  slashCommandUsage,
+  type SlashCommandName,
+} from '../slash-commands'
 import { createMembersStore, type MembersStore } from '../stores/members'
 import { roomKey, roomTitle } from '../stores/room-list'
 import {
   resolveRoomTarget,
   roomCommandSuggestions,
 } from '../stores/room-command'
-import type { SettingsStore } from '../stores/settings'
+import {
+  ROOM_SORTS,
+  type RoomSort,
+  type SettingsStore,
+} from '../stores/settings'
 import type { EphemeralStore } from '../stores/ephemeral'
 import {
   createThreadsStore,
@@ -169,13 +185,14 @@ export function RoomPage() {
   )
   // A persisted preference, not per-room view state (Settings → Timeline).
   const showState = settings.showStateEvents.value
+  const hideRedacted = settings.hideRedactedEvents.value
   const [reactionPickerEventId, setReactionPickerEventId] = useState<
     string | null
   >(null)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
-  const { setJumpAction, setRoomChrome } = useShellActions()
+  const { openUnreadThreads, setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
   const swipeStart = useRef<SwipeStart | null>(null)
   const swipeLocked = useRef(false)
@@ -495,6 +512,9 @@ export function RoomPage() {
     if (!settings.developerMode.value && isUnsupportedBodylessEvent(event)) {
       return false
     }
+    if (hideRedacted && event.redacted) {
+      return false
+    }
     return showState || !isStateEvent(event)
   }
   const visible = timeline.events.value.filter(isVisibleTimelineEvent)
@@ -515,8 +535,32 @@ export function RoomPage() {
       timeline.error.value = `unknown command: ${body.split(/\s+/, 1)[0]}`
       return false
     }
-    if (command.kind === 'help') {
+    if (command.kind === 'help' || command.kind === 'shortcuts') {
       window.dispatchEvent(new Event(SHOW_HELP_EVENT))
+      return true
+    }
+    if (command.kind === 'usage') {
+      timeline.error.value = `usage: ${slashCommandUsage(command.name)}`
+      return false
+    }
+    if (command.kind === 'formatted-message') {
+      sendCommandMessage(command.message)
+      return true
+    }
+    if (command.kind === 'refresh') {
+      inBackground(rooms.refresh())
+      return true
+    }
+    if (command.kind === 'unreadthreads') {
+      openUnreadThreads()
+      return true
+    }
+    if (command.kind === 'sort') {
+      if (command.value === null) {
+        timeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.sort)}`
+        return false
+      }
+      settings.roomSort.value = command.value
       return true
     }
     if (command.kind === 'search') {
@@ -572,6 +616,33 @@ export function RoomPage() {
       })
       return true
     }
+    if (command.kind === 'pin' || command.kind === 'unpin') {
+      if (command.target === null) {
+        const key = roomKey({ account_id: accountId, room_id: roomId })
+        if (command.kind === 'pin') {
+          settings.pinRoom(key)
+        } else {
+          settings.unpinRoom(key)
+        }
+        return true
+      }
+      const targetRoom = resolveCommandRoom(accountRooms, command.target)
+      if (targetRoom === null) {
+        timeline.error.value = `room not found: ${command.target}`
+        return false
+      }
+      if (typeof targetRoom === 'string') {
+        timeline.error.value = targetRoom
+        return false
+      }
+      const key = roomKey(targetRoom)
+      if (command.kind === 'pin') {
+        settings.pinRoom(key)
+      } else {
+        settings.unpinRoom(key)
+      }
+      return true
+    }
     const target = latestCommandTarget()
     if (target === null) {
       timeline.error.value = 'no message available for command'
@@ -609,6 +680,16 @@ export function RoomPage() {
     settings.recordRecentReaction(key)
     void timeline.toggleReaction(target, key)
     return true
+  }
+
+  const sendCommandMessage = (message: FormattedMessage) => {
+    const current = action
+    setAction(null)
+    void timeline.send(message.body, {
+      replyTo: current?.kind === 'reply' ? current.event.event_id : undefined,
+      senderId: ownUserId ?? undefined,
+      formattedBody: message.formattedBody,
+    })
   }
 
   const setThreadParam = useCallback(
@@ -1513,54 +1594,133 @@ function eventPreview(event: EventDto | undefined): string | null {
 }
 
 type ComposerCommand =
+  | { kind: 'formatted-message'; message: FormattedMessage }
   | { kind: 'help' }
   | { kind: 'jump'; date: string | null }
+  | { kind: 'pin'; target: string | null }
   | { kind: 'react'; reaction: string | null }
+  | { kind: 'refresh' }
   | { kind: 'reply'; body: string | null }
   | { kind: 'room'; target: string }
   | { kind: 'search'; args: string }
+  | { kind: 'shortcuts' }
+  | { kind: 'sort'; value: RoomSort | null }
   | { kind: 'thread' }
+  | { kind: 'unpin'; target: string | null }
+  | { kind: 'unreadthreads' }
+  | { kind: 'usage'; name: SlashCommandName }
   | { kind: 'whereami' }
 
 function parseComposerCommand(body: string): ComposerCommand | null {
   const trimmed = body.trim()
   const [name] = trimmed.split(/\s+/, 1)
-  if (name === SLASH_COMMAND.help) {
+  const commandName = canonicalSlashCommandName(name)
+  if (commandName === null) {
+    return null
+  }
+  const args = trimmed.slice(name.length).trim()
+  if (commandName === SLASH_COMMAND.help) {
     return { kind: 'help' }
   }
-  if (name === SLASH_COMMAND.jump) {
-    const date = trimmed.slice(SLASH_COMMAND.jump.length).trim()
-    return { kind: 'jump', date: date === '' ? null : date }
+  if (commandName === SLASH_COMMAND.shortcuts) {
+    return { kind: 'shortcuts' }
   }
-  if (name === SLASH_COMMAND.react) {
-    const reaction = trimmed.slice(SLASH_COMMAND.react.length).trim()
-    return { kind: 'react', reaction: reaction === '' ? null : reaction }
+  if (commandName === SLASH_COMMAND.html) {
+    return args === ''
+      ? { kind: 'usage', name: commandName }
+      : { kind: 'formatted-message', message: rawHtmlMessage(args) }
   }
-  if (name === SLASH_COMMAND.reply) {
-    const reply = trimmed.slice(SLASH_COMMAND.reply.length).trim()
-    return { kind: 'reply', body: reply === '' ? null : reply }
+  if (commandName === SLASH_COMMAND.literal) {
+    return args === ''
+      ? { kind: 'usage', name: commandName }
+      : { kind: 'formatted-message', message: literalMessage(args) }
   }
-  if (name === SLASH_COMMAND.room) {
+  if (commandName === SLASH_COMMAND.rainbow) {
+    return args === ''
+      ? { kind: 'usage', name: commandName }
+      : { kind: 'formatted-message', message: rainbowMessage(args) }
+  }
+  if (commandName === SLASH_COMMAND.spoiler) {
+    if (args === '') {
+      return { kind: 'usage', name: commandName }
+    }
+    const [reason, text] = parseSpoilerArg(args)
+    return {
+      kind: 'formatted-message',
+      message: spoilerMessage(reason, text),
+    }
+  }
+  if (commandName === SLASH_COMMAND.jump) {
+    return { kind: 'jump', date: args === '' ? null : args }
+  }
+  if (commandName === SLASH_COMMAND.react) {
+    return { kind: 'react', reaction: args === '' ? null : args }
+  }
+  if (commandName === SLASH_COMMAND.reply) {
+    return { kind: 'reply', body: args === '' ? null : args }
+  }
+  if (commandName === SLASH_COMMAND.room) {
     // An empty target is a *known* command used wrong, not an unknown one —
     // the caller answers it with the usage line.
     return {
       kind: 'room',
-      target: trimmed.slice(SLASH_COMMAND.room.length).trim(),
+      target: args,
     }
   }
-  if (name === SLASH_COMMAND.search) {
+  if (commandName === SLASH_COMMAND.pin) {
+    return { kind: 'pin', target: args === '' ? null : args }
+  }
+  if (commandName === SLASH_COMMAND.unpin) {
+    return { kind: 'unpin', target: args === '' ? null : args }
+  }
+  if (commandName === SLASH_COMMAND.sort) {
+    return {
+      kind: 'sort',
+      value: ROOM_SORTS.includes(args as RoomSort) ? (args as RoomSort) : null,
+    }
+  }
+  if (commandName === SLASH_COMMAND.refresh) {
+    return { kind: 'refresh' }
+  }
+  if (commandName === SLASH_COMMAND.unreadthreads) {
+    return { kind: 'unreadthreads' }
+  }
+  if (commandName === SLASH_COMMAND.search) {
     return {
       kind: 'search',
-      args: trimmed.slice(SLASH_COMMAND.search.length).trim(),
+      args,
     }
   }
-  if (name === SLASH_COMMAND.thread) {
+  if (commandName === SLASH_COMMAND.thread) {
     return { kind: 'thread' }
   }
-  if (name === SLASH_COMMAND.whereami) {
+  if (commandName === SLASH_COMMAND.whereami) {
     return { kind: 'whereami' }
   }
   return null
+}
+
+function parseSpoilerArg(arg: string): [string | null, string] {
+  const split = arg.split(' | ')
+  if (split.length < 2) {
+    return [null, arg]
+  }
+  const reason = split[0].trim()
+  return [reason === '' ? null : reason, split.slice(1).join(' | ')]
+}
+
+function resolveCommandRoom(
+  rooms: Parameters<typeof resolveRoomTarget>[0],
+  target: string,
+): (typeof rooms)[number] | string | null {
+  const resolution = resolveRoomTarget(rooms, target)
+  if (resolution.kind === 'missing') {
+    return null
+  }
+  if (resolution.kind === 'ambiguous') {
+    return `room name is ambiguous: ${resolution.options.join(', ')}`
+  }
+  return resolution.room
 }
 
 function resolveReactionCommandKey(

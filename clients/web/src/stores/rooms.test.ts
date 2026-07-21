@@ -252,7 +252,7 @@ describe('createRoomsStore', () => {
       sender: '@adam:example.org',
       type: 'm.room.message',
       state_key: null,
-      body: 'Hello from live',
+      body: '**Hello** from [live](https://example.org)',
       content: { msgtype: 'm.text', body: 'Hello from live' } as never,
       redacted: false,
       edited: false,

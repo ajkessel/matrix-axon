@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { markdownToHtmlIfFormatted } from './markdown'
+import { markdownToHtmlIfFormatted, markdownToPlainText } from './markdown'
 
 describe('markdownToHtmlIfFormatted', () => {
   it('returns null for plain prose (TUI parity)', () => {
@@ -50,6 +50,24 @@ describe('markdownToHtmlIfFormatted', () => {
     // Ordinary links survive the outgoing sanitize untouched.
     expect(markdownToHtmlIfFormatted('[ok](https://example.org)')).toContain(
       'href="https://example.org"',
+    )
+  })
+})
+
+describe('markdownToPlainText', () => {
+  it('strips Markdown syntax for one-line display', () => {
+    expect(
+      markdownToPlainText(
+        '**bold** and _italic_ with [a link](https://e.test)',
+      ),
+    ).toBe('bold and italic with a link')
+    expect(markdownToPlainText('- one\n- two')).toBe('one two')
+    expect(markdownToPlainText('`code` and ~~gone~~')).toBe('code and gone')
+  })
+
+  it('keeps raw HTML-looking prose as text', () => {
+    expect(markdownToPlainText('**x** <script>alert(1)</script>')).toBe(
+      'x <script>alert(1)</script>',
     )
   })
 })

@@ -18,7 +18,8 @@ describe('createSettingsStore', () => {
       roomFilter: 'all',
       sidebarCollapsed: false,
       showStateEvents: false,
-      previewRoom: false,
+      hideRedactedEvents: false,
+      previewRoom: true,
       messageComposerHeight: null,
       recentReactions: [],
       developerMode: false,
@@ -129,15 +130,38 @@ describe('room-list settings (ADRs 0038/0042)', () => {
     ).toBe(false)
   })
 
-  it('previewRoom defaults to off and round-trips', () => {
+  it('hideRedactedEvents defaults to off and round-trips', () => {
     const storage = memoryStorage({
       'axon.settings': JSON.stringify({ version: 1, theme: 'dark' }),
     })
     const store = createSettingsStore(storage)
-    expect(store.previewRoom.value).toBe(false)
+    expect(store.hideRedactedEvents.value).toBe(false)
 
-    store.previewRoom.value = true
-    expect(createSettingsStore(storage).previewRoom.value).toBe(true)
+    store.hideRedactedEvents.value = true
+    expect(createSettingsStore(storage).hideRedactedEvents.value).toBe(true)
+
+    // A non-boolean is rejected rather than coerced.
+    expect(
+      createSettingsStore(
+        memoryStorage({
+          'axon.settings': JSON.stringify({
+            version: 1,
+            hideRedactedEvents: 'yes',
+          }),
+        }),
+      ).hideRedactedEvents.value,
+    ).toBe(false)
+  })
+
+  it('previewRoom defaults to on and round-trips explicit off', () => {
+    const storage = memoryStorage({
+      'axon.settings': JSON.stringify({ version: 1, theme: 'dark' }),
+    })
+    const store = createSettingsStore(storage)
+    expect(store.previewRoom.value).toBe(true)
+
+    store.previewRoom.value = false
+    expect(createSettingsStore(storage).previewRoom.value).toBe(false)
 
     // A non-boolean is rejected rather than coerced.
     expect(
@@ -149,7 +173,7 @@ describe('room-list settings (ADRs 0038/0042)', () => {
           }),
         }),
       ).previewRoom.value,
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('messageComposerHeight defaults, validates, rounds, and round-trips', () => {

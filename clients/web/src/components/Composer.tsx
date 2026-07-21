@@ -6,6 +6,7 @@ import { hasModifier } from '../shortcuts'
 import {
   SLASH_COMMAND,
   SLASH_COMMANDS,
+  canonicalSlashCommandName,
   type SlashCommandSpec,
 } from '../slash-commands'
 
@@ -180,7 +181,7 @@ export function Composer({
     commandQuery === null
       ? []
       : SLASH_COMMANDS.filter((command) =>
-          command.name.toLowerCase().startsWith(commandQuery.toLowerCase()),
+          commandMatchesQuery(command, commandQuery),
         )
   const roomMatches =
     roomQuery === null || roomCompletions === undefined
@@ -257,7 +258,7 @@ export function Composer({
     emojiMatches[Math.min(selectedCommand, emojiMatches.length - 1)]
   const exactCommand =
     commandQuery !== null &&
-    commandMatches.some((command) => command.name === commandQuery)
+    commandMatches.some((command) => commandMatchesExact(command, commandQuery))
   const exactRoom =
     roomQuery !== null &&
     roomMatches.some(
@@ -956,11 +957,15 @@ function reactCommandEmojiQuery(
     return null
   }
   const before = value.slice(0, caret)
-  const match = /^\/react\s+(:?[A-Za-z0-9_+-]+)$/.exec(before)
+  const match = /^(\/\S+)\s+(:?[A-Za-z0-9_+-]+)$/.exec(before)
   if (match === null) {
     return null
   }
-  const token = match[1]
+  const commandName = canonicalSlashCommandName(match[1])
+  if (commandName !== SLASH_COMMAND.react) {
+    return null
+  }
+  const token = match[2]
   const query = token.startsWith(':') ? token.slice(1) : token
   if (query === '') {
     return null
@@ -975,6 +980,26 @@ function reactCommandEmojiQuery(
 
 function slashCommandOptionId(command: SlashCommandSpec): string {
   return `composer-slash-command-${command.name.slice(1)}`
+}
+
+function commandMatchesQuery(
+  command: SlashCommandSpec,
+  query: string,
+): boolean {
+  const normalized = query.toLowerCase()
+  return [command.name, ...(command.aliases ?? [])].some((candidate) =>
+    candidate.toLowerCase().startsWith(normalized),
+  )
+}
+
+function commandMatchesExact(
+  command: SlashCommandSpec,
+  query: string,
+): boolean {
+  const normalized = query.toLowerCase()
+  return [command.name, ...(command.aliases ?? [])].some(
+    (candidate) => candidate.toLowerCase() === normalized,
+  )
 }
 
 function roomCompletionOptionId(room: ComposerAutocompleteOption): string {

@@ -1,5 +1,6 @@
 import { signal } from '@preact/signals'
 import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { ErrorBanner } from '../components/ErrorBanner'
 import { NoticeBanner, type Notice } from '../components/NoticeBanner'
 import { isValidRecoveryKey } from '../recovery-key'
@@ -214,6 +215,7 @@ function AccountCard({ account }: { account: Account }) {
 
 function AddAccountForm() {
   const { accounts } = useServices()
+  const location = useLocation()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [recoveryKey, setRecoveryKey] = useState('')
@@ -230,6 +232,7 @@ function AddAccountForm() {
         class="stack-form"
         onSubmit={(event) => {
           event.preventDefault()
+          const firstLogin = accounts.accounts.value.length === 0
           void accounts
             .login({
               username: username.trim(),
@@ -245,6 +248,9 @@ function AddAccountForm() {
               if (ok) {
                 setUsername('')
                 setHomeserver('')
+                if (firstLogin) {
+                  location.route('/')
+                }
               }
             })
         }}

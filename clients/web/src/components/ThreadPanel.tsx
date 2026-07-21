@@ -43,6 +43,7 @@ export function ThreadPanel({
   onClose: () => void
 }) {
   const { api, deviceState, live, media, settings } = useServices()
+  const hideRedacted = settings.hideRedactedEvents.value
   const thread = useMemo(
     () => createTimelineStore(api, media, accountId, roomId, rootId),
     [api, media, accountId, roomId, rootId],
@@ -215,24 +216,26 @@ export function ThreadPanel({
             )}
             <div class="timeline-list-shell">
               <ol class="event-list thread-list">
-                {thread.events.value.map((event) => (
-                  <MessageEventRow
-                    key={event.event_id}
-                    event={event}
-                    timeline={thread}
-                    members={members}
-                    accountId={accountId}
-                    ownUserId={ownUserId}
-                    settings={settings}
-                    reactionPickerOpen={
-                      reactionPickerEventId === event.event_id
-                    }
-                    onSetReactionPicker={setReactionPickerEventId}
-                    onReply={(event) => setAction({ kind: 'reply', event })}
-                    onEdit={(event) => setAction({ kind: 'edit', event })}
-                    showThreadAction={false}
-                  />
-                ))}
+                {thread.events.value
+                  .filter((event) => !hideRedacted || !event.redacted)
+                  .map((event) => (
+                    <MessageEventRow
+                      key={event.event_id}
+                      event={event}
+                      timeline={thread}
+                      members={members}
+                      accountId={accountId}
+                      ownUserId={ownUserId}
+                      settings={settings}
+                      reactionPickerOpen={
+                        reactionPickerEventId === event.event_id
+                      }
+                      onSetReactionPicker={setReactionPickerEventId}
+                      onReply={(event) => setAction({ kind: 'reply', event })}
+                      onEdit={(event) => setAction({ kind: 'edit', event })}
+                      showThreadAction={false}
+                    />
+                  ))}
               </ol>
             </div>
           </>

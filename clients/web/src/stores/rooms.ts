@@ -5,6 +5,7 @@ import {
   type Signal,
 } from '@preact/signals'
 import { apiErrorMessage, type ApiClient } from '../api/client'
+import { markdownToPlainText } from '../markdown/markdown'
 import {
   dmTitleFromMembers,
   isLikelyDm,
@@ -221,7 +222,7 @@ export function createRoomsStore(
     } catch {
       return
     }
-    const body = event?.body?.trim()
+    const body = previewBody(event?.body)
     if (event === undefined || body === undefined || body === '') {
       return
     }
@@ -236,7 +237,7 @@ export function createRoomsStore(
   }
 
   function setLivePreview(room: RoomDto, event: EventDto): void {
-    const body = event.body?.trim()
+    const body = previewBody(event.body)
     if (!isPreviewEvent(event) || body === undefined || body === '') {
       return
     }
@@ -491,4 +492,12 @@ function isPreviewEvent(event: EventDto): boolean {
     typeof event.body === 'string' &&
     event.body.trim() !== ''
   )
+}
+
+function previewBody(body: string | null | undefined): string | undefined {
+  if (body === null || body === undefined) {
+    return undefined
+  }
+  const text = markdownToPlainText(body)
+  return text === '' ? undefined : text
 }

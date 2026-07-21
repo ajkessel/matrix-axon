@@ -222,6 +222,33 @@ test('? opens the help; Escape closes it; typing ? does not open it', async ({
   await expect(composer).toHaveValue('why? ')
 })
 
+test('command descriptions stay aligned when command labels are long', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 820, height: 1180 })
+  await openRoom(page)
+
+  await page.keyboard.press('?')
+  const commandSection = page.locator('.shortcut-group').filter({
+    has: page.getByRole('heading', { name: 'Commands' }),
+  })
+  await expect(
+    commandSection.getByText('Send hidden spoiler text'),
+  ).toBeVisible()
+  await expect(
+    commandSection.getByText('Set room-list sort order'),
+  ).toBeVisible()
+
+  const lefts = await commandSection
+    .locator('dd')
+    .evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().left),
+    )
+  const min = Math.min(...lefts)
+  const max = Math.max(...lefts)
+  expect(max - min).toBeLessThan(1)
+})
+
 test('ArrowUp on an empty composer edits your last message', async ({
   page,
 }) => {

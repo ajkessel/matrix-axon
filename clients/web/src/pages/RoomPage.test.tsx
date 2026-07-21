@@ -154,6 +154,7 @@ function routedRoomPageWithJumpButton(
       () => ({
         jumpAction,
         setJumpAction,
+        openUnreadThreads: () => {},
         roomTitle: null,
         roomInfoAction: null,
         setRoomChrome: () => {},
@@ -446,6 +447,190 @@ describe('RoomPage', () => {
 
     expect(await findByText('unable to decrypt')).toBeTruthy()
     expect(await findByText('message deleted')).toBeTruthy()
+  })
+
+  it('loads the destination timeline after clicking a room hyperlink', async () => {
+    const roomA = '!room-a:hs'
+    const roomB = '!room-b:hs'
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: roomA,
+              canonical_alias: '#a:hs',
+              name: 'Room A',
+              last_activity_ts: T0,
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: roomB,
+              canonical_alias: '#b:hs',
+              name: 'Room B',
+              last_activity_ts: T0 + 1,
+            },
+          ],
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+        ({ params }) => {
+          const roomId = decodeURIComponent(params.roomId as string)
+          return HttpResponse.json({
+            data: {
+              events:
+                roomId === roomB
+                  ? [event('$b', T0 + 1, { room_id: roomB, body: 'body in B' })]
+                  : [
+                      event('$a', T0, {
+                        room_id: roomA,
+                        body: 'visit #b:hs',
+                        content: {
+                          msgtype: 'm.text',
+                          body: 'visit #b:hs',
+                          format: 'org.matrix.custom.html',
+                          formatted_body:
+                            'visit <a href="https://matrix.to/#/%23b%3Ahs">#b:hs</a>',
+                        },
+                      }),
+                    ],
+              next_cursor: null,
+            },
+          })
+        },
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(roomA)}`,
+    )
+    const { findByRole, findByText, queryByText } = render(
+      routedRoomPage(testServices()),
+    )
+
+    const link = await findByRole('link', { name: '#b:hs' })
+    fireEvent.click(link)
+
+    expect(await findByText('body in B')).toBeTruthy()
+    expect(queryByText('No displayable events on this page.')).toBeNull()
+  })
+
+  it('jumps to the destination event after clicking a Matrix.to room-event hyperlink', async () => {
+    const roomA = '!room-a:hs'
+    const roomB = '!room-b:hs'
+    const targetEvent = '$K0l0ndHCq0wBKulL5FdPylfvfVHiMomYv6gEtNZf-2E'
+    const targetTs = T0 - 5 * DAY
+    let seenAtTs: string | null = null
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: roomA,
+              canonical_alias: '#a:hs',
+              name: 'Room A',
+              last_activity_ts: T0,
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: roomB,
+              canonical_alias: '#b:hs',
+              name: 'Room B',
+              last_activity_ts: T0 + 1,
+            },
+          ],
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        ({ params }) =>
+          HttpResponse.json({
+            data: event(params.eventId as string, targetTs, {
+              room_id: roomB,
+              body: 'target body',
+            }),
+          }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+        ({ params, request }) => {
+          const roomId = decodeURIComponent(params.roomId as string)
+          seenAtTs = new URL(request.url).searchParams.get('at_ts')
+          return HttpResponse.json({
+            data: {
+              events:
+                roomId === roomB
+                  ? [
+                      event(targetEvent, targetTs, {
+                        room_id: roomB,
+                        body: 'target body',
+                      }),
+                    ]
+                  : [
+                      event('$a', T0, {
+                        room_id: roomA,
+                        body: 'visit linked event',
+                        content: {
+                          msgtype: 'm.text',
+                          body: 'visit linked event',
+                          format: 'org.matrix.custom.html',
+                          formatted_body: `visit <a href="https://matrix.to/#/${encodeURIComponent(roomB)}/${encodeURIComponent(targetEvent)}?via=hs">linked event</a>`,
+                        },
+                      }),
+                    ],
+              next_cursor: null,
+            },
+          })
+        },
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(roomA)}`,
+    )
+    const { findByRole, findByText, container } = render(
+      routedRoomPage(testServices()),
+    )
+
+    fireEvent.click(await findByRole('link', { name: 'linked event' }))
+
+    expect(await findByText('target body')).toBeTruthy()
+    expect(seenAtTs).toBe(String(targetTs))
+    await waitFor(() =>
+      expect(
+        container
+          .querySelector('.event-row.highlighted')
+          ?.getAttribute('data-event-id'),
+      ).toBe(targetEvent),
+    )
+  })
+
+  it('hides redacted events when the setting is on', async () => {
+    const { services, findByText, queryByText, container } = renderRoom([
+      event('$kept', T0, { body: 'still here' }),
+      event('$gone', T0 + 1, {
+        redacted: true,
+        content: null,
+        body: null,
+        redaction_event_id: '$r',
+      }),
+    ])
+
+    expect(await findByText('still here')).toBeTruthy()
+    expect(await findByText('message deleted')).toBeTruthy()
+
+    services.settings.hideRedactedEvents.value = true
+    await waitFor(() => expect(queryByText('message deleted')).toBeNull())
+    expect(container.querySelector('[data-event-id="$gone"]')).toBeNull()
+    expect(await findByText('still here')).toBeTruthy()
   })
 
   it('retries UTD decryption once and reloads when rows decrypt', async () => {
@@ -1092,6 +1277,43 @@ describe('RoomPage', () => {
     expect(queryByText('Seen by Bob')).toBeNull()
   })
 
+  it('excludes my own receipt from the seen-by summary count', async () => {
+    const { services, findByText, queryByText } = renderRoom(
+      [event('$mine', T0, { sender: '@me:hs', body: 'my message' })],
+      {
+        members: [
+          member('@steve:hs', 'join', 'Steve'),
+          member('@adam:hs', 'join', 'Adam'),
+        ],
+      },
+    )
+    services.live.start()
+    services.sockets[0].emitOpen()
+
+    services.sockets[0].emitMessage(
+      JSON.stringify({
+        type: 'ephemeral.passthrough',
+        account_id: ACCOUNT,
+        payload: {
+          room_id: ROOM,
+          event_type: 'm.receipt',
+          content: {
+            $mine: {
+              'm.read': {
+                '@me:hs': { ts: 120 },
+                '@steve:hs': { ts: 110 },
+                '@adam:hs': { ts: 100 },
+              },
+            },
+          },
+        },
+      }),
+    )
+
+    expect(await findByText('Seen by Steve and Adam')).toBeTruthy()
+    expect(queryByText('Seen by Steve, Adam, and 1 more')).toBeNull()
+  })
+
   it('shows reaction tallies with my reactions highlighted', async () => {
     const { findByText, container } = renderRoom([
       event('$r', T0, {
@@ -1390,6 +1612,32 @@ describe('RoomPage', () => {
     expect(quote.textContent).not.toContain('**bold**')
   })
 
+  it('applies the modern link style inside reply context anchors', async () => {
+    const { findByText, container } = renderRoom([
+      event('$target', T0, {
+        body: 'see https://example.org/docs',
+        content: {
+          msgtype: 'm.text',
+          body: 'see https://example.org/docs',
+          format: 'org.matrix.custom.html',
+          formatted_body:
+            '<p>see <a href="https://example.org/docs">https://example.org/docs</a></p>',
+        },
+      }),
+      event('$reply', T0 + 1, {
+        relates_to: { 'm.in_reply_to': { event_id: '$target' } },
+      }),
+    ])
+
+    await findByText('body of $reply')
+    const anchor = container.querySelector<HTMLAnchorElement>(
+      '.reply-context a[href="https://example.org/docs"]',
+    )
+    expect(anchor).not.toBeNull()
+    expect(anchor?.closest('.event-body')).toBeNull()
+    expect(anchor?.closest('.reply-context')).toBeTruthy()
+  })
+
   it('opens edit history from the (edited) marker', async () => {
     server.use(
       http.get(
@@ -1407,12 +1655,14 @@ describe('RoomPage', () => {
           }),
       ),
     )
-    const { findByText, findByRole, getByRole } = renderRoom([
+    const { findByText, findByRole, getByRole, container } = renderRoom([
       event('$edited', T0, { edited: true, edit_count: 1 }),
     ])
 
     fireEvent.click(await findByText('(edited)'))
-    expect(await findByRole('dialog')).toBeTruthy()
+    const dialog = await findByRole('dialog')
+    expect(dialog.closest('.event-row')).toBeNull()
+    expect(container.querySelector('.overlay')).toBeNull()
     expect(await findByText('first version')).toBeTruthy()
 
     fireEvent.click(getByRole('button', { name: 'Close' }))

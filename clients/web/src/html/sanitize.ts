@@ -1,6 +1,17 @@
 import DOMPurify from 'dompurify'
 import { linkifyDomTree } from './linkify'
 
+interface MatrixHtmlRenderContext {
+  resolveUserLink?: (
+    href: string,
+    label: string,
+  ) => { href: string; label: string } | null
+  resolveRoomLink?: (
+    href: string,
+    label: string,
+  ) => { href: string; label: string; isEventLink: boolean } | null
+}
+
 /**
  * Sanitized rendering of Matrix `formatted_body` HTML (ADR 0046, M-W5).
  *
@@ -87,6 +98,15 @@ const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i
 
 /** The class the spoiler transform emits; the UI toggles `spoiler-revealed`. */
 export const SPOILER_CLASS = 'spoiler'
+const DANGEROUS_LINK_CLASS = 'dangerous-link'
+const KNOWN_DISPLAY_LINK_SCHEMES = new Set([
+  'http',
+  'https',
+  'ftp',
+  'mailto',
+  'matrix',
+  'magnet',
+])
 
 let configured = false
 
@@ -143,7 +163,10 @@ export function sanitizeOutgoingHtml(html: string): string {
  * - links open in a new tab with `rel="noopener noreferrer"`;
  * - `code` keeps only spec-shaped `language-*` classes; other classes drop.
  */
-export function renderMatrixHtml(html: string): string {
+export function renderMatrixHtml(
+  html: string,
+  context: MatrixHtmlRenderContext = {},
+): string {
   configure()
   const clean = DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
@@ -207,8 +230,9 @@ export function renderMatrixHtml(html: string): string {
       reason !== null && reason !== '' ? `spoiler: ${reason}` : 'spoiler',
     )
   }
+  rewriteMatrixToLinks(scratch, context)
   for (const el of [...scratch.querySelectorAll('a[href]')]) {
-    if (isRoomPillLink(el)) {
+    if (isRoomPillLink(el) || isMentionPillLink(el)) {
       el.removeAttribute('target')
       el.removeAttribute('rel')
       continue
@@ -238,7 +262,16 @@ export function renderMatrixHtml(html: string): string {
       continue
     }
     if (isRoomPillLink(el)) {
-      el.setAttribute('class', 'room-pill')
+      el.setAttribute(
+        'class',
+        el.classList.contains('event-pill')
+          ? 'room-pill event-pill'
+          : 'room-pill',
+      )
+      el.setAttribute(
+        'title',
+        isEventPillLink(el) ? 'Jump to message' : 'Jump to room',
+      )
       continue
     }
     if (spoilers.has(el)) {
@@ -252,8 +285,90 @@ export function renderMatrixHtml(html: string): string {
   // bodies and expects receivers to linkify) become anchors; text inside
   // a/code/pre is left alone.
   linkifyDomTree(scratch)
+  rewriteMatrixToLinks(scratch, context)
+  markDangerousLinks(scratch)
 
   return scratch.innerHTML
+}
+
+function markDangerousLinks(root: Element): void {
+  for (const el of [...root.querySelectorAll('a[href]')]) {
+    if (
+      el.classList.contains('mention-pill') ||
+      el.classList.contains('room-pill')
+    ) {
+      continue
+    }
+    const href = el.getAttribute('href')?.trim() ?? ''
+    const visibleText = (el.textContent ?? '').trim()
+    if (
+      href === '' ||
+      visibleText === '' ||
+      visibleText === href ||
+      !looksLikeHyperlink(visibleText)
+    ) {
+      continue
+    }
+    el.classList.add(DANGEROUS_LINK_CLASS)
+    el.setAttribute(
+      'title',
+      `Warning: link text looks like ${visibleText}, but opens ${href}`,
+    )
+    el.setAttribute('aria-label', `${visibleText} (warning: opens ${href})`)
+  }
+}
+
+function looksLikeHyperlink(text: string): boolean {
+  const trimmed = text.trim()
+  const schemeEnd = trimmed.indexOf(':')
+  if (schemeEnd <= 0 || schemeEnd === trimmed.length - 1) {
+    return false
+  }
+  const scheme = trimmed.slice(0, schemeEnd).toLowerCase()
+  return KNOWN_DISPLAY_LINK_SCHEMES.has(scheme)
+}
+
+function rewriteMatrixToLinks(
+  root: Element,
+  context: MatrixHtmlRenderContext,
+): void {
+  if (
+    context.resolveUserLink === undefined &&
+    context.resolveRoomLink === undefined
+  ) {
+    return
+  }
+  for (const el of [...root.querySelectorAll('a[href]')]) {
+    const href = el.getAttribute('href')
+    if (href === null) {
+      continue
+    }
+    const label = el.textContent ?? ''
+    const userLink = context.resolveUserLink?.(href, label) ?? null
+    if (userLink !== null) {
+      el.setAttribute('href', userLink.href)
+      el.setAttribute('class', 'mention-pill')
+      el.removeAttribute('target')
+      el.removeAttribute('rel')
+      el.textContent = userLink.label
+      continue
+    }
+    const roomLink = context.resolveRoomLink?.(href, label) ?? null
+    if (roomLink !== null) {
+      el.setAttribute('href', roomLink.href)
+      el.setAttribute(
+        'class',
+        roomLink.isEventLink ? 'room-pill event-pill' : 'room-pill',
+      )
+      el.setAttribute(
+        'title',
+        roomLink.isEventLink ? 'Jump to message' : 'Jump to room',
+      )
+      el.removeAttribute('target')
+      el.removeAttribute('rel')
+      el.textContent = roomLink.label
+    }
+  }
 }
 
 function isMentionPillLink(el: Element): boolean {
@@ -272,4 +387,9 @@ function isRoomPillLink(el: Element): boolean {
     el.classList.contains('room-pill') &&
     /^\/[^/]+\/rooms\/[^/]+/.test(href)
   )
+}
+
+function isEventPillLink(el: Element): boolean {
+  const href = el.getAttribute('href') ?? ''
+  return /[?&]event=/.test(href)
 }

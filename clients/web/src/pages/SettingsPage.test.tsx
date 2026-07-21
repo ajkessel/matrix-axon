@@ -11,12 +11,19 @@ import {
   vi,
 } from 'vitest'
 import { ServicesContext } from '../services'
+import {
+  resetInstallPromptForTest,
+  setupInstallPromptCapture,
+  type BeforeInstallPromptEvent,
+} from '../install-prompt'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { SettingsPage } from './SettingsPage'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!ops:hs'
+
+let cleanupPromptCapture: (() => void) | null = null
 
 const server = setupServer(
   http.get(`${TEST_BASE_URL}/v1/accounts`, () =>
@@ -32,6 +39,9 @@ const server = setupServer(
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
+  cleanupPromptCapture?.()
+  cleanupPromptCapture = null
+  resetInstallPromptForTest()
   server.resetHandlers()
 })
 afterAll(() => server.close())
@@ -69,6 +79,22 @@ describe('SettingsPage', () => {
     expect(box.checked).toBe(true)
   })
 
+  it('toggles hidden deleted messages off by default', () => {
+    const services = testServices()
+    const { getByLabelText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    const box = getByLabelText('Hide deleted messages') as HTMLInputElement
+
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+
+    expect(services.settings.hideRedactedEvents.value).toBe(true)
+    expect(box.checked).toBe(true)
+  })
+
   it('toggles developer mode', () => {
     const services = testServices()
     const { getByLabelText } = render(
@@ -98,6 +124,86 @@ describe('SettingsPage', () => {
 
     fireEvent.click(getByRole('button', { name: 'Sign out' }))
     expect(services.auth.signedIn.value).toBe(false)
+  })
+
+  it('prompts Android users to install when the browser exposes the install event', async () => {
+    const restoreUserAgent = mockNavigatorProperty(
+      'userAgent',
+      'Mozilla/5.0 (Linux; Android 16; Pixel) AppleWebKit/537.36 Chrome/146 Mobile Safari/537.36',
+    )
+    cleanupPromptCapture = setupInstallPromptCapture(window)
+    let prompted = false
+    const event = new Event('beforeinstallprompt', {
+      cancelable: true,
+    }) as BeforeInstallPromptEvent
+    Object.assign(event, {
+      platforms: ['web'],
+      prompt: vi.fn(async () => {
+        prompted = true
+      }),
+      userChoice: Promise.resolve({ outcome: 'accepted', platform: 'web' }),
+    })
+    window.dispatchEvent(event)
+    const services = testServices()
+    const { findByRole, findByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Add to home screen' }))
+
+    await waitFor(() => expect(prompted).toBe(true))
+    expect(await findByText('Install request accepted.')).toBeTruthy()
+    restoreUserAgent()
+  })
+
+  it('shows iOS home-screen instructions when the install prompt is unavailable', () => {
+    const restoreUserAgent = mockNavigatorProperty(
+      'userAgent',
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+    )
+    const services = testServices()
+    const { getByText, queryByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(getByText('Tap the Share button in Safari.')).toBeTruthy()
+    expect(getByText('Choose Add to Home Screen.')).toBeTruthy()
+    expect(queryByRole('button', { name: 'Add to home screen' })).toBeNull()
+    restoreUserAgent()
+  })
+
+  it('reveals the Android install button when the prompt arrives after Settings renders', async () => {
+    const restoreUserAgent = mockNavigatorProperty(
+      'userAgent',
+      'Mozilla/5.0 (Linux; Android 16; Pixel) AppleWebKit/537.36 Chrome/146 Mobile Safari/537.36',
+    )
+    cleanupPromptCapture = setupInstallPromptCapture(window)
+    const services = testServices()
+    const { findByRole, getByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    expect(getByText(/Open your browser menu/)).toBeTruthy()
+    const event = new Event('beforeinstallprompt', {
+      cancelable: true,
+    }) as BeforeInstallPromptEvent
+    Object.assign(event, {
+      platforms: ['web'],
+      prompt: vi.fn(async () => {}),
+      userChoice: Promise.resolve({ outcome: 'dismissed', platform: 'web' }),
+    })
+
+    window.dispatchEvent(event)
+
+    expect(
+      await findByRole('button', { name: 'Add to home screen' }),
+    ).toBeTruthy()
+    restoreUserAgent()
   })
 
   it('marks all room summaries read after the device-state write lands', async () => {
@@ -225,3 +331,23 @@ describe('SettingsPage', () => {
     expect(getByText(/Web client/)).toBeTruthy()
   })
 })
+
+function mockNavigatorProperty(
+  name: keyof Navigator,
+  value: unknown,
+): () => void {
+  const original =
+    Object.getOwnPropertyDescriptor(Navigator.prototype, name) ??
+    Object.getOwnPropertyDescriptor(navigator, name)
+  Object.defineProperty(navigator, name, {
+    configurable: true,
+    get: () => value,
+  })
+  return () => {
+    if (original !== undefined) {
+      Object.defineProperty(navigator, name, original)
+    } else {
+      delete (navigator as unknown as Record<string, unknown>)[name]
+    }
+  }
+}

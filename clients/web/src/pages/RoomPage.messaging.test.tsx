@@ -264,6 +264,98 @@ describe('sending', () => {
     await waitFor(() => expect(queryByText('Sending…')).toBeNull())
   })
 
+  it('sends /literal without Markdown formatted_body', async () => {
+    let sendBody: Record<string, unknown> = {}
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/send`,
+        async ({ request }) => {
+          sendBody = (await request.json()) as Record<string, unknown>
+          return HttpResponse.json({ data: { event_id: '$new' } })
+        },
+      ),
+      http.get(EVENTS_PATH, () =>
+        HttpResponse.json({
+          data: event('$new', 200, {
+            sender: OWN_USER,
+            body: '**not bold**',
+          }),
+        }),
+      ),
+    )
+    const { findByLabelText, queryByText } = renderRoom([event('$1', 100)])
+
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '/literal **not bold**' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(sendBody.body).toBe('**not bold**'))
+    expect(sendBody.formatted_body).toBeUndefined()
+    expect(sendBody.format).toBeUndefined()
+    await waitFor(() => expect(queryByText('Sending…')).toBeNull())
+  })
+
+  it.each([
+    ['/html <b>bold</b><script>drop()</script>', 'bold', '<b>bold</b>'],
+    [
+      '/rainbow hi',
+      'hi',
+      '<font color="#ff0000">h</font><font color="#00ffff">i</font>',
+    ],
+    [
+      '/spoiler CW | secret',
+      'CW: secret (Spoiler)',
+      '<span data-mx-spoiler="CW">secret</span>',
+    ],
+  ])(
+    'sends %s as an explicit formatted message',
+    async (command, plain, html) => {
+      let sendBody: Record<string, unknown> = {}
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/send`,
+          async ({ request }) => {
+            sendBody = (await request.json()) as Record<string, unknown>
+            return HttpResponse.json({ data: { event_id: '$new' } })
+          },
+        ),
+        http.get(EVENTS_PATH, () =>
+          HttpResponse.json({
+            data: event('$new', 200, { sender: OWN_USER, body: plain }),
+          }),
+        ),
+      )
+      const { findByLabelText, queryByText } = renderRoom([event('$1', 100)])
+
+      const textarea = (await findByLabelText(
+        'Message Ops',
+      )) as HTMLTextAreaElement
+      fireEvent.input(textarea, { target: { value: command } })
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+
+      await waitFor(() => expect(sendBody.body).toBe(plain))
+      expect(sendBody.format).toBe('org.matrix.custom.html')
+      expect(sendBody.formatted_body).toBe(html)
+      await waitFor(() => expect(queryByText('Sending…')).toBeNull())
+    },
+  )
+
+  it('answers a bare /spoiler with usage and keeps the composer text', async () => {
+    const { findByLabelText, findByText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/spoiler' } })
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(await findByText('usage: /spoiler [reason |] <text>')).toBeTruthy()
+    expect(textarea.value).toBe('/spoiler')
+  })
+
   it('reply mode sets reply_to and shows a cancellable banner', async () => {
     let sendBody: Record<string, unknown> = {}
     server.use(
@@ -709,6 +801,38 @@ describe('reactions', () => {
     expect(textarea.value).toBe('')
   })
 
+  it('/+ aliases /react for the latest visible message', async () => {
+    let posted: unknown
+    let reactedEventId: string | null = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        async ({ params, request }) => {
+          reactedEventId = params.eventId as string
+          posted = await request.json()
+          return HttpResponse.json({ data: { event_id: '$rx' } })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$latest', 200) }),
+      ),
+    )
+    const { findByLabelText } = renderRoom([
+      event('$latest', 200),
+      event('$old', 100),
+    ])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/+ 🔥' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(reactedEventId).toBe('$latest'))
+    expect(posted).toEqual({ key: '🔥' })
+    expect(textarea.value).toBe('')
+  })
+
   it('/react resolves common shortcode aliases', async () => {
     let posted: unknown
     server.use(
@@ -771,7 +895,8 @@ describe('reactions', () => {
     const compactPicker = container.querySelector('.reaction-picker')
     const fullPicker = await findByRole('dialog', { name: 'Emoji picker' })
     expect(fullPicker).toBeTruthy()
-    expect(fullPicker.parentElement).toBe(shell)
+    expect(fullPicker.parentElement).toBe(document.body)
+    expect(shell?.contains(fullPicker)).toBe(false)
     expect(fullPicker.parentElement).not.toBe(compactPicker)
     expect(compactPicker?.contains(fullPicker)).toBe(false)
     await waitFor(() =>
@@ -1362,6 +1487,46 @@ describe('threads', () => {
     expect(sendBody.body).toBe('thread send')
   })
 
+  it('hides redacted thread replies when the setting is on', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                  content: { msgtype: 'm.text', body: 'inside the thread' },
+                }),
+                event('$m2', 300, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  redacted: true,
+                  content: null,
+                  body: null,
+                  redaction_event_id: '$redaction',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    const { services, findByText, queryByText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+
+    expect(await findByText('inside the thread')).toBeTruthy()
+    expect(await findByText('message deleted')).toBeTruthy()
+
+    services.settings.hideRedactedEvents.value = true
+
+    await waitFor(() => expect(queryByText('message deleted')).toBeNull())
+    expect(await findByText('inside the thread')).toBeTruthy()
+  })
+
   it('switches an already-open thread panel to the clicked thread root', async () => {
     server.use(
       http.get(
@@ -1882,6 +2047,53 @@ describe('room command', () => {
     await waitFor(() => expect(document.activeElement).toBe(newComposer))
   })
 
+  it('/switch is a /room alias', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: OWN_USER,
+              room_id: ROOM,
+              name: 'Ops',
+              canonical_alias: null,
+              topic: null,
+              last_activity_ts: 0,
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: OWN_USER,
+              room_id: OTHER_ROOM,
+              name: 'axontest',
+              canonical_alias: '#axontest:bostoncoop.net',
+              topic: null,
+              last_activity_ts: 1,
+            },
+          ],
+        }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+        () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/switch axontest' } })
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(OTHER_ROOM)}`,
+      ),
+    )
+  })
+
   it('/search opens the URL-addressed search overlay with its args', async () => {
     const { findByLabelText } = renderRoom([event('$root', 100)])
     const textarea = (await findByLabelText(
@@ -1912,6 +2124,72 @@ describe('room command', () => {
     expect(await findByText('usage: /room <room>')).toBeTruthy()
     // A known command used wrong keeps its text so it can be corrected.
     expect(textarea.value).toBe('/room')
+  })
+
+  it('/sort updates the persisted room-list sort', async () => {
+    const { services, findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/sort oldest' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(services.settings.roomSort.value).toBe('oldest')
+    expect(textarea.value).toBe('')
+  })
+
+  it('/pin and /unpin default to the current room', async () => {
+    const { services, findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+    const key = `${ACCOUNT}/${ROOM}`
+
+    fireEvent.input(textarea, { target: { value: '/pin' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(services.settings.pinnedRooms.value).toContain(key)
+
+    fireEvent.input(textarea, { target: { value: '/unpin' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(services.settings.pinnedRooms.value).not.toContain(key)
+  })
+
+  it('/refresh and /rooms refresh the room list', async () => {
+    let roomRequests = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () => {
+        roomRequests += 1
+        return HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: OWN_USER,
+              room_id: ROOM,
+              name: 'Ops',
+              canonical_alias: null,
+              topic: null,
+              last_activity_ts: 0,
+            },
+          ],
+        })
+      }),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    await waitFor(() => expect(roomRequests).toBeGreaterThan(0))
+    const mountedRequests = roomRequests
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/refresh' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(roomRequests).toBeGreaterThan(mountedRequests))
+    const refreshedRequests = roomRequests
+
+    fireEvent.input(textarea, { target: { value: '/rooms' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(roomRequests).toBeGreaterThan(refreshedRequests))
   })
 })
 

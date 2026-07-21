@@ -49,7 +49,30 @@ describe('renderMatrixHtml', () => {
 
     expect(out).toContain('class="room-pill"')
     expect(out).toContain('href="/acct/rooms/!ops%3Ahs"')
+    expect(out).toContain('title="Jump to room"')
     expect(out).not.toContain('target="_blank"')
+  })
+
+  it('keeps generated event-pill room links in-app', () => {
+    const out = renderMatrixHtml(
+      '<a class="room-pill event-pill" href="/acct/rooms/!ops%3Ahs?event=%24event">#Ops</a>',
+    )
+
+    expect(out).toContain('class="room-pill event-pill"')
+    expect(out).toContain('href="/acct/rooms/!ops%3Ahs?event=%24event"')
+    expect(out).toContain('title="Jump to message"')
+    expect(out).not.toContain('target="_blank"')
+  })
+
+  it('keeps generated mention-pill links in-app', () => {
+    const out = renderMatrixHtml(
+      '<a class="mention-pill" href="https://matrix.to/#/%40alice%3Ahs">@alice:hs</a>',
+    )
+
+    expect(out).toContain('class="mention-pill"')
+    expect(out).toContain('href="https://matrix.to/#/%40alice%3Ahs"')
+    expect(out).not.toContain('target="_blank"')
+    expect(out).not.toContain('rel="noopener noreferrer"')
   })
 
   it('keeps an mxc img, moving its src to data-mxc and dropping src (M-W8)', () => {
@@ -161,6 +184,63 @@ describe('renderMatrixHtml', () => {
     expect(renderMatrixHtml('<pre>curl https://example.org</pre>')).toBe(
       '<pre>curl https://example.org</pre>',
     )
+  })
+
+  it('flags links whose visible URL points somewhere else', () => {
+    const out = renderMatrixHtml(
+      '<a href="https://example.com">https://google.com</a>',
+    )
+    const doc = new DOMParser().parseFromString(out, 'text/html')
+    const anchor = doc.querySelector('a')!
+
+    expect(anchor.classList.contains('dangerous-link')).toBe(true)
+    expect(anchor.getAttribute('href')).toBe('https://example.com')
+    expect(anchor.getAttribute('title')).toBe(
+      'Warning: link text looks like https://google.com, but opens https://example.com',
+    )
+    expect(anchor.getAttribute('aria-label')).toBe(
+      'https://google.com (warning: opens https://example.com)',
+    )
+  })
+
+  it('flags mismatched links only for known visible URL schemes', () => {
+    const out = renderMatrixHtml(
+      '<a href="https://example.com">HTTPS://google.com</a> ' +
+        '<a href="https://example.com">ftp://files.example</a> ' +
+        '<a href="https://example.com">mailto:alice@example.com</a> ' +
+        '<a href="https://example.com">matrix:u/alice:example.com</a> ' +
+        '<a href="https://example.com">magnet:?xt=urn:btih:abcdef</a> ' +
+        '<a href="https://example.com">www.google.com</a> ' +
+        '<a href="https://example.com">tel:+15555550100</a> ' +
+        '<a href="https://example.com">project: notes</a>',
+    )
+    const doc = new DOMParser().parseFromString(out, 'text/html')
+    const anchors = [...doc.querySelectorAll('a')]
+
+    expect(
+      anchors
+        .filter((anchor) => anchor.classList.contains('dangerous-link'))
+        .map((anchor) => anchor.textContent),
+    ).toEqual([
+      'HTTPS://google.com',
+      'ftp://files.example',
+      'mailto:alice@example.com',
+      'matrix:u/alice:example.com',
+      'magnet:?xt=urn:btih:abcdef',
+    ])
+  })
+
+  it('does not flag matching URL links or ordinary label links', () => {
+    const out = renderMatrixHtml(
+      '<a href="https://example.com">https://example.com</a> ' +
+        '<a href="https://example.com">project notes</a>',
+    )
+    const doc = new DOMParser().parseFromString(out, 'text/html')
+    const anchors = [...doc.querySelectorAll('a')]
+
+    expect(
+      anchors.some((anchor) => anchor.classList.contains('dangerous-link')),
+    ).toBe(false)
   })
 
   it('keeps unknown-tag text content (KEEP_CONTENT default)', () => {

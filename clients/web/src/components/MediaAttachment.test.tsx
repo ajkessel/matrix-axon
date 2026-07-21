@@ -55,6 +55,12 @@ describe('MediaAttachment', () => {
     expect(getByText('1.5 KB')).toBeTruthy()
   })
 
+  it('renders a distinct body as the attachment caption', () => {
+    const { getByText } = renderAttachment(file({ caption: 'Seems bad' }))
+    expect(getByText('report.pdf')).toBeTruthy()
+    expect(getByText('Seems bad')).toBeTruthy()
+  })
+
   it('downloads via a transient anchor on Download click', async () => {
     server.use(
       http.get(

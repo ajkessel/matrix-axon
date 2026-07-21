@@ -34,12 +34,12 @@ import {
 } from '../stores/settings'
 import { rowWindow, scrollToReveal } from './virtual-window'
 
-const FILTERS: { value: RoomFilter; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'dms', label: 'DMs' },
-  { value: 'groups', label: 'Groups' },
-  { value: 'unread', label: 'Unread' },
-  { value: 'favorites', label: 'Favorites' },
+const FILTERS: { value: RoomFilter; label: string; shortLabel: string }[] = [
+  { value: 'all', label: 'All rooms', shortLabel: 'All' },
+  { value: 'dms', label: 'DMs', shortLabel: 'DM' },
+  { value: 'groups', label: 'Groups', shortLabel: 'Group' },
+  { value: 'unread', label: 'Unread', shortLabel: 'Unread' },
+  { value: 'favorites', label: 'Favorites', shortLabel: 'Favs' },
 ]
 
 const SORTS: { value: RoomSort; label: string }[] = [
@@ -105,8 +105,15 @@ function roomAvatarColor(roomKeyValue: string): number {
  * scroll position survive every room switch.
  */
 export function RoomList() {
-  const { rooms, settings, unread, activeRoom, composerFocus, deviceState } =
-    useServices()
+  const {
+    accounts: accountStore,
+    rooms,
+    settings,
+    unread,
+    activeRoom,
+    composerFocus,
+    deviceState,
+  } = useServices()
   const location = useLocation()
   // Session-only name filter (ADR 0042: never persisted). `null` = category
   // mode; a string means the name input is active and overrides the category.
@@ -120,20 +127,43 @@ export function RoomList() {
   useEffect(() => {
     void rooms.refresh()
   }, [rooms])
+  useEffect(() => {
+    if (accountStore.loading.value) {
+      void accountStore.refresh()
+    }
+  }, [accountStore, accountStore.loading.value])
 
   const allRooms = rooms.rooms.value
-  const accounts = useMemo(() => {
-    const byId = new Map<string, string>()
-    for (const room of allRooms) {
-      byId.set(room.account_id, room.account_user_id)
-    }
-    return [...byId.entries()]
-  }, [allRooms])
-  const labels = useMemo(() => accountLabels(accounts), [accounts])
+  const accounts = accountStore.accounts.value
+  const activeAccounts = useMemo(
+    () => accounts.filter((account) => account.state === 'active'),
+    [accounts],
+  )
+  const activeAccountEntries = useMemo(
+    () =>
+      activeAccounts.map(
+        (account) => [account.account_id, account.user_id] as const,
+      ),
+    [activeAccounts],
+  )
+  const activeAccountIds = useMemo(
+    () => new Set(activeAccountEntries.map(([id]) => id)),
+    [activeAccountEntries],
+  )
+  const activeAccountsKnown =
+    !accountStore.loading.value && accountStore.error.value === null
+  const scopedRooms = activeAccountsKnown
+    ? allRooms.filter((room) => activeAccountIds.has(room.account_id))
+    : allRooms
+  const showAccountFilter = activeAccountEntries.length > 1
+  const labels = useMemo(
+    () => accountLabels(activeAccountEntries),
+    [activeAccountEntries],
+  )
   const readMarkerState = useMemo(
     () =>
       computed(() =>
-        allRooms
+        scopedRooms
           .map((room) => {
             const marker = deviceState.readMarker(room.account_id, room.room_id)
             return `${roomKey(room)}:${marker?.originTs ?? ''}:${deviceState.hydrated(
@@ -143,22 +173,22 @@ export function RoomList() {
           })
           .join('\0'),
       ),
-    [allRooms, deviceState],
+    [scopedRooms, deviceState],
   ).value
 
   useEffect(() => {
-    for (const [accountId] of accounts) {
+    for (const [accountId] of activeAccountEntries) {
       deviceState.hydrateReadMarkers(accountId)
     }
-  }, [accounts, deviceState])
+  }, [activeAccountEntries, deviceState])
 
   useEffect(() => {
-    for (const [accountId] of accounts) {
+    for (const [accountId] of activeAccountEntries) {
       if (deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE)) {
-        void deviceState.baselineReadMarkers(accountId, allRooms)
+        void deviceState.baselineReadMarkers(accountId, scopedRooms)
       }
     }
-  }, [accounts, allRooms, deviceState, readMarkerState])
+  }, [activeAccountEntries, scopedRooms, deviceState, readMarkerState])
 
   const roomFilter = settings.roomFilter.value
   const roomSort = settings.roomSort.value
@@ -178,13 +208,13 @@ export function RoomList() {
   )
   const visible = useMemo(() => {
     perfMark('room-list:visible-compute:start', {
-      rooms: allRooms.length,
+      rooms: scopedRooms.length,
       filter: roomFilter,
       sort: roomSort,
       name: nameQuery !== null,
       readMarkers: readMarkerState.length,
     })
-    const next = visibleRooms(allRooms, {
+    const next = visibleRooms(scopedRooms, {
       accountFilter,
       nameQuery,
       roomFilter,
@@ -204,7 +234,7 @@ export function RoomList() {
     perfMark('room-list:visible-compute:end', { visible: next.length })
     return next
   }, [
-    allRooms,
+    scopedRooms,
     accountFilter,
     nameQuery,
     roomFilter,
@@ -215,6 +245,14 @@ export function RoomList() {
     deviceState,
     readMarkerState,
   ])
+  useEffect(() => {
+    if (
+      accountFilter !== 'all' &&
+      (!showAccountFilter || !activeAccountIds.has(accountFilter))
+    ) {
+      setAccountFilter('all')
+    }
+  }, [accountFilter, activeAccountIds, showAccountFilter])
   const pinnedCount = useMemo(
     () => visible.filter((room) => pinnedRooms.includes(roomKey(room))).length,
     [visible, pinnedRooms],
@@ -303,7 +341,7 @@ export function RoomList() {
       container.removeEventListener('scroll', onScroll)
       observer?.disconnect()
     }
-  }, [hasRows, measure])
+  }, [hasRows, measure, visible.length])
 
   // Measure the row pitch from two adjacent rows — their height plus whatever
   // rule or gap separates them. Both are windowed rows, so this holds at any
@@ -457,6 +495,14 @@ export function RoomList() {
     composerFocus.value += 1
   }
 
+  const activateRoom = (room: RoomDto, href?: string) => {
+    navigateToRoom(
+      roomKey(room),
+      href ?? `/${room.account_id}/rooms/${encodeURIComponent(room.room_id)}`,
+    )
+    setTimeout(focusComposer)
+  }
+
   /**
    * Jump to the room `delta` away from the open one, wrapping at the ends.
    *
@@ -555,6 +601,28 @@ export function RoomList() {
     } else if (event.key === 'Escape') {
       event.preventDefault()
       focusComposer()
+    } else if (event.key === 'Enter') {
+      if (event.target === filterInput.current && visible.length === 1) {
+        event.preventDefault()
+        activateRoom(visible[0])
+        return
+      }
+      const active =
+        event.target instanceof HTMLElement &&
+        event.target.classList.contains('room-link')
+          ? event.target
+          : null
+      if (active === null) {
+        return
+      }
+      const index = Number(active.dataset.index)
+      const room = Number.isInteger(index) ? visible[index] : undefined
+      const href = active.getAttribute('href')
+      if (room === undefined || href === null) {
+        return
+      }
+      event.preventDefault()
+      activateRoom(room, href)
     }
   }
 
@@ -571,10 +639,11 @@ export function RoomList() {
           aria-label="Filter"
           aria-keyshortcuts={keyAria(KEYS.cycleFilter)}
         >
-          {FILTERS.map(({ value, label }) => (
+          {FILTERS.map(({ value, label, shortLabel }) => (
             <button
               key={value}
               type="button"
+              aria-label={label}
               title={`Show ${label} — ${hint('cycle filters', KEYS.cycleFilter)}`}
               class={
                 nameQuery === null && settings.roomFilter.value === value
@@ -586,7 +655,7 @@ export function RoomList() {
                 settings.roomFilter.value = value
               }}
             >
-              {label}
+              {shortLabel}
             </button>
           ))}
         </div>
@@ -620,7 +689,7 @@ export function RoomList() {
             ))}
           </select>
         </label>
-        {accounts.length > 1 && (
+        {showAccountFilter && (
           <label class="sort-select">
             Account
             <select
@@ -628,7 +697,7 @@ export function RoomList() {
               onChange={(event) => setAccountFilter(event.currentTarget.value)}
             >
               <option value="all">All accounts</option>
-              {accounts.map(([id, userId]) => (
+              {activeAccountEntries.map(([id, userId]) => (
                 <option key={id} value={id}>
                   {userId}
                 </option>
@@ -670,7 +739,7 @@ export function RoomList() {
                 // unpinned room has the separator.
                 rule={index > 0 && index !== pinnedCount}
                 accountLabel={
-                  accounts.length > 1 && accountFilter === 'all'
+                  showAccountFilter && accountFilter === 'all'
                     ? labels.get(room.account_id)
                     : undefined
                 }
@@ -847,7 +916,7 @@ function RoomRow({
       perfMark('room-row:hydrate-preview', { key })
       rooms.hydratePreview(room)
     }
-  }, [previewEnabled, rooms, room])
+  }, [key, previewEnabled, rooms, room])
 
   return (
     <li class={rule ? 'room-row rule' : 'room-row'}>

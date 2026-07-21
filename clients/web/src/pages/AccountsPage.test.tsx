@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
+import { LocationProvider } from 'preact-iso'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ServicesContext, type AppServices } from '../services'
 import { TEST_BASE_URL, testServices } from '../test/services'
@@ -48,6 +49,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
   server.resetHandlers()
+  window.history.replaceState(null, '', '/')
 })
 afterAll(() => server.close())
 
@@ -63,7 +65,9 @@ function renderPage(accounts: unknown[] = [ALICE, BOB]) {
   const services: AppServices = testServices()
   const utils = render(
     <ServicesContext.Provider value={services}>
-      <AccountsPage />
+      <LocationProvider>
+        <AccountsPage />
+      </LocationProvider>
     </ServicesContext.Provider>,
   )
   return { services, ...utils }
@@ -123,6 +127,40 @@ describe('AccountsPage', () => {
       }),
     )
     expect(recoverBody).toEqual({ recovery_key: VALID_KEY })
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('does not leave Accounts when adding another account later', async () => {
+    window.history.replaceState(null, '', '/accounts')
+    let loginBody: unknown
+    const { findByText, getByLabelText, getByRole } = renderPage([ALICE])
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/login`, async ({ request }) => {
+        loginBody = await request.json()
+        return HttpResponse.json({
+          data: { ...BOB, state: 'active', verified: true },
+        })
+      }),
+    )
+
+    await findByText('@alice:example.org')
+
+    fireEvent.input(getByLabelText(/Matrix user ID/), {
+      target: { value: '@bob:example.org' },
+    })
+    fireEvent.input(getByLabelText('Password'), {
+      target: { value: 'hunter2' },
+    })
+    fireEvent.click(getByRole('button', { name: 'Log in' }))
+
+    await waitFor(() =>
+      expect(loginBody).toEqual({
+        username: '@bob:example.org',
+        password: 'hunter2',
+        homeserver_url: null,
+      }),
+    )
+    expect(window.location.pathname).toBe('/accounts')
   })
 
   it('accepts login without a recovery key but blocks a malformed one', async () => {

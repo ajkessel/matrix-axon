@@ -74,7 +74,29 @@ describe('formatMessageBody', () => {
       'href="https://matrix.to/#/%40alice%3Ahs"',
     )
     expect(formatted.formatted_body).toContain('class="room-pill"')
-    expect(formatted.formatted_body).toContain('href="/acct-1/rooms/!ops%3Ahs"')
+    expect(formatted.formatted_body).toContain(
+      'href="https://matrix.to/#/!ops%3Ahs?via=hs"',
+    )
+  })
+
+  it('sends canonical room aliases as Matrix.to room pills', () => {
+    const formatted = formatMessageBody('go to #ops:hs', {
+      accountId: ACCOUNT,
+      members: [],
+      rooms: [
+        room({
+          room_id: '!opaque:hs',
+          name: 'Ops',
+          canonical_alias: '#ops:hs',
+        }),
+      ],
+      roomTitles: new Map(),
+    })
+
+    expect(formatted.formatted_body).toContain('class="room-pill"')
+    expect(formatted.formatted_body).toContain(
+      'href="https://matrix.to/#/%23ops%3Ahs"',
+    )
   })
 
   it('expands emoji shortcodes before formatting', () => {

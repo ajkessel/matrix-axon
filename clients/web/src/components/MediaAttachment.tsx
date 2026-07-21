@@ -61,6 +61,9 @@ export function MediaAttachment({
       </span>
       <span class="media-attachment-meta">
         <span class="media-attachment-name">{media.filename}</span>
+        {media.caption !== null && (
+          <span class="media-attachment-caption">{media.caption}</span>
+        )}
         {size !== null && <span class="muted">{size}</span>}
         {error !== null && <span class="local-echo-status error">{error}</span>}
       </span>

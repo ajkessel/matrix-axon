@@ -1,5 +1,6 @@
 import { useMediaBlob } from '../media/use-media-blob'
 import { useShortcuts } from '../shortcuts'
+import { BodyPortal } from './BodyPortal'
 import { useModalFocus } from './use-modal-focus'
 
 /**
@@ -35,41 +36,43 @@ export function Lightbox({
   )
 
   return (
-    <div
-      ref={containerRef}
-      class="overlay lightbox"
-      role="dialog"
-      aria-modal="true"
-      aria-label={alt}
-      onClick={(event) => {
-        // A click on the backdrop (not the image) dismisses.
-        if (event.target === event.currentTarget) {
-          onClose()
-        }
-      }}
-    >
-      <button
-        type="button"
-        class="ghost lightbox-close"
-        aria-label="Close"
-        onClick={onClose}
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay lightbox"
+        role="dialog"
+        aria-modal="true"
+        aria-label={alt}
+        onClick={(event) => {
+          // A click on the backdrop (not the image) dismisses.
+          if (event.target === event.currentTarget) {
+            onClose()
+          }
+        }}
       >
-        ✕
-      </button>
-      <figure class="lightbox-figure">
-        <div tabindex={0} class="lightbox-image">
-          {state.status === 'ready' && state.url !== undefined ? (
-            <img src={state.url} alt={alt} />
-          ) : state.status === 'error' ? (
-            <p class="muted placeholder">Could not load image</p>
-          ) : (
-            <div class="media-skeleton" aria-hidden="true" />
+        <button
+          type="button"
+          class="ghost lightbox-close"
+          aria-label="Close"
+          onClick={onClose}
+        >
+          ✕
+        </button>
+        <figure class="lightbox-figure">
+          <div tabindex={0} class="lightbox-image">
+            {state.status === 'ready' && state.url !== undefined ? (
+              <img src={state.url} alt={alt} />
+            ) : state.status === 'error' ? (
+              <p class="muted placeholder">Could not load image</p>
+            ) : (
+              <div class="media-skeleton" aria-hidden="true" />
+            )}
+          </div>
+          {caption !== null && (
+            <figcaption class="lightbox-caption">{caption}</figcaption>
           )}
-        </div>
-        {caption !== null && (
-          <figcaption class="lightbox-caption">{caption}</figcaption>
-        )}
-      </figure>
-    </div>
+        </figure>
+      </div>
+    </BodyPortal>
   )
 }
