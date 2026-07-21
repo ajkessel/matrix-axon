@@ -159,6 +159,24 @@ impl AxonClient {
         .await
     }
 
+    pub async fn mark_read(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        event_id: &str,
+    ) -> anyhow::Result<()> {
+        let _: Value = self
+            .post_envelope(
+                &format!(
+                    "/v1/accounts/{account_id}/rooms/{}/read",
+                    path_segment(room_id)
+                ),
+                serde_json::json!({ "event_id": event_id }),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn read_ws_until<F>(
         &self,
         timeout: Duration,

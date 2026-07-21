@@ -43,3 +43,26 @@ where
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+
+/// The negated counterpart to [`wait_for`]: poll `check` every 250ms across
+/// `window` and fail the moment it returns `false`, instead of succeeding on
+/// the first `true`. Use this to prove a condition holds *stably* — e.g. "no
+/// background task changed this" — rather than only checking it once
+/// immediately after a triggering action, which would pass even if the
+/// reaction under test just hadn't landed yet.
+pub async fn stays_true<F, Fut>(label: &str, window: Duration, mut check: F) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+{
+    let deadline = Instant::now() + window;
+    loop {
+        if !check().await? {
+            bail!("{label} did not hold stable");
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}

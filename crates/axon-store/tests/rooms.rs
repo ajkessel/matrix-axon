@@ -119,6 +119,12 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     // Room B: a single, newer event (ts 3000) and no state — sorts first.
     let b_latest = insert_message(&store, account_id, &room_b, 3_000, "newest").await;
 
+    // Room A has a seeded unread-counts row (issue #313); room B has none yet.
+    store
+        .upsert_room_unread_counts(account_id, &room_a, 4, 1)
+        .await
+        .expect("seed unread counts");
+
     let rooms = store.list_rooms(Some(account_id)).await.expect("list");
     assert_eq!(rooms.len(), 2, "exactly the two rooms for this account");
 
@@ -128,6 +134,11 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
     assert_eq!(rooms[0].last_activity_ts, 3_000);
     assert_eq!(rooms[0].last_event_id.as_deref(), Some(b_latest.as_str()));
     assert!(rooms[0].name.is_none(), "room B has no name state");
+    assert_eq!(
+        rooms[0].notification_count, 0,
+        "room B has no unread-counts row yet — reads as 0, not NULL"
+    );
+    assert_eq!(rooms[0].highlight_count, 0);
 
     assert_eq!(rooms[1].room_id, room_a);
     assert!(rooms[1].account_user_id.starts_with("@rooms-"));
@@ -140,6 +151,56 @@ async fn list_rooms_orders_by_activity_with_summary_fields() {
         rooms[1].canonical_alias.as_deref(),
         Some("#alpha:localhost")
     );
+    assert_eq!(rooms[1].notification_count, 4);
+    assert_eq!(rooms[1].highlight_count, 1);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+/// `upsert_room_unread_counts` inserts on first write and overwrites (rather
+/// than accumulating) on a later write for the same `(account_id, room_id)` —
+/// the watcher always supplies the full current value, never a delta.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn upsert_room_unread_counts_inserts_then_overwrites() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "unread").await;
+    let room_id = format!("!u-{}:localhost", Uuid::new_v4());
+
+    store
+        .upsert_room_unread_counts(account_id, &room_id, 2, 0)
+        .await
+        .expect("insert");
+    let rooms = store.list_rooms(Some(account_id)).await.expect("list");
+    // No events for this room, so it doesn't appear in the room list itself —
+    // read the row directly to confirm the insert landed.
+    assert!(rooms.is_empty(), "no events yet, so no room-list entry");
+    let (n, h): (i64, i64) = sqlx_core::query_as::query_as(
+        "SELECT notification_count, highlight_count FROM room_unread_counts \
+         WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account_id)
+    .bind(&room_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read seeded row");
+    assert_eq!((n, h), (2, 0));
+
+    store
+        .upsert_room_unread_counts(account_id, &room_id, 5, 3)
+        .await
+        .expect("overwrite");
+    let (n, h): (i64, i64) = sqlx_core::query_as::query_as(
+        "SELECT notification_count, highlight_count FROM room_unread_counts \
+         WHERE account_id = $1 AND room_id = $2",
+    )
+    .bind(account_id)
+    .bind(&room_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read overwritten row");
+    assert_eq!((n, h), (5, 3), "overwrites rather than accumulating");
 
     common::cleanup_account(&pool, account_id).await;
 }

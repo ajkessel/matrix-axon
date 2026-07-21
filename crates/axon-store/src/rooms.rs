@@ -37,6 +37,22 @@ pub struct RoomSummary {
     pub last_activity_ts: i64,
     /// The `event_id` at `last_activity_ts` (latest by `(origin_ts, id)`).
     pub last_event_id: Option<String>,
+    /// Server-derived unread notification count (issue #313, ADR 0070) — a
+    /// cached read of matrix-sdk's `Room::unread_notification_counts()`,
+    /// itself sourced from the upstream homeserver's own push-rule
+    /// evaluation. `0` until the sync engine's watcher has written a value
+    /// for this room (see [`Store::upsert_room_unread_counts`]). Own-account
+    /// events never count. In an **encrypted** room, other users'
+    /// reactions/edits/redactions may still increment this: the homeserver
+    /// can't inspect ciphertext to apply the content-based push rules that
+    /// would normally suppress them, and falls back to `.m.rule.encrypted`
+    /// (notify on most events from others) — see ADR 0070.
+    pub notification_count: i64,
+    /// Server-derived highlight count (issue #313, ADR 0070) — the subset of
+    /// `notification_count` that also matched a highlighting push rule (e.g. a
+    /// display-name mention). Same source and same encrypted-room caveat as
+    /// `notification_count`.
+    pub highlight_count: i64,
 }
 
 impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
@@ -51,6 +67,8 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for RoomSummary {
             canonical_alias: row.try_get("canonical_alias")?,
             last_activity_ts: row.try_get("last_activity_ts")?,
             last_event_id: row.try_get("last_event_id")?,
+            notification_count: row.try_get("notification_count")?,
+            highlight_count: row.try_get("highlight_count")?,
         })
     }
 }
@@ -61,9 +79,15 @@ impl Store {
     /// (each tagged with its own `account_id`).
     ///
     /// One query: a per-`(account_id, room_id)` aggregate over `events` supplies
-    /// the activity timestamp and the latest event id, and four correlated
+    /// the activity timestamp and the latest event id, four correlated
     /// sub-selects pull the display fields from the `room_state` projection by
-    /// its primary key (so they are single-row index lookups, not scans).
+    /// its primary key (so they are single-row index lookups, not scans), and
+    /// two more correlated sub-selects into `room_unread_counts` (issue #313,
+    /// ADR 0070) supply the unread counts — likewise a primary-key lookup, not
+    /// an aggregate, so this doesn't reintroduce the cost ADR 0055 deferred.
+    /// `COALESCE(..., 0)` covers a room with no `room_unread_counts` row yet
+    /// (between account creation and the sync engine's first sweep), so the
+    /// fields read as `0` rather than `NULL`.
     ///
     /// Rooms the local user has left or been banned from are excluded: a
     /// correlated `NOT EXISTS` drops any room whose current `m.room.member`
@@ -95,7 +119,13 @@ impl Store {
                     (SELECT rs.content->>'alias' FROM room_state rs \
                        WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
                          AND rs.event_type = 'm.room.canonical_alias' AND rs.state_key = '') \
-                         AS canonical_alias \
+                         AS canonical_alias, \
+                    COALESCE((SELECT ruc.notification_count FROM room_unread_counts ruc \
+                       WHERE ruc.account_id = a.account_id AND ruc.room_id = a.room_id), 0) \
+                       AS notification_count, \
+                    COALESCE((SELECT ruc.highlight_count FROM room_unread_counts ruc \
+                       WHERE ruc.account_id = a.account_id AND ruc.room_id = a.room_id), 0) \
+                       AS highlight_count \
              FROM ( \
                  SELECT account_id, room_id, \
                         MAX(origin_ts) AS last_activity_ts, \

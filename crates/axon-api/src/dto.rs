@@ -36,6 +36,26 @@ pub struct RoomDto {
     pub last_activity_ts: i64,
     /// The most recent event's id, if the room has any events.
     pub last_event_id: Option<String>,
+    /// Server-derived unread notification count (issue #313, ADR 0070). This
+    /// is **not** computed by Axon: it is matrix-sdk's own read of the
+    /// upstream homeserver's sync room-summary
+    /// (`unread_notifications.notification_count`), itself the product of
+    /// the homeserver's push-rule evaluation — so a fresh client load can
+    /// show a real number without first observing a live event this session.
+    /// `0` until the sync engine has captured a value for this room.
+    /// Own-account events (your own messages, reactions, redactions, edits)
+    /// never count — the homeserver always excludes them. In an
+    /// **encrypted** room, other users' reactions/edits/redactions may still
+    /// count: the homeserver can't inspect ciphertext to apply the
+    /// content-based push rules that suppress them in an unencrypted room,
+    /// and falls back to `.m.rule.encrypted` (notify on most events from
+    /// others). See ADR 0070.
+    pub notification_count: i64,
+    /// Server-derived highlight count (issue #313, ADR 0070): the subset of
+    /// `notification_count` that also matched a highlighting push rule (e.g.
+    /// a display-name mention). Same source, same encrypted-room caveat as
+    /// `notification_count`.
+    pub highlight_count: i64,
 }
 
 impl From<RoomSummary> for RoomDto {
@@ -50,6 +70,8 @@ impl From<RoomSummary> for RoomDto {
             canonical_alias: r.canonical_alias,
             last_activity_ts: r.last_activity_ts,
             last_event_id: r.last_event_id,
+            notification_count: r.notification_count,
+            highlight_count: r.highlight_count,
         }
     }
 }

@@ -4,8 +4,14 @@ use anyhow::{anyhow, bail};
 use serde_json::Value;
 
 use crate::runner::{Ctx, ScenarioOutcome};
-use crate::util::wait_for;
+use crate::util::{stays_true, wait_for};
 use crate::wire::{EventDto, RoomDto};
+
+/// How long [`unread_counts`] watches `notification_count` for stability after
+/// the account's own message reaches the timeline, before concluding the
+/// server-side unread-counts watcher (an independent async task, with no
+/// ordering guarantee relative to timeline persistence) didn't react to it.
+const UNREAD_COUNTS_OWN_MESSAGE_SETTLE: Duration = Duration::from_secs(3);
 
 pub async fn boot_health(ctx: &Ctx) -> ScenarioOutcome {
     ScenarioOutcome::from_result(
@@ -203,6 +209,98 @@ pub async fn outbound_send(ctx: &Ctx) -> ScenarioOutcome {
     )
 }
 
+/// Server-derived unread counts (issue #313, ADR 0070), validated against a
+/// real Synapse: a peer's message increases `notification_count` without
+/// Axon polling for it or sending anything; marking the room read (ADR 0067's
+/// real receipt round trip) clears it back to `0`, proving the count is
+/// homeserver-derived rather than an Axon-local tally; and the account's own
+/// message never increments it. Runs against `Smoke General`, which is
+/// unencrypted — ADR 0070's documented encrypted-room over-counting caveat is
+/// deliberately not asserted here, since this smoke room doesn't exercise it.
+pub async fn unread_counts(ctx: &Ctx) -> ScenarioOutcome {
+    ScenarioOutcome::from_result(
+        async {
+            let account_id = ctx.manifest.axon_account_id;
+            let room_id = ctx.manifest.rooms.general.room_id.clone();
+
+            let baseline = find_room(&ctx.axon.list_rooms().await?, &room_id)?;
+
+            // A peer message is a real, homeserver-derived notification —
+            // Axon never sent it and never polled the homeserver for it.
+            let peer_token = ctx.matrix.login(&ctx.manifest.accounts.peer).await?;
+            let body = format!("server-smoke unread {}", &ctx.run_id[..8]);
+            let txn_id = format!("server-smoke-unread-{}", &ctx.run_id[..8]);
+            let event_id = ctx
+                .matrix
+                .send_message(&peer_token, &room_id, &txn_id, &body)
+                .await?;
+            ctx.matrix
+                .wait_for_event(&peer_token, &room_id, &event_id, &body, ctx.timeout)
+                .await?;
+            wait_for(
+                "unread notification_count increases after peer message",
+                ctx.timeout,
+                || async {
+                    let room = find_room(&ctx.axon.list_rooms().await?, &room_id)?;
+                    Ok(room.notification_count > baseline.notification_count)
+                },
+            )
+            .await?;
+
+            // Marking the room read round-trips through Synapse's own receipt
+            // handling (ADR 0067) — this is what proves the count is
+            // homeserver-derived rather than an Axon-local tally.
+            ctx.axon.mark_read(account_id, &room_id, &event_id).await?;
+            wait_for(
+                "unread notification_count clears after marking read",
+                ctx.timeout,
+                || async {
+                    let room = find_room(&ctx.axon.list_rooms().await?, &room_id)?;
+                    Ok(room.notification_count == 0)
+                },
+            )
+            .await?;
+            let after_read = find_room(&ctx.axon.list_rooms().await?, &room_id)?;
+
+            // Our own message must never increment the count.
+            let own_body = format!("server-smoke unread own {}", &ctx.run_id[..8]);
+            let own_send = ctx
+                .axon
+                .send_message(account_id, &room_id, &own_body)
+                .await?;
+            wait_for(
+                "own message reaches the Axon timeline",
+                ctx.timeout,
+                || async {
+                    let page = ctx.axon.timeline(account_id, &room_id, 5).await?;
+                    Ok(page
+                        .events
+                        .iter()
+                        .any(|event| event.event_id == own_send.event_id))
+                },
+            )
+            .await?;
+            // The timeline write above only proves `persist_timeline_event` ran;
+            // it says nothing about the independent `watch_unread_counts` task,
+            // which reacts to its own separate `room_info_notable_update_receiver`
+            // broadcast with no ordering guarantee relative to timeline persist.
+            // Poll for a settle window rather than checking once immediately, so
+            // a delayed (not just immediate) regression can't slip past this.
+            stays_true(
+                "own message never increments notification_count",
+                UNREAD_COUNTS_OWN_MESSAGE_SETTLE,
+                || async {
+                    let room = find_room(&ctx.axon.list_rooms().await?, &room_id)?;
+                    Ok(room.notification_count == after_read.notification_count)
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await,
+    )
+}
+
 pub async fn relation_reads(ctx: &Ctx) -> ScenarioOutcome {
     ScenarioOutcome::from_result(
         async {
@@ -304,11 +402,16 @@ pub async fn graceful_stack_shutdown(ctx: &Ctx) -> ScenarioOutcome {
     )
 }
 
-fn require_room(rooms: &[RoomDto], room_id: &str, name: &str) -> anyhow::Result<()> {
-    let room = rooms
+fn find_room(rooms: &[RoomDto], room_id: &str) -> anyhow::Result<RoomDto> {
+    rooms
         .iter()
         .find(|room| room.room_id == room_id)
-        .ok_or_else(|| anyhow!("room {room_id} not found"))?;
+        .cloned()
+        .ok_or_else(|| anyhow!("room {room_id} not found"))
+}
+
+fn require_room(rooms: &[RoomDto], room_id: &str, name: &str) -> anyhow::Result<()> {
+    let room = find_room(rooms, room_id)?;
     if room.name.as_deref() != Some(name) {
         bail!("room {room_id} had unexpected name {:?}", room.name);
     }

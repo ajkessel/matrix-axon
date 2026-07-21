@@ -10,7 +10,10 @@
 //! [`EventDto`]; `verification.{requested,sas,done,cancelled}` carry a
 //! [`VerificationFramePayload`] (SAS emoji/decimals, optional target device,
 //! outcome); `ephemeral.passthrough` carries an allowlisted raw ephemeral
-//! event (`m.typing`, `m.receipt`, …) verbatim (ADR 0056).
+//! event (`m.typing`, `m.receipt`, …) verbatim (ADR 0056);
+//! `unread_counts.changed` carries a room's server-derived unread counts
+//! (issue #313, ADR 0070) — *not* built on the ADR 0056 ephemeral path, since
+//! notification counts are a sync room-summary field, not an ephemeral event.
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -38,8 +41,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axon_core::{
-    DeviceStateFrame, EphemeralFrame, LiveFrame, SenderTrustFrame, VerificationFrame,
-    VerificationFrameKind,
+    DeviceStateFrame, EphemeralFrame, LiveFrame, SenderTrustFrame, UnreadCountsFrame,
+    VerificationFrame, VerificationFrameKind,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -176,6 +179,31 @@ impl From<EphemeralFrame> for EphemeralFramePayload {
     }
 }
 
+/// The `type` tag for a server-derived unread-counts frame (issue #313, ADR
+/// 0070).
+const UNREAD_COUNTS_CHANGED: &str = "unread_counts.changed";
+
+/// The wire payload for an `unread_counts.changed` frame: a room's
+/// server-derived notification/highlight counts, sourced from matrix-sdk's
+/// read of the homeserver's own sync room-summary. See [`UnreadCountsFrame`]
+/// for the encrypted-room caveat this inherits.
+#[derive(Debug, Serialize)]
+struct UnreadCountsFramePayload {
+    room_id: String,
+    notification_count: u64,
+    highlight_count: u64,
+}
+
+impl From<UnreadCountsFrame> for UnreadCountsFramePayload {
+    fn from(frame: UnreadCountsFrame) -> Self {
+        Self {
+            room_id: frame.room_id,
+            notification_count: frame.notification_count,
+            highlight_count: frame.highlight_count,
+        }
+    }
+}
+
 /// The `type` tag for a verification frame of the given kind.
 fn verification_type(kind: VerificationFrameKind) -> &'static str {
     match kind {
@@ -286,6 +314,11 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
             account_id: frame.account_id,
             payload: EphemeralFramePayload::from(frame),
         }),
+        LiveFrame::UnreadCountsChanged(frame) => serde_json::to_string(&WsEnvelope {
+            kind: UNREAD_COUNTS_CHANGED,
+            account_id: frame.account_id,
+            payload: UnreadCountsFramePayload::from(frame),
+        }),
     }
 }
 
@@ -370,7 +403,8 @@ async fn pump(
 mod tests {
     use super::*;
     use axon_core::{
-        EphemeralFrame, LiveEvent, SenderTrustFrame, VerificationFrame, VerificationFrameKind,
+        EphemeralFrame, LiveEvent, SenderTrustFrame, UnreadCountsFrame, VerificationFrame,
+        VerificationFrameKind,
     };
     use serde_json::Value;
 
@@ -535,5 +569,21 @@ mod tests {
         assert_eq!(v["account_id"], account_id.to_string());
         assert_eq!(v["payload"]["user_id"], "@bob:localhost");
         assert_eq!(v["payload"]["verification_violation"], true);
+    }
+
+    #[test]
+    fn unread_counts_changed_frame_wire_shape() {
+        let account_id = Uuid::new_v4();
+        let v = decode(LiveFrame::UnreadCountsChanged(UnreadCountsFrame {
+            account_id,
+            room_id: "!r:localhost".to_owned(),
+            notification_count: 3,
+            highlight_count: 1,
+        }));
+        assert_eq!(v["type"], "unread_counts.changed");
+        assert_eq!(v["account_id"], account_id.to_string());
+        assert_eq!(v["payload"]["room_id"], "!r:localhost");
+        assert_eq!(v["payload"]["notification_count"], 3);
+        assert_eq!(v["payload"]["highlight_count"], 1);
     }
 }

@@ -758,6 +758,22 @@ async fn read_api_end_to_end() {
         })
         .await
         .expect("insert membership event");
+    // `upsert_event` alone only lands the event in the timeline; the
+    // `/members` endpoint reads the resolved `room_state` projection, which
+    // needs its own write.
+    store
+        .upsert_room_state(&RoomStateUpsert {
+            account_id,
+            room_id: &room_id,
+            event_type: "m.room.member",
+            state_key: "@alice:localhost",
+            event_id: &member_event_id,
+            sender: "@jamie:localhost",
+            origin_ts: 500,
+            content: Some(json!({ "membership": "join", "displayname": "Alice" })),
+        })
+        .await
+        .expect("member state");
     store
         .upsert_room_state(&RoomStateUpsert {
             account_id,
@@ -771,6 +787,10 @@ async fn read_api_end_to_end() {
         })
         .await
         .expect("name");
+    store
+        .upsert_room_unread_counts(account_id, &room_id, 3, 1)
+        .await
+        .expect("seed unread counts");
 
     // The read endpoints don't touch the live-event bus or the message sender;
     // throwaway instances satisfy `AppState`.
@@ -808,6 +828,8 @@ async fn read_api_end_to_end() {
     assert_eq!(room["last_event_id"], e2.as_str());
     assert_eq!(room["account_id"], account_id.to_string());
     assert_eq!(room["account_user_id"], account_user_id);
+    assert_eq!(room["notification_count"], 3);
+    assert_eq!(room["highlight_count"], 1);
 
     // Timeline, page 1 (newest): limit 1 -> [e2] with a next_cursor.
     let base = format!("/v1/accounts/{account_id}/rooms/{room_id}/timeline");

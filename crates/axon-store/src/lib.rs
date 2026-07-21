@@ -22,6 +22,7 @@ mod rooms;
 mod search;
 mod state;
 mod tokens;
+mod unread;
 
 pub use accounts::{Account, AccountState};
 pub use backfill::{AccountBackfillProgress, RoomBackfillState};

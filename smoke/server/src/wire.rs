@@ -111,6 +111,8 @@ pub struct RoomDto {
     pub account_id: Uuid,
     pub room_id: String,
     pub name: Option<String>,
+    pub notification_count: i64,
+    pub highlight_count: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

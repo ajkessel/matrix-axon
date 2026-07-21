@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axon_core::{EphemeralFrame, LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig};
+use axon_core::{
+    EphemeralFrame, LiveEvent, LiveFrame, SenderTrustFrame, SyncConfig, UnreadCountsFrame,
+};
 use axon_media::MediaCacheHandle;
 use axon_search::IndexHandle;
 use axon_store::{Account, AccountDataUpsert, EventCiphertext, NewEvent, RoomStateUpsert, Store};
@@ -23,7 +25,7 @@ use matrix_sdk::ruma::events::{
 };
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId, UserId};
-use matrix_sdk::{Client, Room};
+use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_ui::room_list_service::RoomListService;
 use matrix_sdk_ui::sync_service::{State, SyncService};
 use tokio::sync::broadcast;
@@ -52,6 +54,18 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// so there are no lifecycle callers waiting on store-dir quiescence, and the
 /// tracker also includes non-account tasks such as verification flow drivers.
 const ENGINE_TRACKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Narrow a matrix-sdk/Matrix-spec `u64` timestamp or count to Postgres's
+/// signed `BIGINT`, saturating rather than erroring: a value this large is
+/// already meaningless as a timestamp or unread count, and the exact number
+/// stops mattering long before this bound. Shared by every u64→i64 boundary
+/// in this module so, e.g., a persisted unread count and its live-frame
+/// broadcast (see `capture_unread_counts`, which casts this back to `u64`
+/// rather than re-deriving from the unclamped source) can't diverge at the
+/// boundary.
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
 
 /// A supervised task's stop handles: the per-account cancellation token plus
 /// the task's join handle. Both are needed because cancellation is cooperative —
@@ -665,7 +679,7 @@ async fn persist_event_core(
     } else {
         None
     };
-    let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
+    let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
     let event_id = ev.event_id().as_str().to_owned();
     let room_id = room_id.to_owned();
     let state_key = raw_val
@@ -837,7 +851,7 @@ async fn persist_room_state_event(
     let content = raw_val.get("content").cloned();
     let event_id = ev.event_id().as_str().to_owned();
     let sender = ev.sender().as_str().to_owned();
-    let origin_ts = i64::try_from(u64::from(ev.origin_server_ts().0)).unwrap_or(i64::MAX);
+    let origin_ts = saturating_i64(u64::from(ev.origin_server_ts().0));
     let room_id = room.room_id().as_str().to_owned();
 
     let upsert = RoomStateUpsert {
@@ -1049,6 +1063,18 @@ async fn forward_ephemeral_event(
 /// How often the sync loop polls for new verification candidate invites and
 /// re-derives the explicit subscription set (ADR 0040).
 const VERIFICATION_POLL: Duration = Duration::from_secs(5);
+
+/// How often [`watch_unread_counts`] re-walks every joined room as a
+/// self-healing backstop (issue #313, ADR 0070). `room_info_notable_update_receiver`
+/// is a lossy broadcast channel with no dedicated "notification count changed"
+/// reason bit, so a `Lagged` gap could otherwise leave a room's cached count
+/// stale until something else about that room changes.
+const UNREAD_COUNTS_RESWEEP: Duration = Duration::from_secs(300);
+
+/// Bound on concurrent `capture_unread_counts` calls within one
+/// [`sweep_unread_counts`] pass, so an account with many joined rooms doesn't
+/// fan out one Postgres round trip per room unbounded on every sweep.
+const UNREAD_COUNTS_SWEEP_CONCURRENCY: usize = 8;
 
 /// Cap on candidate invites auto-joined per [`VERIFICATION_POLL`]. A backlog of
 /// direct invites must not translate into an unbounded join + explicit-subscribe
@@ -1388,6 +1414,20 @@ async fn run_account(
         trust_cancel.clone(),
     ));
 
+    // Server-derived unread-counts watcher (issue #313, ADR 0070): capture
+    // matrix-sdk's notification/highlight counts (themselves sourced from the
+    // homeserver's own sync room-summary) into `room_unread_counts` so a fresh
+    // client load can show a real count without observing a live event first.
+    // Same child-token + join-handle lifecycle as the watchers above.
+    let unread_cancel = cancel.child_token();
+    let unread_handle = tokio::spawn(watch_unread_counts(
+        client.clone(),
+        store.clone(),
+        account.account_id,
+        live_tx.clone(),
+        unread_cancel.clone(),
+    ));
+
     // Cross-user verification room delivery (ADR 0040): register this run's
     // resubscribe waker, and poll for new candidate invites. The sliding-sync
     // selective window (rank 0..=19) delivers no timeline events to a DM outside
@@ -1464,6 +1504,14 @@ async fn run_account(
             account_id = %account.account_id,
             error = %err,
             "sender-trust watcher did not shut down cleanly"
+        );
+    }
+    unread_cancel.cancel();
+    if let Err(err) = unread_handle.await {
+        tracing::warn!(
+            account_id = %account.account_id,
+            error = %err,
+            "unread-counts watcher did not shut down cleanly"
         );
     }
 
@@ -1593,6 +1641,218 @@ async fn watch_sender_trust(
                     }
                 }
                 None => return,
+            },
+        }
+    }
+}
+
+/// Capture `room`'s current server-derived unread counts and persist them if
+/// they differ from the last value this watcher wrote (issue #313, ADR 0070).
+/// `last` is the watcher's own in-memory cache of what it has already
+/// persisted this run — not a re-read of the store — so a room whose counts
+/// haven't moved since the last capture is a no-op. Skips rooms that aren't
+/// currently joined (an invite/left room has no meaningful unread count here).
+///
+/// A persist failure is logged and `last` is left unchanged, so the next
+/// observation for this room (the next notable update, or the periodic
+/// re-sweep) retries rather than silently giving up. The lock over `last` is
+/// never held across the `.await` below, so concurrent captures for
+/// *different* rooms (see [`sweep_unread_counts`]) never block each other on
+/// the DB round trip — only the two brief, synchronous check/insert sections
+/// are serialized, and a sweep never captures the same room twice
+/// concurrently, so no lost update is possible.
+async fn capture_unread_counts(
+    room: &Room,
+    store: &Store,
+    account_id: Uuid,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
+) {
+    if room.state() != RoomState::Joined {
+        return;
+    }
+    let counts = room.unread_notification_counts();
+    let value = (counts.notification_count, counts.highlight_count);
+    let room_id = room.room_id();
+    if last.lock().expect("unread-counts cache lock").get(room_id) == Some(&value) {
+        return;
+    }
+    // matrix-sdk's counts are `u64`; Postgres has no unsigned type, so narrow
+    // at this boundary via the shared helper, and derive the live frame's
+    // values from the *same* clamped number rather than the raw `counts`
+    // fields, so the DB row and the broadcast frame can't disagree.
+    let notification_count = saturating_i64(counts.notification_count);
+    let highlight_count = saturating_i64(counts.highlight_count);
+    if let Err(err) = store
+        .upsert_room_unread_counts(
+            account_id,
+            room_id.as_str(),
+            notification_count,
+            highlight_count,
+        )
+        .await
+    {
+        tracing::warn!(%account_id, %room_id, error = %err, "failed to persist unread counts");
+        return;
+    }
+    last.lock()
+        .expect("unread-counts cache lock")
+        .insert(room_id.to_owned(), value);
+    let _ = live_tx.send(LiveFrame::UnreadCountsChanged(UnreadCountsFrame {
+        account_id,
+        room_id: room_id.as_str().to_owned(),
+        notification_count: notification_count as u64,
+        highlight_count: highlight_count as u64,
+    }));
+}
+
+/// Re-walk every currently-joined room and capture each one's unread counts,
+/// with up to [`UNREAD_COUNTS_SWEEP_CONCURRENCY`] captures in flight at once
+/// so an account with many rooms doesn't serialize one Postgres round trip
+/// per room. Used both for the startup sweep and the periodic
+/// [`UNREAD_COUNTS_RESWEEP`] backstop.
+///
+/// Also prunes stale state for rooms the account is no longer in, both the
+/// in-memory dedup cache and the persisted `room_unread_counts` row (PR
+/// review, issue #313) — without the latter, a left room's row would sit in
+/// the table forever (invisible to `list_rooms`, which already filters left
+/// rooms, but growing unbounded for a long-lived account that churns through
+/// many rooms over time; previously only `ON DELETE CASCADE` on account
+/// deletion cleaned these up).
+async fn sweep_unread_counts(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    live_tx: &broadcast::Sender<LiveFrame>,
+    last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
+) {
+    use futures_util::stream::{self, StreamExt};
+
+    let rooms = client.joined_rooms();
+    let joined: HashSet<OwnedRoomId> = rooms.iter().map(|room| room.room_id().to_owned()).collect();
+    last.lock()
+        .expect("unread-counts cache lock")
+        .retain(|room_id, _| joined.contains(room_id));
+
+    let joined_ids: Vec<String> = joined
+        .iter()
+        .map(|room_id| room_id.as_str().to_owned())
+        .collect();
+    if let Err(err) = store
+        .delete_stale_room_unread_counts(account_id, &joined_ids)
+        .await
+    {
+        tracing::warn!(%account_id, error = %err, "failed to prune stale unread-count rows");
+    }
+
+    stream::iter(rooms)
+        .for_each_concurrent(UNREAD_COUNTS_SWEEP_CONCURRENCY, |room| async move {
+            capture_unread_counts(&room, store, account_id, live_tx, last).await;
+        })
+        .await;
+}
+
+/// Seed a fresh watcher's in-memory dedup cache from what's already
+/// persisted (PR review, issue #313): without this, `last` starts empty on
+/// every process restart/reconnect, so the very first startup sweep would
+/// treat every joined room as "changed" and unconditionally re-upsert +
+/// re-broadcast it, even when nothing actually changed since the last run.
+/// A malformed persisted room id (should never happen — every row is
+/// written by this same watcher) is logged and skipped rather than failing
+/// the whole seed.
+async fn seed_unread_counts_cache(
+    store: &Store,
+    account_id: Uuid,
+) -> HashMap<OwnedRoomId, (u64, u64)> {
+    let rows = match store.room_unread_counts(account_id).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(
+                %account_id, error = %err,
+                "failed to read persisted unread counts; starting dedup cache empty"
+            );
+            return HashMap::new();
+        }
+    };
+    let mut cache = HashMap::with_capacity(rows.len());
+    for (room_id, (notification_count, highlight_count)) in rows {
+        let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+            tracing::warn!(%account_id, %room_id, "skipping malformed persisted room id");
+            continue;
+        };
+        let notification_count = u64::try_from(notification_count).unwrap_or(0);
+        let highlight_count = u64::try_from(highlight_count).unwrap_or(0);
+        cache.insert(parsed_room_id, (notification_count, highlight_count));
+    }
+    cache
+}
+
+/// Keep `room_unread_counts` tracking matrix-sdk's notification/highlight
+/// counts (issue #313, ADR 0070) — themselves sourced from the upstream
+/// homeserver's own sync room-summary, not derived by Axon. This is what lets
+/// a freshly loaded/reloaded client show a real unread count immediately,
+/// rather than only after observing a live event this session.
+///
+/// The dedup cache (`last`) is seeded from what's already persisted (see
+/// [`seed_unread_counts_cache`]) before anything else runs, so a
+/// restart/reconnect's startup sweep only re-upserts and re-broadcasts rooms
+/// whose counts actually changed since the last run — not unconditionally
+/// every joined room.
+///
+/// Subscribes to `room_info_notable_update_receiver` *before* running the
+/// startup sweep — matching the persist handlers' own "register before
+/// starting sync" rule elsewhere in `run_account` — so a notable update that
+/// lands mid-sweep is queued on the receiver rather than silently missed; the
+/// dedup check in [`capture_unread_counts`] makes replaying it afterward a
+/// harmless no-op if the sweep already observed the same value. After the
+/// startup sweep, the watcher reacts to *every* `room_info_notable_update_receiver`
+/// notification regardless of its `reasons` bitflag — there is no dedicated
+/// "notification count changed" reason, so filtering on the existing flags
+/// would be non-exhaustive — and dedups on the actual value diff. A `Lagged`
+/// gap is not specially recovered: the watcher always re-derives the
+/// *current* value rather than diffing the missed notification, so a dropped
+/// update for a room self-heals the next time anything about that room
+/// changes, backstopped by a periodic full re-sweep. Runs until `cancel`
+/// fires or the update stream closes.
+async fn watch_unread_counts(
+    client: Client,
+    store: Store,
+    account_id: Uuid,
+    live_tx: broadcast::Sender<LiveFrame>,
+    cancel: CancellationToken,
+) {
+    let last: Mutex<HashMap<OwnedRoomId, (u64, u64)>> =
+        Mutex::new(seed_unread_counts_cache(&store, account_id).await);
+
+    let mut updates = client.room_info_notable_update_receiver();
+    sweep_unread_counts(&client, &store, account_id, &live_tx, &last).await;
+
+    // The first tick of `interval` fires immediately; defer it by one period
+    // so the resweep timer doesn't immediately re-run what the startup sweep
+    // above just did.
+    let mut resweep = tokio::time::interval_at(
+        tokio::time::Instant::now() + UNREAD_COUNTS_RESWEEP,
+        UNREAD_COUNTS_RESWEEP,
+    );
+    resweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = resweep.tick() => {
+                sweep_unread_counts(&client, &store, account_id, &live_tx, &last).await;
+            }
+            update = updates.recv() => match update {
+                Ok(update) => {
+                    if let Some(room) = client.get_room(&update.room_id) {
+                        capture_unread_counts(&room, &store, account_id, &live_tx, &last).await;
+                    }
+                }
+                // We always re-derive the current value rather than diff the missed
+                // notification, so a lagged gap is self-healing — see the doc comment
+                // above — and needs no special recovery beyond the periodic re-sweep.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
             },
         }
     }

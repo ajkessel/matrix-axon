@@ -95,6 +95,9 @@ pub async fn run(
         ("outbound_send", |c| {
             Box::pin(crate::scenarios::outbound_send(c))
         }),
+        ("unread_counts", |c| {
+            Box::pin(crate::scenarios::unread_counts(c))
+        }),
         ("relation_reads", |c| {
             Box::pin(crate::scenarios::relation_reads(c))
         }),
