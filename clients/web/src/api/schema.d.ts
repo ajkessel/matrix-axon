@@ -1635,6 +1635,14 @@ export interface components {
                 canonical_alias?: string | null;
                 /**
                  * Format: int64
+                 * @description Server-derived highlight count (issue #313, ADR 0070): the subset of
+                 *     `notification_count` that also matched a highlighting push rule (e.g.
+                 *     a display-name mention). Same source, same encrypted-room caveat as
+                 *     `notification_count`.
+                 */
+                highlight_count: number;
+                /**
+                 * Format: int64
                  * @description `origin_server_ts` of the most recent event, in milliseconds — the sort key.
                  */
                 last_activity_ts: number;
@@ -1642,6 +1650,24 @@ export interface components {
                 last_event_id?: string | null;
                 /** @description Room name (`m.room.name`), if set. */
                 name?: string | null;
+                /**
+                 * Format: int64
+                 * @description Server-derived unread notification count (issue #313, ADR 0070). This
+                 *     is **not** computed by Axon: it is matrix-sdk's own read of the
+                 *     upstream homeserver's sync room-summary
+                 *     (`unread_notifications.notification_count`), itself the product of
+                 *     the homeserver's push-rule evaluation — so a fresh client load can
+                 *     show a real number without first observing a live event this session.
+                 *     `0` until the sync engine has captured a value for this room.
+                 *     Own-account events (your own messages, reactions, redactions, edits)
+                 *     never count — the homeserver always excludes them. In an
+                 *     **encrypted** room, other users' reactions/edits/redactions may still
+                 *     count: the homeserver can't inspect ciphertext to apply the
+                 *     content-based push rules that suppress them in an unencrypted room,
+                 *     and falls back to `.m.rule.encrypted` (notify on most events from
+                 *     others). See ADR 0070.
+                 */
+                notification_count: number;
                 /** @description Matrix room ID. */
                 room_id: string;
                 /** @description Room topic (`m.room.topic`), if set. */
@@ -2181,6 +2207,14 @@ export interface components {
             canonical_alias?: string | null;
             /**
              * Format: int64
+             * @description Server-derived highlight count (issue #313, ADR 0070): the subset of
+             *     `notification_count` that also matched a highlighting push rule (e.g.
+             *     a display-name mention). Same source, same encrypted-room caveat as
+             *     `notification_count`.
+             */
+            highlight_count: number;
+            /**
+             * Format: int64
              * @description `origin_server_ts` of the most recent event, in milliseconds — the sort key.
              */
             last_activity_ts: number;
@@ -2188,6 +2222,24 @@ export interface components {
             last_event_id?: string | null;
             /** @description Room name (`m.room.name`), if set. */
             name?: string | null;
+            /**
+             * Format: int64
+             * @description Server-derived unread notification count (issue #313, ADR 0070). This
+             *     is **not** computed by Axon: it is matrix-sdk's own read of the
+             *     upstream homeserver's sync room-summary
+             *     (`unread_notifications.notification_count`), itself the product of
+             *     the homeserver's push-rule evaluation — so a fresh client load can
+             *     show a real number without first observing a live event this session.
+             *     `0` until the sync engine has captured a value for this room.
+             *     Own-account events (your own messages, reactions, redactions, edits)
+             *     never count — the homeserver always excludes them. In an
+             *     **encrypted** room, other users' reactions/edits/redactions may still
+             *     count: the homeserver can't inspect ciphertext to apply the
+             *     content-based push rules that suppress them in an unencrypted room,
+             *     and falls back to `.m.rule.encrypted` (notify on most events from
+             *     others). See ADR 0070.
+             */
+            notification_count: number;
             /** @description Matrix room ID. */
             room_id: string;
             /** @description Room topic (`m.room.topic`), if set. */
