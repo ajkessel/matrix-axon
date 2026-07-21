@@ -109,6 +109,11 @@ Each crate's own `Cargo.toml` `description` is the source of truth; this table i
   - Push: `jj git push --bookmark <name>`  
   - Restack after base moves: `jj rebase -d <base-bookmark>` then re-push  
   - PRs are still opened with `gh pr create --base <base> --head <branch>`; `gh`'s "uncommitted changes" warning in colocated mode can be ignored as long as the bookmark was pushed correctly.
+- **Pre-push formatting hook (optional but recommended).** CI (`web-lint-and-test.yml`) runs `pnpm format:check` and **fails the build** on any unformatted `clients/web` file. To catch that before it reaches CI, the repo ships a shared `.pre-commit-config.yaml` that runs Prettier (`--check`) over changed web files at push time. It uses a self-contained Prettier (`language: node` + a pinned `additional_dependencies`), so it needs neither the repo's `node_modules` nor a global Prettier — keep that pin in step with `clients/web/package.json` on upgrades. It requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or 'sudo apt install pre-commit`). Note this only applies to web client work; the Rust hook is still git-only. Enable it once per clone:
+  - **git users:** `pre-commit install --hook-type pre-push` — fires natively on `git push`.
+  - **jj users:** git hooks don't fire under jj, so push through the `jj-hooks` tool (`cargo install jj-hooks`) instead: `jj-hooks --runner pre-commit push` (or run `jj-hooks init` once to install a `jj push` alias that does it for you).
+
+  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run `pnpm --dir clients/web format` (jj users can `jj fix` if configured) and push again. CI's `format:check` remains the backstop for anyone who skips the hook.
 
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 
