@@ -7,6 +7,7 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use axon_core::{MediaAttachment, MediaSendKind};
 use bytes::Bytes;
 use futures_util::Stream;
 use uuid::Uuid;
@@ -45,6 +46,26 @@ pub struct ClaimedUpload {
     pub content_type: Option<String>,
     pub size_bytes: u64,
     pub bytes: Vec<u8>,
+}
+
+/// Every consumer of a claimed upload (`send_media`, `set_room_avatar`, and
+/// future M19f profile-avatar routes) needs the same bytes handed to the
+/// outbound-message/room-settings gateway as a [`MediaAttachment`]; sharing
+/// this conversion keeps that mapping in one place instead of re-deriving it
+/// per handler.
+impl From<ClaimedUpload> for MediaAttachment {
+    fn from(upload: ClaimedUpload) -> Self {
+        MediaAttachment {
+            kind: match upload.kind {
+                MediaUploadKindDto::Image => MediaSendKind::Image,
+                MediaUploadKindDto::File => MediaSendKind::File,
+            },
+            filename: upload.filename,
+            content_type: upload.content_type,
+            size_bytes: upload.size_bytes,
+            bytes: upload.bytes,
+        }
+    }
 }
 
 /// What can go wrong while staging or deleting upload bytes.

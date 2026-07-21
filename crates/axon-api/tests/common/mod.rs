@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
     DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
-    MediaAttachment, MediaError, MediaProxy, MediaResource, MediaSendKind, MemberProfile,
-    MemberProfileError, MemberProfileService, MembershipSender, MessageSender, RecoverError,
-    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, SearchHit, SearchHits,
+    MediaAttachment, MediaError, MediaProxy, MediaResource, MemberProfile, MemberProfileError,
+    MemberProfileService, MembershipSender, MessageSender, RecoverError, RedecryptUtdsError,
+    RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits,
     SearchQuery, SearchQueryError, SearchQueryParams, SendError, SenderTrustService,
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier,
     TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService, VerifyError,
@@ -85,11 +85,7 @@ pub enum Call {
     SendMedia {
         account_id: Uuid,
         room_id: String,
-        kind: MediaSendKind,
-        filename: String,
-        content_type: Option<String>,
-        size_bytes: u64,
-        bytes: Vec<u8>,
+        attachment: MediaAttachment,
         caption: Option<String>,
         reply_to: Option<String>,
         thread_root: Option<String>,
@@ -648,6 +644,196 @@ impl RoomEntrySender for StubRoomEntry {
             account_id,
             user_id: user_id.to_owned(),
         });
+        self.outcome.to_result()
+    }
+}
+
+/// One recorded call to [`StubRoomSettings`], with the arguments the handler
+/// passed through.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomSettingsCall {
+    SetName {
+        account_id: Uuid,
+        room_id: String,
+        name: String,
+    },
+    SetTopic {
+        account_id: Uuid,
+        room_id: String,
+        topic: String,
+    },
+    SetAvatar {
+        account_id: Uuid,
+        room_id: String,
+        attachment: MediaAttachment,
+    },
+    RemoveAvatar {
+        account_id: Uuid,
+        room_id: String,
+    },
+    SetTag {
+        account_id: Uuid,
+        room_id: String,
+        tag: String,
+        order: Option<OrderedFloat>,
+    },
+    RemoveTag {
+        account_id: Uuid,
+        room_id: String,
+        tag: String,
+    },
+}
+
+/// Wraps `Option<f64>` so [`RoomSettingsCall`] can derive `Eq` (`f64` has no
+/// total order); test tags never carry `NaN`/`inf`, so bit-equality via
+/// `to_bits` is a safe stand-in for the deliberately absent `PartialOrd`/`Ord`.
+#[derive(Clone, Copy, Debug)]
+pub struct OrderedFloat(pub f64);
+
+impl PartialEq for OrderedFloat {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+impl Eq for OrderedFloat {}
+
+/// The outcome [`StubRoomSettings`] returns for every call. `Clone` (unlike
+/// [`SendError`]) so one stub can answer repeated calls.
+#[derive(Clone)]
+pub enum RoomSettingsOutcome {
+    Ok,
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl RoomSettingsOutcome {
+    fn to_result(&self) -> Result<(), SendError> {
+        match self {
+            RoomSettingsOutcome::Ok => Ok(()),
+            RoomSettingsOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            RoomSettingsOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            RoomSettingsOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            RoomSettingsOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            RoomSettingsOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+}
+
+/// An in-memory [`RoomSettingsSender`] for tests.
+pub struct StubRoomSettings {
+    outcome: RoomSettingsOutcome,
+    calls: Mutex<Vec<RoomSettingsCall>>,
+}
+
+impl StubRoomSettings {
+    /// A stub that returns `Ok(())` for every call.
+    pub fn ok() -> Self {
+        Self {
+            outcome: RoomSettingsOutcome::Ok,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub that returns the given failure for every call.
+    pub fn failing(outcome: RoomSettingsOutcome) -> Self {
+        Self {
+            outcome,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<RoomSettingsCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RoomSettingsSender for StubRoomSettings {
+    async fn set_name(&self, account_id: Uuid, room_id: &str, name: &str) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(RoomSettingsCall::SetName {
+            account_id,
+            room_id: room_id.to_owned(),
+            name: name.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn set_topic(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        topic: &str,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(RoomSettingsCall::SetTopic {
+            account_id,
+            room_id: room_id.to_owned(),
+            topic: topic.to_owned(),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+    ) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RoomSettingsCall::SetAvatar {
+                account_id,
+                room_id: room_id.to_owned(),
+                attachment,
+            });
+        self.outcome.to_result()
+    }
+
+    async fn remove_avatar(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RoomSettingsCall::RemoveAvatar {
+                account_id,
+                room_id: room_id.to_owned(),
+            });
+        self.outcome.to_result()
+    }
+
+    async fn set_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<(), SendError> {
+        self.calls.lock().unwrap().push(RoomSettingsCall::SetTag {
+            account_id,
+            room_id: room_id.to_owned(),
+            tag: tag.to_owned(),
+            order: order.map(OrderedFloat),
+        });
+        self.outcome.to_result()
+    }
+
+    async fn remove_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+    ) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RoomSettingsCall::RemoveTag {
+                account_id,
+                room_id: room_id.to_owned(),
+                tag: tag.to_owned(),
+            });
         self.outcome.to_result()
     }
 }
@@ -1450,11 +1636,7 @@ impl MessageSender for StubSender {
         self.calls.lock().unwrap().push(Call::SendMedia {
             account_id,
             room_id: room_id.to_owned(),
-            kind: attachment.kind,
-            filename: attachment.filename,
-            content_type: attachment.content_type,
-            size_bytes: attachment.size_bytes,
-            bytes: attachment.bytes,
+            attachment,
             caption: caption.map(str::to_owned),
             reply_to: relation.reply_to.map(str::to_owned),
             thread_root: relation.thread_root.map(str::to_owned),

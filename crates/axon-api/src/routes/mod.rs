@@ -11,6 +11,7 @@ pub mod membership;
 pub mod messages;
 pub mod oauth;
 pub mod room_entry;
+pub mod room_settings;
 pub mod rooms;
 pub mod search;
 pub mod status;

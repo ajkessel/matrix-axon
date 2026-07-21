@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use uuid::Uuid;
 
-use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
+use axon_core::{Formatted, MediaAttachment, Relation};
 
 use crate::dto::{
     EditRequest, ReactRequest, RedactQuery, SendMediaRequest, SendMessageRequest, SendResultDto,
@@ -124,16 +124,7 @@ pub async fn send_media(
         claim_elapsed_ms = started_at.elapsed().as_millis(),
         "send_media: upload claimed, handing off to the SDK attachment send"
     );
-    let attachment = MediaAttachment {
-        kind: match upload.kind {
-            crate::dto::MediaUploadKindDto::Image => MediaSendKind::Image,
-            crate::dto::MediaUploadKindDto::File => MediaSendKind::File,
-        },
-        filename: upload.filename,
-        content_type: upload.content_type,
-        size_bytes: upload.size_bytes,
-        bytes: upload.bytes,
-    };
+    let attachment: MediaAttachment = upload.into();
 
     let send_started_at = std::time::Instant::now();
     let send_result = sender

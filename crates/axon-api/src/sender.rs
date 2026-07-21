@@ -212,3 +212,60 @@ pub trait RoomEntrySender: Send + Sync {
     /// Create a DM with `user_id`. Returns the DM room's id.
     async fn create_dm(&self, account_id: Uuid, user_id: &str) -> Result<String, SendError>;
 }
+
+/// Sets this room's `name`/`topic`/`avatar` state and this account's `m.tag`
+/// room account data (ADR 0068, M19d). Split from [`MembershipSender`] rather
+/// than folded into it because, unlike a membership change, `set_tag`/
+/// `remove_tag` write **room account data**, not a state event — there is no
+/// `m.room.member`-style state change for the homeserver to fan out to other
+/// members, only a private per-user record. All six methods still return
+/// `()` on success, same shape as [`MembershipSender`]: none hand back an id
+/// a caller needs, since the resulting state/account-data change round-trips
+/// through sync like any other.
+#[async_trait]
+pub trait RoomSettingsSender: Send + Sync {
+    /// Set this room's `m.room.name`. An empty `name` clears it — the SDK has
+    /// no separate "remove" primitive for name/topic (unlike avatar), so a
+    /// blank value is the clear signal.
+    async fn set_name(&self, account_id: Uuid, room_id: &str, name: &str) -> Result<(), SendError>;
+
+    /// Set this room's `m.room.topic`. An empty `topic` clears it, same
+    /// convention as [`set_name`](Self::set_name).
+    async fn set_topic(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        topic: &str,
+    ) -> Result<(), SendError>;
+
+    /// Upload `attachment`'s bytes as this room's avatar and set
+    /// `m.room.avatar` to the resulting `mxc://` URI in one call. The
+    /// attachment is already claimed from the staging service, mirroring
+    /// [`MessageSender::send_media`](crate::sender::MessageSender::send_media);
+    /// the sender owns only the Matrix SDK upload/state-event operation.
+    async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+    ) -> Result<(), SendError>;
+
+    /// Clear this room's `m.room.avatar`.
+    async fn remove_avatar(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError>;
+
+    /// Add or update `tag` (Matrix's wire form, e.g. `m.favourite`,
+    /// `m.lowpriority`, or a `u.`-prefixed custom tag) on this room, with an
+    /// optional sort `order`. This is room account data, not a state event —
+    /// it's private to this account, not visible to other room members.
+    async fn set_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<(), SendError>;
+
+    /// Remove `tag` from this room.
+    async fn remove_tag(&self, account_id: Uuid, room_id: &str, tag: &str)
+        -> Result<(), SendError>;
+}

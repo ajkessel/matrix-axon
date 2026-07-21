@@ -26,6 +26,7 @@ use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
     AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
 };
+use matrix_sdk::ruma::events::tag::{TagInfo, TagName, UserTagName};
 use matrix_sdk::ruma::events::InitialStateEvent;
 use matrix_sdk::ruma::{
     EventId, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId,
@@ -51,6 +52,27 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
         Some(ErrorKind::BadState) => GatewayError::Invalid(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
+}
+
+/// Reject a room-state write on a room that isn't `Joined` (ADR 0068, M19d).
+/// The SDK's own `send_state_event`/`upload_avatar` paths call
+/// `ensure_room_joined` internally and fail with a local `Error::WrongRoomState`
+/// when they aren't — an SDK-local precondition failure, not a homeserver
+/// response, so it carries no `client_api_error_kind` and `map_sdk_err`'s
+/// catch-all would otherwise surface it as a misleading `502` instead of a
+/// clean `400`. Shared by every M19d state write (`set_name`, `set_topic`,
+/// `set_avatar`, `remove_avatar`) rather than duplicated per method; `set_tag`/
+/// `remove_tag` don't call this because they write room account data via a
+/// direct `client.send`, which the homeserver accepts regardless of local
+/// join state.
+fn ensure_joined(room: &Room) -> Result<(), GatewayError> {
+    if room.state() != RoomState::Joined {
+        return Err(GatewayError::Invalid(format!(
+            "cannot write room state in room state {:?}; the room must be joined",
+            room.state()
+        )));
+    }
+    Ok(())
 }
 
 /// Parse a Matrix event id targeted by a mutation, mapping a malformed one to
@@ -88,6 +110,71 @@ fn parse_server_names(names: &[String]) -> Result<Vec<OwnedServerName>, GatewayE
                 .map_err(|e| GatewayError::Invalid(format!("server name {name:?}: {e}")))
         })
         .collect()
+}
+
+/// Upper bound on a room tag's wire-form byte length (ADR 0068, M19d review).
+/// Not itself a hard limit the Matrix spec text calls out for `m.tag`, but a
+/// deterministic Axon-side cap so a pathologically long custom tag name fails
+/// as a clean `400` here rather than round-tripping to the homeserver and
+/// coming back as a homeserver-dependent rejection — the same reasoning
+/// behind this crate's other upload-metadata caps
+/// (`MAX_FILENAME_CHARS`/`MAX_CONTENT_TYPE_CHARS` in
+/// `axon-api::routes::uploads`), whose 255-byte value this mirrors.
+const MAX_TAG_NAME_BYTES: usize = 255;
+
+/// Parse a room tag's wire form (ADR 0068, M19d) into a [`TagName`],
+/// accepting only the three well-known names (`m.favourite`, `m.lowpriority`,
+/// `m.server_notice`) and `u.`-prefixed custom tags, rejecting anything else
+/// as [`GatewayError::Invalid`]. This validation can't be left to `TagName`
+/// itself: its `From<T: AsRef<str>>` conversion is infallible — any
+/// unrecognized string silently becomes `TagName::_Custom` — so an unvalidated
+/// tag would round-trip to the homeserver as a made-up, non-namespaced tag
+/// instead of failing clean at the API boundary.
+///
+/// The custom-tag branch delegates its `u.`-prefix check to `UserTagName`'s
+/// own `FromStr` rather than re-deriving it, so a future change to what ruma
+/// considers a valid custom tag is picked up here automatically. `UserTagName`
+/// alone accepts a bare `u.` (any string starting with `u.` parses, including
+/// itself), which is why this narrows further with its own `len()` check: a
+/// nameless custom tag has nothing to sort/display by, so it's still rejected
+/// — deliberately stricter than ruma, not a plain passthrough of it.
+fn parse_tag_name(tag: &str) -> Result<TagName, GatewayError> {
+    let invalid = || {
+        GatewayError::Invalid(format!(
+            "tag: must be m.favourite, m.lowpriority, m.server_notice, or u.<name>, got {tag:?}"
+        ))
+    };
+    if tag.len() > MAX_TAG_NAME_BYTES {
+        return Err(GatewayError::Invalid(format!(
+            "tag: must be at most {MAX_TAG_NAME_BYTES} bytes, got {}",
+            tag.len()
+        )));
+    }
+    match tag {
+        "m.favourite" | "m.lowpriority" | "m.server_notice" => Ok(TagName::from(tag)),
+        _ => tag
+            .parse::<UserTagName>()
+            .ok()
+            .filter(|_| tag.len() > "u.".len())
+            .map(TagName::User)
+            .ok_or_else(invalid),
+    }
+}
+
+/// Validate a room tag's `order` (ADR 0068, M19d review) against the Matrix
+/// spec's documented range for `m.tag`'s `order` field: a number in `[0, 1]`.
+/// Ruma's own `TagInfo` carries `order` as a bare `Option<f64>` with no range
+/// check, so an out-of-range value would otherwise round-trip to the
+/// homeserver instead of failing clean at the API boundary. `NaN` and
+/// infinities fail every comparison against the range and so are rejected by
+/// the same guard without a separate check.
+fn validate_tag_order(order: Option<f64>) -> Result<Option<f64>, GatewayError> {
+    match order {
+        Some(value) if !(0.0..=1.0).contains(&value) => Err(GatewayError::Invalid(format!(
+            "tag order must be between 0 and 1, got {value}"
+        ))),
+        _ => Ok(order),
+    }
 }
 
 fn map_preset(preset: RoomPreset) -> create_room::v3::RoomPreset {
@@ -637,6 +724,116 @@ impl SdkGateway {
         }
         Ok(room.room_id().to_string())
     }
+
+    /// Set this room's `m.room.name` (ADR 0068, M19d). An empty `name` clears
+    /// it — the SDK has no separate "remove" primitive for name/topic (unlike
+    /// avatar), so a blank value is the clear signal.
+    pub async fn set_name(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        name: &str,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        room.set_name(name.to_owned()).await.map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Set this room's `m.room.topic` (ADR 0068, M19d). An empty `topic`
+    /// clears it, same convention as [`set_name`](Self::set_name).
+    pub async fn set_topic(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        topic: &str,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        room.set_room_topic(topic).await.map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Upload `attachment`'s bytes as this room's avatar and set
+    /// `m.room.avatar` to the resulting `mxc://` URI in one call
+    /// (`Room::upload_avatar`, ADR 0068 M19d) — mirroring `send_media`'s
+    /// single-call upload+send shape. The avatar must be an image regardless
+    /// of the staged upload's own `kind` metadata, so this always validates
+    /// against [`MediaSendKind::Image`] rather than trusting the caller's
+    /// staged `kind` — and, unlike `send_media`, a missing `content_type` is
+    /// rejected rather than defaulted to `image/png`: `effective_mime`'s
+    /// "assume PNG when absent" fallback exists for message sends where any
+    /// declared kind is acceptable, but here it would silently accept
+    /// non-image bytes with no real validation at all.
+    ///
+    /// See [`ensure_joined`] for why the room-state precondition is checked
+    /// explicitly here rather than left to the SDK.
+    pub async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        let content_type = attachment.content_type.as_deref().ok_or_else(|| {
+            GatewayError::Invalid("avatar upload must declare a content type".to_owned())
+        })?;
+        let content_type = effective_mime(MediaSendKind::Image, Some(content_type))?;
+        room.upload_avatar(&content_type, attachment.bytes, None)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Clear this room's `m.room.avatar` (ADR 0068, M19d). See
+    /// [`ensure_joined`] for why the room-state precondition is checked
+    /// explicitly here rather than left to the SDK.
+    pub async fn remove_avatar(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        room.remove_avatar().await.map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Add or update `tag` on this room, with an optional sort `order`
+    /// (ADR 0068, M19d). Unlike `name`/`topic`/`avatar`, this writes **room
+    /// account data** (`m.tag`, private to this account), not a state event —
+    /// there is no `Room::state()`/`send_state_event` involved, only
+    /// `Room::set_tag`'s direct `create_tag` call, which the homeserver
+    /// accepts regardless of local join state, so this doesn't need
+    /// [`ensure_joined`].
+    pub async fn set_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let tag_name = parse_tag_name(tag)?;
+        let order = validate_tag_order(order)?;
+        let mut tag_info = TagInfo::new();
+        tag_info.order = order;
+        room.set_tag(tag_name, tag_info)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Remove `tag` from this room (ADR 0068, M19d). Same account-data
+    /// caveat as [`set_tag`](Self::set_tag).
+    pub async fn remove_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        let tag_name = parse_tag_name(tag)?;
+        room.remove_tag(tag_name).await.map_err(map_sdk_err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -646,11 +843,13 @@ mod tests {
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
     use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
+    use matrix_sdk::ruma::events::tag::TagName;
     use serde_json::json;
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request, effective_mime,
-        message_relates_to, parse_room_id_or_alias, parse_server_names, parse_user_id,
+        message_relates_to, parse_room_id_or_alias, parse_server_names, parse_tag_name,
+        parse_user_id, validate_tag_order, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -704,6 +903,70 @@ mod tests {
         assert!(
             matches!(err, GatewayError::Invalid(message) if message.starts_with("server name"))
         );
+    }
+
+    #[test]
+    fn parse_tag_name_accepts_well_known_names() {
+        assert_eq!(parse_tag_name("m.favourite").unwrap(), TagName::Favorite);
+        assert_eq!(
+            parse_tag_name("m.lowpriority").unwrap(),
+            TagName::LowPriority
+        );
+        assert_eq!(
+            parse_tag_name("m.server_notice").unwrap(),
+            TagName::ServerNotice
+        );
+    }
+
+    #[test]
+    fn parse_tag_name_accepts_a_custom_user_tag() {
+        let tag = parse_tag_name("u.work").expect("valid custom tag");
+        assert_eq!(tag.as_ref(), "u.work");
+    }
+
+    #[test]
+    fn parse_tag_name_rejects_a_bare_u_prefix() {
+        let err = parse_tag_name("u.").expect_err("empty custom tag name should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("tag:")));
+    }
+
+    #[test]
+    fn parse_tag_name_rejects_an_unrecognized_string() {
+        let err = parse_tag_name("not-a-tag").expect_err("unrecognized tag should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("tag:")));
+    }
+
+    #[test]
+    fn parse_tag_name_accepts_a_tag_at_the_byte_limit() {
+        let tag = format!("u.{}", "a".repeat(MAX_TAG_NAME_BYTES - 2));
+        assert_eq!(tag.len(), MAX_TAG_NAME_BYTES);
+        parse_tag_name(&tag).expect("tag at the byte limit should be accepted");
+    }
+
+    #[test]
+    fn parse_tag_name_rejects_a_tag_over_the_byte_limit() {
+        let tag = format!("u.{}", "a".repeat(MAX_TAG_NAME_BYTES - 1));
+        assert_eq!(tag.len(), MAX_TAG_NAME_BYTES + 1);
+        let err = parse_tag_name(&tag).expect_err("oversized tag should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("tag:")));
+    }
+
+    #[test]
+    fn validate_tag_order_accepts_the_documented_range() {
+        assert_eq!(validate_tag_order(None).unwrap(), None);
+        assert_eq!(validate_tag_order(Some(0.0)).unwrap(), Some(0.0));
+        assert_eq!(validate_tag_order(Some(1.0)).unwrap(), Some(1.0));
+        assert_eq!(validate_tag_order(Some(0.5)).unwrap(), Some(0.5));
+    }
+
+    #[test]
+    fn validate_tag_order_rejects_out_of_range_values() {
+        for value in [-0.001, 1.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = validate_tag_order(Some(value)).expect_err("out-of-range order should fail");
+            assert!(
+                matches!(err, GatewayError::Invalid(message) if message.starts_with("tag order"))
+            );
+        }
     }
 
     #[test]

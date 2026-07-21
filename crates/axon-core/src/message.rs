@@ -56,7 +56,7 @@ pub enum MediaSendKind {
 
 /// Claimed media bytes and metadata passed from the API upload substrate to the
 /// outbound message gateway.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaAttachment {
     pub kind: MediaSendKind,
     pub filename: String,

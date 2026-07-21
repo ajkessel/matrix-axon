@@ -1,6 +1,6 @@
 //! Composition-root adapter: binds `axon-sync`'s concrete [`SdkGateway`] to
 //! `axon-api`'s [`MessageSender`], [`EphemeralSender`], [`MembershipSender`],
-//! and [`RoomEntrySender`] ports.
+//! [`RoomEntrySender`], and [`RoomSettingsSender`] ports.
 //!
 //! `axon-api` and `axon-sync` never depend on each other; this binary is the one
 //! place that knows both, so the adapter lives here. It delegates each call to
@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axon_api::{
     EphemeralSender, Formatted, MediaAttachment, MembershipSender, MessageSender, Relation,
-    RoomEntrySender, SendError,
+    RoomEntrySender, RoomSettingsSender, SendError,
 };
 use axon_core::CreateRoomRequest;
 use axon_sync::{GatewayError, SdkGateway};
@@ -327,6 +327,93 @@ impl RoomEntrySender for GatewayAdapter {
         )
         .await
         .map_err(|_| timed_out("create_dm", self.room_entry_timeout))?
+        .map_err(map_err)
+    }
+}
+
+#[async_trait]
+impl RoomSettingsSender for GatewayAdapter {
+    async fn set_name(&self, account_id: Uuid, room_id: &str, name: &str) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.set_name(account_id, room_id, name),
+        )
+        .await
+        .map_err(|_| timed_out("set_name", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn set_topic(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        topic: &str,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.set_topic(account_id, room_id, topic),
+        )
+        .await
+        .map_err(|_| timed_out("set_topic", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        attachment: MediaAttachment,
+    ) -> Result<(), SendError> {
+        // Reuses the media-upload timeout (not `membership_mutation_timeout`)
+        // since this call, unlike the other five, does a real upload to the
+        // homeserver — the same reason `send_media` uses it.
+        tokio::time::timeout(
+            self.upstream_upload_timeout,
+            self.gateway.set_avatar(account_id, room_id, attachment),
+        )
+        .await
+        .map_err(|_| timed_out("set_avatar", self.upstream_upload_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn remove_avatar(&self, account_id: Uuid, room_id: &str) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.remove_avatar(account_id, room_id),
+        )
+        .await
+        .map_err(|_| timed_out("remove_avatar", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn set_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+        order: Option<f64>,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.set_tag(account_id, room_id, tag, order),
+        )
+        .await
+        .map_err(|_| timed_out("set_tag", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn remove_tag(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        tag: &str,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.remove_tag(account_id, room_id, tag),
+        )
+        .await
+        .map_err(|_| timed_out("remove_tag", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 }

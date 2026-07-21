@@ -51,7 +51,10 @@ pub use oauth::{
 pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
-pub use sender::{EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, SendError};
+pub use sender::{
+    EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, RoomSettingsSender,
+    SendError,
+};
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
@@ -256,6 +259,29 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms",
             post(routes::room_entry::create_room),
+        )
+        // Room settings (ADR 0068, M19d): name/topic/avatar/tags. name/topic/
+        // avatar resolve through `SdkGateway::room()` exactly like the M19b
+        // membership block; tags write room account data, not a state event
+        // (see `RoomSettingsSender`'s doc comment). PUT/DELETE rather than
+        // POST since these are idempotent field-set/clear operations, unlike
+        // M19a/b/c's fire-once actions.
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/name",
+            put(routes::room_settings::set_room_name),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/topic",
+            put(routes::room_settings::set_room_topic),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/avatar",
+            put(routes::room_settings::set_room_avatar)
+                .delete(routes::room_settings::remove_room_avatar),
+        )
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/tags/{tag}",
+            put(routes::room_settings::set_room_tag).delete(routes::room_settings::remove_room_tag),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

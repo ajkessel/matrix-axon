@@ -16,7 +16,7 @@ mod common;
 
 use std::sync::Arc;
 
-use axon_api::{AppState, MediaSendKind, MessageSender, StagedUploadService};
+use axon_api::{AppState, MediaAttachment, MediaSendKind, MessageSender, StagedUploadService};
 use axon_store::Store;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -217,11 +217,13 @@ async fn send_media_claims_sends_and_completes_upload() {
         vec![Call::SendMedia {
             account_id,
             room_id: room_id.to_owned(),
-            kind: MediaSendKind::Image,
-            filename: "photo.png".to_owned(),
-            content_type: Some("image/png".to_owned()),
-            size_bytes: 3,
-            bytes: b"abc".to_vec(),
+            attachment: MediaAttachment {
+                kind: MediaSendKind::Image,
+                filename: "photo.png".to_owned(),
+                content_type: Some("image/png".to_owned()),
+                size_bytes: 3,
+                bytes: b"abc".to_vec(),
+            },
             caption: Some("look".to_owned()),
             reply_to: Some("$reply:localhost".to_owned()),
             thread_root: Some("$root:localhost".to_owned()),

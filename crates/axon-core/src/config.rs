@@ -200,10 +200,18 @@ pub struct SyncConfig {
     #[serde(default = "default_ephemeral_send_timeout_secs")]
     pub ephemeral_send_timeout_secs: u64,
     /// Per-call timeout for an outbound room-membership mutation — `leave`,
-    /// `forget`, `invite`, `kick`, `ban`, `unban` (ADR 0068, M19b) — in
-    /// seconds. Bounds a hung homeserver response so the request-handling
-    /// task can't block on it unbounded (AGENTS.md's "every outbound call
-    /// gets one" boundary-robustness rule). Defaults to 15.
+    /// `forget`, `invite`, `kick`, `ban`, `unban` (ADR 0068, M19b) — or an
+    /// outbound room-settings mutation — `set_name`, `set_topic`,
+    /// `remove_avatar`, `set_tag`, `remove_tag` (ADR 0068, M19d) — in
+    /// seconds. Both groups share this one timeout: each is a purely
+    /// local-room state or account-data write with no federation resolution
+    /// involved, so there's no principled reason to tune them separately.
+    /// Bounds a hung homeserver response so the request-handling task can't
+    /// block on it unbounded (AGENTS.md's "every outbound call gets one"
+    /// boundary-robustness rule). Defaults to 15. (Avatar-set is the one
+    /// M19d verb that does a real media upload, so it reuses
+    /// `media.upstream_upload_timeout_secs` instead of this value — see
+    /// `axon-server`'s `GatewayAdapter`.)
     #[serde(default = "default_membership_mutation_timeout_secs")]
     pub membership_mutation_timeout_secs: u64,
     /// Per-call timeout for an outbound room-entry mutation — `join`,

@@ -23,7 +23,10 @@ use crate::media::MediaProxy;
 use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
-use crate::sender::{EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, SendError};
+use crate::sender::{
+    EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, RoomSettingsSender,
+    SendError,
+};
 use crate::trust::SenderTrustService;
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
@@ -66,6 +69,11 @@ pub struct AppState {
     /// configurations that don't inject one keep compiling; the binary
     /// overrides it via [`with_room_entry`](Self::with_room_entry).
     pub room_entry: Arc<dyn RoomEntrySender>,
+    /// Room-settings port for the name/topic/avatar/tags routes (ADR 0068
+    /// M19d). Defaults to a no-op so tests and non-sync configurations that
+    /// don't inject one keep compiling; the binary overrides it via
+    /// [`with_room_settings`](Self::with_room_settings).
+    pub room_settings: Arc<dyn RoomSettingsSender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -238,6 +246,7 @@ impl AppState {
             ephemeral: Arc::new(NoopEphemeralSender),
             membership: Arc::new(NoopMembershipSender),
             room_entry: Arc::new(NoopRoomEntrySender),
+            room_settings: Arc::new(NoopRoomSettingsSender),
             lifecycle,
             verify,
             trust,
@@ -302,6 +311,15 @@ impl AppState {
     /// routes keep the default no-op.
     pub fn with_room_entry(mut self, room_entry: Arc<dyn RoomEntrySender>) -> Self {
         self.room_entry = room_entry;
+        self
+    }
+
+    /// Inject the room-settings port (name/topic/avatar/tags; ADR 0068
+    /// M19d). The binary calls this with an adapter over the sync engine's
+    /// gateway, same as `sender`; tests that don't touch these routes keep
+    /// the default no-op.
+    pub fn with_room_settings(mut self, room_settings: Arc<dyn RoomSettingsSender>) -> Self {
+        self.room_settings = room_settings;
         self
     }
 
@@ -474,6 +492,80 @@ impl RoomEntrySender for NoopRoomEntrySender {
     }
 }
 
+/// The default `room_settings` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_room_settings`] replaces it with a real adapter.
+struct NoopRoomSettingsSender;
+
+#[async_trait::async_trait]
+impl RoomSettingsSender for NoopRoomSettingsSender {
+    async fn set_name(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _name: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+
+    async fn set_topic(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _topic: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+
+    async fn set_avatar(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _attachment: axon_core::MediaAttachment,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+
+    async fn remove_avatar(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+
+    async fn set_tag(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _tag: &str,
+        _order: Option<f64>,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+
+    async fn remove_tag(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _tag: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "room-settings port is not configured".to_owned(),
+        ))
+    }
+}
+
 struct DisabledStagedUploads;
 
 #[async_trait::async_trait]
@@ -562,6 +654,12 @@ impl FromRef<AppState> for Arc<dyn MembershipSender> {
 impl FromRef<AppState> for Arc<dyn RoomEntrySender> {
     fn from_ref(state: &AppState) -> Arc<dyn RoomEntrySender> {
         state.room_entry.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn RoomSettingsSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn RoomSettingsSender> {
+        state.room_settings.clone()
     }
 }
 

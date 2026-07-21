@@ -85,7 +85,11 @@ ephemeral_event_types = ["m.typing", "m.receipt"]
 # seconds. Default 10.
 # ephemeral_send_timeout_secs = 10
 # Per-call timeout for an outbound room-membership mutation (leave/forget/
-# invite/kick/ban/unban), in seconds. Default 15.
+# invite/kick/ban/unban) or room-settings mutation (name/topic/remove_avatar/
+# tags), in seconds. Both share this one timeout: local-room state/account-
+# data writes, no federation resolution involved. Avatar-set reuses media's
+# upstream_upload_timeout_secs instead, since it does a real media upload.
+# Default 15.
 # membership_mutation_timeout_secs = 15
 # Per-call timeout for an outbound room-entry mutation (join/knock/
 # create_room/create_dm), in seconds. Longer than the membership timeout

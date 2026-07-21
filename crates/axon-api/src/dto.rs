@@ -604,6 +604,45 @@ pub struct RoomEntryResultDto {
     pub room_id: String,
 }
 
+/// Request body for setting a room's name (`PUT …/rooms/{room_id}/name`;
+/// ADR 0068 M19d). An empty `name` clears it — the SDK has no separate
+/// "remove" primitive for name/topic (unlike avatar).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRoomNameRequest {
+    pub name: String,
+}
+
+/// Request body for setting a room's topic (`PUT …/rooms/{room_id}/topic`;
+/// ADR 0068 M19d). An empty `topic` clears it, same convention as
+/// [`SetRoomNameRequest`].
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRoomTopicRequest {
+    pub topic: String,
+}
+
+/// Request body for setting a room's avatar (`PUT …/rooms/{room_id}/avatar`;
+/// ADR 0068 M19d). Takes an already-staged upload id, mirroring
+/// [`SendMediaRequest`]'s `upload_id` — Axon has no route that hands a
+/// client an `mxc://` URI to reference directly, so avatar-set reuses the
+/// same staged-upload flow as sending media.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRoomAvatarRequest {
+    /// Server-issued staged upload id returned by `POST …/media/uploads`.
+    pub upload_id: Uuid,
+}
+
+/// Request body for adding or updating a room tag
+/// (`PUT …/rooms/{room_id}/tags/{tag}`; ADR 0068 M19d). `tag` itself is a
+/// path parameter, not part of this body — see the route handler.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetRoomTagRequest {
+    /// Optional sort order among this account's tagged rooms, in `[0, 1]`
+    /// per the Matrix spec's `m.tag` convention. Rejected as `400` outside
+    /// that range.
+    #[serde(default)]
+    pub order: Option<f64>,
+}
+
 /// Query parameters for staging a media upload (`POST …/media/uploads`).
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

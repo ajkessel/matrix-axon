@@ -48,7 +48,7 @@ yet)
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
 | Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Not started | Not started | Server-only; client UI (leave-room action, member-list kick/ban) is separate follow-up work |
 | Room entry (join/knock/create) | Done (M19c, ADR 0068) — `POST .../rooms/{join,knock,dm}` and `POST .../rooms` | Not started | Not started | Not started | Server-only; client UI (join-room dialog, create-room flow) is separate follow-up work |
-| Room settings (name/topic/avatar/tags) | Planned (M19d, ADR 0068) | Not started | Not started | Not started | |
+| Room settings (name/topic/avatar/tags) | Done (M19d, ADR 0068) — `PUT .../rooms/{room_id}/{name,topic}`, `PUT/DELETE .../rooms/{room_id}/avatar`, and `PUT/DELETE .../rooms/{room_id}/tags/{tag}` | Not started | Not started | Not started | Server-only; client UI (room settings panel, tag/favorite toggle) is separate follow-up work. `tags` writes `m.tag` room account data, not a state event |
 | Power levels | Planned (M19e, ADR 0068) | Not started | Not started | Not started | |
 | Account actions (profile/ignore/directory search) | Planned (M19f, ADR 0068) | Not started | Not started | Not started | |
 | Invited-room visibility (see incoming invites, accept/reject) | Not designed — largest remaining Tier-C gap, issue #279 | Not started | Not started | Not started | Recommended as the milestone after M19 |
