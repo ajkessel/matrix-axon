@@ -610,6 +610,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/accounts/{account_id}/rooms/{room_id}/power_levels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read this room's fully resolved power levels (defaults filled in). */
+        get: operations["get_power_levels"];
+        /**
+         * Apply a power-level change: role thresholds and/or per-user levels,
+         *     merged into one `m.room.power_levels` write.
+         */
+        put: operations["set_power_levels"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/accounts/{account_id}/rooms/{room_id}/read": {
         parameters: {
             query?: never;
@@ -1339,6 +1360,34 @@ export interface components {
                  *     or the peer's user id for cross-user verification (ADR 0040).
                  */
                 user_id: string;
+            };
+        };
+        /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
+        ApiResponse_PowerLevelsDto: {
+            /**
+             * @description Response for `GET …/rooms/{room_id}/power_levels` (ADR 0068 M19e): the
+             *     room's fully resolved power levels, defaults filled in — the same
+             *     computation the write path uses internally for its self-demotion
+             *     guardrail.
+             */
+            data: {
+                /** Format: int64 */
+                ban: number;
+                /** Format: int64 */
+                events_default: number;
+                /** Format: int64 */
+                invite: number;
+                /** Format: int64 */
+                kick: number;
+                /** Format: int64 */
+                redact: number;
+                /** Format: int64 */
+                state_default: number;
+                users: {
+                    [key: string]: number;
+                };
+                /** Format: int64 */
+                users_default: number;
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -2103,6 +2152,70 @@ export interface components {
             membership: string;
             /** @description Matrix user ID (the `m.room.member` state key). */
             user_id: string;
+        };
+        /**
+         * @description Request body for setting a room's power levels (`PUT
+         *     …/rooms/{room_id}/power_levels`; ADR 0068 M19e): role thresholds and
+         *     per-user levels, merged into one `m.room.power_levels` state event. A
+         *     field left absent leaves that level unchanged; `users` entries are
+         *     merged into the room's existing per-user map, not a wholesale
+         *     replacement of it.
+         */
+        PowerLevelChangesRequest: {
+            /**
+             * @description Bypasses the self-demotion guardrail: without this, a change that
+             *     would drop the caller's own resolved power level below what's
+             *     needed to send another `m.room.power_levels` event is rejected as
+             *     `400`, since that write would otherwise succeed and permanently
+             *     strand the caller with no way to self-correct.
+             */
+            acknowledge_self_demotion?: boolean;
+            /** Format: int64 */
+            ban?: number | null;
+            /** Format: int64 */
+            events_default?: number | null;
+            /** Format: int64 */
+            invite?: number | null;
+            /** Format: int64 */
+            kick?: number | null;
+            /** Format: int64 */
+            redact?: number | null;
+            /** Format: int64 */
+            state_default?: number | null;
+            /**
+             * @description User id -> requested power level, merged into the room's existing
+             *     `users` map. A user not present here keeps their current level.
+             */
+            users?: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            users_default?: number | null;
+        };
+        /**
+         * @description Response for `GET …/rooms/{room_id}/power_levels` (ADR 0068 M19e): the
+         *     room's fully resolved power levels, defaults filled in — the same
+         *     computation the write path uses internally for its self-demotion
+         *     guardrail.
+         */
+        PowerLevelsDto: {
+            /** Format: int64 */
+            ban: number;
+            /** Format: int64 */
+            events_default: number;
+            /** Format: int64 */
+            invite: number;
+            /** Format: int64 */
+            kick: number;
+            /** Format: int64 */
+            redact: number;
+            /** Format: int64 */
+            state_default: number;
+            users: {
+                [key: string]: number;
+            };
+            /** Format: int64 */
+            users_default: number;
         };
         /**
          * @description Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.
@@ -4496,6 +4609,163 @@ export interface operations {
                 };
             };
             /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Operation not permitted */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_power_levels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Resolved power levels */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_PowerLevelsDto"];
+                };
+            };
+            /** @description Malformed request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Missing, malformed, or revoked bearer token */
+            401: {
+                headers: {
+                    /** @description RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error="invalid_token"` for an unknown or revoked token. */
+                    "WWW-Authenticate"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account or room not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Upstream homeserver error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Account not reachable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    set_power_levels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Axon account id */
+                account_id: string;
+                /** @description Matrix room id */
+                room_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PowerLevelChangesRequest"];
+            };
+        };
+        responses: {
+            /** @description Power levels set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse_Value"];
+                };
+            };
+            /** @description Malformed request, or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway) */
             400: {
                 headers: {
                     [name: string]: unknown;
