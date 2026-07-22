@@ -244,6 +244,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Same adapter again, unsized onto the room-settings port (name/topic/
     // avatar/tags, ADR 0068 M19d).
     let room_settings: Arc<dyn axon_api::RoomSettingsSender> = sender.clone();
+    // Same adapter again, unsized onto the power-levels port (role
+    // thresholds + per-user levels, ADR 0068 M19e).
+    let power_levels: Arc<dyn axon_api::PowerLevelsSender> = sender.clone();
     let lifecycle = Arc::new(LifecycleAdapter(sync_engine.lifecycle()));
     let verify = Arc::new(VerificationAdapter(sync_engine.verification()));
     let trust = Arc::new(TrustAdapter(sync_engine.sender_trust()));
@@ -295,7 +298,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     .with_ephemeral(ephemeral)
     .with_membership(membership)
     .with_room_entry(room_entry)
-    .with_room_settings(room_settings);
+    .with_room_settings(room_settings)
+    .with_power_levels(power_levels);
     if let Some(oauth) = oauth {
         state = state.with_oauth(oauth);
     }

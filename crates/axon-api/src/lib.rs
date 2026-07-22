@@ -52,8 +52,8 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
 pub use sender::{
-    EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, RoomSettingsSender,
-    SendError,
+    EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender, RoomEntrySender,
+    RoomSettingsSender, SendError,
 };
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
@@ -282,6 +282,16 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/tags/{tag}",
             put(routes::room_settings::set_room_tag).delete(routes::room_settings::remove_room_tag),
+        )
+        // Power levels (ADR 0068, M19e): role thresholds and per-user levels,
+        // merged into one `m.room.power_levels` write, split from the M19d
+        // block above because a bad write here can permanently strand the
+        // caller — see `PowerLevelsSender`'s doc comment. GET returns the
+        // fully resolved levels; no generic Tier-2 state read exists yet
+        // (ADR 0055) to cover this otherwise.
+        .route(
+            "/v1/accounts/{account_id}/rooms/{room_id}/power_levels",
+            put(routes::power_levels::set_power_levels).get(routes::power_levels::get_power_levels),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

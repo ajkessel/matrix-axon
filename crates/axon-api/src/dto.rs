@@ -3,9 +3,9 @@
 //! The store rows (`RoomSummary`, `TimelineRow`) are store-internal and don't
 //! derive `Serialize`; these are the public JSON shapes, owned by the API layer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use axon_core::{CreateRoomRequest, RoomPreset};
+use axon_core::{CreateRoomRequest, PowerLevelChanges, ResolvedPowerLevels, RoomPreset};
 use axon_store::{
     Account, AccountState, DeviceStateRow, ReactionTally, RoomSummary, ThreadSummary, TimelineRow,
 };
@@ -663,6 +663,88 @@ pub struct SetRoomTagRequest {
     /// that range.
     #[serde(default)]
     pub order: Option<f64>,
+}
+
+/// Request body for setting a room's power levels (`PUT
+/// …/rooms/{room_id}/power_levels`; ADR 0068 M19e): role thresholds and
+/// per-user levels, merged into one `m.room.power_levels` state event. A
+/// field left absent leaves that level unchanged; `users` entries are
+/// merged into the room's existing per-user map, not a wholesale
+/// replacement of it.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct PowerLevelChangesRequest {
+    #[serde(default)]
+    pub ban: Option<i64>,
+    #[serde(default)]
+    pub invite: Option<i64>,
+    #[serde(default)]
+    pub kick: Option<i64>,
+    #[serde(default)]
+    pub redact: Option<i64>,
+    #[serde(default)]
+    pub events_default: Option<i64>,
+    #[serde(default)]
+    pub state_default: Option<i64>,
+    #[serde(default)]
+    pub users_default: Option<i64>,
+    /// User id -> requested power level, merged into the room's existing
+    /// `users` map. A user not present here keeps their current level.
+    #[serde(default)]
+    pub users: HashMap<String, i64>,
+    /// Bypasses the self-demotion guardrail: without this, a change that
+    /// would drop the caller's own resolved power level below what's
+    /// needed to send another `m.room.power_levels` event is rejected as
+    /// `400`, since that write would otherwise succeed and permanently
+    /// strand the caller with no way to self-correct.
+    #[serde(default)]
+    pub acknowledge_self_demotion: bool,
+}
+
+impl From<PowerLevelChangesRequest> for PowerLevelChanges {
+    fn from(dto: PowerLevelChangesRequest) -> Self {
+        PowerLevelChanges {
+            ban: dto.ban,
+            invite: dto.invite,
+            kick: dto.kick,
+            redact: dto.redact,
+            events_default: dto.events_default,
+            state_default: dto.state_default,
+            users_default: dto.users_default,
+            users: dto.users,
+            acknowledge_self_demotion: dto.acknowledge_self_demotion,
+        }
+    }
+}
+
+/// Response for `GET …/rooms/{room_id}/power_levels` (ADR 0068 M19e): the
+/// room's fully resolved power levels, defaults filled in — the same
+/// computation the write path uses internally for its self-demotion
+/// guardrail.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PowerLevelsDto {
+    pub ban: i64,
+    pub invite: i64,
+    pub kick: i64,
+    pub redact: i64,
+    pub events_default: i64,
+    pub state_default: i64,
+    pub users_default: i64,
+    pub users: HashMap<String, i64>,
+}
+
+impl From<ResolvedPowerLevels> for PowerLevelsDto {
+    fn from(resolved: ResolvedPowerLevels) -> Self {
+        PowerLevelsDto {
+            ban: resolved.ban,
+            invite: resolved.invite,
+            kick: resolved.kick,
+            redact: resolved.redact,
+            events_default: resolved.events_default,
+            state_default: resolved.state_default,
+            users_default: resolved.users_default,
+            users: resolved.users,
+        }
+    }
 }
 
 /// Query parameters for staging a media upload (`POST …/media/uploads`).

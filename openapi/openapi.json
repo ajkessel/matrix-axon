@@ -2857,6 +2857,224 @@
         }
       }
     },
+    "/v1/accounts/{account_id}/rooms/{room_id}/power_levels": {
+      "get": {
+        "tags": [
+          "power-levels"
+        ],
+        "summary": "Read this room's fully resolved power levels (defaults filled in).",
+        "operationId": "get_power_levels",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved power levels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_PowerLevelsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "power-levels"
+        ],
+        "summary": "Apply a power-level change: role thresholds and/or per-user levels,\nmerged into one `m.room.power_levels` write.",
+        "operationId": "set_power_levels",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Axon account id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "room_id",
+            "in": "path",
+            "description": "Matrix room id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PowerLevelChangesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Power levels set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request, or the change would strand the caller below the level needed to self-correct (set acknowledge_self_demotion to proceed anyway)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, malformed, or revoked bearer token",
+            "headers": {
+              "WWW-Authenticate": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "RFC 6750 bearer challenge: `Bearer` for a missing or malformed credential, `Bearer error=\"invalid_token\"` for an unknown or revoked token."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operation not permitted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or room not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream homeserver error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Account not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/accounts/{account_id}/rooms/{room_id}/read": {
       "post": {
         "tags": [
@@ -5715,6 +5933,69 @@
           }
         }
       },
+      "ApiResponse_PowerLevelsDto": {
+        "type": "object",
+        "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for `GET …/rooms/{room_id}/power_levels` (ADR 0068 M19e): the\nroom's fully resolved power levels, defaults filled in — the same\ncomputation the write path uses internally for its self-demotion\nguardrail.",
+            "required": [
+              "ban",
+              "invite",
+              "kick",
+              "redact",
+              "events_default",
+              "state_default",
+              "users_default",
+              "users"
+            ],
+            "properties": {
+              "ban": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "events_default": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "invite": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "kick": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "redact": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "state_default": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "users": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "users_default": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          }
+        }
+      },
       "ApiResponse_PutDeviceStateResponse": {
         "type": "object",
         "description": "Success envelope: a 2xx body is always `{ \"data\": <T> }`.",
@@ -7161,6 +7442,130 @@
           }
         }
       },
+      "PowerLevelChangesRequest": {
+        "type": "object",
+        "description": "Request body for setting a room's power levels (`PUT\n…/rooms/{room_id}/power_levels`; ADR 0068 M19e): role thresholds and\nper-user levels, merged into one `m.room.power_levels` state event. A\nfield left absent leaves that level unchanged; `users` entries are\nmerged into the room's existing per-user map, not a wholesale\nreplacement of it.",
+        "properties": {
+          "acknowledge_self_demotion": {
+            "type": "boolean",
+            "description": "Bypasses the self-demotion guardrail: without this, a change that\nwould drop the caller's own resolved power level below what's\nneeded to send another `m.room.power_levels` event is rejected as\n`400`, since that write would otherwise succeed and permanently\nstrand the caller with no way to self-correct."
+          },
+          "ban": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "events_default": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "invite": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "kick": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "redact": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state_default": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "users": {
+            "type": "object",
+            "description": "User id -> requested power level, merged into the room's existing\n`users` map. A user not present here keeps their current level.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "users_default": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "PowerLevelsDto": {
+        "type": "object",
+        "description": "Response for `GET …/rooms/{room_id}/power_levels` (ADR 0068 M19e): the\nroom's fully resolved power levels, defaults filled in — the same\ncomputation the write path uses internally for its self-demotion\nguardrail.",
+        "required": [
+          "ban",
+          "invite",
+          "kick",
+          "redact",
+          "events_default",
+          "state_default",
+          "users_default",
+          "users"
+        ],
+        "properties": {
+          "ban": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "events_default": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "invite": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kick": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "redact": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state_default": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "users": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "users_default": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "PutDeviceStateRequest": {
         "type": "object",
         "description": "Body of `PUT /v1/devices/{device_id}/state/{namespace}` (M12): a merge-upsert.\nOnly the keys present are touched — other keys in the namespace are left\nalone — and a `null` value deletes the key (stored as a tombstone so the\ndeletion wins the cross-device merge).",
@@ -7911,6 +8316,10 @@
     {
       "name": "room-settings",
       "description": "Room name, topic, avatar, and this account's tags on a room"
+    },
+    {
+      "name": "power-levels",
+      "description": "Role thresholds and per-user power levels for a room"
     },
     {
       "name": "verification",

@@ -12,8 +12,12 @@
 //! [`GatewayError`], chosen so the composition-root adapter can map them onto
 //! HTTP status without this crate knowing about HTTP.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use axon_core::{
-    CreateRoomRequest, Formatted, MediaAttachment, MediaSendKind, Relation, RoomPreset,
+    CreateRoomRequest, Formatted, MediaAttachment, MediaSendKind, PowerLevelChanges, Relation,
+    ResolvedPowerLevels, RoomPreset,
 };
 use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
@@ -26,14 +30,16 @@ use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
     AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
 };
+use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent};
 use matrix_sdk::ruma::events::tag::{TagInfo, TagName, UserTagName};
-use matrix_sdk::ruma::events::InitialStateEvent;
+use matrix_sdk::ruma::events::{InitialStateEvent, StateEventType};
 use matrix_sdk::ruma::{
-    EventId, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId,
-    ServerName, UInt, UserId,
+    EventId, Int, OwnedEventId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId,
+    RoomOrAliasId, ServerName, UInt, UserId,
 };
 use matrix_sdk::{Room, RoomState};
 use serde_json::{json, Value};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::error::GatewayError;
@@ -54,22 +60,133 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
     }
 }
 
-/// Reject a room-state write on a room that isn't `Joined` (ADR 0068, M19d).
-/// The SDK's own `send_state_event`/`upload_avatar` paths call
-/// `ensure_room_joined` internally and fail with a local `Error::WrongRoomState`
-/// when they aren't — an SDK-local precondition failure, not a homeserver
-/// response, so it carries no `client_api_error_kind` and `map_sdk_err`'s
-/// catch-all would otherwise surface it as a misleading `502` instead of a
-/// clean `400`. Shared by every M19d state write (`set_name`, `set_topic`,
-/// `set_avatar`, `remove_avatar`) rather than duplicated per method; `set_tag`/
+/// Reject an operation on a room that isn't `Joined` (ADR 0068, M19d/M19e).
+/// For a state *write*, the SDK's own `send_state_event`/`upload_avatar`
+/// paths call `ensure_room_joined` internally and fail with a local
+/// `Error::WrongRoomState` when they aren't — an SDK-local precondition
+/// failure, not a homeserver response, so it carries no
+/// `client_api_error_kind` and `map_sdk_err`'s catch-all would otherwise
+/// surface it as a misleading `502` instead of a clean `400`. Shared by every
+/// M19d state write (`set_name`, `set_topic`, `set_avatar`, `remove_avatar`)
+/// and M19e's `set_power_levels` rather than duplicated per method; `set_tag`/
 /// `remove_tag` don't call this because they write room account data via a
 /// direct `client.send`, which the homeserver accepts regardless of local
-/// join state.
+/// join state. M19e's `power_levels` *read* also calls this — not because
+/// the SDK needs it, but because without it `Room::power_levels()` would
+/// happily return a left/banned/invited room's stale cached state, which is
+/// exactly the kind of inconsistency-with-the-write-path this guard closes
+/// everywhere else.
 fn ensure_joined(room: &Room) -> Result<(), GatewayError> {
     if room.state() != RoomState::Joined {
         return Err(GatewayError::Invalid(format!(
             "cannot write room state in room state {:?}; the room must be joined",
             room.state()
+        )));
+    }
+    Ok(())
+}
+
+/// Merge a [`PowerLevelChanges`] request into a resolved [`RoomPowerLevels`]
+/// in place (ADR 0068, M19e): role thresholds first, then per-user levels.
+/// Deliberately doesn't reuse matrix-sdk's own `RoomPowerLevelChanges` +
+/// `apply()` — that type has no `users` field, so a caller wanting both a
+/// role-threshold change and a promote/demote would need matrix-sdk's two
+/// separate `apply_power_level_changes`/`update_power_levels` calls, each an
+/// independent read-modify-send round trip. Two calls would fire two
+/// `m.room.power_levels` state events for one client request and let
+/// [`check_self_demotion_guardrail`] see a stale intermediate state between
+/// them, so this merges both axes into one in-memory copy before a single
+/// send in [`SdkGateway::set_power_levels`].
+fn merge_power_level_changes(
+    power_levels: &mut RoomPowerLevels,
+    changes: &PowerLevelChanges,
+) -> Result<(), GatewayError> {
+    let to_level = |v: i64| -> Result<Int, GatewayError> {
+        Int::try_from(v).map_err(|e| GatewayError::Invalid(format!("power level: {e}")))
+    };
+    if let Some(v) = changes.ban {
+        power_levels.ban = to_level(v)?;
+    }
+    if let Some(v) = changes.invite {
+        power_levels.invite = to_level(v)?;
+    }
+    if let Some(v) = changes.kick {
+        power_levels.kick = to_level(v)?;
+    }
+    if let Some(v) = changes.redact {
+        power_levels.redact = to_level(v)?;
+    }
+    if let Some(v) = changes.events_default {
+        power_levels.events_default = to_level(v)?;
+    }
+    if let Some(v) = changes.state_default {
+        power_levels.state_default = to_level(v)?;
+    }
+    if let Some(v) = changes.users_default {
+        power_levels.users_default = to_level(v)?;
+    }
+    for (user_id, level) in &changes.users {
+        let user_id = parse_user_id(user_id)?;
+        let level = to_level(*level)?;
+        // Mirrors matrix-sdk's own `Room::update_power_levels`: a level equal
+        // to the room's default carries no information as an explicit
+        // override, so drop the entry instead of writing a needless one into
+        // the persisted event content.
+        if level == power_levels.users_default {
+            power_levels.users.remove(&user_id);
+        } else {
+            power_levels.users.insert(user_id, level);
+        }
+    }
+    Ok(())
+}
+
+/// Reject a power-level write that would *itself* drop the caller's own
+/// resolved level below what's needed to send another `m.room.power_levels`
+/// event, unless `acknowledge` is set (ADR 0068, M19e). This is the one
+/// guardrail in the whole M19 batch that `map_sdk_err`'s `M_FORBIDDEN` →
+/// `403` mapping can't provide: the homeserver accepts a self-demoting
+/// power-level write at the protocol level, so it succeeds and permanently
+/// strands the caller with no way to self-correct — there is no error for
+/// Axon to translate, only a state to refuse to reach.
+///
+/// Takes both `before` (the room's power levels prior to this request) and
+/// `merged` (the same, with this request's changes applied) rather than just
+/// `merged`: comparing only the resulting level would also reject a request
+/// from a caller who *already* couldn't self-correct before this write ever
+/// happened (e.g. a no-op body, or a change that doesn't touch their own
+/// level at all) — a real case the gateway's own test suite caught. That
+/// caller isn't stranded *by this request*, so `acknowledge_self_demotion`
+/// wouldn't actually rescue them (the homeserver will reject the send with
+/// its own `M_FORBIDDEN` regardless, since it enforces the identical
+/// sender-level-vs-required check against the room's real state), and
+/// telling them to set it would be misleading. Only a transition from
+/// "could self-correct" to "can't" is this guardrail's concern; an
+/// already-insufficient caller is left to the ordinary `map_sdk_err`
+/// `Forbidden` → `403` path.
+fn check_self_demotion_guardrail(
+    before: &RoomPowerLevels,
+    merged: &RoomPowerLevels,
+    own_user_id: &UserId,
+    acknowledge: bool,
+) -> Result<(), GatewayError> {
+    if acknowledge {
+        return Ok(());
+    }
+
+    let required_before = before.for_state(StateEventType::RoomPowerLevels);
+    let own_level_before = before.for_user(own_user_id);
+    if own_level_before < required_before {
+        return Ok(());
+    }
+
+    let required_after = merged.for_state(StateEventType::RoomPowerLevels);
+    let own_level_after = merged.for_user(own_user_id);
+    if own_level_after < required_after {
+        return Err(GatewayError::Invalid(format!(
+            "this change would drop your own power level ({own_level_after:?}) below \
+             {required_after} (the level required to send m.room.power_levels), leaving no \
+             way to self-correct; set acknowledge_self_demotion to proceed anyway"
         )));
     }
     Ok(())
@@ -330,18 +447,53 @@ fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayEr
     })
 }
 
+/// Per-`(account_id, room_id)` lock guarding [`SdkGateway::set_power_levels`]'s
+/// read-modify-send sequence (ADR 0068, M19e review). Without this, two
+/// concurrent writers to the same room's power levels each read the same
+/// pre-change snapshot via `room.power_levels()`, evaluate
+/// [`check_self_demotion_guardrail`] against their own now-divergent
+/// in-memory copy, and can both pass even though the combined effect strands
+/// someone — whichever `send_state_event` lands second silently overwrites
+/// the whole event (there is no per-field merge on the wire), losing the
+/// earlier write too. Mirrors [`ClientManager`]'s per-account `Slot`
+/// (`manager.rs`) and the lifecycle layer's `IdentityLock` (`lifecycle.rs`):
+/// the outer [`Mutex`] is held only to fetch/insert a lock, the actual
+/// critical section is held under the returned async mutex, so concurrent
+/// writers to *different* rooms never block each other.
+type PowerLevelLock = Arc<AsyncMutex<()>>;
+type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
+
 /// Sends Matrix message-like events on behalf of an account, routed through that
-/// account's SDK client. Cheap to [`Clone`] (holds only a [`ClientManager`]).
+/// account's SDK client. Cheap to [`Clone`] (every field is a handle).
 #[derive(Clone)]
 pub struct SdkGateway {
     manager: ClientManager,
+    power_level_locks: PowerLevelLocks,
 }
 
 impl SdkGateway {
     /// Build a gateway over a client manager. Constructed by the sync engine and
     /// exposed via [`SyncEngine::gateway`](crate::SyncEngine::gateway).
     pub(crate) fn new(manager: ClientManager) -> Self {
-        Self { manager }
+        Self {
+            manager,
+            power_level_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Fetch (or create) the per-room power-level lock for `(account_id,
+    /// room_id)`. See [`PowerLevelLocks`] for why this exists. The map grows
+    /// unbounded — one entry per room ever written to — the same accepted
+    /// tradeoff `lifecycle::lock_for`'s `IdentityLocks` makes: nothing here
+    /// owns room-departure bookkeeping, so pruning isn't this gateway's job,
+    /// and the leak is one small entry per distinct room.
+    fn power_level_lock(&self, account_id: Uuid, room_id: &str) -> PowerLevelLock {
+        let key = (account_id, room_id.to_owned());
+        let mut map = self
+            .power_level_locks
+            .lock()
+            .expect("power-level lock map poisoned");
+        map.entry(key).or_default().clone()
     }
 
     /// Resolve the joined [`Room`] for `(account_id, room_id)`, connecting the
@@ -834,24 +986,132 @@ impl SdkGateway {
         room.remove_tag(tag_name).await.map_err(map_sdk_err)?;
         Ok(())
     }
+
+    /// Set this room's power levels — role thresholds (`ban`/`invite`/`kick`/
+    /// `redact`/`events_default`/`state_default`/`users_default`) and
+    /// individual per-user levels, merged into one `m.room.power_levels`
+    /// state event (ADR 0068, M19e). See [`merge_power_level_changes`] for
+    /// why this doesn't call matrix-sdk's own
+    /// `apply_power_level_changes`/`update_power_levels` helpers directly.
+    ///
+    /// Before sending, [`check_self_demotion_guardrail`] verifies this
+    /// request doesn't itself drop the caller's own resolved power level
+    /// below what's needed to send another `m.room.power_levels` event. See
+    /// [`ensure_joined`] for why the room-state precondition is checked
+    /// explicitly here rather than left to the SDK.
+    ///
+    /// The whole read-merge-check-send sequence runs under a per-`(account_id,
+    /// room_id)` lock (see [`PowerLevelLocks`]): without it, two concurrent
+    /// calls for the same room could each read the same pre-change snapshot,
+    /// pass the guardrail against their own now-stale copy, and have the
+    /// second `send_state_event` silently clobber the first's changes —
+    /// exactly the kind of shared-mutable-state race the guardrail exists to
+    /// close, just from a second writer instead of this request's own two
+    /// change axes (which [`merge_power_level_changes`]'s single-send design
+    /// already closes).
+    pub async fn set_power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        changes: PowerLevelChanges,
+    ) -> Result<(), GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+
+        let lock = self.power_level_lock(account_id, room_id);
+        let _guard = lock.lock().await;
+
+        let before = room
+            .power_levels()
+            .await
+            .map_err(|e| map_sdk_err(e.into()))?;
+        let mut merged = before.clone();
+        merge_power_level_changes(&mut merged, &changes)?;
+        check_self_demotion_guardrail(
+            &before,
+            &merged,
+            room.own_user_id(),
+            changes.acknowledge_self_demotion,
+        )?;
+
+        let content = RoomPowerLevelsEventContent::try_from(merged)
+            .map_err(|e| GatewayError::Invalid(format!("power levels: {e}")))?;
+        room.send_state_event(content).await.map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Read this room's fully resolved power levels, defaults filled in
+    /// (ADR 0068, M19e) — the same computation [`set_power_levels`]
+    /// (Self::set_power_levels) performs internally for its guardrail,
+    /// exposed as its own read so a client can build a power-levels UI. No
+    /// generic Tier-2 state read exists yet to cover this (ADR 0055's
+    /// proposal was never implemented), so without this there would be no
+    /// way for a client to read a room's power levels through Axon at all.
+    /// Shares [`set_power_levels`](Self::set_power_levels)'s [`ensure_joined`]
+    /// guard so a left/banned/invited room's stale cached state can't be read
+    /// through this route either, even though matrix-sdk's own `get_room`/
+    /// `power_levels()` would otherwise happily return it.
+    pub async fn power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<ResolvedPowerLevels, GatewayError> {
+        let room = self.room(account_id, room_id).await?;
+        ensure_joined(&room)?;
+        let power_levels = room
+            .power_levels()
+            .await
+            .map_err(|e| map_sdk_err(e.into()))?;
+        Ok(ResolvedPowerLevels {
+            ban: power_levels.ban.into(),
+            invite: power_levels.invite.into(),
+            kick: power_levels.kick.into(),
+            redact: power_levels.redact.into(),
+            events_default: power_levels.events_default.into(),
+            state_default: power_levels.state_default.into(),
+            users_default: power_levels.users_default.into(),
+            users: power_levels
+                .users
+                .into_iter()
+                .map(|(user_id, level)| (user_id.to_string(), level.into()))
+                .collect(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use axon_core::{CreateRoomRequest, MediaSendKind, Relation, RoomPreset};
+    use axon_core::{CreateRoomRequest, MediaSendKind, PowerLevelChanges, Relation, RoomPreset};
     use matrix_sdk::attachment::AttachmentInfo;
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
     use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
+    use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsSource};
     use matrix_sdk::ruma::events::tag::TagName;
+    use matrix_sdk::ruma::{Int, RoomVersionId, UserId};
     use serde_json::json;
 
     use super::{
-        attachment_info, attachment_reply, build_create_room_request, effective_mime,
+        attachment_info, attachment_reply, build_create_room_request,
+        check_self_demotion_guardrail, effective_mime, merge_power_level_changes,
         message_relates_to, parse_room_id_or_alias, parse_server_names, parse_tag_name,
         parse_user_id, validate_tag_order, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
+
+    /// A room-version-11 [`RoomPowerLevels`] with no explicit event content
+    /// (spec defaults: `state_default`/`ban`/`kick`/`redact` = 50,
+    /// `events_default`/`invite`/`users_default` = 0, no `users` entries),
+    /// for the [`merge_power_level_changes`]/[`check_self_demotion_guardrail`]
+    /// unit tests below — these are pure functions over [`RoomPowerLevels`],
+    /// so no live `Room`/homeserver is needed to exercise them.
+    fn default_power_levels() -> RoomPowerLevels {
+        let rules = RoomVersionId::V11
+            .rules()
+            .expect("V11 has rules")
+            .authorization;
+        RoomPowerLevels::new(RoomPowerLevelsSource::None, &rules, std::iter::empty())
+    }
 
     const REPLY_EVENT: &str = "$reply:example.org";
     const THREAD_ROOT: &str = "$thread:example.org";
@@ -1250,5 +1510,147 @@ mod tests {
         assert!(
             matches!(bad_thread, GatewayError::Invalid(message) if message.starts_with("thread_root:"))
         );
+    }
+
+    #[test]
+    fn merge_power_level_changes_applies_role_thresholds() {
+        let mut power_levels = default_power_levels();
+        let changes = PowerLevelChanges {
+            ban: Some(80),
+            state_default: Some(60),
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut power_levels, &changes).expect("valid change");
+        assert_eq!(power_levels.ban, Int::from(80));
+        assert_eq!(power_levels.state_default, Int::from(60));
+        // Untouched fields keep their spec default.
+        assert_eq!(power_levels.kick, Int::from(50));
+        assert_eq!(power_levels.users_default, Int::from(0));
+    }
+
+    #[test]
+    fn merge_power_level_changes_merges_user_levels_without_clobbering_others() {
+        let mut power_levels = default_power_levels();
+        let alice = UserId::parse("@alice:example.org").unwrap();
+        power_levels.users.insert(alice.clone(), 50.into());
+
+        let mut users = std::collections::HashMap::new();
+        users.insert("@bob:example.org".to_owned(), 75);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut power_levels, &changes).expect("valid change");
+
+        assert_eq!(power_levels.users.get(&alice).copied(), Some(50.into()));
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        assert_eq!(power_levels.users.get(&bob).copied(), Some(75.into()));
+    }
+
+    #[test]
+    fn merge_power_level_changes_removes_a_user_entry_set_back_to_the_default() {
+        let mut power_levels = default_power_levels();
+        let bob = UserId::parse("@bob:example.org").unwrap();
+        power_levels.users.insert(bob.clone(), 50.into());
+
+        let mut users = std::collections::HashMap::new();
+        users.insert("@bob:example.org".to_owned(), 0); // users_default is 0
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut power_levels, &changes).expect("valid change");
+
+        assert!(
+            !power_levels.users.contains_key(&bob),
+            "a level equal to users_default should be removed, not written as an explicit override"
+        );
+    }
+
+    #[test]
+    fn merge_power_level_changes_rejects_a_malformed_user_id() {
+        let mut power_levels = default_power_levels();
+        let mut users = std::collections::HashMap::new();
+        users.insert("not-a-user-id".to_owned(), 50);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        let err = merge_power_level_changes(&mut power_levels, &changes).expect_err("bad user id");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("user id:")));
+    }
+
+    #[test]
+    fn check_self_demotion_guardrail_allows_a_no_op_when_caller_already_lacks_permission() {
+        let before = default_power_levels();
+        let own_user_id = UserId::parse("@alice:example.org").unwrap();
+        // Caller is already at the default (0), below state_default (50) —
+        // nothing about this request caused that (it's a no-op), so the
+        // guardrail must not block it: doing so would misleadingly imply
+        // acknowledge_self_demotion could rescue a caller the homeserver is
+        // going to reject with 403 regardless.
+        let merged = before.clone();
+
+        check_self_demotion_guardrail(&before, &merged, &own_user_id, false)
+            .expect("a request that doesn't itself strand the caller must not be blocked");
+    }
+
+    #[test]
+    fn check_self_demotion_guardrail_blocks_a_change_that_causes_a_self_lockout() {
+        let mut before = default_power_levels();
+        let own_user_id = UserId::parse("@alice:example.org").unwrap();
+        // Caller currently holds an explicit level (100) at/above
+        // state_default (50), so they can self-correct today.
+        before.users.insert(own_user_id.clone(), 100.into());
+
+        let mut merged = before.clone();
+        let mut users = std::collections::HashMap::new();
+        users.insert(own_user_id.to_string(), 10);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut merged, &changes).unwrap();
+
+        let err = check_self_demotion_guardrail(&before, &merged, &own_user_id, false).expect_err(
+            "this request itself drops the caller below what's required to self-correct",
+        );
+        assert!(matches!(err, GatewayError::Invalid(_)));
+    }
+
+    #[test]
+    fn check_self_demotion_guardrail_allows_the_bypass_flag() {
+        let mut before = default_power_levels();
+        let own_user_id = UserId::parse("@alice:example.org").unwrap();
+        before.users.insert(own_user_id.clone(), 100.into());
+        let mut merged = before.clone();
+        let mut users = std::collections::HashMap::new();
+        users.insert(own_user_id.to_string(), 10);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut merged, &changes).unwrap();
+
+        check_self_demotion_guardrail(&before, &merged, &own_user_id, true)
+            .expect("acknowledge_self_demotion bypasses the guardrail");
+    }
+
+    #[test]
+    fn check_self_demotion_guardrail_allows_a_change_that_keeps_caller_at_required_level() {
+        let mut before = default_power_levels();
+        let own_user_id = UserId::parse("@alice:example.org").unwrap();
+        before.users.insert(own_user_id.clone(), 100.into());
+        let mut merged = before.clone();
+        let mut users = std::collections::HashMap::new();
+        users.insert(own_user_id.to_string(), 100);
+        let changes = PowerLevelChanges {
+            users,
+            ..Default::default()
+        };
+        merge_power_level_changes(&mut merged, &changes).unwrap();
+
+        check_self_demotion_guardrail(&before, &merged, &own_user_id, false)
+            .expect("caller's own level (100) stays at/above state_default (50)");
     }
 }

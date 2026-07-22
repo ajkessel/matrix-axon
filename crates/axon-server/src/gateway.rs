@@ -1,6 +1,7 @@
 //! Composition-root adapter: binds `axon-sync`'s concrete [`SdkGateway`] to
 //! `axon-api`'s [`MessageSender`], [`EphemeralSender`], [`MembershipSender`],
-//! [`RoomEntrySender`], and [`RoomSettingsSender`] ports.
+//! [`RoomEntrySender`], [`RoomSettingsSender`], and [`PowerLevelsSender`]
+//! ports.
 //!
 //! `axon-api` and `axon-sync` never depend on each other; this binary is the one
 //! place that knows both, so the adapter lives here. It delegates each call to
@@ -12,10 +13,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axon_api::{
-    EphemeralSender, Formatted, MediaAttachment, MembershipSender, MessageSender, Relation,
-    RoomEntrySender, RoomSettingsSender, SendError,
+    EphemeralSender, Formatted, MediaAttachment, MembershipSender, MessageSender,
+    PowerLevelsSender, Relation, RoomEntrySender, RoomSettingsSender, SendError,
 };
-use axon_core::CreateRoomRequest;
+use axon_core::{CreateRoomRequest, PowerLevelChanges, ResolvedPowerLevels};
 use axon_sync::{GatewayError, SdkGateway};
 use uuid::Uuid;
 
@@ -414,6 +415,38 @@ impl RoomSettingsSender for GatewayAdapter {
         )
         .await
         .map_err(|_| timed_out("remove_tag", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+}
+
+#[async_trait]
+impl PowerLevelsSender for GatewayAdapter {
+    async fn set_power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        changes: PowerLevelChanges,
+    ) -> Result<(), SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.set_power_levels(account_id, room_id, changes),
+        )
+        .await
+        .map_err(|_| timed_out("set_power_levels", self.membership_mutation_timeout))?
+        .map_err(map_err)
+    }
+
+    async fn power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<ResolvedPowerLevels, SendError> {
+        tokio::time::timeout(
+            self.membership_mutation_timeout,
+            self.gateway.power_levels(account_id, room_id),
+        )
+        .await
+        .map_err(|_| timed_out("power_levels", self.membership_mutation_timeout))?
         .map_err(map_err)
     }
 }

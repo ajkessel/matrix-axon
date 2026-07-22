@@ -24,8 +24,8 @@ use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::{
-    EphemeralSender, MembershipSender, MessageSender, RoomEntrySender, RoomSettingsSender,
-    SendError,
+    EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender, RoomEntrySender,
+    RoomSettingsSender, SendError,
 };
 use crate::trust::SenderTrustService;
 use crate::uploads::{
@@ -74,6 +74,11 @@ pub struct AppState {
     /// don't inject one keep compiling; the binary overrides it via
     /// [`with_room_settings`](Self::with_room_settings).
     pub room_settings: Arc<dyn RoomSettingsSender>,
+    /// Power-levels port for the `PUT`/`GET .../power_levels` routes (ADR
+    /// 0068 M19e). Defaults to a no-op so tests and non-sync configurations
+    /// that don't inject one keep compiling; the binary overrides it via
+    /// [`with_power_levels`](Self::with_power_levels).
+    pub power_levels: Arc<dyn PowerLevelsSender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -247,6 +252,7 @@ impl AppState {
             membership: Arc::new(NoopMembershipSender),
             room_entry: Arc::new(NoopRoomEntrySender),
             room_settings: Arc::new(NoopRoomSettingsSender),
+            power_levels: Arc::new(NoopPowerLevelsSender),
             lifecycle,
             verify,
             trust,
@@ -320,6 +326,14 @@ impl AppState {
     /// the default no-op.
     pub fn with_room_settings(mut self, room_settings: Arc<dyn RoomSettingsSender>) -> Self {
         self.room_settings = room_settings;
+        self
+    }
+
+    /// Inject the power-levels port (ADR 0068 M19e). The binary calls this
+    /// with an adapter over the sync engine's gateway, same as `sender`;
+    /// tests that don't touch these routes keep the default no-op.
+    pub fn with_power_levels(mut self, power_levels: Arc<dyn PowerLevelsSender>) -> Self {
+        self.power_levels = power_levels;
         self
     }
 
@@ -566,6 +580,35 @@ impl RoomSettingsSender for NoopRoomSettingsSender {
     }
 }
 
+/// The default `power_levels` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_power_levels`] replaces it with a real adapter.
+struct NoopPowerLevelsSender;
+
+#[async_trait::async_trait]
+impl PowerLevelsSender for NoopPowerLevelsSender {
+    async fn set_power_levels(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+        _changes: axon_core::PowerLevelChanges,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "power-levels port is not configured".to_owned(),
+        ))
+    }
+
+    async fn power_levels(
+        &self,
+        _account_id: uuid::Uuid,
+        _room_id: &str,
+    ) -> Result<axon_core::ResolvedPowerLevels, SendError> {
+        Err(SendError::Unavailable(
+            "power-levels port is not configured".to_owned(),
+        ))
+    }
+}
+
 struct DisabledStagedUploads;
 
 #[async_trait::async_trait]
@@ -660,6 +703,12 @@ impl FromRef<AppState> for Arc<dyn RoomEntrySender> {
 impl FromRef<AppState> for Arc<dyn RoomSettingsSender> {
     fn from_ref(state: &AppState) -> Arc<dyn RoomSettingsSender> {
         state.room_settings.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn PowerLevelsSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn PowerLevelsSender> {
+        state.power_levels.clone()
     }
 }
 

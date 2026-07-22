@@ -10,6 +10,7 @@ pub mod media;
 pub mod membership;
 pub mod messages;
 pub mod oauth;
+pub mod power_levels;
 pub mod room_entry;
 pub mod room_settings;
 pub mod rooms;

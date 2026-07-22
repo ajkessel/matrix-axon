@@ -10,6 +10,7 @@ pub mod error;
 pub mod live;
 pub mod media;
 pub mod message;
+pub mod power_levels;
 pub mod room_entry;
 pub mod secret;
 
@@ -24,5 +25,6 @@ pub use live::{
 };
 pub use media::{ThumbnailMethod, ThumbnailSpec};
 pub use message::{Formatted, MediaAttachment, MediaSendKind, Relation};
+pub use power_levels::{PowerLevelChanges, ResolvedPowerLevels};
 pub use room_entry::{CreateRoomRequest, RoomPreset};
 pub use secret::{generate_opaque_secret, hash_secret};

@@ -17,13 +17,14 @@ use axon_api::{
     AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
     DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
     MediaAttachment, MediaError, MediaProxy, MediaResource, MemberProfile, MemberProfileError,
-    MemberProfileService, MembershipSender, MessageSender, RecoverError, RedecryptUtdsError,
-    RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits,
-    SearchQuery, SearchQueryError, SearchQueryParams, SendError, SenderTrustService,
-    StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, TokenVerifier,
-    TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService, VerifyError,
+    MemberProfileService, MembershipSender, MessageSender, PowerLevelsSender, RecoverError,
+    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender,
+    SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
+    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
+    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
+    VerifyError,
 };
-use axon_core::CreateRoomRequest;
+use axon_core::{CreateRoomRequest, PowerLevelChanges, ResolvedPowerLevels};
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -835,6 +836,127 @@ impl RoomSettingsSender for StubRoomSettings {
                 tag: tag.to_owned(),
             });
         self.outcome.to_result()
+    }
+}
+
+/// One recorded call to [`StubPowerLevels`], with the arguments the handler
+/// passed through.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PowerLevelsCall {
+    SetPowerLevels {
+        account_id: Uuid,
+        room_id: String,
+        changes: PowerLevelChanges,
+    },
+    GetPowerLevels {
+        account_id: Uuid,
+        room_id: String,
+    },
+}
+
+/// The outcome [`StubPowerLevels`] returns for every `set_power_levels` call
+/// (`Clone`, unlike [`SendError`], so one stub can answer repeated calls) and
+/// the fixed value it returns for every `power_levels` read.
+#[derive(Clone)]
+pub enum PowerLevelsOutcome {
+    Ok,
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl PowerLevelsOutcome {
+    fn to_result(&self) -> Result<(), SendError> {
+        match self {
+            PowerLevelsOutcome::Ok => Ok(()),
+            PowerLevelsOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            PowerLevelsOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            PowerLevelsOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            PowerLevelsOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            PowerLevelsOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+}
+
+/// An in-memory [`PowerLevelsSender`] for tests. The self-demotion guardrail
+/// itself lives in `axon-sync`'s `SdkGateway` (covered by its own unit tests,
+/// `gateway::tests::check_self_demotion_guardrail_*`) — this stub only
+/// exercises routing, request decoding, and error-mapping at the handler
+/// layer, same division of labor as [`StubRoomSettings`].
+pub struct StubPowerLevels {
+    outcome: PowerLevelsOutcome,
+    read: ResolvedPowerLevels,
+    calls: Mutex<Vec<PowerLevelsCall>>,
+}
+
+impl StubPowerLevels {
+    /// A stub that returns `Ok(())` for writes and a zeroed read for reads.
+    pub fn ok() -> Self {
+        Self {
+            outcome: PowerLevelsOutcome::Ok,
+            read: ResolvedPowerLevels::default(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose write fails with the given outcome; reads still succeed.
+    pub fn failing(outcome: PowerLevelsOutcome) -> Self {
+        Self {
+            outcome,
+            read: ResolvedPowerLevels::default(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose read returns `resolved`.
+    pub fn with_read(resolved: ResolvedPowerLevels) -> Self {
+        Self {
+            outcome: PowerLevelsOutcome::Ok,
+            read: resolved,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<PowerLevelsCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PowerLevelsSender for StubPowerLevels {
+    async fn set_power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        changes: PowerLevelChanges,
+    ) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(PowerLevelsCall::SetPowerLevels {
+                account_id,
+                room_id: room_id.to_owned(),
+                changes,
+            });
+        self.outcome.to_result()
+    }
+
+    async fn power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<ResolvedPowerLevels, SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(PowerLevelsCall::GetPowerLevels {
+                account_id,
+                room_id: room_id.to_owned(),
+            });
+        Ok(self.read.clone())
     }
 }
 

@@ -12,7 +12,9 @@
 //! [`response`](crate::response).
 
 use async_trait::async_trait;
-use axon_core::{CreateRoomRequest, Formatted, MediaAttachment, Relation};
+use axon_core::{
+    CreateRoomRequest, Formatted, MediaAttachment, PowerLevelChanges, Relation, ResolvedPowerLevels,
+};
 use uuid::Uuid;
 
 /// What can go wrong issuing a mutation. Deliberately small and HTTP-shaped: the
@@ -268,4 +270,33 @@ pub trait RoomSettingsSender: Send + Sync {
     /// Remove `tag` from this room.
     async fn remove_tag(&self, account_id: Uuid, room_id: &str, tag: &str)
         -> Result<(), SendError>;
+}
+
+/// Reads and writes a room's power levels (ADR 0068, M19e): role thresholds
+/// (`ban`/`invite`/`kick`/`redact`/`events_default`/`state_default`/
+/// `users_default`) and individual per-user levels, merged into one
+/// `m.room.power_levels` state event on write. This is the one M19 port
+/// whose write can leave the caller permanently unable to self-correct — a
+/// homeserver accepts a power-level write that drops the sender's own
+/// resolved level below what it takes to send another `m.room.power_levels`
+/// event, so `set_power_levels` must reject that outcome itself
+/// (`SendError::Invalid`) unless the request explicitly acknowledges it, since
+/// there is no `M_FORBIDDEN` for the implementation to translate.
+#[async_trait]
+pub trait PowerLevelsSender: Send + Sync {
+    /// Apply `changes` to this room's power levels in one
+    /// `m.room.power_levels` write.
+    async fn set_power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        changes: PowerLevelChanges,
+    ) -> Result<(), SendError>;
+
+    /// Read this room's fully resolved power levels (defaults filled in).
+    async fn power_levels(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<ResolvedPowerLevels, SendError>;
 }
