@@ -26,8 +26,9 @@ export default tseslint.config(
     },
   },
   {
-    // The e2e lane and its config/mock run in Node, not the browser.
-    files: ['e2e/**', 'playwright.config.ts'],
+    // The e2e lane, its config/mock, and local helper scripts run in Node, not
+    // the browser.
+    files: ['e2e/**', 'playwright.config.ts', 'scripts/**'],
     languageOptions: {
       globals: globals.node,
     },

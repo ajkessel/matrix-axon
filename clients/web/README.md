@@ -160,8 +160,14 @@ contract, regenerate and commit the result:
 pnpm gen:api
 ```
 
-CI fails if the committed file is out of sync with the spec. The generated
-file is excluded from ESLint and Prettier.
+To check drift without rewriting the committed file, run:
+
+```sh
+pnpm check:api
+```
+
+CI and the optional pre-push hook both use `pnpm check:api`. The generated file
+is excluded from ESLint and Prettier.
 
 [openapi-typescript]: https://openapi-ts.dev/
 [openapi-fetch]: https://openapi-ts.dev/openapi-fetch/
@@ -193,6 +199,7 @@ can still slot in later behind the same seam.
 | `pnpm build`                        | Type-check and produce a deployable `dist/`    |
 | `pnpm preview`                      | Serve the built `dist/` locally                |
 | `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec |
+| `pnpm check:api`                    | Check generated API types for drift            |
 | `pnpm test`                         | Vitest, single run                             |
 | `pnpm test:watch`                   | Vitest, watch mode                             |
 | `pnpm lint`                         | ESLint + Prettier check                        |
@@ -204,4 +211,7 @@ An optional live round-trip suite runs against a real server when
 
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus
-manual `workflow_dispatch`).
+manual `workflow_dispatch`). The repo-root `.pre-commit-config.yaml` can run the
+same web checks at pre-push time for both git and jj users. Those hooks use the
+normal web dependencies, so run `pnpm install --frozen-lockfile` here before
+relying on them locally.

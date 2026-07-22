@@ -46,9 +46,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check generated API client is in sync with openapi/openapi.json
-        run: |
-          pnpm gen:api
-          git diff --exit-code -- src/api/schema.d.ts
+        run: pnpm check:api
 
       - name: Lint
         run: pnpm lint

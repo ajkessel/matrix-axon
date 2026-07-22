@@ -109,11 +109,27 @@ Each crate's own `Cargo.toml` `description` is the source of truth; this table i
   - Push: `jj git push --bookmark <name>`  
   - Restack after base moves: `jj rebase -d <base-bookmark>` then re-push  
   - PRs are still opened with `gh pr create --base <base> --head <branch>`; `gh`'s "uncommitted changes" warning in colocated mode can be ignored as long as the bookmark was pushed correctly.
-- **Pre-push formatting hook (optional but recommended).** CI (`web-lint-and-test.yml`) runs `pnpm format:check` and **fails the build** on any unformatted `clients/web` file. To catch that before it reaches CI, the repo ships a shared `.pre-commit-config.yaml` that runs Prettier (`--check`) over changed web files at push time. It uses a self-contained Prettier (`language: node` + a pinned `additional_dependencies`), so it needs neither the repo's `node_modules` nor a global Prettier — keep that pin in step with `clients/web/package.json` on upgrades. It requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or 'sudo apt install pre-commit`). Note this only applies to web client work; the Rust hook is still git-only. Enable it once per clone:
+- **Pre-push web hook (optional but recommended).** CI (`web-lint-and-test.yml`) runs generated-schema drift detection, lint, formatting, tests, and build for `clients/web`. To catch those failures before CI, the repo ships a shared `.pre-commit-config.yaml` that runs the same web checks at push time when web-relevant files change. It requires the [`pre-commit`](https://pre-commit.com) runner (`pipx install pre-commit`, `uv tool install pre-commit`, `pip install --user pre-commit`, or `sudo apt install pre-commit`) and the normal `clients/web` pnpm dependencies (`pnpm install --frozen-lockfile` in `clients/web`). Enable it once per clone:
   - **git users:** `pre-commit install --hook-type pre-push` — fires natively on `git push`.
-  - **jj users:** git hooks don't fire under jj, so push through the `jj-hooks` tool (`cargo install jj-hooks`) instead: `jj-hooks --runner pre-commit push` (or run `jj-hooks init` once to install a `jj push` alias that does it for you).
+  - **jj users:** git hooks don't fire under jj, so push through the `jj-hooks` tool (`cargo install jj-hooks`) instead: `jj-hooks --runner pre-commit push`. To make `jj push` do that by default, add this alias to `~/.config/jj/config.toml`:
 
-  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run `pnpm --dir clients/web format` (jj users can `jj fix` if configured) and push again. CI's `format:check` remains the backstop for anyone who skips the hook.
+    ```toml
+    [aliases]
+    push = ["util", "exec", "--", "jj-hooks", "--runner", "pre-commit", "push"]
+    ```
+
+    Use `jj push`, not `jj git push`; direct `jj git push` bypasses the alias.
+
+  Both front-ends read the same `.pre-commit-config.yaml`; only the driver differs. On a failure, run the command printed by the hook (for example `pnpm --dir clients/web format` for formatting, or `pnpm --dir clients/web gen:api` for schema drift) and push again. CI remains the backstop for anyone who skips the hook.
+- **Web verification uses the package scripts.** For `clients/web` code
+  changes, the local gate is `pnpm --dir clients/web lint`,
+  `pnpm --dir clients/web test`, and `pnpm --dir clients/web build`. Do not
+  use plain `tsc --noEmit` as a substitute for the build typecheck: the web
+  package's root `tsconfig.json` is a project-reference file with no direct
+  inputs, so plain `tsc --noEmit` can check zero app files. Use
+  `pnpm --dir clients/web build` (or, for TypeScript only,
+  `pnpm --dir clients/web exec tsc -b`) so the referenced app/node projects are
+  checked.
 
 Full conventions are in `docs/mvp/implementation.md` under "Conventions."
 

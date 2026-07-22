@@ -1,7 +1,7 @@
 # Shared git-hook config for the repo, run at push time.
 #
-# Purpose: stop unformatted web-client code from reaching CI, where
-# `pnpm format:check` (web-lint-and-test.yml) is a blocking gate.
+# Purpose: stop web-client CI failures from reaching CI. The web checks mirror
+# web-lint-and-test.yml's local steps.
 #
 # Works for both VCS front-ends the team uses:
 #   * git users:  `pre-commit install --hook-type pre-push`   (fires on `git push`)
@@ -10,24 +10,51 @@
 #
 # The prettier hook is self-contained (`language: node` + pinned
 # `additional_dependencies`), so it needs neither the repo's `node_modules`
-# nor a global prettier — which is what lets it run inside jj-hooks' isolated
-# worktree as well as a normal git working tree. Keep the pinned version in
-# step with `clients/web/package.json` on prettier upgrades.
+# nor a global prettier. The pnpm-backed hooks below use the repo's normal
+# clients/web dependencies so they match CI; run `pnpm install --frozen-lockfile`
+# in clients/web before relying on them locally or through jj-hooks.
 #
-# Check-only: an unformatted file fails the push with a message; run
-# `pnpm --dir clients/web format` (or `jj fix`) to fix, then push again.
-minimum_pre_commit_version: '3.2.0'
+# Check-only: failures print the same command CI expects locally.
+minimum_pre_commit_version: "3.2.0"
 repos:
   - repo: local
     hooks:
       - id: prettier-web
         name: prettier (web, check)
         language: node
-        additional_dependencies: ['prettier@3.9.4']
+        additional_dependencies: ["prettier@3.9.4"]
         entry: prettier --check
         # Config (.prettierrc.json) resolves by walking up from each path.
         files: '^(.pre-commit-config.yaml|clients/web/.*\.(ts|tsx|mjs|cjs|js|css|json|md|html|yml|yaml))$'
         # Mirror clients/web/.prettierignore (generated / vendored files).
         exclude: '^clients/web/(dist/|pnpm-lock\.yaml|src/api/schema\.d\.ts|public/emoji-picker-data-en\.json)'
         pass_filenames: true
+        stages: [pre-push]
+      - id: web-api-schema
+        name: web API schema is current
+        language: system
+        entry: pnpm --dir clients/web check:api
+        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/(package\.json|pnpm-lock\.yaml|scripts/check-api-schema\.mjs|src/api/schema\.d\.ts))$'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: web-lint
+        name: web lint
+        language: system
+        entry: pnpm --dir clients/web lint
+        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: web-test
+        name: web test
+        language: system
+        entry: pnpm --dir clients/web test
+        files: '^(\.github/workflows/web-lint-and-test\.yml|clients/web/|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+        stages: [pre-push]
+      - id: web-build
+        name: web build
+        language: system
+        entry: pnpm --dir clients/web build
+        files: '^(\.github/workflows/web-lint-and-test\.yml|openapi/openapi\.json|clients/web/|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
         stages: [pre-push]
