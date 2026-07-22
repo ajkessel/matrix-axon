@@ -11,9 +11,9 @@
 //! [`VerificationFramePayload`] (SAS emoji/decimals, optional target device,
 //! outcome); `ephemeral.passthrough` carries an allowlisted raw ephemeral
 //! event (`m.typing`, `m.receipt`, …) verbatim (ADR 0056);
-//! `unread_counts.changed` carries a room's server-derived unread counts
+//! `unread_counts.changed` carries a room's SDK-derived unread counts
 //! (issue #313, ADR 0070) — *not* built on the ADR 0056 ephemeral path, since
-//! notification counts are a sync room-summary field, not an ephemeral event.
+//! notification counts are per-room counters, not an ephemeral event.
 //!
 //! Delivery is **best-effort live tail**, not a replay: a client sees events
 //! that arrive after it connects, and uses the HTTP read API for history. The
@@ -179,14 +179,13 @@ impl From<EphemeralFrame> for EphemeralFramePayload {
     }
 }
 
-/// The `type` tag for a server-derived unread-counts frame (issue #313, ADR
+/// The `type` tag for an SDK-derived unread-counts frame (issue #313, ADR
 /// 0070).
 const UNREAD_COUNTS_CHANGED: &str = "unread_counts.changed";
 
 /// The wire payload for an `unread_counts.changed` frame: a room's
-/// server-derived notification/highlight counts, sourced from matrix-sdk's
-/// read of the homeserver's own sync room-summary. See [`UnreadCountsFrame`]
-/// for the encrypted-room caveat this inherits.
+/// SDK-derived notification/highlight counts, sourced from matrix-sdk's
+/// read-receipt-based unread counters. See [`UnreadCountsFrame`].
 #[derive(Debug, Serialize)]
 struct UnreadCountsFramePayload {
     room_id: String,

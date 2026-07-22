@@ -1,11 +1,9 @@
-//! Server-derived per-room unread counts (issue #313, ADR 0070).
+//! SDK-derived per-room unread counts (issue #313, ADR 0070).
 //!
-//! Axon does not compute these values — they are matrix-sdk's already-derived
-//! read of the upstream homeserver's own sync room-summary, captured by a
-//! watcher in `axon-sync` and cached here so a fresh client load can read a
-//! number without first observing a live event. See
-//! `room_unread_counts.sql` and ADR 0070 for the encrypted-room caveat this
-//! inherits.
+//! Axon does not compute these values itself — they are matrix-sdk's
+//! client-side read-receipt-based counters, captured by a watcher in
+//! `axon-sync` and cached here so a fresh client load can read a number
+//! without first observing a live event.
 
 use std::collections::HashMap;
 

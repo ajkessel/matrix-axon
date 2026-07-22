@@ -40,12 +40,11 @@ pub enum LiveFrame {
     /// variants above, this is the generic escape hatch for the long tail of
     /// ephemeral signals that don't warrant a bespoke frame.
     Ephemeral(EphemeralFrame),
-    /// A room's server-derived unread counts changed (issue #313, ADR 0070) —
-    /// matrix-sdk's notification/highlight counts for the room, themselves
-    /// sourced from the homeserver's sync room-summary. Unlike
-    /// [`EphemeralFrame`] this is *not* a raw event passthrough: it is not
-    /// built on the ADR 0056 ephemeral path at all, since notification counts
-    /// are a sync room-summary field, not an ephemeral event.
+    /// A room's SDK-derived unread counts changed (issue #313, ADR 0070) —
+    /// matrix-sdk's read-receipt-based notification/mention counters for the
+    /// room. Unlike [`EphemeralFrame`] this is *not* a raw event passthrough:
+    /// it is not built on the ADR 0056 ephemeral path at all, since unread
+    /// counts are room state, not an ephemeral event.
     UnreadCountsChanged(UnreadCountsFrame),
 }
 
@@ -132,17 +131,11 @@ pub struct EphemeralFrame {
     pub content: Value,
 }
 
-/// A room's server-derived unread counts changed (issue #313, ADR 0070), ready
+/// A room's SDK-derived unread counts changed (issue #313, ADR 0070), ready
 /// to fan out over the live-event bus. `notification_count`/`highlight_count`
-/// are matrix-sdk's already-computed read of the upstream homeserver's own
-/// sync room-summary (`Room::unread_notification_counts()`) — Axon derives
-/// nothing here, it only captures and republishes a value the homeserver
-/// already produced. Own-account events are always excluded by the
-/// homeserver's push-rule evaluation. In an **encrypted** room, other users'
-/// reactions/edits/redactions may still increment these counts: the
-/// homeserver can't inspect ciphertext to suppress them the way it does in an
-/// unencrypted room, and falls back to `.m.rule.encrypted` (notify on most
-/// events from others) — see ADR 0070.
+/// are matrix-sdk's client-side read-receipt-derived
+/// `Room::num_unread_notifications()` and `Room::num_unread_mentions()`
+/// values; Axon only caches and republishes them.
 #[derive(Debug, Clone)]
 pub struct UnreadCountsFrame {
     /// Axon account this room belongs to.
@@ -151,8 +144,7 @@ pub struct UnreadCountsFrame {
     pub room_id: String,
     /// Total unread notification count.
     pub notification_count: u64,
-    /// The subset of `notification_count` that also matched a highlighting
-    /// push rule (e.g. a display-name mention).
+    /// The subset of `notification_count` that is an unread mention.
     pub highlight_count: u64,
 }
 

@@ -37,21 +37,14 @@ pub struct RoomSummary {
     pub last_activity_ts: i64,
     /// The `event_id` at `last_activity_ts` (latest by `(origin_ts, id)`).
     pub last_event_id: Option<String>,
-    /// Server-derived unread notification count (issue #313, ADR 0070) — a
-    /// cached read of matrix-sdk's `Room::unread_notification_counts()`,
-    /// itself sourced from the upstream homeserver's own push-rule
-    /// evaluation. `0` until the sync engine's watcher has written a value
-    /// for this room (see [`Store::upsert_room_unread_counts`]). Own-account
-    /// events never count. In an **encrypted** room, other users'
-    /// reactions/edits/redactions may still increment this: the homeserver
-    /// can't inspect ciphertext to apply the content-based push rules that
-    /// would normally suppress them, and falls back to `.m.rule.encrypted`
-    /// (notify on most events from others) — see ADR 0070.
+    /// SDK-derived unread notification count (issue #313, ADR 0070) — a
+    /// cached read of matrix-sdk's client-side
+    /// `Room::num_unread_notifications()` counter. `0` until the sync engine's
+    /// watcher has written a value for this room (see
+    /// [`Store::upsert_room_unread_counts`]).
     pub notification_count: i64,
-    /// Server-derived highlight count (issue #313, ADR 0070) — the subset of
-    /// `notification_count` that also matched a highlighting push rule (e.g. a
-    /// display-name mention). Same source and same encrypted-room caveat as
-    /// `notification_count`.
+    /// SDK-derived highlight count (issue #313, ADR 0070), from matrix-sdk's
+    /// `Room::num_unread_mentions()` counter.
     pub highlight_count: i64,
 }
 

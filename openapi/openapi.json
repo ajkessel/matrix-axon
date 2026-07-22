@@ -6641,7 +6641,7 @@
                 "highlight_count": {
                   "type": "integer",
                   "format": "int64",
-                  "description": "Server-derived highlight count (issue #313, ADR 0070): the subset of\n`notification_count` that also matched a highlighting push rule (e.g.\na display-name mention). Same source, same encrypted-room caveat as\n`notification_count`."
+                  "description": "SDK-derived highlight count (issue #313, ADR 0070), from\n`Room::num_unread_mentions()`."
                 },
                 "last_activity_ts": {
                   "type": "integer",
@@ -6665,7 +6665,7 @@
                 "notification_count": {
                   "type": "integer",
                   "format": "int64",
-                  "description": "Server-derived unread notification count (issue #313, ADR 0070). This\nis **not** computed by Axon: it is matrix-sdk's own read of the\nupstream homeserver's sync room-summary\n(`unread_notifications.notification_count`), itself the product of\nthe homeserver's push-rule evaluation — so a fresh client load can\nshow a real number without first observing a live event this session.\n`0` until the sync engine has captured a value for this room.\nOwn-account events (your own messages, reactions, redactions, edits)\nnever count — the homeserver always excludes them. In an\n**encrypted** room, other users' reactions/edits/redactions may still\ncount: the homeserver can't inspect ciphertext to apply the\ncontent-based push rules that suppress them in an unencrypted room,\nand falls back to `.m.rule.encrypted` (notify on most events from\nothers). See ADR 0070."
+                  "description": "SDK-derived unread notification count (issue #313, ADR 0070). This is\nmatrix-sdk's client-side read-receipt-derived\n`Room::num_unread_notifications()` value, cached by Axon so a fresh\nclient load can show a real number without first observing a live event\nthis session. `0` until the sync engine has captured a value for this\nroom."
                 },
                 "room_id": {
                   "type": "string",
@@ -7744,7 +7744,7 @@
           "highlight_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Server-derived highlight count (issue #313, ADR 0070): the subset of\n`notification_count` that also matched a highlighting push rule (e.g.\na display-name mention). Same source, same encrypted-room caveat as\n`notification_count`."
+            "description": "SDK-derived highlight count (issue #313, ADR 0070), from\n`Room::num_unread_mentions()`."
           },
           "last_activity_ts": {
             "type": "integer",
@@ -7768,7 +7768,7 @@
           "notification_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Server-derived unread notification count (issue #313, ADR 0070). This\nis **not** computed by Axon: it is matrix-sdk's own read of the\nupstream homeserver's sync room-summary\n(`unread_notifications.notification_count`), itself the product of\nthe homeserver's push-rule evaluation — so a fresh client load can\nshow a real number without first observing a live event this session.\n`0` until the sync engine has captured a value for this room.\nOwn-account events (your own messages, reactions, redactions, edits)\nnever count — the homeserver always excludes them. In an\n**encrypted** room, other users' reactions/edits/redactions may still\ncount: the homeserver can't inspect ciphertext to apply the\ncontent-based push rules that suppress them in an unencrypted room,\nand falls back to `.m.rule.encrypted` (notify on most events from\nothers). See ADR 0070."
+            "description": "SDK-derived unread notification count (issue #313, ADR 0070). This is\nmatrix-sdk's client-side read-receipt-derived\n`Room::num_unread_notifications()` value, cached by Axon so a fresh\nclient load can show a real number without first observing a live event\nthis session. `0` until the sync engine has captured a value for this\nroom."
           },
           "room_id": {
             "type": "string",

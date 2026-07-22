@@ -1076,6 +1076,45 @@ const UNREAD_COUNTS_RESWEEP: Duration = Duration::from_secs(300);
 /// fan out one Postgres round trip per room unbounded on every sweep.
 const UNREAD_COUNTS_SWEEP_CONCURRENCY: usize = 8;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnreadCountsSnapshot {
+    notification: u64,
+    highlight: u64,
+}
+
+impl UnreadCountsSnapshot {
+    fn new(notification: u64, highlight: u64) -> Self {
+        Self {
+            notification,
+            highlight,
+        }
+    }
+
+    fn from_room(room: &Room) -> Self {
+        let read_receipts = room.read_receipts();
+        Self::new(read_receipts.num_notifications, read_receipts.num_mentions)
+    }
+
+    fn pair(self) -> (u64, u64) {
+        (self.notification, self.highlight)
+    }
+
+    fn clamped(self) -> (i64, i64) {
+        (
+            saturating_i64(self.notification),
+            saturating_i64(self.highlight),
+        )
+    }
+}
+
+fn cached_unread_counts_match(
+    last: &HashMap<OwnedRoomId, (u64, u64)>,
+    room_id: &RoomId,
+    snapshot: UnreadCountsSnapshot,
+) -> bool {
+    last.get(room_id) == Some(&snapshot.pair())
+}
+
 /// Cap on candidate invites auto-joined per [`VERIFICATION_POLL`]. A backlog of
 /// direct invites must not translate into an unbounded join + explicit-subscribe
 /// spike — the blast radius ADR 0040 exists to avoid. Anything past the cap is
@@ -1414,11 +1453,11 @@ async fn run_account(
         trust_cancel.clone(),
     ));
 
-    // Server-derived unread-counts watcher (issue #313, ADR 0070): capture
-    // matrix-sdk's notification/highlight counts (themselves sourced from the
-    // homeserver's own sync room-summary) into `room_unread_counts` so a fresh
-    // client load can show a real count without observing a live event first.
-    // Same child-token + join-handle lifecycle as the watchers above.
+    // SDK-derived unread-counts watcher (issue #313, ADR 0070): capture
+    // matrix-sdk's read-receipt-based notification/mention counts into
+    // `room_unread_counts` so a fresh client load can show a real count
+    // without observing a live event first. Same child-token + join-handle
+    // lifecycle as the watchers above.
     let unread_cancel = cancel.child_token();
     let unread_handle = tokio::spawn(watch_unread_counts(
         client.clone(),
@@ -1646,7 +1685,7 @@ async fn watch_sender_trust(
     }
 }
 
-/// Capture `room`'s current server-derived unread counts and persist them if
+/// Capture `room`'s current SDK-derived unread counts and persist them if
 /// they differ from the last value this watcher wrote (issue #313, ADR 0070).
 /// `last` is the watcher's own in-memory cache of what it has already
 /// persisted this run — not a re-read of the store — so a room whose counts
@@ -1671,18 +1710,21 @@ async fn capture_unread_counts(
     if room.state() != RoomState::Joined {
         return;
     }
-    let counts = room.unread_notification_counts();
-    let value = (counts.notification_count, counts.highlight_count);
+    let snapshot = UnreadCountsSnapshot::from_room(room);
+    let value = snapshot.pair();
     let room_id = room.room_id();
-    if last.lock().expect("unread-counts cache lock").get(room_id) == Some(&value) {
+    if cached_unread_counts_match(
+        &last.lock().expect("unread-counts cache lock"),
+        room_id,
+        snapshot,
+    ) {
         return;
     }
     // matrix-sdk's counts are `u64`; Postgres has no unsigned type, so narrow
     // at this boundary via the shared helper, and derive the live frame's
-    // values from the *same* clamped number rather than the raw `counts`
-    // fields, so the DB row and the broadcast frame can't disagree.
-    let notification_count = saturating_i64(counts.notification_count);
-    let highlight_count = saturating_i64(counts.highlight_count);
+    // values from the *same* clamped number rather than the raw SDK fields, so
+    // the DB row and the broadcast frame can't disagree.
+    let (notification_count, highlight_count) = snapshot.clamped();
     if let Err(err) = store
         .upsert_room_unread_counts(
             account_id,
@@ -1787,11 +1829,12 @@ async fn seed_unread_counts_cache(
     cache
 }
 
-/// Keep `room_unread_counts` tracking matrix-sdk's notification/highlight
-/// counts (issue #313, ADR 0070) — themselves sourced from the upstream
-/// homeserver's own sync room-summary, not derived by Axon. This is what lets
-/// a freshly loaded/reloaded client show a real unread count immediately,
-/// rather than only after observing a live event this session.
+/// Keep `room_unread_counts` tracking matrix-sdk's client-side unread
+/// notification/mention counts (issue #313, ADR 0070). These are derived from
+/// synced read-receipt state and match the unread badge semantics Matrix
+/// clients expose. This is what lets a freshly loaded/reloaded client show a
+/// real unread count immediately, rather than only after observing a live
+/// event this session.
 ///
 /// The dedup cache (`last`) is seeded from what's already persisted (see
 /// [`seed_unread_counts_cache`]) before anything else runs, so a
@@ -1868,6 +1911,64 @@ fn recovery_key_for<'c>(config: &'c SyncConfig, account: &Account) -> Option<&'c
         .as_ref()
         .filter(|p| matches_account(p, account))
         .and_then(|p| p.recovery_key.as_deref())
+}
+
+#[cfg(test)]
+mod unread_counts_tests {
+    use super::{cached_unread_counts_match, saturating_i64, UnreadCountsSnapshot};
+    use matrix_sdk::ruma::room_id;
+    use std::collections::HashMap;
+
+    #[test]
+    fn unread_snapshot_keeps_notification_and_highlight_together() {
+        let snapshot = UnreadCountsSnapshot::new(14, 2);
+
+        assert_eq!(
+            snapshot,
+            UnreadCountsSnapshot {
+                notification: 14,
+                highlight: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn unread_snapshot_pair_is_the_watchers_dedup_value() {
+        let snapshot = UnreadCountsSnapshot::new(3, 1);
+
+        assert_eq!(snapshot.pair(), (3, 1));
+    }
+
+    #[test]
+    fn unread_snapshot_clamps_the_persisted_values() {
+        let snapshot = UnreadCountsSnapshot::new(u64::MAX, 7);
+
+        assert_eq!(snapshot.clamped(), (i64::MAX, 7));
+        assert_eq!(saturating_i64(8), 8);
+    }
+
+    #[test]
+    fn cached_unread_counts_match_only_when_both_counts_match() {
+        let room = room_id!("!unread:localhost");
+        let mut last = HashMap::new();
+        last.insert(room.to_owned(), (3, 1));
+
+        assert!(cached_unread_counts_match(
+            &last,
+            room,
+            UnreadCountsSnapshot::new(3, 1)
+        ));
+        assert!(!cached_unread_counts_match(
+            &last,
+            room,
+            UnreadCountsSnapshot::new(4, 1)
+        ));
+        assert!(!cached_unread_counts_match(
+            &last,
+            room,
+            UnreadCountsSnapshot::new(3, 2)
+        ));
+    }
 }
 
 #[cfg(test)]
