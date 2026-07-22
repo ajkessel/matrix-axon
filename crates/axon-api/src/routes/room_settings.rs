@@ -24,8 +24,6 @@ use std::time::Instant;
 use axum::extract::State;
 use uuid::Uuid;
 
-use axon_core::MediaAttachment;
-
 use crate::dto::{
     SetRoomAvatarRequest, SetRoomNameRequest, SetRoomTagRequest, SetRoomTopicRequest,
 };
@@ -162,13 +160,15 @@ pub async fn set_room_avatar(
     Json(req): Json<SetRoomAvatarRequest>,
 ) -> Result<ApiResponse<serde_json::Value>, ApiError> {
     let started_at = Instant::now();
-    let upload = uploads.claim_upload(account_id, req.upload_id).await?;
-    let attachment: MediaAttachment = upload.into();
-
-    match room_settings
-        .set_avatar(account_id, &room_id, attachment)
-        .await
-    {
+    let result = crate::uploads::with_staged_upload(
+        uploads.as_ref(),
+        account_id,
+        req.upload_id,
+        "set avatar",
+        |attachment| room_settings.set_avatar(account_id, &room_id, attachment),
+    )
+    .await;
+    match result {
         Ok(()) => {
             tracing::info!(
                 account_id = %account_id,
@@ -177,14 +177,6 @@ pub async fn set_room_avatar(
                 elapsed_ms = started_at.elapsed().as_millis(),
                 "room_settings: set_avatar succeeded"
             );
-            if let Err(err) = uploads.complete_upload(account_id, req.upload_id).await {
-                tracing::warn!(
-                    account_id = %account_id,
-                    upload_id = %req.upload_id,
-                    error = ?err,
-                    "set avatar but failed to consume staged upload"
-                );
-            }
             Ok(ApiResponse::new(serde_json::json!({})))
         }
         Err(err) => {
@@ -196,15 +188,7 @@ pub async fn set_room_avatar(
                 error = ?err,
                 "room_settings: set_avatar failed"
             );
-            if let Err(release_err) = uploads.release_upload(account_id, req.upload_id).await {
-                tracing::warn!(
-                    account_id = %account_id,
-                    upload_id = %req.upload_id,
-                    error = ?release_err,
-                    "failed to release staged upload after avatar-set failure"
-                );
-            }
-            Err(err.into())
+            Err(err)
         }
     }
 }

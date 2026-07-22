@@ -5,7 +5,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use axon_core::{CreateRoomRequest, PowerLevelChanges, ResolvedPowerLevels, RoomPreset};
+use axon_core::{
+    CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomSummary, PublicRoomsPage,
+    ResolvedPowerLevels, RoomPreset,
+};
 use axon_store::{
     Account, AccountState, DeviceStateRow, ReactionTally, RoomSummary, ThreadSummary, TimelineRow,
 };
@@ -733,6 +736,133 @@ impl From<ResolvedPowerLevels> for PowerLevelsDto {
             state_default: resolved.state_default,
             users_default: resolved.users_default,
             users: resolved.users,
+        }
+    }
+}
+
+/// Request body for setting this account's display name
+/// (`PUT …/profile/display_name`; ADR 0068 M19f). An empty `display_name`
+/// clears it, same convention as [`SetRoomNameRequest`] — the handler issues
+/// the SDK's real profile-field-delete call rather than writing an empty
+/// string to the homeserver.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetDisplayNameRequest {
+    pub display_name: String,
+}
+
+/// Request body for setting this account's avatar (`PUT …/profile/avatar`;
+/// ADR 0068 M19f). Takes an already-staged upload id, mirroring
+/// [`SetRoomAvatarRequest`] — Axon has no route that hands a client an
+/// `mxc://` URI to reference directly.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetAccountAvatarRequest {
+    /// Server-issued staged upload id returned by `POST …/media/uploads`.
+    pub upload_id: Uuid,
+}
+
+/// Response for `GET …/users/{user_id}/profile` (ADR 0068 M19f): the target
+/// user's display name and avatar, either of which may be absent.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MatrixProfileDto {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+/// Wraps a [`MatrixProfile`] with the `user_id` it was fetched for — the
+/// gateway's read only knows the profile fields, not which user id the
+/// caller asked about, so the route attaches it.
+impl MatrixProfileDto {
+    pub(crate) fn from_profile(user_id: String, profile: MatrixProfile) -> Self {
+        MatrixProfileDto {
+            user_id,
+            display_name: profile.display_name,
+            avatar_url: profile.avatar_url,
+        }
+    }
+}
+
+/// Query parameters for searching a homeserver's public-room directory
+/// (`GET …/directory/public_rooms`; ADR 0068 M19f). A paginated **read**, not
+/// a mutation like the other M19f verbs — see `PublicRoomsSender::public_rooms`.
+#[derive(Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PublicRoomsQueryDto {
+    /// Search the directory of this server instead of the account's own
+    /// homeserver.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Free-text filter over room name, topic, and canonical alias.
+    #[serde(default)]
+    pub search_term: Option<String>,
+    /// Maximum rooms to return in this page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Pagination token from a previous page's `next_batch`.
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+impl From<PublicRoomsQueryDto> for axon_core::PublicRoomsQuery {
+    fn from(dto: PublicRoomsQueryDto) -> Self {
+        axon_core::PublicRoomsQuery {
+            server: dto.server,
+            search_term: dto.search_term,
+            limit: dto.limit,
+            since: dto.since,
+        }
+    }
+}
+
+/// One room in a [`PublicRoomsPageDto`].
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PublicRoomSummaryDto {
+    pub room_id: String,
+    pub canonical_alias: Option<String>,
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub avatar_url: Option<String>,
+    pub num_joined_members: u64,
+    pub world_readable: bool,
+    pub guest_can_join: bool,
+    pub join_rule: String,
+    pub room_type: Option<String>,
+}
+
+impl From<PublicRoomSummary> for PublicRoomSummaryDto {
+    fn from(summary: PublicRoomSummary) -> Self {
+        PublicRoomSummaryDto {
+            room_id: summary.room_id,
+            canonical_alias: summary.canonical_alias,
+            name: summary.name,
+            topic: summary.topic,
+            avatar_url: summary.avatar_url,
+            num_joined_members: summary.num_joined_members,
+            world_readable: summary.world_readable,
+            guest_can_join: summary.guest_can_join,
+            join_rule: summary.join_rule,
+            room_type: summary.room_type,
+        }
+    }
+}
+
+/// Response for `GET …/directory/public_rooms` (ADR 0068 M19f): one page of
+/// public rooms plus pagination tokens.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PublicRoomsPageDto {
+    pub chunk: Vec<PublicRoomSummaryDto>,
+    pub next_batch: Option<String>,
+    pub prev_batch: Option<String>,
+    pub total_room_count_estimate: Option<u64>,
+}
+
+impl From<PublicRoomsPage> for PublicRoomsPageDto {
+    fn from(page: PublicRoomsPage) -> Self {
+        PublicRoomsPageDto {
+            chunk: page.chunk.into_iter().map(Into::into).collect(),
+            next_batch: page.next_batch,
+            prev_batch: page.prev_batch,
+            total_room_count_estimate: page.total_room_count_estimate,
         }
     }
 }

@@ -1,5 +1,6 @@
 //! HTTP route handlers for the `/v1/` read API.
 
+pub mod account_actions;
 pub mod accounts;
 pub mod bootstrap;
 pub mod device_state;

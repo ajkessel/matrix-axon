@@ -16,14 +16,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axon_core::{
-    CreateRoomRequest, Formatted, MediaAttachment, MediaSendKind, PowerLevelChanges, Relation,
-    ResolvedPowerLevels, RoomPreset,
+    CreateRoomRequest, Formatted, MatrixProfile, MediaAttachment, MediaSendKind, PowerLevelChanges,
+    PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery, Relation, ResolvedPowerLevels,
+    RoomPreset,
 };
 use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, BaseImageInfo};
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
+use matrix_sdk::ruma::api::client::directory::get_public_rooms_filtered;
+use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::api::client::room::{create_room, Visibility};
 use matrix_sdk::ruma::api::error::ErrorKind;
+use matrix_sdk::ruma::directory::Filter;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
 use matrix_sdk::ruma::events::relation::Annotation;
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
@@ -216,6 +220,22 @@ fn parse_room_id_or_alias(id: &str) -> Result<OwnedRoomOrAliasId, GatewayError> 
     RoomOrAliasId::parse(id).map_err(|e| GatewayError::Invalid(format!("room id or alias: {e}")))
 }
 
+/// Shared `ServerName::parse` call behind [`parse_server_name`] and
+/// [`parse_server_names`] — the two differ only in how they format the
+/// resulting `GatewayError` (one server name vs. naming which entry in a
+/// list failed), so both build on this one parse instead of each calling
+/// `ServerName::parse` independently.
+fn try_parse_server_name(name: &str) -> Result<OwnedServerName, matrix_sdk::ruma::IdParseError> {
+    ServerName::parse(name)
+}
+
+/// Parse a single target server name for a directory search (ADR 0068,
+/// M19f's `public_rooms_filtered`'s `server` field), mapping a malformed one
+/// to [`GatewayError::Invalid`] instead of letting it reach the homeserver.
+fn parse_server_name(name: &str) -> Result<OwnedServerName, GatewayError> {
+    try_parse_server_name(name).map_err(|e| GatewayError::Invalid(format!("server: {e}")))
+}
+
 /// Parse the `server_names` hints a join/knock caller supplies for federation
 /// resolution (ruma's `via`) of an alias/id this account's client has no
 /// direct path to.
@@ -223,7 +243,7 @@ fn parse_server_names(names: &[String]) -> Result<Vec<OwnedServerName>, GatewayE
     names
         .iter()
         .map(|name| {
-            ServerName::parse(name)
+            try_parse_server_name(name)
                 .map_err(|e| GatewayError::Invalid(format!("server name {name:?}: {e}")))
         })
         .collect()
@@ -1077,6 +1097,168 @@ impl SdkGateway {
                 .collect(),
         })
     }
+
+    /// Set this account's own display name (ADR 0068, M19f). An empty
+    /// `display_name` clears it — the same "blank clears" convention as
+    /// [`set_name`](Self::set_name) — issuing the SDK's real
+    /// profile-field-delete call (`Account::set_display_name(None)`) rather
+    /// than writing an empty string to the homeserver.
+    pub async fn set_display_name(
+        &self,
+        account_id: Uuid,
+        display_name: &str,
+    ) -> Result<(), GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let name = (!display_name.is_empty()).then_some(display_name);
+        client
+            .account()
+            .set_display_name(name)
+            .await
+            .map_err(map_sdk_err)
+    }
+
+    /// Upload `attachment`'s bytes as this account's avatar and set the
+    /// account's profile avatar to the resulting `mxc://` URI in one call
+    /// (`Account::upload_avatar`, ADR 0068 M19f) — mirroring
+    /// [`set_avatar`](Self::set_avatar)'s (room avatar) single-call
+    /// upload+set shape and its same validation: the avatar must be an
+    /// image regardless of the staged upload's own `kind` metadata, and a
+    /// missing `content_type` is rejected rather than defaulted.
+    pub async fn set_account_avatar(
+        &self,
+        account_id: Uuid,
+        attachment: MediaAttachment,
+    ) -> Result<(), GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let content_type = attachment.content_type.as_deref().ok_or_else(|| {
+            GatewayError::Invalid("avatar upload must declare a content type".to_owned())
+        })?;
+        let content_type = effective_mime(MediaSendKind::Image, Some(content_type))?;
+        client
+            .account()
+            .upload_avatar(&content_type, attachment.bytes)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(())
+    }
+
+    /// Clear this account's profile avatar (ADR 0068, M19f).
+    pub async fn remove_account_avatar(&self, account_id: Uuid) -> Result<(), GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        client
+            .account()
+            .set_avatar_url(None)
+            .await
+            .map_err(map_sdk_err)
+    }
+
+    /// Read `user_id`'s Matrix profile (ADR 0068, M19f). `user_id` may be
+    /// this account's own user id or any other user's; either returned field
+    /// may be absent for a user who never set it, not an error.
+    pub async fn fetch_user_profile_of(
+        &self,
+        account_id: Uuid,
+        user_id: &str,
+    ) -> Result<MatrixProfile, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        let response = client
+            .account()
+            .fetch_user_profile_of(&user_id)
+            .await
+            .map_err(map_sdk_err)?;
+        let display_name = response
+            .get_static::<DisplayName>()
+            .map_err(|e| GatewayError::Upstream(format!("profile display_name: {e}")))?;
+        let avatar_url = response
+            .get_static::<AvatarUrl>()
+            .map_err(|e| GatewayError::Upstream(format!("profile avatar_url: {e}")))?
+            .map(|url| url.to_string());
+        Ok(MatrixProfile {
+            display_name,
+            avatar_url,
+        })
+    }
+
+    /// Add `user_id` to this account's ignore list (ADR 0068, M19f). Rejects
+    /// an attempt to ignore this account's own user id up front as a clean
+    /// `400` — the SDK's own guard (`Error::CantIgnoreLoggedInUser`) is a
+    /// local precondition failure, not a homeserver response, so it carries
+    /// no `client_api_error_kind` and `map_sdk_err`'s catch-all would
+    /// otherwise surface it as a misleading `502`.
+    pub async fn ignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        if Some(user_id.as_ref()) == client.user_id() {
+            return Err(GatewayError::Invalid(
+                "cannot ignore this account's own user id".to_owned(),
+            ));
+        }
+        client
+            .account()
+            .ignore_user(&user_id)
+            .await
+            .map_err(map_sdk_err)
+    }
+
+    /// Remove `user_id` from this account's ignore list (ADR 0068, M19f).
+    pub async fn unignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let user_id = parse_user_id(user_id)?;
+        client
+            .account()
+            .unignore_user(&user_id)
+            .await
+            .map_err(map_sdk_err)
+    }
+
+    /// Search a homeserver's public-room directory (`public_rooms_filtered`,
+    /// ADR 0068 M19f). Unlike every other M19f method, this is a paginated
+    /// **read**: `query.server`, when set, searches that server's directory
+    /// instead of the account's own homeserver's.
+    pub async fn public_rooms(
+        &self,
+        account_id: Uuid,
+        query: PublicRoomsQuery,
+    ) -> Result<PublicRoomsPage, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let server = query.server.as_deref().map(parse_server_name).transpose()?;
+
+        let mut request = get_public_rooms_filtered::v3::Request::new();
+        request.server = server;
+        request.limit = query.limit.map(UInt::from);
+        request.since = query.since;
+        let mut filter = Filter::new();
+        filter.generic_search_term = query.search_term;
+        request.filter = filter;
+
+        let response = client
+            .public_rooms_filtered(request)
+            .await
+            .map_err(|e| map_sdk_err(matrix_sdk::Error::from(e)))?;
+
+        Ok(PublicRoomsPage {
+            chunk: response
+                .chunk
+                .into_iter()
+                .map(|chunk| PublicRoomSummary {
+                    room_id: chunk.room_id.to_string(),
+                    canonical_alias: chunk.canonical_alias.map(|a| a.to_string()),
+                    name: chunk.name,
+                    topic: chunk.topic,
+                    avatar_url: chunk.avatar_url.map(|u| u.to_string()),
+                    num_joined_members: chunk.num_joined_members.into(),
+                    world_readable: chunk.world_readable,
+                    guest_can_join: chunk.guest_can_join,
+                    join_rule: chunk.join_rule.as_str().to_owned(),
+                    room_type: chunk.room_type.map(|t| t.as_str().to_owned()),
+                })
+                .collect(),
+            next_batch: response.next_batch,
+            prev_batch: response.prev_batch,
+            total_room_count_estimate: response.total_room_count_estimate.map(u64::from),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1094,8 +1276,8 @@ mod tests {
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
         check_self_demotion_guardrail, effective_mime, merge_power_level_changes,
-        message_relates_to, parse_room_id_or_alias, parse_server_names, parse_tag_name,
-        parse_user_id, validate_tag_order, MAX_TAG_NAME_BYTES,
+        message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
+        parse_tag_name, parse_user_id, validate_tag_order, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -1146,6 +1328,18 @@ mod tests {
         assert!(
             matches!(err, GatewayError::Invalid(message) if message.starts_with("room id or alias:"))
         );
+    }
+
+    #[test]
+    fn parse_server_name_accepts_a_valid_name() {
+        let name = parse_server_name("example.org").expect("valid server name");
+        assert_eq!(name.as_str(), "example.org");
+    }
+
+    #[test]
+    fn parse_server_name_rejects_a_malformed_name() {
+        let err = parse_server_name("not a server name").expect_err("malformed name should fail");
+        assert!(matches!(err, GatewayError::Invalid(message) if message.starts_with("server:")));
     }
 
     #[test]

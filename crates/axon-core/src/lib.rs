@@ -5,6 +5,7 @@
 //! [`Config`] loader and the top-level [`Error`] enum that downstream crate
 //! errors convert into.
 
+pub mod account_actions;
 pub mod config;
 pub mod error;
 pub mod live;
@@ -14,6 +15,7 @@ pub mod power_levels;
 pub mod room_entry;
 pub mod secret;
 
+pub use account_actions::{MatrixProfile, PublicRoomSummary, PublicRoomsPage, PublicRoomsQuery};
 pub use config::{
     AccountProvision, AppleOauthConfig, Config, Credential, GenericOauthProviderConfig,
     MediaConfig, OauthClientConfig, OauthConfig, OauthProvidersConfig, SearchConfig, SyncConfig,

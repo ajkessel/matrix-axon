@@ -52,8 +52,8 @@ pub use openapi::ApiDoc;
 pub use response::{ApiError, ApiResponse, ErrorBody, ErrorResponse};
 pub use search::{SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams};
 pub use sender::{
-    EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender, RoomEntrySender,
-    RoomSettingsSender, SendError,
+    AccountActionsSender, EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender,
+    RoomEntrySender, RoomSettingsSender, SendError,
 };
 pub use state::{AppState, BootstrapConfig};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
@@ -292,6 +292,36 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/accounts/{account_id}/rooms/{room_id}/power_levels",
             put(routes::power_levels::set_power_levels).get(routes::power_levels::get_power_levels),
+        )
+        // Account actions (ADR 0068, M19f): this account's own display name
+        // and avatar, reading any user's profile, this account's ignore
+        // list, and public-room directory search. None of these resolve
+        // through a `Room` handle — same `ClientManager::get_or_connect`
+        // resolution path as room-entry above. `get_user_profile` and
+        // `search_public_rooms` are reads (their envelope carries real data,
+        // not an empty object) mixed into the same port as the mutations,
+        // the same shape `PowerLevelsSender` already has.
+        .route(
+            "/v1/accounts/{account_id}/profile/display_name",
+            put(routes::account_actions::set_display_name),
+        )
+        .route(
+            "/v1/accounts/{account_id}/profile/avatar",
+            put(routes::account_actions::set_account_avatar)
+                .delete(routes::account_actions::remove_account_avatar),
+        )
+        .route(
+            "/v1/accounts/{account_id}/users/{user_id}/profile",
+            get(routes::account_actions::get_user_profile),
+        )
+        .route(
+            "/v1/accounts/{account_id}/users/{user_id}/ignore",
+            put(routes::account_actions::ignore_user)
+                .delete(routes::account_actions::unignore_user),
+        )
+        .route(
+            "/v1/accounts/{account_id}/directory/public_rooms",
+            get(routes::account_actions::search_public_rooms),
         )
         // Staged media uploads (M15a): client bytes are accepted and stored
         // before the later room-aware send-media mutation consumes them.

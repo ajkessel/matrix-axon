@@ -24,8 +24,8 @@ use crate::member_profiles::{MemberProfileService, NoopMemberProfileService};
 use crate::oauth::OAuthRuntime;
 use crate::search::SearchQuery;
 use crate::sender::{
-    EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender, RoomEntrySender,
-    RoomSettingsSender, SendError,
+    AccountActionsSender, EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender,
+    RoomEntrySender, RoomSettingsSender, SendError,
 };
 use crate::trust::SenderTrustService;
 use crate::uploads::{
@@ -79,6 +79,11 @@ pub struct AppState {
     /// that don't inject one keep compiling; the binary overrides it via
     /// [`with_power_levels`](Self::with_power_levels).
     pub power_levels: Arc<dyn PowerLevelsSender>,
+    /// Account-actions port for the profile/ignore-list/directory-search
+    /// routes (ADR 0068 M19f). Defaults to a no-op so tests and non-sync
+    /// configurations that don't inject one keep compiling; the binary
+    /// overrides it via [`with_account_actions`](Self::with_account_actions).
+    pub account_actions: Arc<dyn AccountActionsSender>,
     /// Account-lifecycle port for the login handler (and later logout/delete).
     /// Injected by the binary via an adapter over the sync engine, same as
     /// `sender`.
@@ -253,6 +258,7 @@ impl AppState {
             room_entry: Arc::new(NoopRoomEntrySender),
             room_settings: Arc::new(NoopRoomSettingsSender),
             power_levels: Arc::new(NoopPowerLevelsSender),
+            account_actions: Arc::new(NoopAccountActionsSender),
             lifecycle,
             verify,
             trust,
@@ -334,6 +340,15 @@ impl AppState {
     /// tests that don't touch these routes keep the default no-op.
     pub fn with_power_levels(mut self, power_levels: Arc<dyn PowerLevelsSender>) -> Self {
         self.power_levels = power_levels;
+        self
+    }
+
+    /// Inject the account-actions port (profile, ignore list, directory
+    /// search; ADR 0068 M19f). The binary calls this with an adapter over
+    /// the sync engine's gateway, same as `sender`; tests that don't touch
+    /// these routes keep the default no-op.
+    pub fn with_account_actions(mut self, account_actions: Arc<dyn AccountActionsSender>) -> Self {
+        self.account_actions = account_actions;
         self
     }
 
@@ -609,6 +624,76 @@ impl PowerLevelsSender for NoopPowerLevelsSender {
     }
 }
 
+/// The default `account_actions` port when the binary hasn't injected one:
+/// [`AppState::new`] always sets this, and only a caller invoking
+/// [`AppState::with_account_actions`] replaces it with a real adapter.
+struct NoopAccountActionsSender;
+
+#[async_trait::async_trait]
+impl AccountActionsSender for NoopAccountActionsSender {
+    async fn set_display_name(
+        &self,
+        _account_id: uuid::Uuid,
+        _display_name: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn set_avatar(
+        &self,
+        _account_id: uuid::Uuid,
+        _attachment: axon_core::MediaAttachment,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn remove_avatar(&self, _account_id: uuid::Uuid) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn user_profile(
+        &self,
+        _account_id: uuid::Uuid,
+        _user_id: &str,
+    ) -> Result<axon_core::MatrixProfile, SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn ignore_user(&self, _account_id: uuid::Uuid, _user_id: &str) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn unignore_user(
+        &self,
+        _account_id: uuid::Uuid,
+        _user_id: &str,
+    ) -> Result<(), SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+
+    async fn public_rooms(
+        &self,
+        _account_id: uuid::Uuid,
+        _query: axon_core::PublicRoomsQuery,
+    ) -> Result<axon_core::PublicRoomsPage, SendError> {
+        Err(SendError::Unavailable(
+            "account-actions port is not configured".to_owned(),
+        ))
+    }
+}
+
 struct DisabledStagedUploads;
 
 #[async_trait::async_trait]
@@ -709,6 +794,12 @@ impl FromRef<AppState> for Arc<dyn RoomSettingsSender> {
 impl FromRef<AppState> for Arc<dyn PowerLevelsSender> {
     fn from_ref(state: &AppState) -> Arc<dyn PowerLevelsSender> {
         state.power_levels.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn AccountActionsSender> {
+    fn from_ref(state: &AppState) -> Arc<dyn AccountActionsSender> {
+        state.account_actions.clone()
     }
 }
 

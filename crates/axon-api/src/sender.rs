@@ -13,7 +13,8 @@
 
 use async_trait::async_trait;
 use axon_core::{
-    CreateRoomRequest, Formatted, MediaAttachment, PowerLevelChanges, Relation, ResolvedPowerLevels,
+    CreateRoomRequest, Formatted, MatrixProfile, MediaAttachment, PowerLevelChanges,
+    PublicRoomsPage, PublicRoomsQuery, Relation, ResolvedPowerLevels,
 };
 use uuid::Uuid;
 
@@ -299,4 +300,58 @@ pub trait PowerLevelsSender: Send + Sync {
         account_id: Uuid,
         room_id: &str,
     ) -> Result<ResolvedPowerLevels, SendError>;
+}
+
+/// This account's own profile and ignore list, plus reading another user's
+/// profile and searching a homeserver's public-room directory (ADR 0068,
+/// M19f: `set_display_name`, `set_avatar_url`, `fetch_user_profile_of`,
+/// `ignore_user`/`unignore_user`, `public_rooms_filtered`). Kept as one port
+/// for the same reason ADR 0068 keeps M19f one PR — none of these resolve
+/// through a `Room` handle, all go straight through `ClientManager::get_or_connect`
+/// — even though `user_profile` and `public_rooms` are reads, not mutations:
+/// [`PowerLevelsSender`] already mixes a write and a read in one trait for
+/// the same "same resolution path" reason.
+#[async_trait]
+pub trait AccountActionsSender: Send + Sync {
+    /// Set this account's own display name. An empty `display_name` clears
+    /// it (mirroring [`RoomSettingsSender::set_name`]'s convention), issuing
+    /// the SDK's real profile-field-delete call rather than writing an empty
+    /// string to the homeserver.
+    async fn set_display_name(&self, account_id: Uuid, display_name: &str)
+        -> Result<(), SendError>;
+
+    /// Upload `attachment`'s bytes as this account's avatar and set the
+    /// account's profile avatar to the resulting `mxc://` URI in one call,
+    /// mirroring [`RoomSettingsSender::set_avatar`]'s staged-upload shape.
+    async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        attachment: MediaAttachment,
+    ) -> Result<(), SendError>;
+
+    /// Clear this account's profile avatar.
+    async fn remove_avatar(&self, account_id: Uuid) -> Result<(), SendError>;
+
+    /// Read `user_id`'s Matrix profile (display name + avatar). `user_id` may
+    /// be this account's own user id or any other user's.
+    async fn user_profile(
+        &self,
+        account_id: Uuid,
+        user_id: &str,
+    ) -> Result<MatrixProfile, SendError>;
+
+    /// Add `user_id` to this account's ignore list.
+    async fn ignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError>;
+
+    /// Remove `user_id` from this account's ignore list.
+    async fn unignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError>;
+
+    /// Search a homeserver's public-room directory. A paginated **read**,
+    /// unlike every other method on this trait — see [`PublicRoomsQuery`]/
+    /// [`PublicRoomsPage`].
+    async fn public_rooms(
+        &self,
+        account_id: Uuid,
+        query: PublicRoomsQuery,
+    ) -> Result<PublicRoomsPage, SendError>;
 }

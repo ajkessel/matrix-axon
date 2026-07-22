@@ -14,17 +14,20 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axon_api::{
-    AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo, DeviceList, DeviceListError,
-    DeviceListService, EphemeralSender, FlowStage, FlowSummary, Formatted, LoginError, LogoutError,
-    MediaAttachment, MediaError, MediaProxy, MediaResource, MemberProfile, MemberProfileError,
-    MemberProfileService, MembershipSender, MessageSender, PowerLevelsSender, RecoverError,
-    RedecryptUtdsError, RedecryptUtdsStats, Relation, RoomEntrySender, RoomSettingsSender,
-    SearchHit, SearchHits, SearchQuery, SearchQueryError, SearchQueryParams, SendError,
-    SenderTrustService, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,
-    TokenVerifier, TrustBundle, TrustError, TrustSnapshot, UploadStream, VerificationService,
-    VerifyError,
+    AccountActionsSender, AccountLifecycle, ApiError, CurrentTrust, DeleteError, DeviceInfo,
+    DeviceList, DeviceListError, DeviceListService, EphemeralSender, FlowStage, FlowSummary,
+    Formatted, LoginError, LogoutError, MediaAttachment, MediaError, MediaProxy, MediaResource,
+    MemberProfile, MemberProfileError, MemberProfileService, MembershipSender, MessageSender,
+    PowerLevelsSender, RecoverError, RedecryptUtdsError, RedecryptUtdsStats, Relation,
+    RoomEntrySender, RoomSettingsSender, SearchHit, SearchHits, SearchQuery, SearchQueryError,
+    SearchQueryParams, SendError, SenderTrustService, StageUploadError, StageUploadRequest,
+    StagedUpload, StagedUploadService, TokenVerifier, TrustBundle, TrustError, TrustSnapshot,
+    UploadStream, VerificationService, VerifyError,
 };
-use axon_core::{CreateRoomRequest, PowerLevelChanges, ResolvedPowerLevels};
+use axon_core::{
+    CreateRoomRequest, MatrixProfile, PowerLevelChanges, PublicRoomsPage, PublicRoomsQuery,
+    ResolvedPowerLevels,
+};
 use futures_util::StreamExt;
 use uuid::Uuid;
 
@@ -957,6 +960,216 @@ impl PowerLevelsSender for StubPowerLevels {
                 room_id: room_id.to_owned(),
             });
         Ok(self.read.clone())
+    }
+}
+
+/// One recorded call to [`StubAccountActions`], with the arguments the
+/// handler passed through.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountActionsCall {
+    SetDisplayName {
+        account_id: Uuid,
+        display_name: String,
+    },
+    SetAvatar {
+        account_id: Uuid,
+        attachment: MediaAttachment,
+    },
+    RemoveAvatar {
+        account_id: Uuid,
+    },
+    UserProfile {
+        account_id: Uuid,
+        user_id: String,
+    },
+    IgnoreUser {
+        account_id: Uuid,
+        user_id: String,
+    },
+    UnignoreUser {
+        account_id: Uuid,
+        user_id: String,
+    },
+    PublicRooms {
+        account_id: Uuid,
+        query: PublicRoomsQuery,
+    },
+}
+
+/// The outcome [`StubAccountActions`] returns for every mutating call
+/// (`Clone`, unlike [`SendError`], so one stub can answer repeated calls);
+/// the fixed values it returns for the two reads live separately.
+#[derive(Clone)]
+pub enum AccountActionsOutcome {
+    Ok,
+    NotFound(String),
+    Forbidden(String),
+    Unavailable(String),
+    Invalid(String),
+    Upstream(String),
+}
+
+impl AccountActionsOutcome {
+    fn to_result(&self) -> Result<(), SendError> {
+        match self {
+            AccountActionsOutcome::Ok => Ok(()),
+            AccountActionsOutcome::NotFound(m) => Err(SendError::NotFound(m.clone())),
+            AccountActionsOutcome::Forbidden(m) => Err(SendError::Forbidden(m.clone())),
+            AccountActionsOutcome::Unavailable(m) => Err(SendError::Unavailable(m.clone())),
+            AccountActionsOutcome::Invalid(m) => Err(SendError::Invalid(m.clone())),
+            AccountActionsOutcome::Upstream(m) => Err(SendError::Upstream(m.clone())),
+        }
+    }
+    fn to_read_result<T: Clone>(&self, ok: &T) -> Result<T, SendError> {
+        self.to_result().map(|()| ok.clone())
+    }
+}
+
+/// An in-memory [`AccountActionsSender`] for tests, mirroring
+/// [`StubPowerLevels`]'s division of labor: only routing, request decoding,
+/// and error-mapping at the handler layer, without a real homeserver.
+pub struct StubAccountActions {
+    outcome: AccountActionsOutcome,
+    profile: MatrixProfile,
+    public_rooms: PublicRoomsPage,
+    calls: Mutex<Vec<AccountActionsCall>>,
+}
+
+impl StubAccountActions {
+    /// A stub that returns `Ok(())` for mutations and empty/default values
+    /// for reads.
+    pub fn ok() -> Self {
+        Self {
+            outcome: AccountActionsOutcome::Ok,
+            profile: MatrixProfile::default(),
+            public_rooms: PublicRoomsPage::default(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose mutations fail with the given outcome; reads still succeed.
+    pub fn failing(outcome: AccountActionsOutcome) -> Self {
+        Self {
+            outcome,
+            profile: MatrixProfile::default(),
+            public_rooms: PublicRoomsPage::default(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose `user_profile` read returns `profile`.
+    pub fn with_profile(profile: MatrixProfile) -> Self {
+        Self {
+            outcome: AccountActionsOutcome::Ok,
+            profile,
+            public_rooms: PublicRoomsPage::default(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A stub whose `public_rooms` read returns `page`.
+    pub fn with_public_rooms(page: PublicRoomsPage) -> Self {
+        Self {
+            outcome: AccountActionsOutcome::Ok,
+            profile: MatrixProfile::default(),
+            public_rooms: page,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The calls recorded so far, in order.
+    pub fn calls(&self) -> Vec<AccountActionsCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AccountActionsSender for StubAccountActions {
+    async fn set_display_name(
+        &self,
+        account_id: Uuid,
+        display_name: &str,
+    ) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::SetDisplayName {
+                account_id,
+                display_name: display_name.to_owned(),
+            });
+        self.outcome.to_result()
+    }
+
+    async fn set_avatar(
+        &self,
+        account_id: Uuid,
+        attachment: MediaAttachment,
+    ) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::SetAvatar {
+                account_id,
+                attachment,
+            });
+        self.outcome.to_result()
+    }
+
+    async fn remove_avatar(&self, account_id: Uuid) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::RemoveAvatar { account_id });
+        self.outcome.to_result()
+    }
+
+    async fn user_profile(
+        &self,
+        account_id: Uuid,
+        user_id: &str,
+    ) -> Result<MatrixProfile, SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::UserProfile {
+                account_id,
+                user_id: user_id.to_owned(),
+            });
+        self.outcome.to_read_result(&self.profile)
+    }
+
+    async fn ignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::IgnoreUser {
+                account_id,
+                user_id: user_id.to_owned(),
+            });
+        self.outcome.to_result()
+    }
+
+    async fn unignore_user(&self, account_id: Uuid, user_id: &str) -> Result<(), SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::UnignoreUser {
+                account_id,
+                user_id: user_id.to_owned(),
+            });
+        self.outcome.to_result()
+    }
+
+    async fn public_rooms(
+        &self,
+        account_id: Uuid,
+        query: PublicRoomsQuery,
+    ) -> Result<PublicRoomsPage, SendError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(AccountActionsCall::PublicRooms { account_id, query });
+        self.outcome.to_read_result(&self.public_rooms)
     }
 }
 
