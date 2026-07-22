@@ -238,6 +238,40 @@ local developer databases after rebases or edited historical migration files, no
 for production remediation, so it is only compiled into `axon-server` when the
 `dev-tools` Cargo feature is enabled.
 
+#### Reclaiming an oversized SDK event cache
+
+Axon versions before the fix for issue #287 let history backfill write a second
+copy of every backfilled event into the Matrix SDK's own event cache, at
+`<sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3`. Axon never reads
+that store — Postgres holds the authoritative copy — but on an instance that has
+backfilled deep history it can reach several GB per account.
+
+Current versions no longer write those rows, but they do not remove ones already
+written: nothing in the SDK trims them. To check whether an account is affected,
+compare the file against the account's history:
+
+```bash
+ls -lh <sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3
+sqlite3 "file:<sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3?mode=ro" \
+  "select count(*) from events e
+     where not exists (select 1 from event_chunks c where c.event_id = e.event_id);"
+```
+
+A large orphaned count is the stale backfill duplicate. To reclaim it, **stop
+axon**, delete the store, and restart:
+
+```bash
+rm <sync.data_dir>/<account_id>/matrix-sdk-event-cache.sqlite3*
+```
+
+The SDK recreates the store on the next run and live sync repopulates what it
+actually needs. No Matrix history is lost: your events, search index, and read
+state live in Postgres and the search index, not in this cache.
+
+Delete the file rather than clearing rows from it. SQLite does not return freed
+pages to the filesystem without a `VACUUM`, so a `DELETE` leaves the file at its
+original size.
+
 ## Docs
 
 |                                                   |                                                  |

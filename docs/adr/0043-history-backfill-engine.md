@@ -71,6 +71,28 @@ the live bus would flood subscribers with events mislabeled as just-arrived.
 Backfilled history reaches clients through timeline reads (M8) and search (M9),
 both driven by `upsert_event`, not the emit.
 
+### Paging bypasses the SDK event cache
+
+Backfill issues the `/messages` request directly (`fetch_page` in `backfill.rs`)
+instead of calling `Room::messages`. The two are otherwise identical — same client
+send path, same per-event decryption via `Room::decrypt_event` — but
+`Room::messages` also hands every fetched event to the SDK's own event cache
+(`save_events`), which writes it to a per-account SQLite store that axon never
+reads: Postgres holds the authoritative copy.
+
+Those cache rows are written out-of-band, unattached to any linked chunk, and the
+store's only deletion path is a wholesale `DELETE FROM events` inside
+`clear_all_linked_chunks`. Nothing trims them, so with `target_depth = 0` ("to room
+start") the SDK accumulated a second full copy of all history, per account. Measured
+on a live instance before the fix: 426,823 cache rows against 422,308 Postgres
+events — a near-exact duplicate, 91% of it orphaned — inflating
+`matrix-sdk-event-cache.sqlite3` to 1.8 GB beside a 728 MB `events` table.
+
+The bypass costs a small amount of duplicated SDK logic, which is why `fetch_page`
+carries a comment pinning it to the upstream method it mirrors. Disabling the event
+cache globally was not an option: `RoomListService` subscribes to it during sync
+setup, and sync depends on it. (Issue #287.)
+
 ### Disk-space safety valve
 
 Because backfill grows storage unbounded, it pauses when free space on the
@@ -103,3 +125,13 @@ separately. This is a deliberately cheap valve, not a full storage manager.
   not fit the frame envelope, and multiple accounts' tasks would race to emit it.
 - `sync.timeline_limit` is now only a cold-start latency knob (ADR 0015), no
   longer the history bound.
+- The event-cache bypass stops the duplication going forward but reclaims nothing
+  already written: an instance that backfilled under the old code keeps its bloated
+  `matrix-sdk-event-cache.sqlite3` indefinitely, because no incremental trim path
+  reaches those orphaned rows. Reclaiming is an operator action, documented under
+  "Troubleshooting" in `README.md`. Automating it at startup was rejected for now —
+  `VACUUM` needs free space on the order of the file size and blocks while it runs,
+  which is the wrong thing to do unprompted during boot.
+- `fetch_page` must be kept in sync with upstream `Room::messages` when matrix-sdk
+  is upgraded. If a future SDK version makes the cache write opt-out (or adds a
+  pagination API that skips it), prefer that over the local copy.

@@ -3,12 +3,21 @@
 //! A continuous, throttled, low-priority background task — one per account,
 //! spawned alongside the re-decryption queue in
 //! [`run_account`](crate::engine) — that pages each *joined* room's pre-existing
-//! history backward through the SDK's `/messages` pagination and persists every
-//! event through the same ingestion path as live sync
+//! history backward through `/messages` and persists every event through the same
+//! ingestion path as live sync
 //! ([`persist_backfilled_event`](crate::engine::persist_backfilled_event)). So
 //! hot columns, crypto siblings, redaction handling, the M8 aggregation indexes,
 //! and the M9 search index all apply uniformly, and re-runs are idempotent
 //! (`upsert_event` is `ON CONFLICT DO NOTHING`).
+//!
+//! Paging issues the `/messages` request directly rather than calling
+//! [`Room::messages`](matrix_sdk::Room::messages), which additionally writes every
+//! fetched event into the SDK's own event cache — a store axon never reads, since
+//! Postgres holds the authoritative copy. Doing so duplicated all of history on
+//! disk: on one live account, 390k orphaned rows / 1.8 GB of SQLite shadowing a
+//! 728 MB `events` table. [`fetch_page`] replicates what `Room::messages` does
+//! (send, then decrypt each event via the same [`matrix_sdk::Room::decrypt_event`]
+//! the re-decryption queue uses) minus that cache write. See issue #287.
 //!
 //! It is *not* a one-shot boot sweep: the task lives for the whole supervised run
 //! and re-polls `joined_rooms()` when idle, so a newly joined or re-joined room is
@@ -28,7 +37,12 @@ use std::time::Duration;
 
 use axon_core::SyncConfig;
 use axon_store::RoomBackfillState;
-use matrix_sdk::room::MessagesOptions;
+use matrix_sdk::deserialized_responses::TimelineEvent;
+use matrix_sdk::ruma::api::client::message::get_message_events;
+use matrix_sdk::ruma::events::{
+    AnySyncMessageLikeEvent, AnySyncTimelineEvent, AnyTimelineEvent, SyncMessageLikeEvent,
+};
+use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::Client;
 use tokio_util::sync::CancellationToken;
 
@@ -271,6 +285,63 @@ pub(crate) async fn run(
     }
 }
 
+/// Decrypt one paged event into the [`TimelineEvent`] the ingestion path expects.
+///
+/// Mirrors the SDK's own `Room::try_decrypt_event`, which `Room::messages` applies
+/// to every fetched event, with two deliberate differences: no push context (axon
+/// never reads `push_actions`, so computing them is pure waste — the re-decryption
+/// queue passes `None` for the same reason), and no event-cache write.
+///
+/// An event whose keys haven't arrived yet comes back as a UTD `TimelineEvent`
+/// rather than an error, exactly as on the live path; the re-decryption queue
+/// back-fills it once keys arrive.
+async fn decrypt_paged_event(room: &matrix_sdk::Room, raw: Raw<AnyTimelineEvent>) -> TimelineEvent {
+    if needs_decryption(&raw) {
+        if let Ok(event) = room.decrypt_event(raw.cast_ref_unchecked(), None).await {
+            return event;
+        }
+    }
+    TimelineEvent::from_plaintext(raw.cast())
+}
+
+/// Whether a paged event is an original `m.room.encrypted` message-like event, and
+/// so the one shape [`matrix_sdk::Room::decrypt_event`] accepts.
+///
+/// Split out from [`decrypt_paged_event`] because it is the classification the
+/// bypass has to get right — everything else in the decrypt path is delegated to
+/// the SDK. Anything else (plaintext, state, redacted) is passed through
+/// undecrypted, matching the SDK's own `try_decrypt_event`.
+fn needs_decryption(raw: &Raw<AnyTimelineEvent>) -> bool {
+    matches!(
+        raw.deserialize_as::<AnySyncTimelineEvent>(),
+        Ok(AnySyncTimelineEvent::MessageLike(
+            AnySyncMessageLikeEvent::RoomEncrypted(SyncMessageLikeEvent::Original(_))
+        ))
+    )
+}
+
+/// Fetch and decrypt one `/messages` page, returning the events and the resume
+/// token for the next page (`None` once the room's history is exhausted).
+///
+/// This is `Room::messages` minus its event-cache write — see the module docs and
+/// issue #287. Everything else matches: the same client send path (so retry and
+/// rate-limit handling are unchanged) and the same per-event decryption.
+async fn fetch_page(
+    room: &matrix_sdk::Room,
+    request: get_message_events::v3::Request,
+) -> Result<(Vec<TimelineEvent>, Option<String>), matrix_sdk::Error> {
+    let response = room.client().send(request).await?;
+
+    let mut events = Vec::with_capacity(response.chunk.len());
+    for raw in response.chunk {
+        events.push(decrypt_paged_event(room, raw).await);
+    }
+
+    // `state` is ignored: the paged timeline events are what backfill persists, and
+    // room state arrives through live sync.
+    Ok((events, response.end))
+}
+
 /// Page one room one step older and persist the results. `force_from_start`
 /// ignores the persisted resume token and re-pages from the live timeline end —
 /// the recovery path for a room whose token has become permanently invalid.
@@ -296,22 +367,22 @@ async fn backfill_room_page(
         return PageOutcome::Idle;
     }
 
-    let mut opts = MessagesOptions::backward();
-    opts.limit = params.page_size.into();
+    let mut request = get_message_events::v3::Request::backward(room.room_id().to_owned());
+    request.limit = params.page_size.into();
     // `force_from_start` re-pages from the timeline end (idempotent, via
     // `ON CONFLICT DO NOTHING`) to recover a stuck room; otherwise resume from the
     // saved token.
-    opts.from = if force_from_start { None } else { from_token };
+    request.from = if force_from_start { None } else { from_token };
 
     // The `/messages` call crosses the homeserver boundary, so bound it: race it
     // against a timeout *and* the cancellation token. Without this, a hung request
     // would keep the backfill task parked inside the await, and shutdown / logout /
     // delete — which cancel the token and then await this task's handle — would
     // stall until the request eventually resolved.
-    let msgs = tokio::select! {
+    let (events, end) = tokio::select! {
         biased;
         _ = cancel.cancelled() => return PageOutcome::Failed,
-        result = tokio::time::timeout(params.page_timeout, room.messages(opts)) => match result {
+        result = tokio::time::timeout(params.page_timeout, fetch_page(room, request)) => match result {
             Ok(Ok(m)) => m,
             Ok(Err(err)) => {
                 // Transient (network, rate limit) or a bad token; the caller counts
@@ -326,21 +397,21 @@ async fn backfill_room_page(
         },
     };
 
-    for tev in &msgs.chunk {
+    for tev in &events {
         if cancel.is_cancelled() {
             return PageOutcome::Failed;
         }
         persist_backfilled_event(ctx, room, tev).await;
     }
 
-    let fetched = msgs.chunk.len();
-    let complete = msgs.end.is_none();
+    let fetched = events.len();
+    let complete = end.is_none();
     if let Err(err) = ctx
         .store
         .save_room_backfill(
             account_id,
             &room_id,
-            msgs.end.as_deref(),
+            end.as_deref(),
             complete,
             fetched as i64,
         )
@@ -365,5 +436,82 @@ async fn backfill_room_page(
         PageOutcome::Paged
     } else {
         PageOutcome::Idle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const DECRYPTED_MESSAGE: &str =
+        include_str!("../../../tests/fixtures/decryption/decrypted_message_event.json");
+    const UTD_ENCRYPTED: &str =
+        include_str!("../../../tests/fixtures/decryption/utd_encrypted_event.json");
+
+    fn raw(json: &str) -> Raw<AnyTimelineEvent> {
+        serde_json::from_str(json).expect("fixture")
+    }
+
+    #[test]
+    fn encrypted_event_is_routed_to_decryption() {
+        assert!(needs_decryption(&raw(UTD_ENCRYPTED)));
+    }
+
+    #[test]
+    fn plaintext_event_is_passed_through() {
+        // The common case on an unencrypted room: no olm round-trip, straight to
+        // `TimelineEvent::from_plaintext`.
+        assert!(!needs_decryption(&raw(DECRYPTED_MESSAGE)));
+    }
+
+    #[test]
+    fn redacted_encrypted_event_is_passed_through() {
+        // A redacted `m.room.encrypted` has no ciphertext left to decrypt, so it
+        // must take the plaintext arm rather than a doomed `decrypt_event` call.
+        let redacted = json!({
+            "type": "m.room.encrypted",
+            "sender": "@alice:example.org",
+            "event_id": "$redacted1:example.org",
+            "origin_server_ts": 1_700_000_000_000_u64,
+            "content": {},
+            "unsigned": {
+                "redacted_because": {
+                    "type": "m.room.redaction",
+                    "sender": "@alice:example.org",
+                    "event_id": "$redaction1:example.org",
+                    "origin_server_ts": 1_700_000_000_001_u64,
+                    "content": {}
+                }
+            }
+        });
+        let raw: Raw<AnyTimelineEvent> = serde_json::from_value(redacted).expect("raw");
+        assert!(!needs_decryption(&raw));
+    }
+
+    #[test]
+    fn state_event_is_passed_through() {
+        // Backfill pages state events too; only message-like encrypted events are
+        // decryptable, so a state event must never reach `decrypt_event`.
+        let raw: Raw<AnyTimelineEvent> = serde_json::from_value(json!({
+            "type": "m.room.topic",
+            "sender": "@alice:example.org",
+            "event_id": "$topic1:example.org",
+            "origin_server_ts": 1_700_000_000_000_u64,
+            "state_key": "",
+            "content": { "topic": "hello" }
+        }))
+        .expect("raw");
+        assert!(!needs_decryption(&raw));
+    }
+
+    #[test]
+    fn malformed_event_is_passed_through() {
+        // Undeserializable JSON must not be mistaken for an encrypted event; it
+        // falls through to `from_plaintext`, where the ingestion path logs and
+        // skips it.
+        let raw: Raw<AnyTimelineEvent> =
+            serde_json::from_value(json!({ "nonsense": true })).expect("raw");
+        assert!(!needs_decryption(&raw));
     }
 }

@@ -581,10 +581,10 @@ async fn persist_timeline_event(
     .await;
 }
 
-/// Persist one event fetched by history backfill (M10). SDK back-pagination
-/// (`Room::messages`) does not dispatch through `add_event_handler`, so the
-/// backfill driver calls this to run each paged event through the same ingestion
-/// path as live sync — minus the live `/v1/ws` emit (see [`persist_event_core`]).
+/// Persist one event fetched by history backfill (M10). Back-pagination
+/// (`/messages`) does not dispatch through `add_event_handler`, so the backfill
+/// driver calls this to run each paged event through the same ingestion path as
+/// live sync — minus the live `/v1/ws` emit (see [`persist_event_core`]).
 /// A paged event that the SDK could not decrypt (keys not yet imported) arrives
 /// as a UTD, exactly as on the live path; the re-decryption queue back-fills it
 /// once keys arrive.
