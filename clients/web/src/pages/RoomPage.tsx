@@ -153,7 +153,6 @@ export function RoomPage() {
     api,
     media,
     rooms,
-    unread,
     activeRoom,
     activeThread,
     live,
@@ -218,7 +217,7 @@ export function RoomPage() {
       roomId,
       highlighted: highlighted !== null,
     })
-    unread.markSeen(roomKey({ account_id: accountId, room_id: roomId }))
+    rooms.noteUnreadCounts(accountId, roomId, 0, 0)
     // The room list store also feeds this page's title; populate it on a
     // hard load straight into the room URL.
     if (rooms.rooms.value.length === 0) {
@@ -259,8 +258,7 @@ export function RoomPage() {
       )
   }, [api, accountId, timeline, highlighted])
 
-  // Mark this room active while it is open so the live unread feed doesn't
-  // badge messages the user is already looking at (M-W6, ADR 0061).
+  // Mark this room active while it is open so shared chrome can mark the row.
   useEffect(() => {
     perfMark('room-page:active-room-effect', { accountId, roomId })
     activeRoom.value = roomKey({ account_id: accountId, room_id: roomId })

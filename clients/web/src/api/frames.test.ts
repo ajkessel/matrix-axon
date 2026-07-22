@@ -6,6 +6,8 @@ import {
   EPHEMERAL_PASSTHROUGH,
   timelineEvent,
   TIMELINE_EVENT,
+  unreadCountsChange,
+  UNREAD_COUNTS_CHANGED,
 } from './frames'
 
 const envelope = (type: string, accountId: string, payload: unknown) =>
@@ -150,6 +152,54 @@ describe('ephemeralPassthrough', () => {
     ).toBeNull()
     expect(
       ephemeralPassthrough(ephemeralFrame({ room_id: '!r:hs', content: {} })),
+    ).toBeNull()
+  })
+})
+
+describe('unreadCountsChange', () => {
+  const unreadFrame = (payload: unknown) =>
+    decodeFrame(envelope(UNREAD_COUNTS_CHANGED, 'acct-1', payload))!
+
+  it('extracts server-derived room unread counts', () => {
+    const frame = unreadFrame({
+      room_id: '!r:hs',
+      notification_count: 3,
+      highlight_count: 1,
+    })
+    expect(unreadCountsChange(frame)).toEqual({
+      roomId: '!r:hs',
+      notificationCount: 3,
+      highlightCount: 1,
+    })
+  })
+
+  it('returns null for other tags and malformed payloads', () => {
+    expect(
+      unreadCountsChange(decodeFrame(envelope(TIMELINE_EVENT, 'a', {}))!),
+    ).toBeNull()
+    expect(unreadCountsChange(unreadFrame(null))).toBeNull()
+    expect(
+      unreadCountsChange(
+        unreadFrame({
+          room_id: '!r:hs',
+          notification_count: -1,
+          highlight_count: 0,
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      unreadCountsChange(
+        unreadFrame({
+          room_id: '!r:hs',
+          notification_count: 1.5,
+          highlight_count: 0,
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      unreadCountsChange(
+        unreadFrame({ room_id: 1, notification_count: 1, highlight_count: 0 }),
+      ),
     ).toBeNull()
   })
 })

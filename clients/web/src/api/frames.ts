@@ -10,7 +10,8 @@ export type EventDto = components['schemas']['EventDto']
  * can dispatch by tag and silently ignore kinds this client predates — a new
  * server frame type reaches no handler until one is added, rather than
  * breaking decode. Known tags today: `timeline.event`, `verification.*`,
- * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`.
+ * `sender_trust.violation`, `device_state.changed`, `ephemeral.passthrough`,
+ * `unread_counts.changed`.
  */
 export interface LiveFrame {
   /** Namespaced tag, e.g. `timeline.event`. */
@@ -29,6 +30,9 @@ export const DEVICE_STATE_CHANGED = 'device_state.changed'
 
 /** The `type` tag for raw allowlisted ephemeral Matrix events (ADR 0056). */
 export const EPHEMERAL_PASSTHROUGH = 'ephemeral.passthrough'
+
+/** The `type` tag for server-derived per-room unread counts (ADR 0070). */
+export const UNREAD_COUNTS_CHANGED = 'unread_counts.changed'
 
 /**
  * The payload of a `device_state.changed` frame (M12, ADR 0048): the writing
@@ -51,6 +55,13 @@ export interface EphemeralPassthrough {
   roomId: string | null
   eventType: string
   content: unknown
+}
+
+/** The payload of an `unread_counts.changed` frame (ADR 0070). */
+export interface UnreadCountsChange {
+  roomId: string
+  notificationCount: number
+  highlightCount: number
 }
 
 /**
@@ -150,4 +161,36 @@ export function ephemeralPassthrough(
     return null
   }
   return { roomId: roomId ?? null, eventType, content }
+}
+
+/**
+ * The server-derived unread counts for one room, or `null` for any other tag
+ * or malformed payload. The frame's account is on the envelope.
+ */
+export function unreadCountsChange(
+  frame: LiveFrame,
+): UnreadCountsChange | null {
+  if (frame.type !== UNREAD_COUNTS_CHANGED) {
+    return null
+  }
+  if (typeof frame.payload !== 'object' || frame.payload === null) {
+    return null
+  }
+  const {
+    room_id: roomId,
+    notification_count: notificationCount,
+    highlight_count: highlightCount,
+  } = frame.payload as Record<string, unknown>
+  if (
+    typeof roomId !== 'string' ||
+    !isCount(notificationCount) ||
+    !isCount(highlightCount)
+  ) {
+    return null
+  }
+  return { roomId, notificationCount, highlightCount }
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }

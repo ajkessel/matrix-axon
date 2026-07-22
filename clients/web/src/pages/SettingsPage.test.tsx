@@ -16,7 +16,6 @@ import {
   setupInstallPromptCapture,
   type BeforeInstallPromptEvent,
 } from '../install-prompt'
-import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { SettingsPage } from './SettingsPage'
 
@@ -223,6 +222,8 @@ describe('SettingsPage', () => {
               name: 'Ops',
               last_activity_ts: 200,
               last_event_id: '$latest',
+              notification_count: 7,
+              highlight_count: 0,
             },
           ],
         }),
@@ -243,7 +244,6 @@ describe('SettingsPage', () => {
       ),
     )
     const services = testServices()
-    services.unread.recordEvent(roomKey({ account_id: ACCOUNT, room_id: ROOM }))
     const { findByRole } = render(
       <ServicesContext.Provider value={services}>
         <SettingsPage />
@@ -253,8 +253,8 @@ describe('SettingsPage', () => {
     fireEvent.click(await findByRole('button', { name: 'Mark all as read' }))
 
     expect(await findByRole('button', { name: 'Marking…' })).toBeTruthy()
-    expect(services.unread.count(`${ACCOUNT}/${ROOM}`)).toBe(1)
     await waitFor(() => expect(putRequested).toBe(true))
+    expect(services.rooms.unreadCount(`${ACCOUNT}/${ROOM}`)).toBe(7)
     resolvePut()
     await waitFor(() =>
       expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
@@ -263,14 +263,14 @@ describe('SettingsPage', () => {
       }),
     )
     await waitFor(() =>
-      expect(services.unread.count(`${ACCOUNT}/${ROOM}`)).toBe(0),
+      expect(services.rooms.unreadCount(`${ACCOUNT}/${ROOM}`)).toBe(0),
     )
     expect(
       await findByRole('button', { name: 'Mark all as read' }),
     ).toBeTruthy()
   })
 
-  it('clears local unread badges when the mark-read write is requeued', async () => {
+  it('clears unread badges when the mark-read write is requeued', async () => {
     vi.useFakeTimers()
     let puts = 0
     server.use(
@@ -284,6 +284,8 @@ describe('SettingsPage', () => {
               name: 'Ops',
               last_activity_ts: 200,
               last_event_id: '$latest',
+              notification_count: 4,
+              highlight_count: 0,
             },
           ],
         }),
@@ -294,7 +296,6 @@ describe('SettingsPage', () => {
       }),
     )
     const services = testServices()
-    services.unread.recordEvent(roomKey({ account_id: ACCOUNT, room_id: ROOM }))
     const { findByRole } = render(
       <ServicesContext.Provider value={services}>
         <SettingsPage />
@@ -310,7 +311,7 @@ describe('SettingsPage', () => {
       }),
     )
     await waitFor(() =>
-      expect(services.unread.count(`${ACCOUNT}/${ROOM}`)).toBe(0),
+      expect(services.rooms.unreadCount(`${ACCOUNT}/${ROOM}`)).toBe(0),
     )
     expect(puts).toBe(1)
     expect(

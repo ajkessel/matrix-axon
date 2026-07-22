@@ -14,7 +14,6 @@ import { createApiClient } from '../api/client'
 import { memoryStorage } from '../test/memory-storage'
 import { roomKey } from './room-list'
 import { createRoomsStore } from './rooms'
-import { createUnreadStore } from './unread'
 
 const BASE_URL = 'http://axon.test'
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
@@ -25,12 +24,16 @@ const NAMED = {
   room_id: '!ops:hs',
   name: 'Ops',
   last_activity_ts: 100,
+  notification_count: 0,
+  highlight_count: 0,
 }
 const UNNAMED = {
   account_id: ACCOUNT,
   account_user_id: '@me:example.org',
   room_id: '!dm:hs',
   last_activity_ts: 200,
+  notification_count: 0,
+  highlight_count: 0,
 }
 
 const server = setupServer()
@@ -384,50 +387,45 @@ describe('createRoomsStore', () => {
     expect(store.error.value).toBe('database unavailable')
     expect(store.loading.value).toBe(false)
   })
-})
 
-describe('createUnreadStore', () => {
-  it('counts events per room and clears on markSeen', () => {
-    const unread = createUnreadStore()
-    expect(unread.count('a/x')).toBe(0)
+  it('hydrates unread counts from room summaries', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [{ ...NAMED, notification_count: 4, highlight_count: 1 }],
+        }),
+      ),
+      http.get(`${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
 
-    unread.recordEvent('a/x')
-    unread.recordEvent('a/x')
-    unread.recordEvent('a/y')
-
-    expect(unread.count('a/x')).toBe(2)
-    expect(unread.count('a/y')).toBe(1)
-
-    unread.markSeen('a/x')
-    expect(unread.count('a/x')).toBe(0)
-    expect(unread.count('a/y')).toBe(1)
-
-    // markSeen on an unknown key is a no-op, not an entry.
-    const before = unread.unreadKeys.value
-    unread.markSeen('a/z')
-    expect(unread.unreadKeys.value).toBe(before)
+    const key = roomKey(NAMED)
+    expect(store.unreadCount(key)).toBe(4)
+    expect([...store.unreadKeys.value]).toEqual([key])
   })
 
-  it('moves unreadKeys only when a room crosses 0 <-> unread', () => {
-    const unread = createUnreadStore()
-    expect(unread.unreadKeys.value.size).toBe(0)
+  it('applies live unread count updates per room', async () => {
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [NAMED, UNNAMED] }),
+      ),
+      http.get(`${BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
+    const key = roomKey(NAMED)
 
-    unread.recordEvent('a/x')
-    const afterFirst = unread.unreadKeys.value
-    expect([...afterFirst]).toEqual(['a/x'])
+    store.noteUnreadCounts(ACCOUNT, NAMED.room_id, 2, 0)
+    expect(store.unreadCount(key)).toBe(2)
+    expect(store.unreadKeys.value.has(key)).toBe(true)
 
-    // A second event in an already-unread room bumps the count but must not
-    // rewrite the set — the Unread filter re-runs off it.
-    unread.recordEvent('a/x')
-    expect(unread.count('a/x')).toBe(2)
-    expect(unread.unreadKeys.value).toBe(afterFirst)
-
-    unread.markSeen('a/x')
-    expect(unread.unreadKeys.value.size).toBe(0)
-
-    // Seeing an already-seen room is likewise inert.
-    const afterSeen = unread.unreadKeys.value
-    unread.markSeen('a/x')
-    expect(unread.unreadKeys.value).toBe(afterSeen)
+    store.noteUnreadCounts(ACCOUNT, NAMED.room_id, 0, 0)
+    expect(store.unreadCount(key)).toBe(0)
+    expect(store.unreadKeys.value.has(key)).toBe(false)
   })
 })

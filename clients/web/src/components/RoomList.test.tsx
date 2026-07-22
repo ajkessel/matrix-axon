@@ -25,6 +25,8 @@ function makeRoom(overrides: Record<string, unknown>): Record<string, unknown> {
     account_id: ACCOUNT,
     account_user_id: '@me:example.org',
     last_activity_ts: Date.now(),
+    notification_count: 0,
+    highlight_count: 0,
     ...overrides,
   }
 }
@@ -345,20 +347,18 @@ describe('RoomList', () => {
     expect(queryByText('#lounge:hs')).toBeNull()
   })
 
-  it('unread filter uses the client-derived store', async () => {
-    const { services, findByText, getByRole, queryByText } = renderPage()
+  it('unread filter uses server-derived notification counts', async () => {
+    const unreadOps = { ...OPS, notification_count: 1 }
+    const { findByText, getByRole, queryByText } = renderPage([unreadOps, DM])
     await findByText('Ops')
 
     fireEvent.click(getByRole('button', { name: 'Unread' }))
-    expect(queryByText('Ops')).toBeNull()
-    expect(await findByText('No rooms match the current filter.')).toBeTruthy()
-
-    services.unread.recordEvent(roomKey(OPS as never))
     expect(await findByText('Ops')).toBeTruthy()
     expect(await findByText('1')).toBeTruthy() // badge
+    expect(queryByText('Bob')).toBeNull()
   })
 
-  it('does not treat missing read markers as unread after reload', async () => {
+  it('does not treat recent rooms with zero server counts as unread', async () => {
     const freshOps = {
       ...OPS,
       last_activity_ts: 200,
@@ -373,27 +373,20 @@ describe('RoomList', () => {
     expect(await findByText('No rooms match the current filter.')).toBeTruthy()
   })
 
-  it('unread filter includes rooms newer than a hydrated read marker', async () => {
+  it('unread filter includes rooms with nonzero server counts', async () => {
     const freshOps = {
       ...OPS,
       last_activity_ts: 200,
       last_event_id: '$ops-new',
+      notification_count: 3,
     }
-    const { findByText, getByRole } = renderPage([freshOps], undefined, {
-      readMarkers: {
-        '!ops:hs': {
-          value: { event_id: '$ops-read', origin_ts: 100 },
-          device_id: '00000000-0000-4000-8000-000000000001',
-          updated_at: '2026-07-20T12:00:00Z',
-        },
-      },
-    })
+    const { findByText, getByRole } = renderPage([freshOps])
     await findByText('Ops')
 
     fireEvent.click(getByRole('button', { name: 'Unread' }))
 
     expect(await findByText('Ops')).toBeTruthy()
-    expect(await findByText('•')).toBeTruthy()
+    expect(await findByText('3')).toBeTruthy()
   })
 
   it('pinning floats a room to the top with a separator, persisted', async () => {
@@ -881,10 +874,10 @@ describe('RoomList selection and shortcut hints', () => {
   })
 
   /**
-   * A message in one room must wake one row. It used to wake every row: each
-   * read `unread.count(key)` off a single map-valued signal, so all of them
-   * subscribed to all of it. At 1594 rooms that was 1594 renders and ~0.9MB of
-   * VDOM garbage per event — the room list's whole performance problem.
+   * A count update in one room must wake one row. The room list used to read
+   * unread state from one map-valued signal, so every room subscribed to every
+   * update. At 1594 rooms that was 1594 renders and ~0.9MB of VDOM garbage per
+   * event — the room list's whole performance problem.
    *
    * jsdom has no layout, so the list here renders unwindowed, which is exactly
    * what makes the fan-out observable: every row is mounted and able to render.
@@ -905,11 +898,11 @@ describe('RoomList selection and shortcut hints', () => {
       await waitFor(() => expect(renders.get('RoomRow')).toBeGreaterThan(0))
 
       renders.clear()
-      services.unread.recordEvent(roomKey(OPS as never))
+      services.rooms.noteUnreadCounts(ACCOUNT, '!ops:hs', 2, 0)
       await waitFor(() => expect(renders.get('RoomRow')).toBe(1))
 
       // And the badge really did land, so the single render is the right one.
-      expect(await findByText('1')).toBeTruthy()
+      expect(await findByText('2')).toBeTruthy()
     } finally {
       options.diffed = previous
     }

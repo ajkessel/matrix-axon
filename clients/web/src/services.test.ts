@@ -1,190 +1,19 @@
 import { computed, signal } from '@preact/signals'
 import { describe, expect, it, vi } from 'vitest'
 import { createApiClient } from './api/client'
-import { TIMELINE_EVENT } from './api/frames'
+import { TIMELINE_EVENT, UNREAD_COUNTS_CHANGED } from './api/frames'
 import {
   connectLiveRooms,
-  connectLiveUnread,
   connectReadMarkers,
+  connectUnreadCounts,
 } from './services'
 import { createDeviceStateStore } from './stores/device-state'
 import { createLiveConnection } from './stores/live-connection'
-import { createUnreadStore } from './stores/unread'
 import { FakeWebSocket } from './test/fake-socket'
 import { memoryStorage } from './test/memory-storage'
 
 const ACCT = '11111111-1111-1111-1111-111111111111'
 const ROOM = '!room:server'
-const KEY = `${ACCT}/${ROOM}`
-
-function harness() {
-  let socket: FakeWebSocket | undefined
-  const live = createLiveConnection({
-    socketFactory: () => {
-      socket = new FakeWebSocket()
-      return socket.asWebSocket()
-    },
-  })
-  const unread = createUnreadStore()
-  const api = createApiClient(
-    {
-      getToken: () => 't',
-      onAuthFailure: () => {},
-      LoginBootstrap: () => null,
-    },
-    'http://axon.test',
-  )
-  const accounts = {
-    accounts: signal([{ account_id: ACCT, user_id: '@me:hs' }]),
-  }
-  const rooms = {
-    rooms: signal([
-      { account_id: ACCT, room_id: ROOM, account_user_id: '@me:hs' },
-    ]),
-  }
-  const deviceState = createDeviceStateStore(api, live, memoryStorage())
-  const activeRoom = signal<string | null>(null)
-  connectLiveUnread(
-    live,
-    unread,
-    activeRoom,
-    rooms as never,
-    accounts as never,
-    deviceState,
-  )
-  live.start()
-  return { live, unread, activeRoom, deviceState, socket: () => socket! }
-}
-
-const timelineFrame = (
-  accountId: string,
-  roomId: string,
-  options: {
-    sender?: string
-    eventId?: string
-    originTs?: number
-    type?: string
-    body?: string | null
-    redacted?: boolean
-    stateKey?: string | null
-    relatesTo?: unknown
-  } = {},
-) =>
-  JSON.stringify({
-    type: TIMELINE_EVENT,
-    account_id: accountId,
-    payload: {
-      event_id: options.eventId ?? '$e',
-      account_id: accountId,
-      room_id: roomId,
-      sender: options.sender ?? '@alice:hs',
-      origin_ts: options.originTs ?? 100,
-      type: options.type ?? 'm.room.message',
-      body: options.body === undefined ? 'hello' : options.body,
-      redacted: options.redacted ?? false,
-      state_key: options.stateKey ?? null,
-      relates_to: options.relatesTo ?? null,
-    },
-  })
-
-describe('connectLiveUnread', () => {
-  it('raises the badge for a live event in a room that is not open', () => {
-    const { unread, socket } = harness()
-    socket().emitMessage(timelineFrame(ACCT, ROOM))
-    expect(unread.count(KEY)).toBe(1)
-  })
-
-  it('does not badge the room the user is currently viewing', () => {
-    const { unread, activeRoom, socket } = harness()
-    activeRoom.value = KEY
-    socket().emitMessage(timelineFrame(ACCT, ROOM))
-    expect(unread.count(KEY)).toBe(0)
-  })
-
-  it('does not badge the user’s own live event in another room', () => {
-    const { unread, deviceState, socket } = harness()
-    socket().emitMessage(timelineFrame(ACCT, ROOM, { sender: '@me:hs' }))
-    expect(unread.count(KEY)).toBe(0)
-    expect(deviceState.readMarker(ACCT, ROOM)).toEqual({
-      eventId: '$e',
-      originTs: 100,
-    })
-  })
-
-  it('does not badge reactions, redactions, state events, or edits', () => {
-    const { unread, deviceState, socket } = harness()
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, {
-        eventId: '$reaction',
-        originTs: 101,
-        type: 'm.reaction',
-        body: null,
-        relatesTo: { rel_type: 'm.annotation', event_id: '$message' },
-      }),
-    )
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, {
-        eventId: '$redaction',
-        originTs: 102,
-        type: 'm.room.redaction',
-        body: null,
-      }),
-    )
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, {
-        eventId: '$state',
-        originTs: 103,
-        type: 'm.room.topic',
-        body: 'topic',
-        stateKey: '',
-      }),
-    )
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, {
-        eventId: '$edit',
-        originTs: 104,
-        relatesTo: { rel_type: 'm.replace', event_id: '$message' },
-      }),
-    )
-
-    expect(unread.count(KEY)).toBe(0)
-    expect(deviceState.readMarker(ACCT, ROOM)).toEqual({
-      eventId: '$edit',
-      originTs: 104,
-    })
-  })
-
-  it('does not let ignored events clear an existing unread message', () => {
-    const { unread, deviceState, socket } = harness()
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, { eventId: '$message', originTs: 100 }),
-    )
-    socket().emitMessage(
-      timelineFrame(ACCT, ROOM, {
-        eventId: '$reaction',
-        originTs: 101,
-        type: 'm.reaction',
-        body: null,
-        relatesTo: { rel_type: 'm.annotation', event_id: '$message' },
-      }),
-    )
-
-    expect(unread.count(KEY)).toBe(1)
-    expect(deviceState.readMarker(ACCT, ROOM)).toBeNull()
-  })
-
-  it('ignores non-timeline frames', () => {
-    const { unread, socket } = harness()
-    socket().emitMessage(
-      JSON.stringify({
-        type: 'device_state.changed',
-        account_id: ACCT,
-        payload: {},
-      }),
-    )
-    expect(unread.count(KEY)).toBe(0)
-  })
-})
 
 function readMarkerHarness() {
   let socket: FakeWebSocket | undefined
@@ -194,7 +23,6 @@ function readMarkerHarness() {
       return socket.asWebSocket()
     },
   })
-  const unread = createUnreadStore()
   const api = createApiClient(
     {
       getToken: () => 't',
@@ -204,9 +32,10 @@ function readMarkerHarness() {
     'http://axon.test',
   )
   const deviceState = createDeviceStateStore(api, live, memoryStorage())
-  connectReadMarkers(live, unread, deviceState)
+  const { stub, unreadCounts } = roomsStub()
+  connectReadMarkers(live, deviceState, stub)
   live.start()
-  return { live, unread, deviceState, socket: () => socket! }
+  return { live, deviceState, unreadCounts, socket: () => socket! }
 }
 
 const readMarkerFrame = (deviceId: string, entries: Record<string, unknown>) =>
@@ -223,29 +52,25 @@ const readMarkerFrame = (deviceId: string, entries: Record<string, unknown>) =>
 
 describe('connectReadMarkers', () => {
   it('clears unread when a sibling device reads a room', () => {
-    const { unread, socket } = readMarkerHarness()
-    unread.recordEvent(KEY)
-    expect(unread.count(KEY)).toBe(1)
+    const { unreadCounts, socket } = readMarkerHarness()
     socket().emitMessage(
       readMarkerFrame('sibling', { [ROOM]: { event_id: '$e', origin_ts: 1 } }),
     )
-    expect(unread.count(KEY)).toBe(0)
+    expect(unreadCounts).toEqual([[ACCT, ROOM, 0, 0]])
   })
 
   it('ignores our own read-marker echo', () => {
-    const { unread, deviceState, socket } = readMarkerHarness()
-    unread.recordEvent(KEY)
+    const { unreadCounts, deviceState, socket } = readMarkerHarness()
     socket().emitMessage(
       readMarkerFrame(deviceState.deviceId, {
         [ROOM]: { event_id: '$e', origin_ts: 1 },
       }),
     )
-    expect(unread.count(KEY)).toBe(1)
+    expect(unreadCounts).toHaveLength(0)
   })
 
   it('ignores drafts frames', () => {
-    const { unread, socket } = readMarkerHarness()
-    unread.recordEvent(KEY)
+    const { unreadCounts, socket } = readMarkerHarness()
     socket().emitMessage(
       JSON.stringify({
         type: 'device_state.changed',
@@ -258,17 +83,19 @@ describe('connectReadMarkers', () => {
         },
       }),
     )
-    expect(unread.count(KEY)).toBe(1)
+    expect(unreadCounts).toHaveLength(0)
   })
 })
 
 function roomsStub() {
   const noted: [string, string, number][] = []
+  const unreadCounts: [string, string, number, number][] = []
   const liveEvents: unknown[] = []
   let refreshes = 0
   const empty = signal<never[]>([])
   const stub = {
     rooms: computed(() => empty.value),
+    unreadKeys: computed(() => new Set<string>()),
     loading: computed(() => false),
     error: signal<string | null>(null),
     titles: computed(() => new Map<string, string>()),
@@ -277,6 +104,7 @@ function roomsStub() {
       return Promise.resolve()
     },
     preview: () => undefined,
+    unreadCount: () => 0,
     hydratePreview: () => {},
     noteActivity: (accountId: string, roomId: string, ts: number) => {
       noted.push([accountId, roomId, ts])
@@ -297,9 +125,60 @@ function roomsStub() {
         ])
       }
     },
+    noteUnreadCounts: (
+      accountId: string,
+      roomId: string,
+      notificationCount: number,
+      highlightCount: number,
+    ) => {
+      unreadCounts.push([accountId, roomId, notificationCount, highlightCount])
+    },
   }
-  return { stub, noted, liveEvents, refreshCount: () => refreshes }
+  return {
+    stub,
+    noted,
+    unreadCounts,
+    liveEvents,
+    refreshCount: () => refreshes,
+  }
 }
+
+describe('connectUnreadCounts', () => {
+  it('feeds server count frames into the rooms store', () => {
+    let socket: FakeWebSocket | undefined
+    const live = createLiveConnection({
+      socketFactory: () => {
+        socket = new FakeWebSocket()
+        return socket.asWebSocket()
+      },
+    })
+    const { stub, unreadCounts } = roomsStub()
+    connectUnreadCounts(live, stub)
+    live.start()
+
+    socket!.emitMessage(
+      JSON.stringify({
+        type: UNREAD_COUNTS_CHANGED,
+        account_id: ACCT,
+        payload: {
+          room_id: ROOM,
+          notification_count: 3,
+          highlight_count: 1,
+        },
+      }),
+    )
+    expect(unreadCounts).toEqual([[ACCT, ROOM, 3, 1]])
+
+    socket!.emitMessage(
+      JSON.stringify({
+        type: UNREAD_COUNTS_CHANGED,
+        account_id: ACCT,
+        payload: { room_id: ROOM, notification_count: -1, highlight_count: 0 },
+      }),
+    )
+    expect(unreadCounts).toHaveLength(1)
+  })
+})
 
 describe('connectLiveRooms', () => {
   it('feeds timeline frames into noteActivity and ignores other kinds', () => {

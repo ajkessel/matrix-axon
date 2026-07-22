@@ -7,7 +7,6 @@ import {
 } from '../install-prompt'
 import { useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
-import { roomKey } from '../stores/room-list'
 import type { Theme, TimeFormat } from '../stores/settings'
 import { AccountLifecycle } from './AccountsPage'
 
@@ -24,7 +23,7 @@ const TIME_FORMATS: { value: TimeFormat; label: string }[] = [
 
 /** Theme + (schema-versioned) local settings (ADR 0046, M-W3). */
 export function SettingsPage() {
-  const { auth, settings, rooms, deviceState, unread } = useServices()
+  const { auth, settings, rooms, deviceState } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
 
   const markAllRead = async () => {
@@ -47,7 +46,7 @@ export function SettingsPage() {
       // badges instead of throwing from a fire-and-forget click handler.
     } finally {
       for (const room of current) {
-        unread.markSeen(roomKey(room))
+        rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
       }
       setMarkingRead(false)
     }

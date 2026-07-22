@@ -23,8 +23,15 @@ export interface RoomPreview {
   body: string
 }
 
+export interface RoomUnreadCounts {
+  notificationCount: number
+  highlightCount: number
+}
+
 export interface RoomsStore {
   rooms: ReadonlySignal<RoomDto[]>
+  /** Rooms whose server-derived notification count is nonzero. */
+  unreadKeys: ReadonlySignal<ReadonlySet<string>>
   /** True until the first load settles. */
   loading: ReadonlySignal<boolean>
   error: Signal<string | null>
@@ -38,6 +45,8 @@ export interface RoomsStore {
   refresh(): Promise<void>
   /** Latest-message preview for one room. */
   preview(key: string): RoomPreview | undefined
+  /** Server-derived unread notification count for one room. */
+  unreadCount(key: string): number
   /** Fetch the latest-message preview for one room, if it is not cached. */
   hydratePreview(room: RoomDto): void
   /**
@@ -50,6 +59,13 @@ export interface RoomsStore {
   noteActivity(accountId: string, roomId: string, ts: number): void
   /** Apply a live timeline event to room activity and preview state. */
   noteTimelineEvent(event: EventDto): void
+  /** Apply a live or optimistic unread-count update for one room. */
+  noteUnreadCounts(
+    accountId: string,
+    roomId: string,
+    notificationCount: number,
+    highlightCount: number,
+  ): void
 }
 
 /** How many member-list fetches run at once when resolving DM titles. */
@@ -70,6 +86,7 @@ export function createRoomsStore(
   storage: Storage = window.localStorage,
 ): RoomsStore {
   const rooms = signal<RoomDto[]>([])
+  const unreadKeys = signal<ReadonlySet<string>>(new Set())
   const loading = signal(true)
   const error = signal<string | null>(null)
   const titles = signal<ReadonlyMap<string, string>>(loadTitleCache(storage))
@@ -79,6 +96,8 @@ export function createRoomsStore(
   const requestedPreviews = new Set<string>()
   /** One preview signal per room, so a live event wakes only its row. */
   const previewSlots = new Map<string, Signal<RoomPreview | undefined>>()
+  /** One unread-count signal per room, so a count update wakes only its row. */
+  const unreadSlots = new Map<string, Signal<RoomUnreadCounts>>()
   /** Member lists by `roomKey(room)`, shared by every preview for that room. */
   const members = new Map<string, Promise<MemberDto[]>>()
 
@@ -195,6 +214,73 @@ export function createRoomsStore(
     const created = signal<RoomPreview | undefined>(undefined)
     previewSlots.set(key, created)
     return created
+  }
+
+  function unreadSlot(key: string): Signal<RoomUnreadCounts> {
+    const existing = unreadSlots.get(key)
+    if (existing !== undefined) {
+      return existing
+    }
+    const created = signal<RoomUnreadCounts>({
+      notificationCount: 0,
+      highlightCount: 0,
+    })
+    unreadSlots.set(key, created)
+    return created
+  }
+
+  function setUnreadCounts(
+    key: string,
+    notificationCount: number,
+    highlightCount: number,
+    nextUnreadKeys?: Set<string>,
+  ): void {
+    const slot = unreadSlot(key)
+    const current = slot.value
+    if (
+      current.notificationCount !== notificationCount ||
+      current.highlightCount !== highlightCount
+    ) {
+      slot.value = { notificationCount, highlightCount }
+    }
+    if (nextUnreadKeys !== undefined) {
+      if (notificationCount > 0) {
+        nextUnreadKeys.add(key)
+      }
+      return
+    }
+    const isUnread = unreadKeys.value.has(key)
+    if (notificationCount > 0 === isUnread) {
+      return
+    }
+    const next = new Set(unreadKeys.value)
+    if (notificationCount > 0) {
+      next.add(key)
+    } else {
+      next.delete(key)
+    }
+    unreadKeys.value = next
+  }
+
+  function syncUnreadCounts(current: RoomDto[]): void {
+    const nextUnreadKeys = new Set<string>()
+    const liveKeys = new Set<string>()
+    for (const room of current) {
+      const key = roomKey(room)
+      liveKeys.add(key)
+      setUnreadCounts(
+        key,
+        countFromRoom(room.notification_count),
+        countFromRoom(room.highlight_count),
+        nextUnreadKeys,
+      )
+    }
+    for (const key of unreadSlots.keys()) {
+      if (!liveKeys.has(key)) {
+        setUnreadCounts(key, 0, 0, nextUnreadKeys)
+      }
+    }
+    unreadKeys.value = nextUnreadKeys
   }
 
   function setPreview(key: string, preview: RoomPreview): void {
@@ -327,6 +413,7 @@ export function createRoomsStore(
         return
       }
       rooms.value = data.data
+      syncUnreadCounts(data.data)
       cacheRoomListTitles(data.data)
       recomputeNewest(data.data)
       error.value = null
@@ -415,17 +502,46 @@ export function createRoomsStore(
     }
   }
 
+  function noteUnreadCounts(
+    accountId: string,
+    roomId: string,
+    notificationCount: number,
+    highlightCount: number,
+  ): void {
+    const key = roomKey({ account_id: accountId, room_id: roomId })
+    const known = rooms.value.some(
+      (room) => room.account_id === accountId && room.room_id === roomId,
+    )
+    if (!known) {
+      void refresh()
+    }
+    setUnreadCounts(
+      key,
+      countFromRoom(notificationCount),
+      countFromRoom(highlightCount),
+    )
+  }
+
   return {
     rooms: computed(() => rooms.value),
+    unreadKeys: computed(() => unreadKeys.value),
     loading: computed(() => loading.value),
     error,
     titles: computed(() => titles.value),
     refresh,
     preview: (key) => previewSlot(key).value,
+    unreadCount: (key) => unreadSlot(key).value.notificationCount,
     hydratePreview,
     noteActivity,
     noteTimelineEvent,
+    noteUnreadCounts,
   }
+}
+
+function countFromRoom(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : 0
 }
 
 function loadTitleCache(storage: Storage): ReadonlyMap<string, string> {

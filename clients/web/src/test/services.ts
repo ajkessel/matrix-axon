@@ -5,10 +5,10 @@ import type { OAuthProviderConfig } from '../auth/oauth'
 import {
   connectLiveRooms,
   connectLiveThreadUnread,
-  connectLiveUnread,
   connectEphemeralPassthrough,
   connectReadMarkers,
   connectThreadReadMarkers,
+  connectUnreadCounts,
   type AppServices,
 } from '../services'
 import { createAccountsStore } from '../stores/accounts'
@@ -24,7 +24,6 @@ import {
   createThreadUnreadStore,
   type ActiveThread,
 } from '../stores/thread-unread'
-import { createUnreadStore } from '../stores/unread'
 import { FakeWebSocket } from './fake-socket'
 import { memoryStorage } from './memory-storage'
 
@@ -66,7 +65,6 @@ export function testServices(
   const accounts = createAccountsStore(api)
   const rooms = createRoomsStore(api, storage)
   const search = createSearchStore(api)
-  const unread = createUnreadStore()
   const threadUnread = createThreadUnreadStore()
   const ephemeral = createEphemeralStore()
   const ephemeralSender = createEphemeralSender(api)
@@ -87,11 +85,11 @@ export function testServices(
   const activeThread = signal<ActiveThread | null>(null)
   const composerFocus = signal(0)
   const deviceState = createDeviceStateStore(api, live, storage)
-  connectLiveUnread(live, unread, activeRoom, rooms, accounts, deviceState)
+  connectUnreadCounts(live, rooms)
   connectLiveRooms(live, rooms)
   connectLiveThreadUnread(live, rooms, accounts, threadUnread, activeThread)
   connectEphemeralPassthrough(live, ephemeral)
-  connectReadMarkers(live, unread, deviceState)
+  connectReadMarkers(live, deviceState, rooms)
   connectThreadReadMarkers(live, threadUnread, deviceState)
   return {
     auth,
@@ -101,7 +99,6 @@ export function testServices(
     accounts,
     rooms,
     search,
-    unread,
     threadUnread,
     live,
     deviceState,

@@ -2011,15 +2011,15 @@ describe('RoomPage', () => {
 
   it('opening the room clears its unread count', async () => {
     const { services } = renderRoom([event('$1', T0)])
-    services.unread.recordEvent(`${ACCOUNT}/${ROOM}`)
-    // markSeen ran in the mount effect before this record… so re-assert via
-    // a fresh mount instead: the effect must clear pre-existing counts.
+    services.rooms.noteUnreadCounts(ACCOUNT, ROOM, 3, 0)
+    // The first mount already cleared the summary count, so re-assert via a
+    // fresh mount instead: the effect must clear pre-existing counts.
     cleanup()
     const key = `${ACCOUNT}/${ROOM}`
-    expect(services.unread.count(key)).toBe(1)
+    expect(services.rooms.unreadCount(key)).toBe(3)
 
     render(routedRoomPage(services))
-    await waitFor(() => expect(services.unread.count(key)).toBe(0))
+    await waitFor(() => expect(services.rooms.unreadCount(key)).toBe(0))
   })
 
   it('opening the room advances the read marker from the room summary', async () => {

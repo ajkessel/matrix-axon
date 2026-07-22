@@ -1,4 +1,3 @@
-import { computed } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import {
   useCallback,
@@ -11,7 +10,6 @@ import {
 import { layoutMode } from '../layout'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
-import { READ_MARKERS_NAMESPACE } from '../stores/device-state'
 import { ErrorBanner } from './ErrorBanner'
 import { perfMark, perfMarkFrames } from '../perf'
 import { hasModifier, hint, keyAria, KEYS, useShortcuts } from '../shortcuts'
@@ -97,7 +95,7 @@ function roomAvatarColor(roomKeyValue: string): number {
 /**
  * The room list (ADR 0046, M-W4): TUI semantics — pinned section on top in
  * pin order (ADR 0038), sort modes and category/name filters (ADR 0042),
- * client-derived unread badges (live-fed in M-W6), membership filtering
+ * server-derived unread badges (ADR 0070), membership filtering
  * server-side (ADR 0037). Rows navigate to the deep-link URL shape.
  *
  * Mounted once in the app shell as the left pane (ADR 0062) and hidden with
@@ -109,10 +107,8 @@ export function RoomList() {
     accounts: accountStore,
     rooms,
     settings,
-    unread,
     activeRoom,
     composerFocus,
-    deviceState,
   } = useServices()
   const location = useLocation()
   // Session-only name filter (ADR 0042: never persisted). `null` = category
@@ -160,51 +156,22 @@ export function RoomList() {
     () => accountLabels(activeAccountEntries),
     [activeAccountEntries],
   )
-  const readMarkerState = useMemo(
-    () =>
-      computed(() =>
-        scopedRooms
-          .map((room) => {
-            const marker = deviceState.readMarker(room.account_id, room.room_id)
-            return `${roomKey(room)}:${marker?.originTs ?? ''}:${deviceState.hydrated(
-              room.account_id,
-              READ_MARKERS_NAMESPACE,
-            )}`
-          })
-          .join('\0'),
-      ),
-    [scopedRooms, deviceState],
-  ).value
-
-  useEffect(() => {
-    for (const [accountId] of activeAccountEntries) {
-      deviceState.hydrateReadMarkers(accountId)
-    }
-  }, [activeAccountEntries, deviceState])
-
-  useEffect(() => {
-    for (const [accountId] of activeAccountEntries) {
-      if (deviceState.hydrated(accountId, READ_MARKERS_NAMESPACE)) {
-        void deviceState.baselineReadMarkers(accountId, scopedRooms)
-      }
-    }
-  }, [activeAccountEntries, scopedRooms, deviceState, readMarkerState])
-
   const roomFilter = settings.roomFilter.value
   const roomSort = settings.roomSort.value
   const pinnedRooms = settings.pinnedRooms.value
   const roomTitles = rooms.titles.value
   const unreadKeys =
     nameQuery === null && roomFilter === 'unread'
-      ? unread.unreadKeys.value
+      ? rooms.unreadKeys.value
       : EMPTY_UNREAD_KEYS
   const navigateToRoom = useCallback(
-    (key: string, href: string) => {
+    (room: RoomDto, href: string) => {
+      const key = roomKey(room)
       perfMark('room-list:navigate-to-room', { key })
-      unread.markSeen(key)
+      rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
       location.route(href)
     },
-    [location, unread],
+    [location, rooms],
   )
   const visible = useMemo(() => {
     perfMark('room-list:visible-compute:start', {
@@ -212,7 +179,7 @@ export function RoomList() {
       filter: roomFilter,
       sort: roomSort,
       name: nameQuery !== null,
-      readMarkers: readMarkerState.length,
+      unreadRooms: unreadKeys.size,
     })
     const next = visibleRooms(scopedRooms, {
       accountFilter,
@@ -221,15 +188,7 @@ export function RoomList() {
       roomSort,
       pinnedRooms,
       roomTitles,
-      hasUnread: (room) =>
-        hasRoomUnread(room, {
-          liveUnreadKeys: unreadKeys,
-          readMarkersHydrated: deviceState.hydrated(
-            room.account_id,
-            READ_MARKERS_NAMESPACE,
-          ),
-          readMarker: deviceState.readMarker(room.account_id, room.room_id),
-        }),
+      hasUnread: (room) => unreadKeys.has(roomKey(room)),
     })
     perfMark('room-list:visible-compute:end', { visible: next.length })
     return next
@@ -242,8 +201,6 @@ export function RoomList() {
     pinnedRooms,
     roomTitles,
     unreadKeys,
-    deviceState,
-    readMarkerState,
   ])
   useEffect(() => {
     if (
@@ -497,7 +454,7 @@ export function RoomList() {
 
   const activateRoom = (room: RoomDto, href?: string) => {
     navigateToRoom(
-      roomKey(room),
+      room,
       href ?? `/${room.account_id}/rooms/${encodeURIComponent(room.room_id)}`,
     )
     setTimeout(focusComposer)
@@ -530,7 +487,7 @@ export function RoomList() {
           : visible.length - 1
         : (current + delta + visible.length) % visible.length
     const room = visible[index]
-    unread.markSeen(roomKey(room))
+    rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
     // The row may be outside the window; keep the highlighted room on screen.
     revealRow(index)
     location.route(
@@ -807,28 +764,6 @@ function visibleRooms(
   return sortRooms(filtered, pinnedRooms, roomSort, title)
 }
 
-function hasRoomUnread(
-  room: RoomDto,
-  context: {
-    liveUnreadKeys: ReadonlySet<string>
-    readMarkersHydrated: boolean
-    readMarker: { originTs: number } | null
-  },
-): boolean {
-  if (context.liveUnreadKeys.has(roomKey(room))) {
-    return true
-  }
-  if (
-    !context.readMarkersHydrated ||
-    room.last_event_id === null ||
-    room.last_event_id === undefined ||
-    context.readMarker === null
-  ) {
-    return false
-  }
-  return room.last_activity_ts > context.readMarker.originTs
-}
-
 /**
  * One row: the name on its own line above a muted account/activity line. The
  * two were side by side until the sidebar shrank them — a nowrap `.room-meta`
@@ -850,24 +785,14 @@ function RoomRow({
   /** Draw the hairline above this row (see the caller). */
   rule: boolean
   /** Navigate on touch taps, but leave touch scroll gestures to the browser. */
-  onNavigate: (key: string, href: string) => void
+  onNavigate: (room: RoomDto, href: string) => void
 }) {
-  const { rooms, settings, unread, activeRoom, deviceState } = useServices()
+  const { rooms, settings, activeRoom } = useServices()
   const key = roomKey(room)
   const pinned = settings.pinnedRooms.value.includes(key)
-  // Reads this room's own count signal, so a message elsewhere leaves this row
-  // alone. With one shared map signal, every row woke for every event.
-  const count = unread.count(key)
-  const hasUnread =
-    count > 0 ||
-    hasRoomUnread(room, {
-      liveUnreadKeys: EMPTY_UNREAD_KEYS,
-      readMarkersHydrated: deviceState.hydrated(
-        room.account_id,
-        READ_MARKERS_NAMESPACE,
-      ),
-      readMarker: deviceState.readMarker(room.account_id, room.room_id),
-    })
+  // Reads this room's own count signal, so a count update elsewhere leaves
+  // this row alone.
+  const count = rooms.unreadCount(key)
   const title = roomTitle(room, rooms.titles.value)
   const href = `/${room.account_id}/rooms/${encodeURIComponent(room.room_id)}`
   const suppressNextClick = useRef(false)
@@ -975,7 +900,7 @@ function RoomRow({
           pointerEvent.preventDefault()
           pointerEvent.stopPropagation()
           suppressSyntheticClick()
-          onNavigate(key, href)
+          onNavigate(room, href)
         }}
         onClickCapture={(click) => {
           if (!suppressNextClick.current) {
@@ -994,10 +919,10 @@ function RoomRow({
           if (!hasModifier(click)) {
             click.preventDefault()
             click.stopPropagation()
-            onNavigate(key, href)
+            onNavigate(room, href)
             return
           }
-          unread.markSeen(key)
+          rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
         }}
       >
         <RoomAvatar
@@ -1013,16 +938,10 @@ function RoomRow({
                 inline content, never a flex item, so the badges cannot share it. */}
               <span class="room-name">{title}</span>
               {isLikelyDm(room) && <span class="badge dm">DM</span>}
-              {count > 0 ? (
+              {count > 0 && (
                 <span class="badge unread-count" aria-label={`${count} unread`}>
                   {count}
                 </span>
-              ) : (
-                hasUnread && (
-                  <span class="badge unread-count" aria-label="Unread">
-                    •
-                  </span>
-                )
               )}
             </span>
             {previewEnabled && (

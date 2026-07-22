@@ -11,7 +11,7 @@ key-format validation and success/error feedback), theme +
 schema-versioned settings, history routing with the permanent deep-link
 shape `/:accountId/rooms/:roomId?thread=&event=` (signed off), the
 cross-account room list with TUI semantics (pinning ADR 0038, sort/filters
-ADR 0042, member-derived DM titles, client-derived unread), the room
+ADR 0042, member-derived DM titles, server-derived room unread counts), the room
 timeline (cursor-paginated scroll-back, date jump, DOMPurify-sanitized
 formatted bodies with spoilers, state-events toggle, ADR 0033 relations
 display, UTD/redaction placeholders, `?event=` highlighting, plain-text URL
