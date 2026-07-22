@@ -121,6 +121,41 @@ const sockets = new Set()
 let blockUpgradesUntil = 0
 /** Synthetic rooms `/v1/rooms` appends; set via `/__e2e/bulk-rooms`. */
 let bulkRooms = 0
+/**
+ * Synthetic message events the timeline GET prepends to its fixtures; set via
+ * `/__e2e/bulk-timeline`. Zero by default so every other spec sees the small
+ * seeded history. The perf lane sets this high to mount a long, un-windowed
+ * timeline whose teardown-on-back is the transition cost under study.
+ */
+let bulkTimeline = 0
+
+/**
+ * `n` text messages, oldest first, older than the seeded history, so the GET
+ * can return `[...synthTimeline(n), ...timeline]` and the client mounts a row
+ * per event. IDs and timestamps are deterministic for stable assertions.
+ */
+function synthTimeline(n) {
+  const base = Date.now() - 7 * 86_400_000
+  return Array.from({ length: n }, (_, i) => ({
+    account_id: ACCOUNT_ID,
+    event_id: `$bulk-${i}:hs`,
+    room_id: ROOM_ID,
+    sender: i % 2 === 0 ? USER_ID : '@bob:hs',
+    state_key: null,
+    origin_ts: base + i * 1000,
+    type: 'm.room.message',
+    content: { msgtype: 'm.text', body: `Bulk message ${i}` },
+    body: `Bulk message ${i}`,
+    relates_to: null,
+    redacted: false,
+    redaction_event_id: null,
+    sender_trust: null,
+    edited: false,
+    edit_count: 0,
+    latest_edit_ts: null,
+    reactions: null,
+  }))
+}
 /** `/v1/search` answers 503 while set (the search-disabled server state);
  *  toggled via `/__e2e/search-503` and reset by the spec that sets it. */
 let searchDisabled = false
@@ -304,17 +339,21 @@ async function handleApi(req, res, url) {
     // newest-first, `limit`-sized) so jumps and forward paging are honest;
     // the un-jumped read keeps returning everything, as the other specs'
     // fixtures assume.
+    const history =
+      bulkTimeline > 0
+        ? [...synthTimeline(bulkTimeline), ...timeline]
+        : timeline
     const atTs = url.searchParams.get('at_ts')
     if (atTs !== null) {
       const limit = Number(url.searchParams.get('limit') ?? 50)
-      const pool = [...timeline]
+      const pool = [...history]
         .sort((a, b) => b.origin_ts - a.origin_ts)
         .filter((event) => event.origin_ts <= Number(atTs))
       return json(res, {
         data: { events: pool.slice(0, limit), next_cursor: null },
       })
     }
-    return json(res, { data: { events: timeline, next_cursor: null } })
+    return json(res, { data: { events: history, next_cursor: null } })
   }
   // The media proxy: raw image bytes behind the bearer guard, mirroring the
   // real route's headers so the client's fetch → blob path is exercised.
@@ -521,6 +560,12 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/bulk-rooms') {
     bulkRooms = Number(url.searchParams.get('count') ?? 0)
     return json(res, { data: { bulk_rooms: bulkRooms } })
+  }
+  // How many synthetic message events the timeline GET prepends. Zero by
+  // default; the perf lane raises it to mount a long, un-windowed timeline.
+  if (req.method === 'POST' && url.pathname === '/__e2e/bulk-timeline') {
+    bulkTimeline = Number(url.searchParams.get('count') ?? 0)
+    return json(res, { data: { bulk_timeline: bulkTimeline } })
   }
   // What the browser actually staged. The unit tests cannot assert the upload's
   // *bytes* — under jsdom a `File` is not undici's `Blob`, so the body never
