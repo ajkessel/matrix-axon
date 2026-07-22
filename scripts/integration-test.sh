@@ -233,6 +233,12 @@ run_axon() {
     local recovery="${1:-}"
     local -a envs=(
         DATABASE_URL="$DATABASE_URL"
+        # Pin the bind address: without it axon can resolve a non-loopback
+        # default on a host that has one (a Tailscale/VPN interface, say) and
+        # refuse to bind over plain HTTP, exiting before it syncs anything. The
+        # harness would then fail 90s later on a UTD timeout that says nothing
+        # about the real cause.
+        AXON_SERVER__HOST=127.0.0.1
         AXON_SERVER__PORT=18080
         AXON_SYNC__DATA_DIR="${RUN_DIR}/axon-data/sync"
         AXON_SEARCH__INDEX_PATH="${RUN_DIR}/axon-data/search"
@@ -284,7 +290,8 @@ wait_until() {
 # window is raised from the SDK default of 1 (sync.timeline_limit, default 20), so
 # device B sees several UTDs rather than just the latest — but still bounded by
 # that window, not the full backlog. We assert on the count axon *actually*
-# archived rather than MESSAGE_COUNT, then prove that exact set flips.
+# archived rather than MESSAGE_COUNT, then prove that set flips (and that
+# nothing is left undecrypted once backfill has caught up).
 
 log "Phase 1: axon as fresh device B (no recovery key) — expect UTDs"
 run_axon
@@ -298,7 +305,10 @@ stop_axon
 
 log "Phase 2: restart axon WITH recovery key — expect re-decryption"
 run_axon "$RECOVERY_KEY"
-wait_until "rows back-filled to decrypted" -eq "$SEEN" decrypted_count
+# `-ge`, not `-eq`: backfill pages history behind the sync window and decrypts
+# that too, so on a room deeper than `sync.timeline_limit` the count legitimately
+# exceeds what phase 1 saw. "No UTDs remain" below is the assertion that bites.
+wait_until "rows back-filled to decrypted" -ge "$SEEN" decrypted_count
 # And no UTDs should remain.
 wait_until "UTDs drained to zero" -eq 0 utd_count
 wait_until "encrypted media metadata available" -eq 1 media_event_ready
