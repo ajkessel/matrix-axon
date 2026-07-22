@@ -27,6 +27,8 @@ function room(
     account_user_id: accountId === ACCOUNT_A ? '@alice:hs' : '@bob:hs',
     room_id: roomId,
     last_activity_ts: 0,
+    highlight_count: 0,
+    notification_count: 0,
     ...overrides,
   }
 }

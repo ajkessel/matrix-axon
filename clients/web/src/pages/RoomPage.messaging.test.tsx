@@ -1809,20 +1809,19 @@ describe('threads', () => {
         },
       ),
     )
-    const { getByLabelText, getAllByLabelText, findByText } = renderRoom(
+    const { getByLabelText, findByLabelText, findByText } = renderRoom(
       [event('$root', 100)],
       `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
     )
-    await findByText('Thread')
+    const panel = await findByLabelText('Thread')
 
-    // Two composers are mounted (room and thread); the thread's is the second.
-    const inputs = getAllByLabelText('Attach a file') as HTMLInputElement[]
-    expect(inputs).toHaveLength(2)
-    fireEvent.change(inputs[1], {
-      target: {
+    fireEvent.drop(panel, {
+      dataTransfer: {
         files: [new File(['bytes'], 'cat.png', { type: 'image/png' })],
+        types: ['Files'],
       },
     })
+    await findByText('cat.png')
 
     const textarea = getByLabelText('Reply in thread') as HTMLTextAreaElement
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -2288,15 +2287,15 @@ describe('sending media (M-W8.5, ADR 0065)', () => {
     expect(getByLabelText('Attach a file')).toBeTruthy()
   })
 
-  it('sends a picked file bare, with no caption, on an empty composer', async () => {
+  it('sends a staged file bare, with no caption, on an empty composer', async () => {
     const seen = serveMediaSend()
-    const { getByRole, getByLabelText, getByText } = renderRoom([
-      event('$a', 100),
-    ])
+    const { getByRole, getByText, container } = renderRoom([event('$a', 100)])
     await waitFor(() => getByText('body of $a'))
 
-    const input = getByLabelText('Attach a file') as HTMLInputElement
-    fireEvent.change(input, { target: { files: [png()] } })
+    const stream = container.querySelector('.room-stream')!
+    fireEvent.drop(stream, {
+      dataTransfer: { files: [png()], types: ['Files'] },
+    })
     await waitFor(() => getByText('cat.png'))
 
     fireEvent.submit(getByRole('textbox').closest('form')!)

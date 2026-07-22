@@ -27,6 +27,8 @@ function room(): components['schemas']['RoomDto'] {
     room_id: ROOM,
     name: 'Ops Team',
     last_activity_ts: 1000,
+    highlight_count: 0,
+    notification_count: 0,
   }
 }
 
