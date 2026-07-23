@@ -132,8 +132,8 @@ impl ClientManager {
     /// can do one last thing with it, e.g. invalidate the device token upstream on
     /// logout — and *evicts* it (the slot is left empty), atomically under the slot
     /// lock so a concurrent [`get_or_connect`](Self::get_or_connect) can't observe a
-    /// half-removed client. Unlike [`evict`](Self::evict) this awaits the slot lock
-    /// rather than skipping a slot that is mid-connect.
+    /// half-removed client. Unlike [`evict`](Self::evict), which drops the client,
+    /// this one returns it.
     pub async fn take(&self, account_id: Uuid) -> Option<Client> {
         let slot = self.slot(account_id);
         let mut guard = slot.lock().await;
@@ -152,17 +152,102 @@ impl ClientManager {
     /// Drop the cached client for `account_id` so the next
     /// [`get_or_connect`](Self::get_or_connect) rebuilds it. Called by the sync
     /// supervisor when a run fails, so a supervised restart reconnects cleanly.
-    /// A no-op if nothing is cached. If a connect is in flight (the slot is
-    /// locked) this skips — that connect is already producing a fresh client.
-    pub fn evict(&self, account_id: Uuid) {
+    /// A no-op if nothing is cached.
+    ///
+    /// Awaits the slot lock rather than skipping when it's held (unlike a
+    /// `try_lock`, which would let a concurrent `get_or_connect`'s cache-hit read
+    /// win the race and leave the stale, about-to-be-replaced client cached —
+    /// the next supervised run would then reuse it and pile a second set of
+    /// event handlers onto it; see issue #289).
+    pub async fn evict(&self, account_id: Uuid) {
         let slot = {
             let map = self.slots.lock().expect("client slot map poisoned");
             map.get(&account_id).cloned()
         };
         if let Some(slot) = slot {
-            if let Ok(mut guard) = slot.try_lock() {
-                *guard = None;
-            }
+            *slot.lock().await = None;
         }
+    }
+
+    /// Expose an account's raw connection slot, so a test can hold its lock
+    /// itself to simulate a concurrent `get_or_connect`/`login` in flight.
+    #[cfg(test)]
+    pub(crate) fn slot_for_test(&self, account_id: Uuid) -> Slot {
+        self.slot(account_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Build a manager over the test DB. `evict`/`inject_for_test` never touch
+    /// the store, so no account row is needed — only a live `Store` to satisfy
+    /// `ClientManager::new`.
+    async fn manager() -> ClientManager {
+        let url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+        let store = Store::connect(&url, 5).await.expect("connect + migrate");
+        let config = SyncConfig {
+            data_dir: std::env::temp_dir().join("axon-manager-test"),
+            store_key: Some("test-key".to_owned()),
+            account: None,
+            timeline_limit: 1,
+            live_event_buffer: 16,
+            ..SyncConfig::default()
+        };
+        ClientManager::new(store, config)
+    }
+
+    /// `server_versions` skips the discovery request, so this builds offline.
+    async fn offline_client() -> Client {
+        Client::builder()
+            .homeserver_url("http://127.0.0.1:9") // nothing listens; requests fail fast
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            .build()
+            .await
+            .expect("offline client")
+    }
+
+    /// Regression for issue #289: the old `evict` used `try_lock` and silently
+    /// skipped when the slot was held by a concurrent `get_or_connect`, leaving
+    /// the stale client cached for the next supervised restart to reuse (and
+    /// pile a second set of event handlers onto). `evict` must instead await
+    /// the lock and still clear the slot once the holder releases it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn evict_awaits_a_held_slot_lock_instead_of_skipping() {
+        let manager = manager().await;
+        let account_id = Uuid::new_v4();
+        manager
+            .inject_for_test(account_id, offline_client().await)
+            .await;
+
+        // Simulate a concurrent `get_or_connect` holding the slot lock.
+        let slot = manager.slot_for_test(account_id);
+        let guard = slot.lock().await;
+
+        let evicting_manager = manager.clone();
+        let evict = tokio::spawn(async move {
+            evicting_manager.evict(account_id).await;
+        });
+
+        // Give `evict` a chance to run; a `try_lock`-based implementation would
+        // already have returned by now instead of blocking on the held lock.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !evict.is_finished(),
+            "evict must block while the slot lock is held, not skip"
+        );
+
+        drop(guard);
+        evict.await.expect("evict task panicked");
+
+        assert!(
+            manager.take(account_id).await.is_none(),
+            "evict must clear the slot once the lock is released"
+        );
     }
 }

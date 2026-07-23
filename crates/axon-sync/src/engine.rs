@@ -493,7 +493,21 @@ async fn supervise_account(
             Err(err) => {
                 // Drop the cached client so the next attempt reconnects cleanly
                 // (a stale session/connection won't be reused across a restart).
-                manager.evict(account.account_id);
+                // This awaits the slot lock (see `evict`'s doc), so it can block
+                // behind a concurrent `get_or_connect` on this account for as
+                // long as that connect takes (unbounded — no connect timeout).
+                // Race it against cancellation so a shutdown/logout isn't stalled
+                // by a hung homeserver: on cancel, `sever_session` still tears the
+                // client down correctly afterward via `take` (which runs only
+                // once this task has exited, per `reap_task`), so dropping this
+                // eviction attempt loses nothing there; on full process shutdown
+                // it doesn't matter either. It only matters for an ordinary
+                // restart-after-failure, where `cancel` isn't firing and this
+                // always resolves via the eviction itself.
+                tokio::select! {
+                    () = manager.evict(account.account_id) => {}
+                    () = cancel.cancelled() => return,
+                }
                 tracing::error!(
                     account_id = %account.account_id,
                     error = %err,

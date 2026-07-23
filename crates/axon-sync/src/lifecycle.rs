@@ -567,7 +567,7 @@ impl AccountLifecycle {
         let active = match self.activate(account.account_id).await {
             Ok(active) => active,
             Err(err) => {
-                self.manager.evict(account.account_id);
+                self.manager.evict(account.account_id).await;
                 return Err(err);
             }
         };
