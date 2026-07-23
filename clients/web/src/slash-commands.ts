@@ -2,6 +2,7 @@ export const SLASH_COMMAND = {
   help: '/help',
   html: '/html',
   jump: '/jump',
+  leave: '/leave',
   literal: '/literal',
   pin: '/pin',
   rainbow: '/rainbow',
@@ -17,6 +18,7 @@ export const SLASH_COMMAND = {
   thread: '/thread',
   unreadthreads: '/unreadthreads',
   unpin: '/unpin',
+  forget: '/forget',
   whereami: '/whereami',
 } as const
 
@@ -72,6 +74,17 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
     aliases: ['/switch'],
     usage: '/room <room>',
     description: 'Switch rooms by name, alias, ID, or number',
+  },
+  {
+    name: SLASH_COMMAND.leave,
+    aliases: ['/part'],
+    usage: '/leave, /part',
+    description: 'Leave the current room',
+  },
+  {
+    name: SLASH_COMMAND.forget,
+    usage: '/forget',
+    description: 'Forget the current left or banned room',
   },
   {
     name: SLASH_COMMAND.pin,

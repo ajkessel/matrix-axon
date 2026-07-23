@@ -372,6 +372,77 @@ describe('createRoomsStore', () => {
     expect(listCalls).toBe(2)
   })
 
+  it('leaves a room through M19b, hides it immediately, and refreshes authoritative rooms', async () => {
+    let leaveCalls = 0
+    let listCalls = 0
+    let listedRooms = [NAMED]
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => {
+        listCalls += 1
+        return HttpResponse.json({ data: listedRooms })
+      }),
+      http.post(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}/leave`,
+        () => {
+          leaveCalls += 1
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const store = makeStore()
+    await store.refresh()
+    expect(store.rooms.value).toEqual([NAMED])
+
+    const result = await store.leaveRoom(ACCOUNT, NAMED.room_id)
+
+    expect(result).toEqual({ ok: true })
+    expect(leaveCalls).toBe(1)
+    expect(listCalls).toBe(2)
+    // The immediate refresh can race sync and still return the room. Keep it
+    // hidden locally once the leave mutation itself has succeeded.
+    expect(store.rooms.value).toEqual([])
+
+    // If the same room id appears on a later refresh without an intervening
+    // absence, treat that as a legitimate rejoin and show it again.
+    await store.refresh()
+    expect(store.rooms.value).toEqual([NAMED])
+
+    listedRooms = []
+    await store.refresh()
+    expect(store.rooms.value).toEqual([])
+
+    listedRooms = [NAMED]
+    await store.refresh()
+    expect(store.rooms.value).toEqual([NAMED])
+  })
+
+  it('returns a recoverable message when forgetting fails', async () => {
+    server.use(
+      http.post(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(NAMED.room_id)}/forget`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'bad_request',
+                message: "room isn't left or banned",
+              },
+            },
+            { status: 400 },
+          ),
+      ),
+    )
+    const store = makeStore()
+
+    const result = await store.forgetRoom(ACCOUNT, NAMED.room_id)
+
+    expect(result).toEqual({
+      ok: false,
+      message: "room isn't left or banned",
+    })
+    expect(store.error.value).toBe("room isn't left or banned")
+  })
+
   it('surfaces a list-fetch error', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/rooms`, () =>

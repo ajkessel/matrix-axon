@@ -129,6 +129,38 @@ describe('Composer drafts (M-W6 step 5b)', () => {
     expect(textarea.value).toBe('/unknown')
   })
 
+  it('waits for async slash commands before clearing the composer', async () => {
+    const onCommand = vi.fn(async () => true)
+    const { textarea, form, onSubmit, onDraftChange } = renderComposer({
+      onCommand,
+    })
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.submit(form)
+
+    expect(onCommand).toHaveBeenCalledWith('/leave')
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(textarea.value).toBe('/leave')
+    await vi.waitFor(() => expect(textarea.value).toBe(''))
+    expect(onDraftChange).toHaveBeenLastCalledWith('')
+  })
+
+  it('keeps the composer recoverable when an async slash command rejects', async () => {
+    const onCommand = vi.fn(async () => {
+      throw new Error('command failed')
+    })
+    const { textarea, form, onSubmit, onDraftChange } = renderComposer({
+      onCommand,
+    })
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.submit(form)
+
+    expect(onCommand).toHaveBeenCalledWith('/leave')
+    expect(onSubmit).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1))
+    expect(onDraftChange).not.toHaveBeenCalledWith('')
+    expect(textarea.value).toBe('/leave')
+  })
+
   it('sends double-slash input as a literal leading slash message', () => {
     const onCommand = vi.fn(() => true)
     const { textarea, form, onSubmit } = renderComposer({ onCommand })

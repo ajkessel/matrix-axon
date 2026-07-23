@@ -103,6 +103,8 @@ function roomsStub() {
       refreshes += 1
       return Promise.resolve()
     },
+    leaveRoom: () => Promise.resolve({ ok: true as const }),
+    forgetRoom: () => Promise.resolve({ ok: true as const }),
     preview: () => undefined,
     unreadCount: () => 0,
     hydratePreview: () => {},

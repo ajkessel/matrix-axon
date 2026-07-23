@@ -74,6 +74,10 @@ const TIMELINE_PATH = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURI
 const EVENTS_PATH = `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`
 const OWN_USER = '@me:hs'
 
+function RoomsIndexStub() {
+  return <div data-testid="rooms-index">Select a room</div>
+}
+
 function event(id: string, ts: number, overrides: object = {}): EventDto {
   return {
     account_id: ACCOUNT,
@@ -2077,7 +2081,11 @@ describe('room command', () => {
         () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
       ),
     )
-    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      undefined,
+      RoomsIndexStub,
+    )
     const textarea = (await findByLabelText(
       'Message Ops',
     )) as HTMLTextAreaElement
@@ -2189,6 +2197,199 @@ describe('room command', () => {
     fireEvent.input(textarea, { target: { value: '/rooms' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(roomRequests).toBeGreaterThan(refreshedRequests))
+  })
+
+  it('/leave posts the M19b mutation, refreshes rooms, and leaves the room route', async () => {
+    let leaveRequests = 0
+    let roomRequests = 0
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () => {
+        roomRequests += 1
+        return HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: OWN_USER,
+              room_id: ROOM,
+              name: 'Ops',
+              canonical_alias: null,
+              topic: null,
+              last_activity_ts: 0,
+            },
+          ],
+        })
+      }),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/leave`,
+        () => {
+          leaveRequests += 1
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { services, findByLabelText } = renderRoom([event('$root', 100)])
+    await waitFor(() => expect(roomRequests).toBeGreaterThan(0))
+    const mountedRequests = roomRequests
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(leaveRequests).toBe(1))
+    await waitFor(() => expect(roomRequests).toBeGreaterThan(mountedRequests))
+    await waitFor(() => expect(services.rooms.rooms.value).toEqual([]))
+    await waitFor(() => expect(window.location.pathname).toBe('/'))
+  })
+
+  it('/leave asks for confirmation when this account is the only joined member', async () => {
+    let leaveRequests = 0
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                user_id: OWN_USER,
+                membership: 'join',
+                display_name: 'Me',
+              },
+            ],
+          }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/leave`,
+        () => {
+          leaveRequests += 1
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1))
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining('only joined member'),
+    )
+    expect(leaveRequests).toBe(0)
+    expect(textarea.value).toBe('/leave')
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    confirm.mockRestore()
+  })
+
+  it('/leave skips the last-member confirmation when another user is joined', async () => {
+    let leaveRequests = 0
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+        () =>
+          HttpResponse.json({
+            data: [
+              {
+                user_id: OWN_USER,
+                membership: 'join',
+                display_name: 'Me',
+              },
+              {
+                user_id: '@bob:hs',
+                membership: 'join',
+                display_name: 'Bob',
+              },
+            ],
+          }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/leave`,
+        () => {
+          leaveRequests += 1
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      undefined,
+      RoomsIndexStub,
+    )
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/leave' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(leaveRequests).toBe(1))
+    expect(confirm).not.toHaveBeenCalled()
+    confirm.mockRestore()
+  })
+
+  it('/part is a /leave alias', async () => {
+    let leaveRequests = 0
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/leave`,
+        () => {
+          leaveRequests += 1
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$root', 100)],
+      undefined,
+      RoomsIndexStub,
+    )
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/part' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(leaveRequests).toBe(1))
+  })
+
+  it('/forget leaves the command in place when the server rejects it', async () => {
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}/forget`,
+        () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: 'bad_request',
+                message: "room isn't left or banned",
+              },
+            },
+            { status: 400 },
+          ),
+      ),
+    )
+    const { findByLabelText, findByText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      'Message Ops',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/forget' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(await findByText("room isn't left or banned")).toBeTruthy()
+    expect(textarea.value).toBe('/forget')
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
   })
 })
 

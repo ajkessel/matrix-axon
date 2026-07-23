@@ -32,6 +32,7 @@ yet)
 
 ## Matrix
 
+<!-- prettier-ignore -->
 | Capability | Server (`/v1/`) | axon-tui | axon-web | iOS (future) | Notes |
 |---|---|---|---|---|---|
 | Text send / edit / redact / react | Done (M6, ADR 0021) | Done | Done | Not started | |
@@ -48,7 +49,7 @@ yet)
 | Outbound typing notice | Done (M19a, ADR 0068) — `PUT .../rooms/{room_id}/typing` | Done — `app/typing.rs`, driven by `note_draft_activity` + a `flush_due_typing` tick | Done (`stores/ephemeral-sender.ts`, driven by the composer) | Not started | Throttled true, cleared on empty/command/submit/room-switch/idle |
 | Interactive SAS device verification | Done (7a-6, ADR 0027/0028) | Done — full emoji-modal flow | **Gap** — `AccountsPage.tsx` only mentions SAS in a placeholder label; no verification flow implemented | Not started | Verified by grep, 2026-07-17 |
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
-| Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Not started | Not started | Server-only; client UI (leave-room action, member-list kick/ban) is separate follow-up work |
+| Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Partial (M19-W1) — `/leave`, `/part`, and `/forget`; member-list invite/kick/ban/unban remains | Not started | Server-only for moderation actions; web M19-W5 will add invite/kick/ban/unban |
 | Room entry (join/knock/create) | Done (M19c, ADR 0068) — `POST .../rooms/{join,knock,dm}` and `POST .../rooms` | Not started | Not started | Not started | Server-only; client UI (join-room dialog, create-room flow) is separate follow-up work |
 | Room settings (name/topic/avatar/tags) | Done (M19d, ADR 0068) — `PUT .../rooms/{room_id}/{name,topic}`, `PUT/DELETE .../rooms/{room_id}/avatar`, and `PUT/DELETE .../rooms/{room_id}/tags/{tag}` | Not started | Not started | Not started | Server-only; client UI (room settings panel, tag/favorite toggle) is separate follow-up work. `tags` writes `m.tag` room account data, not a state event |
 | Power levels | Done (M19e, ADR 0068) — `PUT/GET .../rooms/{room_id}/power_levels` | Not started | Not started | Not started | Server-only; client UI (power-levels editor, self-demotion confirmation) is separate follow-up work. Write merges role thresholds and per-user levels into one `m.room.power_levels` event; rejects a change that would strand the caller below the level needed to self-correct unless `acknowledge_self_demotion` is set |

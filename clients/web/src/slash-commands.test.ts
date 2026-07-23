@@ -12,12 +12,14 @@ describe('slash command aliases', () => {
     expect(canonicalSlashCommandName('/?')).toBe(SLASH_COMMAND.help)
     expect(canonicalSlashCommandName('/ut')).toBe(SLASH_COMMAND.unreadthreads)
     expect(canonicalSlashCommandName('/rooms')).toBe(SLASH_COMMAND.refresh)
+    expect(canonicalSlashCommandName('/part')).toBe(SLASH_COMMAND.leave)
   })
 
   it('returns command specs for canonical names and aliases', () => {
     expect(slashCommandSpecForInput('/room')?.name).toBe(SLASH_COMMAND.room)
     expect(slashCommandSpecForInput('/switch')?.name).toBe(SLASH_COMMAND.room)
     expect(slashCommandSpecForInput('/+')?.name).toBe(SLASH_COMMAND.react)
+    expect(slashCommandSpecForInput('/part')?.name).toBe(SLASH_COMMAND.leave)
     expect(slashCommandSpecForInput('/missing')).toBeUndefined()
   })
 })

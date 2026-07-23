@@ -28,6 +28,8 @@ export interface RoomUnreadCounts {
   highlightCount: number
 }
 
+export type RoomMembershipResult = { ok: true } | { ok: false; message: string }
+
 export interface RoomsStore {
   rooms: ReadonlySignal<RoomDto[]>
   /** Rooms whose server-derived notification count is nonzero. */
@@ -43,6 +45,10 @@ export interface RoomsStore {
 
   /** Fetch the room list (server-side membership filtering per ADR 0037). */
   refresh(): Promise<void>
+  /** Leave one room through M19b, then refresh authoritative room state. */
+  leaveRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
+  /** Forget one left/banned room through M19b, then refresh room state. */
+  forgetRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
   /** Latest-message preview for one room. */
   preview(key: string): RoomPreview | undefined
   /** Server-derived unread notification count for one room. */
@@ -100,6 +106,8 @@ export function createRoomsStore(
   const unreadSlots = new Map<string, Signal<RoomUnreadCounts>>()
   /** Member lists by `roomKey(room)`, shared by every preview for that room. */
   const members = new Map<string, Promise<MemberDto[]>>()
+  /** Rooms this session successfully left/forgot before sync caught up. */
+  const locallyHiddenRooms = new Set<string>()
 
   async function fetchTitle(room: RoomDto): Promise<void> {
     let data
@@ -412,14 +420,17 @@ export function createRoomsStore(
         error.value = apiErrorMessage(apiError)
         return
       }
-      rooms.value = data.data
-      syncUnreadCounts(data.data)
-      cacheRoomListTitles(data.data)
-      recomputeNewest(data.data)
+      const visibleRooms = data.data.filter(
+        (room) => !locallyHiddenRooms.has(roomKey(room)),
+      )
+      rooms.value = visibleRooms
+      syncUnreadCounts(visibleRooms)
+      cacheRoomListTitles(visibleRooms)
+      recomputeNewest(visibleRooms)
       error.value = null
       // Fire-and-forget: titles arrive incrementally; the list re-renders as
       // the titles signal updates.
-      void resolveUnnamedTitles(data.data)
+      void resolveUnnamedTitles(visibleRooms)
     } catch (cause) {
       error.value = cause instanceof Error ? cause.message : String(cause)
     } finally {
@@ -436,6 +447,66 @@ export function createRoomsStore(
       refreshing = null
     })
     return refreshing
+  }
+
+  async function membershipMutation(
+    accountId: string,
+    roomId: string,
+    call: () => Promise<{ error?: unknown }>,
+  ): Promise<RoomMembershipResult> {
+    try {
+      const { error: apiError } = await call()
+      if (apiError !== undefined) {
+        const message = apiErrorMessage(apiError)
+        error.value = message
+        return { ok: false, message }
+      }
+      const hiddenKey = hideRoomLocally(accountId, roomId)
+      try {
+        await refresh()
+      } finally {
+        locallyHiddenRooms.delete(hiddenKey)
+      }
+      return { ok: true }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      error.value = message
+      return { ok: false, message }
+    }
+  }
+
+  function leaveRoom(
+    accountId: string,
+    roomId: string,
+  ): Promise<RoomMembershipResult> {
+    return membershipMutation(accountId, roomId, () =>
+      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/leave', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+      }),
+    )
+  }
+
+  function forgetRoom(
+    accountId: string,
+    roomId: string,
+  ): Promise<RoomMembershipResult> {
+    return membershipMutation(accountId, roomId, () =>
+      api.POST('/v1/accounts/{account_id}/rooms/{room_id}/forget', {
+        params: { path: { account_id: accountId, room_id: roomId } },
+      }),
+    )
+  }
+
+  function hideRoomLocally(accountId: string, roomId: string): string {
+    const key = roomKey({ account_id: accountId, room_id: roomId })
+    locallyHiddenRooms.add(key)
+    const next = rooms.value.filter((room) => roomKey(room) !== key)
+    if (next.length !== rooms.value.length) {
+      rooms.value = next
+      syncUnreadCounts(next)
+      recomputeNewest(next)
+    }
+    return key
   }
 
   function noteActivityRoom(
@@ -529,6 +600,8 @@ export function createRoomsStore(
     error,
     titles: computed(() => titles.value),
     refresh,
+    leaveRoom,
+    forgetRoom,
     preview: (key) => previewSlot(key).value,
     unreadCount: (key) => unreadSlot(key).value.notificationCount,
     hydratePreview,

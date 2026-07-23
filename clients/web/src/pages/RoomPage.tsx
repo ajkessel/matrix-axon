@@ -47,7 +47,7 @@ import {
   type SlashCommandName,
 } from '../slash-commands'
 import { createMembersStore, type MembersStore } from '../stores/members'
-import { roomKey, roomTitle } from '../stores/room-list'
+import { roomKey, roomTitle, type MemberDto } from '../stores/room-list'
 import {
   resolveRoomTarget,
   roomCommandSuggestions,
@@ -81,6 +81,9 @@ const REACTION_COMMAND_ALIASES = new Map([
   ['open_mouth', '😮'],
   ['cry', '😢'],
 ])
+
+const LAST_JOINED_MEMBER_LEAVE_CONFIRM =
+  'You are the only joined member in this room. If you leave, there may be no one left to invite you back. Leave this room?'
 
 const SWIPE_RIGHT_MIN_X = 72
 const SWIPE_RIGHT_MAX_Y = 64
@@ -345,10 +348,12 @@ export function RoomPage() {
         ? null
         : { accountId, roomId, rootEventId: openThread }
     return () => {
+      const current = activeThread.value
       if (
-        activeThread.value?.accountId === accountId &&
-        activeThread.value.roomId === roomId &&
-        activeThread.value.rootEventId === openThread
+        current !== null &&
+        current.accountId === accountId &&
+        current.roomId === roomId &&
+        current.rootEventId === openThread
       ) {
         activeThread.value = null
       }
@@ -527,7 +532,7 @@ export function RoomPage() {
     return null
   }
 
-  const handleComposerCommand = (body: string): boolean => {
+  const handleComposerCommand = (body: string): boolean | Promise<boolean> => {
     const command = parseComposerCommand(body)
     if (command === null) {
       timeline.error.value = `unknown command: ${body.split(/\s+/, 1)[0]}`
@@ -614,6 +619,9 @@ export function RoomPage() {
       })
       return true
     }
+    if (command.kind === 'leave' || command.kind === 'forget') {
+      return handleMembershipCommand(command.kind)
+    }
     if (command.kind === 'pin' || command.kind === 'unpin') {
       if (command.target === null) {
         const key = roomKey({ account_id: accountId, room_id: roomId })
@@ -688,6 +696,41 @@ export function RoomPage() {
       senderId: ownUserId ?? undefined,
       formattedBody: message.formattedBody,
     })
+  }
+
+  const handleMembershipCommand = async (
+    action: 'leave' | 'forget',
+  ): Promise<boolean> => {
+    timeline.error.value = null
+    if (action === 'leave' && !(await confirmLeaveIfOnlyJoinedMember())) {
+      return false
+    }
+    const result =
+      action === 'leave'
+        ? await rooms.leaveRoom(accountId, roomId)
+        : await rooms.forgetRoom(accountId, roomId)
+    if (!result.ok) {
+      timeline.error.value = result.message
+      return false
+    }
+    location.route('/', true)
+    return true
+  }
+
+  async function confirmLeaveIfOnlyJoinedMember(): Promise<boolean> {
+    if (ownUserId === null) {
+      timeline.error.value = 'room membership is still loading; try again'
+      return false
+    }
+    await members.refresh()
+    if (members.error.value !== null) {
+      timeline.error.value = `could not refresh room members: ${members.error.value}`
+      return false
+    }
+    if (!isOnlyJoinedMember(members.members.value.values(), ownUserId)) {
+      return true
+    }
+    return window.confirm(LAST_JOINED_MEMBER_LEAVE_CONFIRM)
   }
 
   const setThreadParam = useCallback(
@@ -1593,8 +1636,10 @@ function eventPreview(event: EventDto | undefined): string | null {
 
 type ComposerCommand =
   | { kind: 'formatted-message'; message: FormattedMessage }
+  | { kind: 'forget' }
   | { kind: 'help' }
   | { kind: 'jump'; date: string | null }
+  | { kind: 'leave' }
   | { kind: 'pin'; target: string | null }
   | { kind: 'react'; reaction: string | null }
   | { kind: 'refresh' }
@@ -1665,6 +1710,16 @@ function parseComposerCommand(body: string): ComposerCommand | null {
       target: args,
     }
   }
+  if (commandName === SLASH_COMMAND.leave) {
+    return args === ''
+      ? { kind: 'leave' }
+      : { kind: 'usage', name: commandName }
+  }
+  if (commandName === SLASH_COMMAND.forget) {
+    return args === ''
+      ? { kind: 'forget' }
+      : { kind: 'usage', name: commandName }
+  }
   if (commandName === SLASH_COMMAND.pin) {
     return { kind: 'pin', target: args === '' ? null : args }
   }
@@ -1705,6 +1760,25 @@ function parseSpoilerArg(arg: string): [string | null, string] {
   }
   const reason = split[0].trim()
   return [reason === '' ? null : reason, split.slice(1).join(' | ')]
+}
+
+function isOnlyJoinedMember(
+  members: Iterable<MemberDto>,
+  ownUserId: string,
+): boolean {
+  let joinedCount = 0
+  let joinedUserId: string | null = null
+  for (const member of members) {
+    if (member.membership !== 'join') {
+      continue
+    }
+    joinedCount += 1
+    joinedUserId = member.user_id
+    if (joinedCount > 1) {
+      return false
+    }
+  }
+  return joinedCount === 1 && joinedUserId === ownUserId
 }
 
 function resolveCommandRoom(

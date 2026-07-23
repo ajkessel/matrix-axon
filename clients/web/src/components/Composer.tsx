@@ -107,7 +107,7 @@ export function Composer({
    * Intercepts submitted slash commands. Return true when the command was
    * handled and the composer should clear; false leaves the text in place.
    */
-  onCommand?(body: string): boolean
+  onCommand?(body: string): boolean | Promise<boolean>
   roomCompletions?(query: string): ComposerAutocompleteOption[]
   mentionCompletions?(query: string): ComposerAutocompleteOption[]
   roomReferenceCompletions?(query: string): ComposerAutocompleteOption[]
@@ -483,7 +483,17 @@ export function Composer({
       return
     }
     if (commandsEnabled && isSlashCommandDraft(body)) {
-      if (onCommand?.(body) === true) {
+      const result = onCommand?.(body)
+      if (isPromiseLike(result)) {
+        void result
+          .then((handled) => {
+            if (handled) {
+              setDraft('')
+              onDraftChange?.('')
+            }
+          })
+          .catch(() => {})
+      } else if (result === true) {
         setDraft('')
         onDraftChange?.('')
       }
@@ -927,6 +937,18 @@ function slashCommandQuery(value: string): string | null {
     return null
   }
   return trimmedStart
+}
+
+function isPromiseLike<T>(
+  value: T | PromiseLike<T> | undefined,
+): value is PromiseLike<T> {
+  return (
+    value !== undefined &&
+    typeof value === 'object' &&
+    value !== null &&
+    'then' in value &&
+    typeof value.then === 'function'
+  )
 }
 
 function roomCommandQuery(value: string): string | null {
