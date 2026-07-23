@@ -27,6 +27,8 @@ export interface ParsedMedia {
   size?: number
   w?: number
   h?: number
+  /** `info.duration`, in milliseconds — audio and video only. */
+  duration?: number
 }
 
 function str(value: unknown): string | undefined {
@@ -111,6 +113,7 @@ export function parseMedia(event: EventDto): ParsedMedia | null {
     size: num(info?.size),
     w: num(info?.w),
     h: num(info?.h),
+    duration: num(info?.duration),
   }
 }
 

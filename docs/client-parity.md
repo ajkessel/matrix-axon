@@ -37,6 +37,8 @@ yet)
 | Text send / edit / redact / react | Done (M6, ADR 0021) | Done | Done | Not started | |
 | Media send (`m.image`/`m.file`) | Done (M15, ADR 0059) | Done | Done | Not started | |
 | Media read proxy + LRU cache | Done (M11, ADR 0045) | Done | Done | Not started | |
+| Inline media preview (audio/video/pdf/text) | n/a — client-side rendering over the existing proxy | **Gap** — download only (a terminal cannot play media) | Done (ADR 0072) — click-to-expand player below the attachment card | Not started | Blob-backed with per-kind size ceilings; `Range` streaming deferred to a media service worker |
+| Syntax highlighting (code blocks + text attachments) | n/a — client-side rendering | **Gap** — plain text | Done (ADR 0073) — highlight.js core + per-language lazy chunks; language from `language-*` class, extension, or shebang | Not started | The sanitizer has preserved `language-*` classes since ADR 0046; nothing consumed them until now |
 | Media thumbnail proxy | Done (M17, ADR 0063) | **Gap** — client-side downscale only; doesn't call the server endpoint | Done | Not started | Called out explicitly in AGENTS.md's M17 note |
 | Full-text search | Done (M9) | Done (minimal input, per MVP scope) | Done | Not started | |
 | Drafts (cross-device) | Done (M12, ADR 0048) | Done | Done | Not started | |

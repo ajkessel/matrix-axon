@@ -2851,6 +2851,167 @@ input[type='checkbox'] {
   overflow-wrap: anywhere;
 }
 
+/* Tile card for media that opens in the lightbox (ADR 0072): the media is the
+   affordance, so the whole surface is the button. */
+.media-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.25rem 0 0;
+  max-width: min(320px, 100%);
+}
+
+.media-tile-surface {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+
+.media-tile-surface:hover,
+.media-tile-surface:focus-visible {
+  border-color: var(--accent, var(--border));
+}
+
+/* A video tile without a sender thumbnail is a dark stage for the play glyph;
+   a document tile is paper. Neither pretends to be a rendered frame — the
+   bytes are not fetched to build one (see the ADR). */
+.media-tile-video .media-tile-surface {
+  background: linear-gradient(160deg, #2b2f36, #14161a);
+}
+
+.media-tile-pdf .media-tile-surface {
+  background: linear-gradient(170deg, #fdfdfb, #e7e5df);
+}
+
+.media-tile-poster {
+  position: absolute;
+  inset: 0;
+}
+
+.media-tile-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.media-tile-glyph {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  /* The ▶ glyph is visually left-heavy inside a circle. */
+  padding-left: 0.15em;
+}
+
+.media-tile-pdf .media-tile-glyph {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.15);
+  padding-left: 0;
+}
+
+.media-tile-kind,
+.media-tile-duration {
+  position: absolute;
+  bottom: 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.66);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
+
+.media-tile-kind {
+  left: 0.5rem;
+}
+
+.media-tile-duration {
+  right: 0.5rem;
+}
+
+.media-tile-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.media-tile-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Inline preview (ADR 0072): the card plus an expanded player below it. The
+   preview is wider than the card, so the wrapper — not `.media-attachment` —
+   owns the outer width. */
+.media-attachment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.media-preview {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.media-player {
+  display: block;
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+audio.media-player {
+  width: min(360px, 100%);
+  background: none;
+}
+
+.media-pdf {
+  display: block;
+  width: min(640px, 100%);
+  height: 480px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.media-text {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  max-width: min(640px, 100%);
+  max-height: 24rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Lightbox: full-viewport image over the standard overlay backdrop. */
 .lightbox {
   flex-direction: column;
@@ -2862,9 +3023,29 @@ input[type='checkbox'] {
   position: absolute;
   top: 1rem;
   right: 1rem;
-  font-size: 1.25rem;
+  z-index: 1;
+  /* 44px: the smallest reliable touch target, and this is the control you
+     reach for when the tap-outside gesture is not obvious. */
+  width: 2.75rem;
+  height: 2.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
   line-height: 1;
+  /* A PDF page is white and a video frame can be any colour, so the ✕ carries
+     its own contrast rather than relying on the backdrop behind it. */
   color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  backdrop-filter: blur(2px);
+}
+
+.lightbox-close:hover,
+.lightbox-close:focus-visible {
+  background: rgba(0, 0, 0, 0.88);
+  border-color: rgba(255, 255, 255, 0.8);
 }
 
 .lightbox-figure {
@@ -2896,4 +3077,257 @@ input[type='checkbox'] {
   padding: 0.5rem 0.75rem;
   text-align: center;
   max-width: min(60ch, 90vw);
+}
+
+/* Video and PDF in the lightbox (ADR 0072). The wrapper is what the media
+   hook's ref observes, so it must not collapse to zero. */
+.lightbox-media {
+  display: flex;
+  /* Centre, never stretch. A stretched `<video>` keeps its own aspect ratio by
+     painting letterbox bars *inside* its box, so the empty space beside the
+     picture would still be the video element — and the tap-to-dismiss gesture,
+     which exempts the media, would have nowhere left to land. Centring puts
+     that space back in this wrapper, where it is backdrop. */
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lightbox-player {
+  max-width: 92vw;
+  max-height: 82vh;
+  /* Transparent, not black: a black box reads as part of the video, so the
+     dismissable area around it should not look like more picture. */
+  background: transparent;
+}
+
+.lightbox-pdf {
+  width: min(1100px, 92vw);
+  /* `dvh` so an iOS URL bar sliding in cannot push the viewer off-screen. */
+  height: min(82vh, 88dvh);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Paged PDF viewer (ADR 0072): a scroll container of lazily rendered pages,
+   because iOS Safari only ever draws page 1 of a framed PDF. */
+.pdf-viewer {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.pdf-pages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Momentum scrolling and snappier paging on touch. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 0.5rem;
+  background: var(--bg-raised);
+}
+
+.pdf-page {
+  display: block;
+  width: 100%;
+  margin: 0 auto 0.5rem;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+}
+
+.pdf-page-count {
+  position: absolute;
+  bottom: 0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  pointer-events: none;
+}
+
+/* On a phone the lightbox *is* full screen: drop the overlay's padding so the
+   document or video gets every pixel, and let the frame fill it. */
+@media (max-width: 640px) {
+  .lightbox {
+    padding: 0;
+    gap: 0;
+  }
+
+  .lightbox-figure {
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+  }
+
+  .lightbox-media {
+    width: 100%;
+    flex: 1;
+  }
+
+  .lightbox-pdf {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border-radius: 0;
+  }
+
+  /* Room for the close button's 44px target, so the first page is not under
+     it, and for the page counter at the bottom. */
+  .pdf-pages {
+    padding: 3.75rem 0 2.5rem;
+  }
+
+  .lightbox-player {
+    width: 100%;
+    max-width: 100%;
+    /* `height: auto` is the point: the element is exactly as tall as the
+       picture, so the rest of the screen is backdrop you can tap. The ceiling
+       guarantees that strip exists even for a portrait phone video, which
+       would otherwise fill the screen and leave nothing to tap. */
+    height: auto;
+    max-height: 78dvh;
+  }
+
+  .lightbox-caption {
+    position: absolute;
+    bottom: 0.75rem;
+    max-width: 92vw;
+  }
+}
+
+/* Syntax highlighting (ADR 0073). `highlight.js` emits `hljs-*` classes; the
+   palette is ours, defined as tokens so light and dark are declared in the
+   same three places the rest of the theme uses. No stylesheet ships from the
+   package — importing one would put a fixed theme in the main CSS bundle and
+   fight the app's own. */
+:root {
+  --code-keyword: #a626a4;
+  --code-string: #3f8f3c;
+  --code-comment: #8a8f98;
+  --code-number: #b76b01;
+  --code-type: #9a6700;
+  --code-function: #3556c4;
+  --code-meta: #6a6a74;
+  --code-deleted: #b3362e;
+  --code-added: #1a7f37;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --code-keyword: #c792ea;
+    --code-string: #98c379;
+    --code-comment: #7f848e;
+    --code-number: #d19a66;
+    --code-type: #e5c07b;
+    --code-function: #7c96ec;
+    --code-meta: #9c9ca8;
+    --code-deleted: #e5776f;
+    --code-added: #4ac26b;
+  }
+}
+
+:root[data-theme='dark'] {
+  --code-keyword: #c792ea;
+  --code-string: #98c379;
+  --code-comment: #7f848e;
+  --code-number: #d19a66;
+  --code-type: #e5c07b;
+  --code-function: #7c96ec;
+  --code-meta: #9c9ca8;
+  --code-deleted: #e5776f;
+  --code-added: #4ac26b;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-doctag,
+.hljs-name {
+  color: var(--code-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-quote,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-template-tag {
+  color: var(--code-string);
+}
+
+.hljs-comment {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-attribute,
+.hljs-selector-class {
+  color: var(--code-number);
+}
+
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-built_in,
+.hljs-params {
+  color: var(--code-type);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title {
+  color: var(--code-function);
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-punctuation,
+.hljs-operator,
+.hljs-tag {
+  color: var(--code-meta);
+}
+
+.hljs-deletion {
+  color: var(--code-deleted);
+}
+
+.hljs-addition {
+  color: var(--code-added);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* The preview's own `<code>` should not restyle inside its `<pre>`. */
+.media-text code {
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
 }

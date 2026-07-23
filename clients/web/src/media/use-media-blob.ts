@@ -27,12 +27,17 @@ export interface MediaBlobState {
 export function useMediaBlob<T extends HTMLElement = HTMLElement>(
   accountId: string,
   mxcUrl: string | null,
-  options: { eager?: boolean; thumbnail?: ThumbnailRequest } = {},
+  options: {
+    eager?: boolean
+    thumbnail?: ThumbnailRequest
+    /** See `MediaRequestOptions.contentType` — allowlisted types only. */
+    contentType?: string
+  } = {},
 ): { ref: RefObject<T>; state: MediaBlobState } {
   const { media } = useServices()
   const ref = useRef<T>(null)
   const [state, setState] = useState<MediaBlobState>({ status: 'idle' })
-  const { eager = false, thumbnail } = options
+  const { eager = false, thumbnail, contentType } = options
   const thumbnailWidth = thumbnail?.width
   const thumbnailHeight = thumbnail?.height
   const thumbnailMethod = thumbnail?.method
@@ -71,8 +76,11 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
                   height: thumbnailHeight,
                   method: thumbnailMethod,
                 },
+                contentType,
               }
-            : undefined,
+            : contentType !== undefined
+              ? { contentType }
+              : undefined,
         )
         .then((acquired) => {
           if (cancelled) {
@@ -125,6 +133,7 @@ export function useMediaBlob<T extends HTMLElement = HTMLElement>(
     thumbnailWidth,
     thumbnailHeight,
     thumbnailMethod,
+    contentType,
   ])
 
   return { ref, state }

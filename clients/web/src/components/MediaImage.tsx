@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks'
 import type { ParsedMedia } from '../media/parse-media'
 import { useMediaBlob } from '../media/use-media-blob'
-import { Lightbox } from './Lightbox'
+import { Lightbox, LightboxImage } from './Lightbox'
 
 /** The longest side an inline thumbnail is allowed, in CSS px (Element-ish). */
 const THUMBNAIL_MAX = 320
@@ -146,12 +146,12 @@ export function MediaImage({
       {figure}
       {lightboxOpen && media.url !== null && (
         <Lightbox
-          accountId={accountId}
-          mxcUrl={media.url}
-          alt={alt}
+          label={alt}
           caption={media.caption}
           onClose={() => setLightboxOpen(false)}
-        />
+        >
+          <LightboxImage accountId={accountId} mxcUrl={media.url} alt={alt} />
+        </Lightbox>
       )}
     </>
   )

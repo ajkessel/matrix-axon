@@ -23,8 +23,10 @@
     "dompurify": "^3.4.11",
     "emoji-picker-element": "1.29.1",
     "emoji-picker-element-data": "1.8.0",
+    "highlight.js": "^11.11.1",
     "marked": "^18.0.5",
     "openapi-fetch": "^0.17.0",
+    "pdfjs-dist": "^6.1.200",
     "preact": "^10.29.3",
     "preact-iso": "^2.12.0"
   },

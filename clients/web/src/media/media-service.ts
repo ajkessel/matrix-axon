@@ -23,6 +23,10 @@ import { mxcToPath } from './parse-media'
 export type MediaResult =
   { ok: true; url: string } | { ok: false; error: MediaFailure }
 
+/** The outcome of decoding an object as text (ADR 0072). */
+export type TextResult =
+  { ok: true; text: string } | { ok: false; error: MediaFailure }
+
 export interface MediaFailure {
   kind: 'auth' | 'not_found' | 'too_large' | 'network' | 'rejected'
   status?: number
@@ -53,6 +57,18 @@ export interface ThumbnailRequest {
 
 export interface MediaRequestOptions {
   thumbnail?: ThumbnailRequest
+  /**
+   * Re-type the fetched bytes before the object URL is minted (ADR 0072). The
+   * proxy downgrades everything that is not image/audio/video to
+   * `application/octet-stream` (`is_inline_safe`, `routes/media.rs`), which no
+   * browser will render in an `<iframe>` — so an inline PDF/text preview
+   * restores the type from the event's own `info.mimetype`.
+   *
+   * This overrides the server's declared type, so it is only ever safe with a
+   * value the caller derived from `previewPlan()`'s allowlist; an active type
+   * (`text/html`, `image/svg+xml`) must never reach here.
+   */
+  contentType?: string
 }
 
 export interface MediaService {
@@ -72,6 +88,17 @@ export interface MediaService {
    * refcounted, since a download is transient.
    */
   fetchBlobUrl(accountId: string, mxcUrl: string): Promise<MediaResult>
+  /**
+   * Decode an object as text, truncated to `limit` characters — the inline
+   * text preview (ADR 0072). Distinct from `acquire()` because a `<pre>` wants
+   * a string, not an object URL, and round-tripping one through `fetch()` on a
+   * `blob:` URL is neither free nor available under jsdom.
+   */
+  fetchText(
+    accountId: string,
+    mxcUrl: string,
+    limit: number,
+  ): Promise<TextResult>
   /**
    * Stage a file's bytes for a later `send-media` (ADR 0065, the first step of
    * ADR 0059's two-step upload). Returns the `upload_id` the send claims.
@@ -174,12 +201,15 @@ export function createMediaService(deps: {
     options?: MediaRequestOptions,
   ) => {
     const thumbnail = options?.thumbnail
+    // A re-typed fetch yields a different blob than the raw one, so it needs
+    // its own cache slot even though it hits the same proxy URL.
+    const type = options?.contentType ?? ''
     if (thumbnail === undefined) {
-      return `${accountId}\0full\0${mxc}`
+      return `${accountId}\0full\0${type}\0${mxc}`
     }
     return `${accountId}\0thumb\0${thumbnail.width}x${thumbnail.height}\0${
       thumbnail.method ?? 'scale'
-    }\0${mxc}`
+    }\0${type}\0${mxc}`
   }
 
   const mediaUrl = (
@@ -208,12 +238,13 @@ export function createMediaService(deps: {
     return `${base}/thumbnail?${params.toString()}`
   }
 
-  /** Fetch → Blob → object URL, without touching the cache. */
-  async function download(
+  /** Fetch → Blob, without touching the cache. The shared core of every
+   *  download: object URL, one-shot download, and text decode. */
+  async function fetchBlob(
     accountId: string,
     mxcUrl: string,
     options?: MediaRequestOptions,
-  ): Promise<MediaResult> {
+  ): Promise<{ ok: true; blob: Blob } | { ok: false; error: MediaFailure }> {
     const url = mediaUrl(accountId, mxcUrl, options)
     if (url === null) {
       return { ok: false, error: { kind: 'network' } }
@@ -228,8 +259,12 @@ export function createMediaService(deps: {
         }
         const res = await fetch(url, { headers })
         if (res.ok) {
-          const blob = await res.blob()
-          return { ok: true, url: URL.createObjectURL(blob) }
+          const raw = await res.blob()
+          const blob =
+            options?.contentType === undefined
+              ? raw
+              : new Blob([raw], { type: options.contentType })
+          return { ok: true, blob }
         }
         if (res.status === 401) {
           // Let the provider drop the revoked token, exactly as the API client
@@ -248,6 +283,35 @@ export function createMediaService(deps: {
         return { ok: false, error: { kind: 'network' } }
       }
     })
+  }
+
+  /** Fetch → Blob → object URL, without touching the cache. */
+  async function download(
+    accountId: string,
+    mxcUrl: string,
+    options?: MediaRequestOptions,
+  ): Promise<MediaResult> {
+    const result = await fetchBlob(accountId, mxcUrl, options)
+    return result.ok
+      ? { ok: true, url: URL.createObjectURL(result.blob) }
+      : result
+  }
+
+  async function fetchText(
+    accountId: string,
+    mxcUrl: string,
+    limit: number,
+  ): Promise<TextResult> {
+    const result = await fetchBlob(accountId, mxcUrl)
+    if (!result.ok) {
+      return result
+    }
+    try {
+      const text = await result.blob.text()
+      return { ok: true, text: text.slice(0, limit) }
+    } catch {
+      return { ok: false, error: { kind: 'network' } }
+    }
   }
 
   function evict(): void {
@@ -405,5 +469,5 @@ export function createMediaService(deps: {
     }
   }
 
-  return { acquire, fetchBlobUrl, upload }
+  return { acquire, fetchBlobUrl, fetchText, upload }
 }

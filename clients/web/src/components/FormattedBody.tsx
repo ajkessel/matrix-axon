@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact'
 import { useLayoutEffect, useMemo, useRef } from 'preact/hooks'
+import { highlightCode } from '../code/highlight'
 import { matchUrls } from '../html/linkify'
 import { resolveMatrixToRoomLink, resolveMatrixToUserLink } from '../matrix-to'
 import { renderMatrixHtml, SPOILER_CLASS } from '../html/sanitize'
@@ -166,6 +167,39 @@ export function FormattedBody({
       }
     }
   }, [media, accountId, html])
+
+  // Syntax-highlight fenced code blocks (ADR 0073). The sanitizer already
+  // preserves spec-shaped `language-*` classes on `<code>`, which is the only
+  // signal Matrix gives for a block's language. Same imperative shape as the
+  // image resolution above, and for the same reason: the subtree came from
+  // `dangerouslySetInnerHTML`.
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (root === null || html === null) {
+      return
+    }
+    let cancelled = false
+    for (const el of root.querySelectorAll<HTMLElement>('pre code[class]')) {
+      const declared = [...el.classList]
+        .find((cls) => cls.startsWith('language-'))
+        ?.slice('language-'.length)
+      if (declared === undefined) {
+        continue
+      }
+      const source = el.textContent ?? ''
+      void highlightCode(source, declared).then((highlighted) => {
+        // `textContent` still matching guards the race where the effect re-ran
+        // for new content before this resolved.
+        if (!cancelled && highlighted !== null && el.textContent === source) {
+          el.innerHTML = highlighted
+          el.classList.add('hljs')
+        }
+      })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [html])
 
   if (html === null) {
     const roomLinkContext = {
