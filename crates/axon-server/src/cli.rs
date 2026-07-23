@@ -15,9 +15,25 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
+/// `-V`/`--version` output: mirrors the fields logged in the "axon starting"
+/// line (see `main.rs::serve`), so a build can be identified without starting
+/// the server.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " git_hash=\"",
+    env!("AXON_GIT_HASH"),
+    "\" profile=\"",
+    env!("AXON_PROFILE"),
+    "\" build_time=\"",
+    env!("AXON_BUILD_TIME"),
+    "\" rustc_version=\"",
+    env!("AXON_RUSTC_VERSION"),
+    "\""
+);
+
 /// Top-level CLI: an optional subcommand, defaulting to "run the server".
 #[derive(Debug, Parser)]
-#[command(name = "axon", version, about = "A personal Matrix state layer")]
+#[command(name = "axon", version = VERSION, about = "A personal Matrix state layer")]
 pub struct Cli {
     /// Path to the TOML config file. Overrides the `AXON_CONFIG` env var and the
     /// `./axon.toml` / platform-config-dir discovery. Applies to the server and

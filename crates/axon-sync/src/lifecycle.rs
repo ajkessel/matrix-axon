@@ -35,6 +35,7 @@ use crate::engine::{spawn_supervised, AccountTask, TaskRegistry};
 use crate::error::{GatewayError, SyncError};
 use crate::manager::ClientManager;
 use crate::redecrypt::{RedecryptSummary, SweepScope};
+use crate::sync_health::SyncHealth;
 use crate::verification::{FlowRegistry, VerificationRooms};
 
 /// How long logout waits for a cancelled supervised task to finish draining
@@ -328,6 +329,10 @@ pub struct AccountLifecycle {
     /// Backfill disk-space health (M10), shared with the engine so a runtime-login
     /// account's backfill task reports into the same handle the API reads.
     backfill_health: BackfillHealth,
+    /// Per-account sync-service state, shared with the engine so a runtime-login
+    /// account's supervised task reports into the same handle the API reads, and
+    /// so logout/delete can clear the entry via [`sever_session`](Self::sever_session).
+    sync_health: SyncHealth,
 }
 
 impl AccountLifecycle {
@@ -349,6 +354,7 @@ impl AccountLifecycle {
         index: Option<IndexHandle>,
         media: MediaCacheHandle,
         backfill_health: BackfillHealth,
+        sync_health: SyncHealth,
     ) -> Self {
         Self {
             store,
@@ -365,6 +371,7 @@ impl AccountLifecycle {
             index,
             media,
             backfill_health,
+            sync_health,
         }
     }
 
@@ -586,6 +593,7 @@ impl AccountLifecycle {
             self.verification_rooms.clone(),
             self.index.clone(),
             self.backfill_health.clone(),
+            self.sync_health.clone(),
         );
         tracing::info!(%account_id, user_id = %username, "account logged in and supervised");
         Ok(account_id)
@@ -1007,6 +1015,15 @@ impl AccountLifecycle {
     /// and a logout retry try the reap again. A join error (panic or abort)
     /// still means the task is gone, which is all the caller needs.
     async fn reap_task(&self, account_id: Uuid) -> Result<(), LifecycleError> {
+        // Cleared unconditionally (a no-op if absent), before the cancel/drain/abort
+        // sequence below: intentionally so `/v1/status` omits the account rather than
+        // show a stale state, even in the `LifecycleError::Draining` case where the
+        // task survives and is re-registered. `backfill_health` has no matching call
+        // here not from an oversight but because it isn't keyed per account at all —
+        // unlike this map, it's a single process-wide disk-space gauge (see
+        // `BackfillHealth`), so there's no per-account entry for it to drop.
+        self.sync_health.remove(account_id);
+
         // The map guard is dropped before any await.
         let task = self
             .tasks
@@ -1110,6 +1127,7 @@ mod tests {
             None,
             test_media_handle().await,
             crate::backfill::BackfillHealth::new(None),
+            crate::sync_health::SyncHealth::new(),
         )
     }
 
@@ -1151,6 +1169,7 @@ mod tests {
             None,
             test_media_handle().await,
             crate::backfill::BackfillHealth::new(None),
+            crate::sync_health::SyncHealth::new(),
         )
     }
 

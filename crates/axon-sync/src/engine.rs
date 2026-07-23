@@ -40,6 +40,7 @@ use crate::gateway::SdkGateway;
 use crate::lifecycle::{lock_for, AccountLifecycle, IdentityLock, IdentityLocks};
 use crate::manager::ClientManager;
 use crate::redecrypt;
+use crate::sync_health::SyncHealth;
 use crate::verification::{
     active_flow_rooms, cancel_account_flows, new_registry, on_incoming_request,
     on_incoming_room_request, reap_expired_flows, FlowRegistry, HandledRoomEvents,
@@ -139,6 +140,10 @@ pub struct SyncEngine {
     /// Disk-space health of the M10 backfill engine, shared with every account's
     /// backfill task (they write it) and the API status surface (which reads it).
     backfill_health: BackfillHealth,
+    /// Per-account sync-service state, shared with every account's supervised
+    /// task (they write it, on every state transition) and the API status
+    /// surface (which reads it).
+    sync_health: SyncHealth,
 }
 
 impl SyncEngine {
@@ -192,6 +197,10 @@ impl SyncEngine {
         // the API status surface. Carries the guarded filesystem so `/v1/status`
         // reads free space live.
         let backfill_health = BackfillHealth::new(Some(backfill::guard_path(&config)));
+        // Shared per-account sync-service state (see module docs): one handle for
+        // the whole engine, written by each account's supervised task and read by
+        // the API status surface.
+        let sync_health = SyncHealth::new();
 
         // Crash recovery (ADR 0024), before any account is brought online and
         // before the HTTP listener binds (`axon-server` serves only after `start`
@@ -212,6 +221,7 @@ impl SyncEngine {
             index.clone(),
             media.clone(),
             backfill_health.clone(),
+            sync_health.clone(),
         );
         crate::reconcile::reconcile_deleting(&lifecycle, &store).await;
         crate::reconcile::prune_orphan_store_dirs(&config, &store).await;
@@ -243,6 +253,7 @@ impl SyncEngine {
                 verification_rooms.clone(),
                 index.clone(),
                 backfill_health.clone(),
+                sync_health.clone(),
             );
         }
 
@@ -269,6 +280,7 @@ impl SyncEngine {
             index,
             media,
             backfill_health,
+            sync_health,
         })
     }
 
@@ -314,6 +326,7 @@ impl SyncEngine {
             self.index.clone(),
             self.media.clone(),
             self.backfill_health.clone(),
+            self.sync_health.clone(),
         )
     }
 
@@ -321,6 +334,12 @@ impl SyncEngine {
     /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
     pub fn backfill_health(&self) -> BackfillHealth {
         self.backfill_health.clone()
+    }
+
+    /// Per-account sync-service state, for the API status surface
+    /// (`GET /v1/status`). Cheap to clone (an `Arc` internally).
+    pub fn sync_health(&self) -> SyncHealth {
+        self.sync_health.clone()
     }
 
     /// The runtime device-verification port, for the API layer's verify routes.
@@ -418,6 +437,7 @@ pub(crate) fn spawn_supervised(
     verification_rooms: VerificationRooms,
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
+    sync_health: SyncHealth,
 ) {
     let task_cancel = cancel.child_token();
     let account_id = account.account_id;
@@ -434,6 +454,7 @@ pub(crate) fn spawn_supervised(
         verification_rooms,
         index,
         backfill_health,
+        sync_health,
     ));
     if let Some(stale) = tasks.lock().expect("task registry poisoned").insert(
         account_id,
@@ -462,6 +483,7 @@ async fn supervise_account(
     verification_rooms: VerificationRooms,
     index: Option<IndexHandle>,
     backfill_health: BackfillHealth,
+    sync_health: SyncHealth,
 ) {
     let mut backoff = BACKOFF_START;
 
@@ -483,6 +505,7 @@ async fn supervise_account(
             &verification_rooms,
             index.as_ref(),
             &backfill_health,
+            &sync_health,
         )
         .await
         {
@@ -508,6 +531,7 @@ async fn supervise_account(
                     () = manager.evict(account.account_id) => {}
                     () = cancel.cancelled() => return,
                 }
+                sync_health.set_error(account.account_id);
                 tracing::error!(
                     account_id = %account.account_id,
                     error = %err,
@@ -1273,6 +1297,7 @@ async fn run_account(
     verification_rooms: &VerificationRooms,
     index: Option<&IndexHandle>,
     backfill_health: &BackfillHealth,
+    sync_health: &SyncHealth,
 ) -> Result<(), SyncError> {
     // The manager owns client construction + caching (and single-flight with the
     // gateway, which may have connected this account already). A connect failure
@@ -1375,8 +1400,21 @@ async fn run_account(
     // clones are cheap and share one underlying connection + crypto store).
     // Raise the room-list timeline window from the SDK default of 1 (latest
     // event only) so each room archives its last N events. See ADR 0015.
+    //
+    // `with_offline_mode` makes `State::Offline` reachable: on a sync failure the
+    // SDK itself now retries `GET /_matrix/client/versions` (an unbounded loop,
+    // ~100ms between attempts — see `SyncService::offline_check`) and resumes
+    // syncing on the same client/session once the homeserver answers, instead of
+    // surfacing `State::Error` immediately. That leaves this function's own
+    // `State::Error`/`Terminated` handling below, and `supervise_account`'s
+    // external backoff-restart above it, in place for what offline mode does not
+    // absorb: session-level failures reported through a `TerminationReport` (e.g.
+    // an explicit `stop()`), and the state stream closing outright. The two are
+    // not in tension — offline mode is the fast, cheap path for "homeserver is
+    // briefly unreachable"; the outer restart is the fallback for everything else.
     let sync_service = SyncService::builder(client.clone())
         .with_room_list_timeline_limit(config.timeline_limit)
+        .with_offline_mode()
         .build()
         .await
         .map_err(sdk_err)?;
@@ -1498,6 +1536,10 @@ async fn run_account(
     verification_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut state = sync_service.state();
+    // Whether the last state we saw was `Offline`, so a return to `Running`/`Idle`
+    // logs a matching "back online" line rather than silently clearing the flag
+    // (see the M10-style `/v1/status` sync-health surface this feeds).
+    let mut was_offline = false;
     let result = loop {
         tokio::select! {
             _ = cancel.cancelled() => break Ok(()),
@@ -1515,10 +1557,31 @@ async fn run_account(
                     &rls, verifications, verification_rooms, account.account_id, &mut subscribed,
                 ).await;
             }
-            next = state.next() => match next {
-                Some(State::Running) | Some(State::Idle) | Some(State::Offline) => continue,
-                Some(State::Error(err)) => break Err(SyncError::Sdk(format!("sync service error: {err}"))),
-                Some(State::Terminated) => break Err(SyncError::Sdk("sync service terminated".into())),
+            next = state.next() => match &next {
+                Some(s @ State::Offline) => {
+                    sync_health.set(account.account_id, s);
+                    if !was_offline {
+                        was_offline = true;
+                        tracing::warn!(account_id = %account.account_id, "sync service went offline");
+                    }
+                    continue;
+                }
+                Some(s @ (State::Running | State::Idle)) => {
+                    sync_health.set(account.account_id, s);
+                    if was_offline {
+                        was_offline = false;
+                        tracing::info!(account_id = %account.account_id, "sync service back online");
+                    }
+                    continue;
+                }
+                Some(s @ State::Error(err)) => {
+                    sync_health.set(account.account_id, s);
+                    break Err(SyncError::Sdk(format!("sync service error: {err}")));
+                }
+                Some(s @ State::Terminated) => {
+                    sync_health.set(account.account_id, s);
+                    break Err(SyncError::Sdk("sync service terminated".into()));
+                }
                 // The state stream ended; treat as a terminal condition.
                 None => break Err(SyncError::Sdk("sync service state stream closed".into())),
             },

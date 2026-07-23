@@ -168,6 +168,8 @@ fn unauthorized_response() -> RefOr<Response> {
         crate::dto::StatusDto,
         crate::dto::BackfillStatusDto,
         crate::dto::AccountBackfillDto,
+        crate::dto::BuildInfoDto,
+        crate::dto::AccountSyncStatusDto,
         crate::dto::ReactionDto,
         crate::dto::ThreadSummaryDto,
         crate::dto::LoginRequest,

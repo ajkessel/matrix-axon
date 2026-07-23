@@ -6146,7 +6146,7 @@
         "tags": [
           "status"
         ],
-        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress.",
+        "summary": "Report backfill status: the disk-space valve state (live free space, whether\npaused) plus per-account backfill progress; per-account sync-service status;\nand the running build's identity.",
         "operationId": "get_status",
         "responses": {
           "200": {
@@ -6281,6 +6281,30 @@
           "deactivated",
           "deleting"
         ]
+      },
+      "AccountSyncStatusDto": {
+        "type": "object",
+        "description": "One account's sync-service status (M10-adjacent). Lets a client — or an\noperator polling `/v1/status` — tell that sync is actually running rather\nthan silently wedged, instead of only inferring it from the absence of new\nevents.",
+        "required": [
+          "account_id",
+          "state",
+          "since_ms"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "since_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account last entered `state`, in epoch milliseconds."
+          },
+          "state": {
+            "type": "string",
+            "description": "One of `\"idle\"`, `\"running\"`, `\"offline\"`, `\"terminated\"`, `\"error\"`."
+          }
+        }
       },
       "ApiResponse_AccountDto": {
         "type": "object",
@@ -7023,14 +7047,27 @@
         "properties": {
           "data": {
             "type": "object",
-            "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress.",
+            "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress, and the running build's identity.",
             "required": [
-              "backfill"
+              "backfill",
+              "build",
+              "sync"
             ],
             "properties": {
               "backfill": {
                 "$ref": "#/components/schemas/BackfillStatusDto",
                 "description": "History-backfill engine status."
+              },
+              "build": {
+                "$ref": "#/components/schemas/BuildInfoDto",
+                "description": "The running binary's build identity."
+              },
+              "sync": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AccountSyncStatusDto"
+                },
+                "description": "Per-account sync-service status."
               }
             }
           }
@@ -7599,6 +7636,34 @@
               "null"
             ],
             "description": "Why backfill is paused, or `null` when it is not paused. Currently only\n`\"low_disk\"`."
+          }
+        }
+      },
+      "BuildInfoDto": {
+        "type": "object",
+        "description": "The running binary's build identity, mirroring the fields logged in the\n\"axon starting\" startup line and reported by `axon -V`.",
+        "required": [
+          "version",
+          "git_hash",
+          "profile",
+          "build_time",
+          "rustc_version"
+        ],
+        "properties": {
+          "build_time": {
+            "type": "string"
+          },
+          "git_hash": {
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "rustc_version": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
           }
         }
       },
@@ -9011,14 +9076,27 @@
       },
       "StatusDto": {
         "type": "object",
-        "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress.",
+        "description": "Server status (`GET /v1/status`, M10): the backfill engine's disk-space health\nplus per-account backfill progress, and the running build's identity.",
         "required": [
-          "backfill"
+          "backfill",
+          "build",
+          "sync"
         ],
         "properties": {
           "backfill": {
             "$ref": "#/components/schemas/BackfillStatusDto",
             "description": "History-backfill engine status."
+          },
+          "build": {
+            "$ref": "#/components/schemas/BuildInfoDto",
+            "description": "The running binary's build identity."
+          },
+          "sync": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccountSyncStatusDto"
+            },
+            "description": "Per-account sync-service status."
           }
         }
       },

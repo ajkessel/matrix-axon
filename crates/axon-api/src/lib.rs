@@ -12,6 +12,7 @@
 
 mod auth;
 mod backfill;
+mod build_info;
 mod cursor;
 mod devices;
 mod dto;
@@ -26,6 +27,7 @@ mod routes;
 mod search;
 mod sender;
 mod state;
+mod sync_status;
 mod trust;
 mod uploads;
 mod verification;
@@ -34,6 +36,7 @@ mod ws;
 pub use auth::{StoreTokenVerifier, TokenVerifier};
 pub use axon_core::{Formatted, MediaAttachment, MediaSendKind, Relation};
 pub use backfill::{BackfillStatusProvider, BackfillStatusSnapshot};
+pub use build_info::BuildInfo;
 pub use devices::{DeviceInfo, DeviceList, DeviceListError, DeviceListService};
 pub use dto::MediaUploadKindDto;
 pub use lifecycle::{
@@ -56,6 +59,7 @@ pub use sender::{
     RoomEntrySender, RoomSettingsSender, SendError,
 };
 pub use state::{AppState, BootstrapConfig};
+pub use sync_status::{AccountSyncSnapshot, SyncStatusProvider};
 pub use trust::{CurrentTrust, SenderTrustService, TrustBundle, TrustError, TrustSnapshot};
 pub use uploads::{
     ClaimedUpload, StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService,

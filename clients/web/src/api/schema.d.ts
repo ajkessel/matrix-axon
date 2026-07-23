@@ -1161,7 +1161,8 @@ export interface paths {
         };
         /**
          * Report backfill status: the disk-space valve state (live free space, whether
-         *     paused) plus per-account backfill progress.
+         *     paused) plus per-account backfill progress; per-account sync-service status;
+         *     and the running build's identity.
          */
         get: operations["get_status"];
         put?: never;
@@ -1246,6 +1247,23 @@ export interface components {
          * @enum {string}
          */
         AccountStateDto: "active" | "deactivated" | "deleting";
+        /**
+         * @description One account's sync-service status (M10-adjacent). Lets a client — or an
+         *     operator polling `/v1/status` — tell that sync is actually running rather
+         *     than silently wedged, instead of only inferring it from the absence of new
+         *     events.
+         */
+        AccountSyncStatusDto: {
+            /** Format: uuid */
+            account_id: string;
+            /**
+             * Format: int64
+             * @description When the account last entered `state`, in epoch milliseconds.
+             */
+            since_ms: number;
+            /** @description One of `"idle"`, `"running"`, `"offline"`, `"terminated"`, `"error"`. */
+            state: string;
+        };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
         ApiResponse_AccountDto: {
             /**
@@ -1610,11 +1628,15 @@ export interface components {
         ApiResponse_StatusDto: {
             /**
              * @description Server status (`GET /v1/status`, M10): the backfill engine's disk-space health
-             *     plus per-account backfill progress.
+             *     plus per-account backfill progress, and the running build's identity.
              */
             data: {
                 /** @description History-backfill engine status. */
                 backfill: components["schemas"]["BackfillStatusDto"];
+                /** @description The running binary's build identity. */
+                build: components["schemas"]["BuildInfoDto"];
+                /** @description Per-account sync-service status. */
+                sync: components["schemas"]["AccountSyncStatusDto"][];
             };
         };
         /** @description Success envelope: a 2xx body is always `{ "data": <T> }`. */
@@ -1889,6 +1911,17 @@ export interface components {
              *     `"low_disk"`.
              */
             reason?: string | null;
+        };
+        /**
+         * @description The running binary's build identity, mirroring the fields logged in the
+         *     "axon starting" startup line and reported by `axon -V`.
+         */
+        BuildInfoDto: {
+            build_time: string;
+            git_hash: string;
+            profile: string;
+            rustc_version: string;
+            version: string;
         };
         /** @description Request body for creating a DM (`POST …/rooms/dm`; ADR 0068 M19c). */
         CreateDmRequest: {
@@ -2705,11 +2738,15 @@ export interface components {
         };
         /**
          * @description Server status (`GET /v1/status`, M10): the backfill engine's disk-space health
-         *     plus per-account backfill progress.
+         *     plus per-account backfill progress, and the running build's identity.
          */
         StatusDto: {
             /** @description History-backfill engine status. */
             backfill: components["schemas"]["BackfillStatusDto"];
+            /** @description The running binary's build identity. */
+            build: components["schemas"]["BuildInfoDto"];
+            /** @description Per-account sync-service status. */
+            sync: components["schemas"]["AccountSyncStatusDto"][];
         };
         /**
          * @description One thread in the `GET …/rooms/{room_id}/threads` response (M8): a thread root

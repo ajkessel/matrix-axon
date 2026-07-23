@@ -267,6 +267,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .context("configuring staged media uploads")?,
     );
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
+    let sync_status = Arc::new(status::SyncStatusAdapter(sync_engine.sync_health()));
 
     // OAuth 2.0 authorization server (M14, ADR 0054), when enabled. Provider
     // construction is async (discovery-doc fetch), so it happens here rather
@@ -296,6 +297,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         search_port,
     )
     .with_backfill_status(backfill_status)
+    .with_sync_status(sync_status)
+    .with_build_info(axon_api::BuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        git_hash: env!("AXON_GIT_HASH").to_owned(),
+        profile: env!("AXON_PROFILE").to_owned(),
+        build_time: env!("AXON_BUILD_TIME").to_owned(),
+        rustc_version: env!("AXON_RUSTC_VERSION").to_owned(),
+    })
     .with_member_profiles(member_profiles)
     .with_staged_uploads(uploads)
     .with_ephemeral(ephemeral)

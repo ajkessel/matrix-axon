@@ -221,6 +221,7 @@ mod tests {
             None,
             media,
             crate::backfill::BackfillHealth::new(None),
+            crate::sync_health::SyncHealth::new(),
         )
     }
 

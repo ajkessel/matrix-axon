@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::auth::TokenVerifier;
 use crate::backfill::{BackfillStatusProvider, NoBackfillStatus};
+use crate::build_info::BuildInfo;
 use crate::devices::DeviceListService;
 use crate::lifecycle::AccountLifecycle;
 use crate::media::MediaProxy;
@@ -27,6 +28,7 @@ use crate::sender::{
     AccountActionsSender, EphemeralSender, MembershipSender, MessageSender, PowerLevelsSender,
     RoomEntrySender, RoomSettingsSender, SendError,
 };
+use crate::sync_status::{NoSyncStatus, SyncStatusProvider};
 use crate::trust::SenderTrustService;
 use crate::uploads::{
     StageUploadError, StageUploadRequest, StagedUpload, StagedUploadService, UploadStream,
@@ -130,6 +132,14 @@ pub struct AppState {
     /// (always-healthy) provider; the binary injects an adapter over the sync
     /// engine's `BackfillHealth` via [`with_backfill_status`](Self::with_backfill_status).
     pub backfill_status: Arc<dyn BackfillStatusProvider>,
+    /// Build identity for `GET /v1/status` (M10). Defaults to empty strings;
+    /// the binary injects the real values via
+    /// [`with_build_info`](Self::with_build_info).
+    pub build_info: BuildInfo,
+    /// Sync-service status port for `GET /v1/status` (M10-adjacent). Defaults to
+    /// a no-op (no accounts) provider; the binary injects an adapter over the
+    /// sync engine's `SyncHealth` via [`with_sync_status`](Self::with_sync_status).
+    pub sync_status: Arc<dyn SyncStatusProvider>,
     /// OAuth 2.0 authorization-server runtime for `/v1/oauth/*` (M14, ADR
     /// 0054). `None` when `oauth.enabled = false`, in which case every oauth
     /// handler (and the rate-limiting layer in front of them) returns `404`
@@ -270,6 +280,8 @@ impl AppState {
             uploads: Arc::new(DisabledStagedUploads),
             search,
             backfill_status: Arc::new(NoBackfillStatus),
+            build_info: BuildInfo::default(),
+            sync_status: Arc::new(NoSyncStatus),
             oauth: None,
             bootstrap: None,
         }
@@ -288,6 +300,23 @@ impl AppState {
     /// don't care keep the default no-op provider.
     pub fn with_backfill_status(mut self, provider: Arc<dyn BackfillStatusProvider>) -> Self {
         self.backfill_status = provider;
+        self
+    }
+
+    /// Inject the running binary's build identity (`GET /v1/status`). The
+    /// binary calls this with its own `CARGO_PKG_VERSION`/`AXON_GIT_HASH`/etc
+    /// (the same values it logs in the "axon starting" line); tests that
+    /// don't care keep the default empty strings.
+    pub fn with_build_info(mut self, build_info: BuildInfo) -> Self {
+        self.build_info = build_info;
+        self
+    }
+
+    /// Inject the sync-status provider (`GET /v1/status`). The binary calls this
+    /// with an adapter over the sync engine's `SyncHealth`; tests that don't care
+    /// keep the default no-op (empty) provider.
+    pub fn with_sync_status(mut self, provider: Arc<dyn SyncStatusProvider>) -> Self {
+        self.sync_status = provider;
         self
     }
 
@@ -860,6 +889,18 @@ impl FromRef<AppState> for Option<Arc<dyn SearchQuery>> {
 impl FromRef<AppState> for Arc<dyn BackfillStatusProvider> {
     fn from_ref(state: &AppState) -> Arc<dyn BackfillStatusProvider> {
         state.backfill_status.clone()
+    }
+}
+
+impl FromRef<AppState> for BuildInfo {
+    fn from_ref(state: &AppState) -> BuildInfo {
+        state.build_info.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn SyncStatusProvider> {
+    fn from_ref(state: &AppState) -> Arc<dyn SyncStatusProvider> {
+        state.sync_status.clone()
     }
 }
 

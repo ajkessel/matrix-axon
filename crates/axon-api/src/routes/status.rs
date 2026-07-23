@@ -10,11 +10,14 @@ use axon_store::Store;
 use axum::extract::State;
 
 use crate::backfill::BackfillStatusProvider;
-use crate::dto::{BackfillStatusDto, StatusDto};
+use crate::build_info::BuildInfo;
+use crate::dto::{AccountSyncStatusDto, BackfillStatusDto, StatusDto};
 use crate::response::{ApiError, ApiResponse};
+use crate::sync_status::SyncStatusProvider;
 
 /// Report backfill status: the disk-space valve state (live free space, whether
-/// paused) plus per-account backfill progress.
+/// paused) plus per-account backfill progress; per-account sync-service status;
+/// and the running build's identity.
 #[utoipa::path(
     get,
     path = "/v1/status",
@@ -25,10 +28,18 @@ use crate::response::{ApiError, ApiResponse};
 )]
 pub async fn get_status(
     State(store): State<Store>,
-    State(provider): State<Arc<dyn BackfillStatusProvider>>,
+    State(backfill_provider): State<Arc<dyn BackfillStatusProvider>>,
+    State(sync_provider): State<Arc<dyn SyncStatusProvider>>,
+    State(build_info): State<BuildInfo>,
 ) -> Result<ApiResponse<StatusDto>, ApiError> {
     let progress = store.backfill_progress().await?;
     Ok(ApiResponse::new(StatusDto {
-        backfill: BackfillStatusDto::new(provider.snapshot(), progress),
+        backfill: BackfillStatusDto::new(backfill_provider.snapshot(), progress),
+        sync: sync_provider
+            .snapshot()
+            .into_iter()
+            .map(AccountSyncStatusDto::from)
+            .collect(),
+        build: build_info.into(),
     }))
 }

@@ -1218,11 +1218,66 @@ pub struct SearchPage {
 }
 
 /// Server status (`GET /v1/status`, M10): the backfill engine's disk-space health
-/// plus per-account backfill progress.
+/// plus per-account backfill progress, and the running build's identity.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct StatusDto {
     /// History-backfill engine status.
     pub backfill: BackfillStatusDto,
+    /// The running binary's build identity.
+    pub build: BuildInfoDto,
+    /// Per-account sync-service status.
+    pub sync: Vec<AccountSyncStatusDto>,
+}
+
+/// The running binary's build identity, mirroring the fields logged in the
+/// "axon starting" startup line and reported by `axon -V`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BuildInfoDto {
+    pub version: String,
+    pub git_hash: String,
+    pub profile: String,
+    pub build_time: String,
+    pub rustc_version: String,
+}
+
+impl From<crate::build_info::BuildInfo> for BuildInfoDto {
+    fn from(b: crate::build_info::BuildInfo) -> Self {
+        BuildInfoDto {
+            version: b.version,
+            git_hash: b.git_hash,
+            profile: b.profile,
+            build_time: b.build_time,
+            rustc_version: b.rustc_version,
+        }
+    }
+}
+
+/// One account's sync-service status (M10-adjacent). Lets a client — or an
+/// operator polling `/v1/status` — tell that sync is actually running rather
+/// than silently wedged, instead of only inferring it from the absence of new
+/// events.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AccountSyncStatusDto {
+    pub account_id: Uuid,
+    /// One of `"idle"`, `"running"`, `"offline"`, `"terminated"`, `"error"`.
+    pub state: String,
+    /// When the account last entered `state`, in epoch milliseconds.
+    pub since_ms: i64,
+}
+
+impl From<crate::sync_status::AccountSyncSnapshot> for AccountSyncStatusDto {
+    fn from(s: crate::sync_status::AccountSyncSnapshot) -> Self {
+        let since_ms = s
+            .since
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        AccountSyncStatusDto {
+            account_id: s.account_id,
+            state: s.state.to_owned(),
+            since_ms,
+        }
+    }
 }
 
 /// The history-backfill engine's status (M10). Backfill grows storage unbounded
