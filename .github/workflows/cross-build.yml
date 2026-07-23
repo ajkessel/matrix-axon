@@ -29,6 +29,8 @@ on:
   push:
     tags:
       - 'v*' 
+      - 'beta-*'
+      - 'alpha-*'
   workflow_dispatch:
     inputs:
       release:

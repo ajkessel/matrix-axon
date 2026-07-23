@@ -38,7 +38,9 @@ on:
           - boslb015700
   push:
     tags:
+      - 'v*' 
       - 'beta-*'
+      - 'alpha-*'
 
 env:
   # JS actions (docker/*) need Node on the self-hosted runner (matches cross-build.yml).
