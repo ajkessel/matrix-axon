@@ -6,12 +6,26 @@ import type { MembersStore } from '../stores/members'
 import type { RoomDto } from '../stores/room-list'
 import type { ThreadUnreadStore } from '../stores/thread-unread'
 import { createTimelineStore, type EventDto } from '../stores/timeline'
-import { Composer } from './Composer'
+import type { TimelineEvent, TimelineStore } from '../stores/timeline'
+import { Composer, type ComposerAutocompleteOption } from './Composer'
 import { ErrorBanner } from './ErrorBanner'
 import { EventBody } from './EventBody'
 import { MessageEventRow } from './MessageEventRow'
 import { UserAvatar } from './UserAvatar'
-import { useMessageComposer } from './use-message-composer'
+import { useMessageComposer, type ComposerAction } from './use-message-composer'
+
+type ThreadCommandHandler = (
+  body: string,
+  timeline: TimelineStore,
+  visibleEvents: readonly TimelineEvent[],
+  isVisibleEvent: (event: TimelineEvent) => boolean,
+  action: ComposerAction | null,
+  setAction: (action: ComposerAction | null) => void,
+  setReactionPickerEventId: (eventId: string | null) => void,
+  formatComposerBody: ReturnType<
+    typeof useMessageComposer
+  >['formatComposerBody'],
+) => boolean | Promise<boolean>
 
 /**
  * One open thread (ADR 0046, M-W7; ADR 0032): the root event, the
@@ -29,6 +43,8 @@ export function ThreadPanel({
   rooms,
   roomTitles,
   threadUnread,
+  onCommand,
+  roomCompletions,
   onClose,
 }: {
   accountId: string
@@ -40,6 +56,8 @@ export function ThreadPanel({
   rooms: readonly RoomDto[]
   roomTitles: ReadonlyMap<string, string>
   threadUnread: ThreadUnreadStore
+  onCommand?: ThreadCommandHandler
+  roomCompletions?(query: string): ComposerAutocompleteOption[]
   onClose: () => void
 }) {
   const { api, deviceState, live, media, settings } = useServices()
@@ -61,6 +79,7 @@ export function ThreadPanel({
     clearAttachment,
     dragging,
     dropHandlers,
+    formatComposerBody,
     mentionCompletions,
     roomReferenceCompletions,
     emojiCompletions,
@@ -153,6 +172,12 @@ export function ThreadPanel({
     }
   }, [api, accountId, rootId, root])
 
+  const visibleEvents = thread.events.value.filter(
+    (event) => !hideRedacted || !event.redacted,
+  )
+  const isVisibleEvent = (event: TimelineEvent): boolean =>
+    !hideRedacted || !event.redacted
+
   return (
     <aside
       class="thread-panel"
@@ -216,26 +241,24 @@ export function ThreadPanel({
             )}
             <div class="timeline-list-shell">
               <ol class="event-list thread-list">
-                {thread.events.value
-                  .filter((event) => !hideRedacted || !event.redacted)
-                  .map((event) => (
-                    <MessageEventRow
-                      key={event.event_id}
-                      event={event}
-                      timeline={thread}
-                      members={members}
-                      accountId={accountId}
-                      ownUserId={ownUserId}
-                      settings={settings}
-                      reactionPickerOpen={
-                        reactionPickerEventId === event.event_id
-                      }
-                      onSetReactionPicker={setReactionPickerEventId}
-                      onReply={(event) => setAction({ kind: 'reply', event })}
-                      onEdit={(event) => setAction({ kind: 'edit', event })}
-                      showThreadAction={false}
-                    />
-                  ))}
+                {visibleEvents.map((event) => (
+                  <MessageEventRow
+                    key={event.event_id}
+                    event={event}
+                    timeline={thread}
+                    members={members}
+                    accountId={accountId}
+                    ownUserId={ownUserId}
+                    settings={settings}
+                    reactionPickerOpen={
+                      reactionPickerEventId === event.event_id
+                    }
+                    onSetReactionPicker={setReactionPickerEventId}
+                    onReply={(event) => setAction({ kind: 'reply', event })}
+                    onEdit={(event) => setAction({ kind: 'edit', event })}
+                    showThreadAction={false}
+                  />
+                ))}
               </ol>
             </div>
           </>
@@ -263,6 +286,22 @@ export function ThreadPanel({
         mentionCompletions={mentionCompletions}
         roomReferenceCompletions={roomReferenceCompletions}
         emojiCompletions={emojiCompletions}
+        onCommand={
+          onCommand === undefined
+            ? undefined
+            : (body) =>
+                onCommand(
+                  body,
+                  thread,
+                  visibleEvents,
+                  isVisibleEvent,
+                  action,
+                  setAction,
+                  setReactionPickerEventId,
+                  formatComposerBody,
+                )
+        }
+        roomCompletions={roomCompletions}
         onAttach={attachable ? stage : undefined}
         attachment={
           attachment === null

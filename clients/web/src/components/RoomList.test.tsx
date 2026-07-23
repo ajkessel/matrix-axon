@@ -90,6 +90,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   cleanup()
   server.resetHandlers()
+  vi.unstubAllGlobals()
 })
 afterAll(() => server.close())
 
@@ -509,6 +510,46 @@ describe('RoomList keyboard shortcuts (ADR 0063)', () => {
     }
   })
 
+  it('Ctrl-Up and Ctrl-Down step rooms on Windows and Linux', async () => {
+    history.replaceState(null, '', '/')
+    const { findByText } = renderPage([OPS, LOUNGE])
+    await findByText('Ops')
+
+    fireEvent.keyDown(document.body, { key: 'ArrowDown', ctrlKey: true })
+
+    await waitFor(() =>
+      expect(location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+      ),
+    )
+  })
+
+  it('uses Cmd-Option-Up and Cmd-Option-Down for room stepping on macOS', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      userAgent: 'MacIntel',
+      maxTouchPoints: 0,
+    })
+    history.replaceState(null, '', '/')
+    const { findByText } = renderPage([OPS, LOUNGE])
+    await findByText('Ops')
+
+    fireEvent.keyDown(document.body, { key: 'ArrowDown', metaKey: true })
+    expect(location.pathname).toBe('/')
+
+    fireEvent.keyDown(document.body, {
+      key: 'ArrowDown',
+      metaKey: true,
+      altKey: true,
+    })
+
+    await waitFor(() =>
+      expect(location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
+      ),
+    )
+  })
+
   it('arrows rove focus across the room links and back to the filter', async () => {
     const { findByText, getByLabelText, container } = renderPage()
     await findByText('Ops')
@@ -532,7 +573,39 @@ describe('RoomList keyboard shortcuts (ADR 0063)', () => {
     expect(document.activeElement).toBe(filter)
   })
 
-  it('Escape from the room list asks for the composer', async () => {
+  it('clears the room filter with the clear button and keeps focus in the filter', async () => {
+    const { findByText, getByLabelText, getByRole, queryByRole } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+
+    fireEvent.input(filter, { target: { value: 'ops' } })
+    expect(getByRole('button', { name: 'Clear room filter' })).toBeTruthy()
+
+    fireEvent.click(getByRole('button', { name: 'Clear room filter' }))
+
+    expect(filter.value).toBe('')
+    expect(queryByRole('button', { name: 'Clear room filter' })).toBeNull()
+    expect(document.activeElement).toBe(filter)
+  })
+
+  it('Escape clears a non-empty room filter before asking for the composer', async () => {
+    const { services, findByText, getByLabelText } = renderPage()
+    await findByText('Ops')
+    const filter = getByLabelText('Filter by name') as HTMLInputElement
+    fireEvent.input(filter, { target: { value: 'ops' } })
+    const before = services.composerFocus.value
+
+    fireEvent.keyDown(filter, { key: 'Escape' })
+
+    expect(filter.value).toBe('')
+    expect(services.composerFocus.value).toBe(before)
+
+    fireEvent.keyDown(filter, { key: 'Escape' })
+
+    expect(services.composerFocus.value).toBe(before + 1)
+  })
+
+  it('Escape from an empty room list asks for the composer', async () => {
     const { services, findByText, getByLabelText } = renderPage()
     await findByText('Ops')
     const before = services.composerFocus.value

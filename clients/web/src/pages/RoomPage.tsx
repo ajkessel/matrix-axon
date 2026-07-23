@@ -31,7 +31,10 @@ import {
   spoilerMessage,
   type FormattedMessage,
 } from '../html/send-format'
-import { useMessageComposer } from '../components/use-message-composer'
+import {
+  useMessageComposer,
+  type ComposerAction,
+} from '../components/use-message-composer'
 import { useModalFocus } from '../components/use-modal-focus'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
 import { SINGLE_PANE_QUERY } from '../layout'
@@ -522,20 +525,39 @@ export function RoomPage() {
   }
   const visible = timeline.events.value.filter(isVisibleTimelineEvent)
 
-  const latestCommandTarget = (): TimelineEvent | null => {
-    for (let i = visible.length - 1; i >= 0; i -= 1) {
-      const event = visible[i]
-      if (isReactable(event)) {
-        return event
+  const handleComposerCommandFor = ({
+    body,
+    timeline: commandTimeline,
+    visible: commandVisible,
+    isVisible: isCommandVisible,
+    action: commandAction,
+    setAction: setCommandAction,
+    setReactionPickerEventId: setCommandReactionPickerEventId,
+    formatComposerBody: commandFormatComposerBody,
+    allowThreadCommand,
+  }: {
+    body: string
+    timeline: TimelineStore
+    visible: readonly TimelineEvent[]
+    isVisible: (event: TimelineEvent) => boolean
+    action: ComposerAction | null
+    setAction: (action: ComposerAction | null) => void
+    setReactionPickerEventId: (eventId: string | null) => void
+    formatComposerBody: typeof formatComposerBody
+    allowThreadCommand: boolean
+  }): boolean | Promise<boolean> => {
+    const latestTarget = (): TimelineEvent | null => {
+      for (let i = commandVisible.length - 1; i >= 0; i -= 1) {
+        const event = commandVisible[i]
+        if (isReactable(event)) {
+          return event
+        }
       }
+      return null
     }
-    return null
-  }
-
-  const handleComposerCommand = (body: string): boolean | Promise<boolean> => {
     const command = parseComposerCommand(body)
     if (command === null) {
-      timeline.error.value = `unknown command: ${body.split(/\s+/, 1)[0]}`
+      commandTimeline.error.value = `unknown command: ${body.split(/\s+/, 1)[0]}`
       return false
     }
     if (command.kind === 'help' || command.kind === 'shortcuts') {
@@ -543,11 +565,17 @@ export function RoomPage() {
       return true
     }
     if (command.kind === 'usage') {
-      timeline.error.value = `usage: ${slashCommandUsage(command.name)}`
+      commandTimeline.error.value = `usage: ${slashCommandUsage(command.name)}`
       return false
     }
     if (command.kind === 'formatted-message') {
-      sendCommandMessage(command.message)
+      const current = commandAction
+      setCommandAction(null)
+      void commandTimeline.send(command.message.body, {
+        replyTo: current?.kind === 'reply' ? current.event.event_id : undefined,
+        senderId: ownUserId ?? undefined,
+        formattedBody: command.message.formattedBody,
+      })
       return true
     }
     if (command.kind === 'refresh') {
@@ -560,7 +588,7 @@ export function RoomPage() {
     }
     if (command.kind === 'sort') {
       if (command.value === null) {
-        timeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.sort)}`
+        commandTimeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.sort)}`
         return false
       }
       settings.roomSort.value = command.value
@@ -579,11 +607,11 @@ export function RoomPage() {
       }
       const day = parseCalendarDay(command.date)
       if (day === null) {
-        timeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.jump)}`
+        commandTimeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.jump)}`
         return false
       }
       setDateJumpStart(day.start)
-      void timeline.jumpToDate(day.start, day.end, isVisibleTimelineEvent)
+      void commandTimeline.jumpToDate(day.start, day.end, isCommandVisible)
       return true
     }
     if (command.kind === 'whereami') {
@@ -592,7 +620,7 @@ export function RoomPage() {
     }
     if (command.kind === 'room') {
       if (command.target === '') {
-        timeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.room)}`
+        commandTimeline.error.value = `usage: ${slashCommandUsage(SLASH_COMMAND.room)}`
         return false
       }
       const visibleRooms = rooms.rooms.value.filter(
@@ -600,11 +628,11 @@ export function RoomPage() {
       )
       const resolution = resolveRoomTarget(visibleRooms, command.target)
       if (resolution.kind === 'missing') {
-        timeline.error.value = `room not found: ${command.target}`
+        commandTimeline.error.value = `room not found: ${command.target}`
         return false
       }
       if (resolution.kind === 'ambiguous') {
-        timeline.error.value = `room name is ambiguous: ${resolution.options.join(', ')}`
+        commandTimeline.error.value = `room name is ambiguous: ${resolution.options.join(', ')}`
         return false
       }
       location.route(
@@ -634,11 +662,11 @@ export function RoomPage() {
       }
       const targetRoom = resolveCommandRoom(accountRooms, command.target)
       if (targetRoom === null) {
-        timeline.error.value = `room not found: ${command.target}`
+        commandTimeline.error.value = `room not found: ${command.target}`
         return false
       }
       if (typeof targetRoom === 'string') {
-        timeline.error.value = targetRoom
+        commandTimeline.error.value = targetRoom
         return false
       }
       const key = roomKey(targetRoom)
@@ -649,19 +677,22 @@ export function RoomPage() {
       }
       return true
     }
-    const target = latestCommandTarget()
+    if (command.kind === 'thread' && !allowThreadCommand) {
+      return true
+    }
+    const target = latestTarget()
     if (target === null) {
-      timeline.error.value = 'no message available for command'
+      commandTimeline.error.value = 'no message available for command'
       return false
     }
     if (command.kind === 'reply') {
       if (command.body === null) {
-        setAction({ kind: 'reply', event: target })
+        setCommandAction({ kind: 'reply', event: target })
       } else {
-        setAction(null)
+        setCommandAction(null)
         void (async () => {
-          const formatted = await formatComposerBody(command.body!)
-          void timeline.send(formatted.body, {
+          const formatted = await commandFormatComposerBody(command.body!)
+          void commandTimeline.send(formatted.body, {
             replyTo: target.event_id,
             senderId: ownUserId ?? undefined,
             formattedBody: formatted.formatted_body ?? null,
@@ -675,28 +706,53 @@ export function RoomPage() {
       return true
     }
     if (command.reaction === null) {
-      setReactionPickerEventId(target.event_id)
+      setCommandReactionPickerEventId(target.event_id)
       return true
     }
     const key = resolveReactionCommandKey(command.reaction, emojiEntries)
     if (key === null) {
-      timeline.error.value = `unknown reaction shortcode: ${command.reaction}`
+      commandTimeline.error.value = `unknown reaction shortcode: ${command.reaction}`
       return false
     }
     settings.recordRecentReaction(key)
-    void timeline.toggleReaction(target, key)
+    void commandTimeline.toggleReaction(target, key)
     return true
   }
 
-  const sendCommandMessage = (message: FormattedMessage) => {
-    const current = action
-    setAction(null)
-    void timeline.send(message.body, {
-      replyTo: current?.kind === 'reply' ? current.event.event_id : undefined,
-      senderId: ownUserId ?? undefined,
-      formattedBody: message.formattedBody,
+  const handleComposerCommand = (body: string): boolean | Promise<boolean> =>
+    handleComposerCommandFor({
+      body,
+      timeline,
+      visible,
+      isVisible: isVisibleTimelineEvent,
+      action,
+      setAction,
+      setReactionPickerEventId,
+      formatComposerBody,
+      allowThreadCommand: true,
     })
-  }
+
+  const handleThreadComposerCommand = (
+    body: string,
+    commandTimeline: TimelineStore,
+    commandVisible: readonly TimelineEvent[],
+    isCommandVisible: (event: TimelineEvent) => boolean,
+    commandAction: ComposerAction | null,
+    setCommandAction: (action: ComposerAction | null) => void,
+    setCommandReactionPickerEventId: (eventId: string | null) => void,
+    commandFormatComposerBody: typeof formatComposerBody,
+  ): boolean | Promise<boolean> =>
+    handleComposerCommandFor({
+      body,
+      timeline: commandTimeline,
+      visible: commandVisible,
+      isVisible: isCommandVisible,
+      action: commandAction,
+      setAction: setCommandAction,
+      setReactionPickerEventId: setCommandReactionPickerEventId,
+      formatComposerBody: commandFormatComposerBody,
+      allowThreadCommand: false,
+    })
 
   const handleMembershipCommand = async (
     action: 'leave' | 'forget',
@@ -1072,6 +1128,8 @@ export function RoomPage() {
             }
             ownUserId={ownUserId}
             threadUnread={threadUnread}
+            onCommand={handleThreadComposerCommand}
+            roomCompletions={roomCompletions}
             onClose={() => setThreadParam(null)}
           />
         )}

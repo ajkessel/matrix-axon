@@ -12,7 +12,14 @@ import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
 import { perfMark, perfMarkFrames } from '../perf'
-import { hasModifier, hint, keyAria, KEYS, useShortcuts } from '../shortcuts'
+import {
+  hasModifier,
+  hint,
+  isApplePlatform,
+  keyAria,
+  KEYS,
+  useShortcuts,
+} from '../shortcuts'
 import {
   accountLabels,
   filterRooms,
@@ -222,6 +229,8 @@ export function RoomList() {
   const [scrollTop, setScrollTop] = useState(0)
   const [viewport, setViewport] = useState(0)
   const [pendingFocus, setPendingFocus] = useState<number | null>(null)
+  const nameFilterValue = nameQuery ?? ''
+
   /**
    * Whether the list has a scrolling ancestor. `unknown` on the first render —
    * refs are not populated yet — and resolved before paint by the layout effect
@@ -525,10 +534,30 @@ export function RoomList() {
         settings.roomSort.value = nextIn(ROOM_SORTS, settings.roomSort.value)
       },
       'mod+arrowup': (event) => {
+        if (isApplePlatform()) {
+          return
+        }
         event.preventDefault()
         stepRoom(-1)
       },
       'mod+arrowdown': (event) => {
+        if (isApplePlatform()) {
+          return
+        }
+        event.preventDefault()
+        stepRoom(1)
+      },
+      'mod+alt+arrowup': (event) => {
+        if (!isApplePlatform()) {
+          return
+        }
+        event.preventDefault()
+        stepRoom(-1)
+      },
+      'mod+alt+arrowdown': (event) => {
+        if (!isApplePlatform()) {
+          return
+        }
         event.preventDefault()
         stepRoom(1)
       },
@@ -540,10 +569,11 @@ export function RoomList() {
   /**
    * Arrow/Escape handling shared by the filter input and the room links.
    *
-   * Bare arrows only. `Ctrl-↑`/`Ctrl-↓` step to the previous/next room, and
-   * this handler runs first (it is bound below `document`), so claiming a
-   * modified arrow here would rove focus instead and hide the chord from
-   * `useShortcuts`, which ignores a defaultPrevented event.
+   * Bare arrows only. Modified arrows are reserved for platform text
+   * navigation and room stepping, and this handler runs first (it is bound
+   * below `document`), so claiming a modified arrow here would rove focus
+   * instead and hide the chord from `useShortcuts`, which ignores a
+   * defaultPrevented event.
    */
   const onListKeyDown = (event: KeyboardEvent) => {
     if (hasModifier(event)) {
@@ -557,6 +587,10 @@ export function RoomList() {
       moveFocus(-1)
     } else if (event.key === 'Escape') {
       event.preventDefault()
+      if (event.target === filterInput.current && nameFilterValue !== '') {
+        setNameQuery(null)
+        return
+      }
       focusComposer()
     } else if (event.key === 'Enter') {
       if (event.target === filterInput.current && visible.length === 1) {
@@ -582,7 +616,6 @@ export function RoomList() {
       activateRoom(room, href)
     }
   }
-
   return (
     <>
       <ErrorBanner error={rooms.error} />
@@ -616,19 +649,35 @@ export function RoomList() {
             </button>
           ))}
         </div>
-        <input
-          ref={filterInput}
-          class="name-filter"
-          type="search"
-          placeholder="Filter by name…"
-          aria-label="Filter by name"
-          title={hint('Filter rooms by name', KEYS.filterRooms)}
-          aria-keyshortcuts={keyAria(KEYS.filterRooms)}
-          value={nameQuery ?? ''}
-          onInput={(event) => setNameQuery(event.currentTarget.value)}
-          onBlur={() => nameQuery?.trim() === '' && setNameQuery(null)}
-          onKeyDown={onListKeyDown}
-        />
+        <span class="name-filter-shell">
+          <input
+            ref={filterInput}
+            class="name-filter"
+            type="search"
+            placeholder="Filter by name…"
+            aria-label="Filter by name"
+            title={hint('Filter rooms by name', KEYS.filterRooms)}
+            aria-keyshortcuts={keyAria(KEYS.filterRooms)}
+            value={nameFilterValue}
+            onInput={(event) => setNameQuery(event.currentTarget.value)}
+            onBlur={() => nameQuery?.trim() === '' && setNameQuery(null)}
+            onKeyDown={onListKeyDown}
+          />
+          {nameFilterValue !== '' && (
+            <button
+              type="button"
+              class="name-filter-clear"
+              aria-label="Clear room filter"
+              title="Clear room filter"
+              onClick={() => {
+                setNameQuery(null)
+                filterInput.current?.focus()
+              }}
+            >
+              ×
+            </button>
+          )}
+        </span>
         <label class="sort-select">
           Sort
           <select

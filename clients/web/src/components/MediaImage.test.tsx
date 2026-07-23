@@ -81,6 +81,15 @@ describe('MediaImage', () => {
     expect(box.style.width).toBe('100px')
   })
 
+  it('keeps a known portrait thumbnail narrow instead of reserving a square frame', () => {
+    serveBytes()
+    const { container } = renderImage(image({ w: 400, h: 1200 }))
+    const box = container.querySelector('.media-image') as HTMLElement
+    // 400×1200 → longest side 1200 scaled to 320 → about 107px wide.
+    expect(box.style.width).toBe('107px')
+    expect(box.style.aspectRatio).toBe('400 / 1200')
+  })
+
   it('caps a dimensionless image to the thumbnail box', () => {
     serveBytes()
     const { container } = renderImage(image({ w: undefined, h: undefined }))

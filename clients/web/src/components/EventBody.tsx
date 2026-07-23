@@ -1,4 +1,5 @@
 import { parseMedia, type ParsedMedia } from '../media/parse-media'
+import { hasEmojiCandidate } from '../emoji'
 import type { TimelineEvent } from '../stores/timeline'
 import { FormattedBody } from './FormattedBody'
 import { MediaAttachment } from './MediaAttachment'
@@ -49,6 +50,21 @@ function unsupportedEventLabel(event: TimelineEvent): string {
 
 function hasVisibleText(body: string | null | undefined): boolean {
   return body !== null && body !== undefined && body.trim() !== ''
+}
+
+export function isEmojiOnlyMessageBody(
+  body: string | null | undefined,
+): boolean {
+  const text = body?.trim()
+  if (text === undefined || text === '') {
+    return false
+  }
+  if (!hasEmojiCandidate(text)) {
+    return false
+  }
+  return /^(?:\s|[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}]|\u200D|\uFE0E|\uFE0F|\u20E3|[0-9#*])+$/u.test(
+    text,
+  )
 }
 
 /**
@@ -120,11 +136,15 @@ export function EventBody({
       </em>
     )
   }
+  const bodyClassName = isEmojiOnlyMessageBody(event.body)
+    ? 'body-emoji-only'
+    : undefined
   const body = (
     <FormattedBody
       accountId={event.account_id}
       body={event.body}
       content={event.content}
+      className={bodyClassName}
     />
   )
   if (!hasVisibleText(event.body)) {

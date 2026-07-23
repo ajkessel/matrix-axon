@@ -2,7 +2,7 @@ import type { JSX } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { SINGLE_PANE_QUERY, useMediaQuery } from '../layout'
 import { humanSize } from '../media/human-size'
-import { hasModifier } from '../shortcuts'
+import { hasModifier, isApplePlatform } from '../shortcuts'
 import {
   SLASH_COMMAND,
   SLASH_COMMANDS,
@@ -762,6 +762,14 @@ export function Composer({
               })
             }}
             onKeyDown={(event) => {
+              const wholeMessageCaret =
+                autocomplete === null ? wholeMessageCaretTarget(event) : null
+              if (wholeMessageCaret !== null) {
+                event.preventDefault()
+                moveWholeMessageCaret(event.currentTarget, wholeMessageCaret)
+                setCaret(wholeMessageCaret)
+                return
+              }
               // Resize from the composer itself (ADR 0063 keyboard reach): the
               // drag grip's arrow keys only work once it has focus, and its tab
               // position is not consistent across browsers. `mod+shift` + a
@@ -836,9 +844,9 @@ export function Composer({
                 banner.onCancel()
               } else if (
                 event.key === 'ArrowUp' &&
-                // Bare `↑` only: `Ctrl-↑` is "previous room" (ADR 0063), and
-                // claiming it here both opened an edit and stopped the room from
-                // changing, since `useShortcuts` skips a defaultPrevented event.
+                // Bare `↑` only: modified arrows are platform text navigation
+                // or room stepping, and claiming one here would hide it from
+                // the document-level shortcut layer.
                 !hasModifier(event) &&
                 draft === '' &&
                 banner === undefined &&
@@ -1048,6 +1056,49 @@ function emojiOptionMatchesQuery(
     option.value.replace(/^:/, '').replace(/:$/, '').toLowerCase() ===
     query.toLowerCase()
   )
+}
+
+function wholeMessageCaretTarget(
+  event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>,
+): number | null {
+  if (event.altKey || event.shiftKey) {
+    return null
+  }
+  const apple = isApplePlatform()
+  const start =
+    apple &&
+    event.metaKey &&
+    !event.ctrlKey &&
+    (event.key === 'ArrowUp' || event.key === 'Home')
+  const end =
+    apple &&
+    event.metaKey &&
+    !event.ctrlKey &&
+    (event.key === 'ArrowDown' || event.key === 'End')
+  const windowsStart =
+    !apple && event.ctrlKey && !event.metaKey && event.key === 'Home'
+  const windowsEnd =
+    !apple && event.ctrlKey && !event.metaKey && event.key === 'End'
+
+  if (start || windowsStart) {
+    return 0
+  }
+  if (end || windowsEnd) {
+    return event.currentTarget.value.length
+  }
+  return null
+}
+
+function moveWholeMessageCaret(
+  element: HTMLTextAreaElement,
+  target: number,
+): void {
+  const move = () => {
+    element.setSelectionRange(target, target)
+    element.scrollTop = target === 0 ? 0 : element.scrollHeight
+  }
+  move()
+  requestAnimationFrame(move)
 }
 
 function referenceTokenQuery(

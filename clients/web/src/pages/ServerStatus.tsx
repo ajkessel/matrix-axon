@@ -4,6 +4,22 @@ import type { components } from '../api/schema'
 import { useServices } from '../services'
 
 type StatusDto = components['schemas']['StatusDto']
+type ServerBuildInfo = {
+  build_time: string
+  git_hash: string
+  profile: string
+  rustc_version: string
+  version: string
+}
+type AccountSyncStatus = {
+  account_id: string
+  since_ms: number
+  state: string
+}
+type ServerStatusDto = StatusDto & {
+  build?: ServerBuildInfo
+  sync?: AccountSyncStatus[]
+}
 
 /**
  * Server status (`GET /v1/status`): the backfill engine's disk-space health
@@ -11,7 +27,7 @@ type StatusDto = components['schemas']['StatusDto']
  */
 export function ServerStatus() {
   const { api } = useServices()
-  const [status, setStatus] = useState<StatusDto | null>(null)
+  const [status, setStatus] = useState<ServerStatusDto | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -46,10 +62,31 @@ export function ServerStatus() {
   }
 
   const backfill = status.backfill
+  const build = status.build
+  const sync = status.sync ?? []
   const gib = (backfill.free_bytes / 1024 ** 3).toFixed(1)
   return (
     <section class="panel">
       <h2>Server status</h2>
+      {build !== undefined && (
+        <p>
+          Axon server <code>{build.version}</code>
+          {build.git_hash !== '' && (
+            <>
+              {' '}
+              · <code>{shortHash(build.git_hash)}</code>
+            </>
+          )}
+          {' · '}
+          {build.profile}
+          {' · '}
+          <time dateTime={build.build_time}>
+            {formatDate(build.build_time)}
+          </time>
+          {' · '}
+          <code>{build.rustc_version}</code>
+        </p>
+      )}
       <p>
         History backfill:{' '}
         {backfill.paused ? (
@@ -73,6 +110,36 @@ export function ServerStatus() {
           ))}
         </ul>
       )}
+      {sync.length > 0 && (
+        <>
+          <h3>Sync service</h3>
+          <ul class="status-list">
+            {sync.map((account) => (
+              <li key={account.account_id}>
+                <code>{account.account_id.slice(0, 8)}</code>:{' '}
+                <span class={`badge sync-${account.state}`}>
+                  {account.state}
+                </span>{' '}
+                since{' '}
+                <time dateTime={new Date(account.since_ms).toISOString()}>
+                  {formatDate(account.since_ms)}
+                </time>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </section>
   )
+}
+
+function shortHash(hash: string): string {
+  return hash.length > 12 ? hash.slice(0, 12) : hash
+}
+
+function formatDate(value: string | number): string {
+  return new Date(value).toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }

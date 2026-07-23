@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+} from '@testing-library/preact'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
 
@@ -11,6 +17,7 @@ const originalTextareaScrollHeight = Object.getOwnPropertyDescriptor(
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   if (originalMatchMedia === undefined) {
     delete (window as { matchMedia?: typeof window.matchMedia }).matchMedia
   } else {
@@ -340,6 +347,95 @@ describe('Composer drafts (M-W6 step 5b)', () => {
 
     expect(onHeightChange).not.toHaveBeenCalled()
   })
+
+  it('leaves Ctrl-A to the platform select-all default', () => {
+    const { textarea } = renderComposer({
+      initialValue: 'first line\nsecond line',
+    })
+    textarea.setSelectionRange(
+      'first line\nsecond'.length,
+      'first line\nsecond'.length,
+    )
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+
+    textarea.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+    expect(textarea.selectionStart).toBe('first line\nsecond'.length)
+    expect(textarea.selectionEnd).toBe('first line\nsecond'.length)
+  })
+
+  it('moves Ctrl-Home and Ctrl-End across the whole message on Windows and Linux', async () => {
+    const { textarea } = renderComposer({
+      initialValue: 'first line\nsecond line',
+    })
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      value: 240,
+    })
+    textarea.setSelectionRange(
+      'first line\nsecond'.length,
+      'first line\nsecond'.length,
+    )
+    textarea.scrollTop = 120
+
+    fireEvent.keyDown(textarea, { key: 'Home', ctrlKey: true })
+
+    expect(textarea.selectionStart).toBe(0)
+    expect(textarea.selectionEnd).toBe(0)
+    expect(textarea.scrollTop).toBe(0)
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+    expect(textarea.scrollTop).toBe(0)
+
+    fireEvent.keyDown(textarea, { key: 'End', ctrlKey: true })
+
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+    expect(textarea.selectionEnd).toBe(textarea.value.length)
+    expect(textarea.scrollTop).toBe(240)
+  })
+
+  it('moves Cmd-Up and Cmd-Down across the whole message on macOS', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      userAgent: 'MacIntel',
+      maxTouchPoints: 0,
+    })
+    const { textarea } = renderComposer({
+      initialValue: 'first line\nsecond line',
+    })
+    Object.defineProperty(textarea, 'scrollHeight', {
+      configurable: true,
+      value: 240,
+    })
+    textarea.setSelectionRange(
+      'first line\nsecond'.length,
+      'first line\nsecond'.length,
+    )
+    textarea.scrollTop = 120
+
+    fireEvent.keyDown(textarea, { key: 'ArrowUp', metaKey: true })
+
+    expect(textarea.selectionStart).toBe(0)
+    expect(textarea.selectionEnd).toBe(0)
+    expect(textarea.scrollTop).toBe(0)
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    })
+    expect(textarea.scrollTop).toBe(0)
+
+    fireEvent.keyDown(textarea, { key: 'ArrowDown', metaKey: true })
+
+    expect(textarea.selectionStart).toBe(textarea.value.length)
+    expect(textarea.selectionEnd).toBe(textarea.value.length)
+    expect(textarea.scrollTop).toBe(240)
+  })
 })
 
 describe('Composer Enter-key behavior (mobile newline vs. desktop send)', () => {
@@ -450,6 +546,24 @@ describe('Composer slash command autocomplete', () => {
 
     expect(textarea.value).toBe('/reply ')
     expect(queryByRole('listbox', { name: 'Slash commands' })).toBeNull()
+  })
+
+  it('keeps modified arrows inside autocomplete instead of jumping the message caret', () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      userAgent: 'MacIntel',
+      maxTouchPoints: 0,
+    })
+    const { textarea } = renderComposer({ onCommand: vi.fn() })
+
+    fireEvent.input(textarea, { target: { value: '/re' } })
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown', metaKey: true })
+
+    expect(textarea.getAttribute('aria-activedescendant')).toBe(
+      'composer-slash-command-reply',
+    )
+    expect(textarea.selectionStart).toBe(textarea.value.length)
   })
 
   it('completes the selected partial command with Enter on a narrow viewport too', () => {

@@ -805,6 +805,59 @@ describe('reactions', () => {
     expect(textarea.value).toBe('')
   })
 
+  it('/react with an emoji reacts to the latest visible thread-pane message from the thread composer', async () => {
+    let posted: unknown
+    let reactedEventId: string | null = null
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        () =>
+          HttpResponse.json({
+            data: {
+              events: [
+                event('$thread-latest', 250, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'newer reply',
+                }),
+                event('$thread-old', 150, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'older reply',
+                }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$thread-latest', 250) }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/events/:eventId/reactions`,
+        async ({ params, request }) => {
+          reactedEventId = params.eventId as string
+          posted = await request.json()
+          return HttpResponse.json({ data: { event_id: '$rx' } })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom(
+      [event('$room-latest', 300), event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+    const panel = await findByLabelText('Thread')
+    await within(panel).findByText('newer reply')
+    const textarea = within(panel).getByLabelText(
+      'Reply in thread',
+    ) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/react 🔥' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(reactedEventId).toBe('$thread-latest'))
+    expect(posted).toEqual({ key: '🔥' })
+    expect(textarea.value).toBe('')
+  })
+
   it('/+ aliases /react for the latest visible message', async () => {
     let posted: unknown
     let reactedEventId: string | null = null
@@ -1489,6 +1542,50 @@ describe('threads', () => {
     await waitFor(() => expect(sendBody.thread_root).toBe('$root'))
     expect(sendBody.reply_to).toBeNull()
     expect(sendBody.body).toBe('thread send')
+  })
+
+  it('/thread from the thread composer does not retarget the open thread', async () => {
+    const threadRequests: string[] = []
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+        ({ params }) => {
+          threadRequests.push(params.rootId as string)
+          return HttpResponse.json({
+            data: {
+              events: [
+                event('$m1', 200, {
+                  relates_to: { rel_type: 'm.thread', event_id: '$root' },
+                  body: 'inside the thread',
+                  content: { msgtype: 'm.text', body: 'inside the thread' },
+                }),
+              ],
+              next_cursor: null,
+            },
+          })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$root', 100) }),
+      ),
+    )
+    const { findByLabelText, findByText } = renderRoom(
+      [event('$root', 100)],
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?thread=%24root`,
+    )
+
+    expect(await findByText('inside the thread')).toBeTruthy()
+    threadRequests.length = 0
+
+    const textarea = (await findByLabelText(
+      'Reply in thread',
+    )) as HTMLTextAreaElement
+    fireEvent.input(textarea, { target: { value: '/thread' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() => expect(textarea.value).toBe(''))
+    expect(window.location.search).toBe('?thread=%24root')
+    expect(threadRequests).toEqual([])
   })
 
   it('hides redacted thread replies when the setting is on', async () => {

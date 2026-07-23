@@ -178,6 +178,12 @@ export const KEYS = {
     appleLabel: '/ or ⌘-G',
     appleAria: '/ Meta+G',
   },
+  roomStep: {
+    label: 'Ctrl-↑ / Ctrl-↓',
+    aria: 'Control+ArrowUp Control+ArrowDown',
+    appleLabel: '⌘-Option-↑ / ⌘-Option-↓',
+    appleAria: 'Meta+Alt+ArrowUp Meta+Alt+ArrowDown',
+  },
 } as const
 
 type NavigatorWithUserAgentData = Navigator & {
@@ -248,7 +254,7 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
       { keys: KEYS.filterRooms.label, description: 'Filter rooms by name' },
       { keys: '↑ / ↓', description: 'Move through the room list' },
       { keys: 'Enter', description: 'Open the selected room' },
-      { keys: 'Ctrl-↑ / Ctrl-↓', description: 'Previous / next room' },
+      { keys: KEYS.roomStep, description: 'Previous / next room' },
       {
         keys: KEYS.cycleFilter,
         description: 'Cycle filter: all, DMs, groups, unread, favorites',

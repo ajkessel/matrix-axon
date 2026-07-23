@@ -1,5 +1,17 @@
 import type { ComponentChildren } from 'preact'
-import { useLayoutEffect, useMemo, useRef } from 'preact/hooks'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'preact/hooks'
+import {
+  currentEmojiEntries,
+  emojiNameMap,
+  hasEmojiCandidate,
+  loadEmojiEntries,
+} from '../emoji'
 import { highlightCode } from '../code/highlight'
 import { matchUrls } from '../html/linkify'
 import { resolveMatrixToRoomLink, resolveMatrixToUserLink } from '../matrix-to'
@@ -7,6 +19,28 @@ import { renderMatrixHtml, SPOILER_CLASS } from '../html/sanitize'
 import type { MediaHandle } from '../media/media-service'
 import { useServices } from '../services'
 import type { RoomDto } from '../stores/room-list'
+
+const EMPTY_EMOJI_NAMES: ReadonlyMap<string, string> = new Map()
+
+type GraphemeSegment = {
+  segment: string
+}
+
+type SegmenterLike = {
+  segment(input: string): Iterable<GraphemeSegment>
+}
+
+type IntlWithSegmenter = typeof Intl & {
+  Segmenter?: new (
+    locale?: string,
+    options?: { granularity?: 'grapheme' },
+  ) => SegmenterLike
+}
+
+type EmojiTextPart = {
+  text: string
+  title?: string
+}
 
 /**
  * Linkify bare URLs in plain text, as VNodes — never via innerHTML, so the
@@ -20,16 +54,17 @@ function linkify(
     rooms: readonly RoomDto[]
     roomTitles: ReadonlyMap<string, string>
   },
+  emojiNames: ReadonlyMap<string, string>,
 ): ComponentChildren {
   const matches = matchUrls(text)
   if (matches.length === 0) {
-    return text
+    return emojiTooltippedText(text, emojiNames)
   }
   const parts: ComponentChildren[] = []
   let last = 0
   for (const { url, start, end } of matches) {
     if (start > last) {
-      parts.push(text.slice(last, start))
+      parts.push(...emojiTooltippedParts(text.slice(last, start), emojiNames))
     }
     const userLink = resolveMatrixToUserLink(url)
     const roomLink =
@@ -56,7 +91,7 @@ function linkify(
     last = end
   }
   if (last < text.length) {
-    parts.push(text.slice(last))
+    parts.push(...emojiTooltippedParts(text.slice(last), emojiNames))
   }
   return parts
 }
@@ -90,6 +125,114 @@ function routeLocalRoomPillClick(event: MouseEvent): boolean {
   return true
 }
 
+function emojiTooltippedText(
+  text: string,
+  emojiNames: ReadonlyMap<string, string>,
+): ComponentChildren {
+  const parts = emojiTooltippedParts(text, emojiNames)
+  return parts.length === 1 && typeof parts[0] === 'string' ? parts[0] : parts
+}
+
+function emojiTooltippedParts(
+  text: string,
+  emojiNames: ReadonlyMap<string, string>,
+): ComponentChildren[] {
+  return emojiTextParts(text, emojiNames).map((part) =>
+    part.title === undefined ? (
+      part.text
+    ) : (
+      <span class="emoji-tooltip" title={part.title}>
+        {part.text}
+      </span>
+    ),
+  )
+}
+
+function addEmojiTooltipsToHtml(
+  html: string,
+  emojiNames: ReadonlyMap<string, string>,
+): string {
+  if (emojiNames.size === 0 || !hasEmojiCandidate(html)) {
+    return html
+  }
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const walker = document.createTreeWalker(
+    template.content,
+    NodeFilter.SHOW_TEXT,
+  )
+  const textNodes: Text[] = []
+  let node = walker.nextNode()
+  while (node !== null) {
+    textNodes.push(node as Text)
+    node = walker.nextNode()
+  }
+  for (const textNode of textNodes) {
+    if (textNode.parentElement?.closest('a, code, pre') != null) {
+      continue
+    }
+    const parts = emojiTextParts(textNode.data, emojiNames)
+    if (parts.every((part) => part.title === undefined)) {
+      continue
+    }
+    const fragment = document.createDocumentFragment()
+    for (const part of parts) {
+      if (part.title === undefined) {
+        fragment.append(part.text)
+        continue
+      }
+      const span = document.createElement('span')
+      span.className = 'emoji-tooltip'
+      span.title = part.title
+      span.textContent = part.text
+      fragment.append(span)
+    }
+    textNode.replaceWith(fragment)
+  }
+  return template.innerHTML
+}
+
+function emojiTextParts(
+  text: string,
+  emojiNames: ReadonlyMap<string, string>,
+): EmojiTextPart[] {
+  if (emojiNames.size === 0 || !hasEmojiCandidate(text)) {
+    return [{ text }]
+  }
+  const parts: EmojiTextPart[] = []
+  let pending = ''
+  for (const segment of graphemeSegments(text)) {
+    const title = emojiNames.get(normalizeTooltipEmoji(segment))
+    if (title === undefined) {
+      pending += segment
+      continue
+    }
+    if (pending !== '') {
+      parts.push({ text: pending })
+      pending = ''
+    }
+    parts.push({ text: segment, title })
+  }
+  if (pending !== '') {
+    parts.push({ text: pending })
+  }
+  return parts.length === 0 ? [{ text }] : parts
+}
+
+function graphemeSegments(text: string): string[] {
+  const Segmenter = (Intl as IntlWithSegmenter).Segmenter
+  if (Segmenter === undefined) {
+    return Array.from(text)
+  }
+  return [
+    ...new Segmenter(undefined, { granularity: 'grapheme' }).segment(text),
+  ].map((segment) => segment.segment)
+}
+
+function normalizeTooltipEmoji(emoji: string): string {
+  return emoji.replaceAll('\uFE0F', '')
+}
+
 /**
  * A message body: sanitized Matrix HTML when the event carries
  * `format: "org.matrix.custom.html"`, plain text (with bare URLs linkified)
@@ -100,15 +243,42 @@ export function FormattedBody({
   accountId,
   body,
   content,
+  className,
 }: {
   accountId: string
   body: string | null | undefined
   content: unknown
+  className?: string
 }) {
   const { media, rooms } = useServices()
   const rootRef = useRef<HTMLSpanElement>(null)
   const roomList = rooms.rooms.value
   const roomTitles = rooms.titles.value
+  const formattedBody = (
+    content as { formatted_body?: unknown } | null | undefined
+  )?.formatted_body
+  const bodyHasEmoji =
+    hasEmojiCandidate(body) ||
+    (typeof formattedBody === 'string' && hasEmojiCandidate(formattedBody))
+  const [emojiEntries, setEmojiEntries] = useState(() => currentEmojiEntries())
+  useEffect(() => {
+    if (!bodyHasEmoji) {
+      return
+    }
+    let cancelled = false
+    void loadEmojiEntries().then((entries) => {
+      if (!cancelled) {
+        setEmojiEntries(entries)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [bodyHasEmoji])
+  const emojiNames = useMemo(
+    () => (bodyHasEmoji ? emojiNameMap(emojiEntries) : EMPTY_EMOJI_NAMES),
+    [bodyHasEmoji, emojiEntries],
+  )
   const html = useMemo(() => {
     const roomLinkContext = {
       accountId,
@@ -121,14 +291,17 @@ export function FormattedBody({
       c?.format === 'org.matrix.custom.html' &&
       typeof c.formatted_body === 'string'
     ) {
-      return renderMatrixHtml(c.formatted_body, {
+      const rendered = renderMatrixHtml(c.formatted_body, {
         resolveUserLink: resolveMatrixToUserLink,
         resolveRoomLink: (href, label) =>
           resolveMatrixToRoomLink(href, roomLinkContext, label),
       })
+      return bodyHasEmoji
+        ? addEmojiTooltipsToHtml(rendered, emojiNames)
+        : rendered
     }
     return null
-  }, [content, accountId, roomList, roomTitles])
+  }, [content, accountId, roomList, roomTitles, bodyHasEmoji, emojiNames])
 
   // Resolve inline `<img data-mxc>` (the sanitizer moved a safe `mxc://` src
   // here) to authenticated blob URLs after mount. This is imperative DOM
@@ -209,10 +382,10 @@ export function FormattedBody({
     }
     return (
       <span
-        class="body-text"
+        class={className === undefined ? 'body-text' : `body-text ${className}`}
         onClick={(event) => routeLocalRoomPillClick(event)}
       >
-        {linkify(body ?? '', roomLinkContext)}
+        {linkify(body ?? '', roomLinkContext, emojiNames)}
       </span>
     )
   }
@@ -226,7 +399,7 @@ export function FormattedBody({
 
   return (
     <span
-      class="body-html"
+      class={className === undefined ? 'body-html' : `body-html ${className}`}
       ref={rootRef}
       // Sanitized by renderMatrixHtml (DOMPurify + Matrix allowlist).
       dangerouslySetInnerHTML={{ __html: html }}

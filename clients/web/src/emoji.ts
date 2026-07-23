@@ -21,6 +21,8 @@ export interface EmojiEntry {
 const SHORTCODE = /^[A-Za-z0-9_+-]+$/
 const SHORTCODE_TOKEN = /^:([A-Za-z0-9_+-]+):/
 const MAX_EMOJI_SUGGESTIONS = 64
+const EMOJI_CANDIDATE =
+  /[\p{Extended_Pictographic}\p{Regional_Indicator}]|(?:[0-9#*]\uFE0F?\u20E3)/u
 
 const FALLBACK_EMOJI_ENTRIES: readonly EmojiEntry[] = [
   {
@@ -60,11 +62,35 @@ const FALLBACK_EMOJI_ENTRIES: readonly EmojiEntry[] = [
 ]
 
 let cachedEmojiEntries: readonly EmojiEntry[] = FALLBACK_EMOJI_ENTRIES
+let cachedEmojiNameEntries: readonly EmojiEntry[] | null = null
+let cachedEmojiNames: ReadonlyMap<string, string> = new Map()
 let loaded = false
 let pending: Promise<readonly EmojiEntry[]> | null = null
 
 export function currentEmojiEntries(): readonly EmojiEntry[] {
   return cachedEmojiEntries
+}
+
+export function hasEmojiCandidate(text: string | null | undefined): boolean {
+  return text !== null && text !== undefined && EMOJI_CANDIDATE.test(text)
+}
+
+export function emojiNameMap(
+  entries: readonly EmojiEntry[] = cachedEmojiEntries,
+): ReadonlyMap<string, string> {
+  if (entries === cachedEmojiNameEntries) {
+    return cachedEmojiNames
+  }
+  const names = new Map<string, string>()
+  for (const entry of entries) {
+    const emoji = normalizeEmoji(entry.emoji)
+    if (!names.has(emoji)) {
+      names.set(emoji, entry.annotation || entry.shortcodes[0])
+    }
+  }
+  cachedEmojiNameEntries = entries
+  cachedEmojiNames = names
+  return names
 }
 
 export function loadEmojiEntries(): Promise<readonly EmojiEntry[]> {

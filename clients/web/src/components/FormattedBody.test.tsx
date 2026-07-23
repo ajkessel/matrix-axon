@@ -115,6 +115,34 @@ describe('FormattedBody plain-text linkification', () => {
     expect(container.querySelector('a')).toBeNull()
   })
 
+  it('adds emoji-name tooltips to emoji in plain message text', () => {
+    const { container } = renderBody({
+      body: 'ship it 👍',
+      content: null,
+    })
+
+    const tooltip = container.querySelector('.emoji-tooltip')!
+    expect(tooltip.textContent).toBe('👍')
+    expect(tooltip.getAttribute('title')).toBe('thumbs up')
+    expect(container.textContent).toBe('ship it 👍')
+  })
+
+  it('keeps plain-text links intact while adding emoji tooltips around them', () => {
+    const { container } = renderBody({
+      body: '👍 https://example.org 😄',
+      content: null,
+    })
+
+    expect(container.querySelector('a')!.textContent).toBe(
+      'https://example.org',
+    )
+    expect(
+      [...container.querySelectorAll('.emoji-tooltip')].map((el) =>
+        el.getAttribute('title'),
+      ),
+    ).toEqual(['thumbs up', 'grinning face with smiling eyes'])
+  })
+
   it('linkifies bare URLs inside formatted bodies too (Element parity)', () => {
     const { container } = renderBody({
       body: 'fallback',
@@ -126,6 +154,36 @@ describe('FormattedBody plain-text linkification', () => {
     expect(container.querySelector('a')!.getAttribute('href')).toBe(
       'https://example.org',
     )
+  })
+
+  it('adds emoji-name tooltips to emoji in formatted message text', () => {
+    const { container } = renderBody({
+      body: 'ship it 👍',
+      content: {
+        format: 'org.matrix.custom.html',
+        formatted_body: '<strong>ship it 👍</strong>',
+      },
+    })
+
+    const tooltip = container.querySelector('.emoji-tooltip')!
+    expect(tooltip.textContent).toBe('👍')
+    expect(tooltip.getAttribute('title')).toBe('thumbs up')
+    expect(container.querySelector('strong')?.textContent).toBe('ship it 👍')
+  })
+
+  it('does not add emoji wrappers inside formatted links or code', () => {
+    const { container } = renderBody({
+      body: '👍',
+      content: {
+        format: 'org.matrix.custom.html',
+        formatted_body:
+          '<a href="https://example.org">👍</a> <code>😄</code> 👍',
+      },
+    })
+
+    expect(container.querySelector('a .emoji-tooltip')).toBeNull()
+    expect(container.querySelector('code .emoji-tooltip')).toBeNull()
+    expect(container.querySelectorAll('.emoji-tooltip')).toHaveLength(1)
   })
 
   it('flags formatted links whose visible URL points somewhere else', () => {

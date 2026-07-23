@@ -125,6 +125,65 @@ describe('SettingsPage', () => {
     expect(services.auth.signedIn.value).toBe(false)
   })
 
+  it('keeps older server status responses quiet', async () => {
+    const services = testServices()
+    const { findByRole, queryByRole, queryByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(await findByRole('heading', { name: 'Server status' })).toBeTruthy()
+    expect(queryByText('Axon server')).toBeNull()
+    expect(queryByRole('heading', { name: 'Sync service' })).toBeNull()
+  })
+
+  it('shows build and sync details from newer server status responses', async () => {
+    const since = Date.UTC(2026, 6, 22, 12, 0, 0)
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/status`, () =>
+        HttpResponse.json({
+          data: {
+            backfill: { paused: false, free_bytes: 0, accounts: [] },
+            build: {
+              version: '0.15.0',
+              git_hash: 'abcdef1234567890',
+              profile: 'release',
+              build_time: '2026-07-22T12:34:56Z',
+              rustc_version: 'rustc 1.89.0',
+            },
+            sync: [
+              {
+                account_id: ACCOUNT,
+                state: 'running',
+                since_ms: since,
+              },
+            ],
+          },
+        }),
+      ),
+    )
+    const services = testServices()
+    const { container, findByRole, findByText, getByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(await findByText('0.15.0')).toBeTruthy()
+    expect(getByText('abcdef123456')).toBeTruthy()
+    expect(container.textContent).toContain('release')
+    expect(getByText('rustc 1.89.0')).toBeTruthy()
+    expect(await findByRole('heading', { name: 'Sync service' })).toBeTruthy()
+    expect(getByText('running')).toBeTruthy()
+    expect(getByText(ACCOUNT.slice(0, 8))).toBeTruthy()
+    expect(
+      container.querySelector(
+        `time[datetime="${new Date(since).toISOString()}"]`,
+      ),
+    ).toBeTruthy()
+  })
+
   it('prompts Android users to install when the browser exposes the install event', async () => {
     const restoreUserAgent = mockNavigatorProperty(
       'userAgent',

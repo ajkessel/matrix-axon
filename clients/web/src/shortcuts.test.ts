@@ -120,7 +120,9 @@ describe('hint', () => {
     expect(shortcutLabel(KEYS.toggleSidebar.label, 'MacIntel')).toBe('⌘-B')
     expect(keyLabel(KEYS.showHelp, 'iPhone')).toBe('? or ⌘-/')
     expect(keyLabel(KEYS.search, 'MacIntel')).toBe('/ or ⌘-G')
+    expect(keyLabel(KEYS.roomStep, 'MacIntel')).toBe('⌘-Option-↑ / ⌘-Option-↓')
     expect(shortcutLabel(KEYS.toggleSidebar.label, 'Win32')).toBe('Ctrl-B')
+    expect(keyLabel(KEYS.roomStep, 'Win32')).toBe('Ctrl-↑ / Ctrl-↓')
   })
 
   it('prefers User-Agent Client Hints when available', () => {
