@@ -19,7 +19,9 @@
 //! that arrive after it connects, and uses the HTTP read API for history. The
 //! fan-out rides a [`tokio::sync::broadcast`] channel, so a client too slow to
 //! keep up is told it lagged (and skips the backlog) rather than ever stalling
-//! the sync engine.
+//! the sync engine. Writing a frame to the socket itself is bounded too (see
+//! `WRITE_TIMEOUT`): a peer that stops draining its TCP receive buffer gets
+//! disconnected rather than parking the connection's task forever (#290).
 //!
 //! Like every `/v1/` route the socket requires a valid bearer token (M7b), but
 //! it can't ride the HTTP `require_bearer` layer: a browser can't set an
@@ -67,6 +69,15 @@ const TIMELINE_EVENT: &str = "timeline.event";
 /// *some* offered subprotocol is required so the 101 handshake is RFC 6455 §4.1
 /// compliant (Chrome fails the connection otherwise); see #238 and ADR 0029.
 const WS_SUBPROTOCOL: &str = "axon";
+
+/// How long `pump` will wait for a frame write to drain before giving up on
+/// the client. A live-tail reader that can't accept one frame in this long is
+/// already indistinguishable from a dead peer; without this bound `send` can
+/// park inside its `select!` branch indefinitely (a suspended laptop, a
+/// NAT half-open connection, a deliberately slow reader), which also stalls
+/// the periodic token-revalidation branch and lets a revoked token keep
+/// receiving frames (issue #290).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The wire envelope for every `/v1/ws` frame: a `type` discriminant, the
 /// `account_id` the frame pertains to, and a type-specific `payload`.
@@ -321,6 +332,30 @@ fn encode_frame(frame: LiveFrame) -> Result<String, serde_json::Error> {
     }
 }
 
+/// The result of a [`send_with_timeout`] call.
+enum SendOutcome {
+    /// The peer's socket accepted the message.
+    Delivered,
+    /// The peer hung up.
+    Closed,
+    /// The peer didn't drain the write within [`WRITE_TIMEOUT`].
+    TimedOut,
+}
+
+/// Send one message on `socket`, bounded by [`WRITE_TIMEOUT`]. Every send in
+/// `pump` goes through this — including the best-effort revocation `Close`
+/// notice — so a peer that stops draining its TCP receive buffer (suspended
+/// laptop, half-open NAT, deliberately slow reader) can never park the task
+/// indefinitely, which would otherwise also suspend the `select!`'s
+/// revalidation branch and let a revoked token keep its stream open (#290).
+async fn send_with_timeout(socket: &mut WebSocket, message: Message) -> SendOutcome {
+    match tokio::time::timeout(WRITE_TIMEOUT, socket.send(message)).await {
+        Ok(Ok(())) => SendOutcome::Delivered,
+        Ok(Err(_)) => SendOutcome::Closed,
+        Err(_) => SendOutcome::TimedOut,
+    }
+}
+
 /// Forward live frames to one connected client until either side hangs up or the
 /// client's token is revoked.
 ///
@@ -348,7 +383,9 @@ async fn pump(
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::info!("websocket token revoked; closing socket");
-                        let _ = socket.send(Message::Close(None)).await;
+                        // Best-effort notice: the socket is closing either way, so a
+                        // timed-out or failed send changes nothing here.
+                        let _ = send_with_timeout(&mut socket, Message::Close(None)).await;
                         break;
                     }
                     Err(err) => {
@@ -369,9 +406,16 @@ async fn pump(
                             continue;
                         }
                     };
-                    if socket.send(Message::Text(text.into())).await.is_err() {
+                    match send_with_timeout(&mut socket, Message::Text(text.into())).await {
+                        SendOutcome::Delivered => {}
                         // The client is gone; stop pumping.
-                        break;
+                        SendOutcome::Closed => break,
+                        // The client hasn't drained the socket in time; treat it like a
+                        // dead peer rather than parking here and stalling revalidation.
+                        SendOutcome::TimedOut => {
+                            tracing::info!("websocket write timed out; closing socket");
+                            break;
+                        }
                     }
                 }
                 // The client couldn't keep up and the channel overwrote unread
