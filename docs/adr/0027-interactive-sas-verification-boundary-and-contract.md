@@ -87,10 +87,13 @@ supersedes the "and as equivalent `/v1/ws` commands" wording in the 7a spec.
 There is also **no `accept` operation**. SAS has a protocol-level *accept* step,
 but it requires no human decision (only `confirm`, the emoji comparison, does), so
 the driver performs it automatically: a peer-initiated request is accepted as soon
-as it is observed (SAS-only methods — see below), and a flow we started begins SAS
-as soon as the peer is ready. Exposing `accept` to the client would add a verb
-with no decision behind it. This supersedes the spec's listing of `accept` as a
-client operation.
+as it is observed (SAS-only methods — see below). Once the request is `Ready`,
+the driver is also allowed to send `m.key.verification.start` from either side,
+not only for flows axon initiated. This keeps Axon interoperable with clients
+such as Element X that expect the responder to start SAS after accepting and
+advertising `m.sas.v1`; matrix-rust-sdk owns the concrete start/race handling.
+Exposing `accept` to the client would add a verb with no decision behind it.
+This supersedes the spec's listing of `accept` as a client operation.
 
 **Why HTTP-only.** The WS bus is fan-out infrastructure (ADR 0020) with no
 inbound command framing, sequence numbers, or per-client addressing. Adding a

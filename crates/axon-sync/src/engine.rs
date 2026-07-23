@@ -1247,7 +1247,12 @@ async fn maybe_resubscribe_verification_rooms(
     let ids: Vec<OwnedRoomId> = desired.iter().cloned().collect();
     let refs: Vec<&RoomId> = ids.iter().map(AsRef::as_ref).collect();
     rls.subscribe_to_rooms(&refs).await;
-    tracing::debug!(%account_id, count = refs.len(), "updated verification room subscriptions");
+    tracing::info!(
+        %account_id,
+        count = refs.len(),
+        room_ids = ?ids,
+        "updated verification room subscriptions"
+    );
     *subscribed = desired;
 }
 

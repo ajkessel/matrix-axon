@@ -699,6 +699,29 @@ fn emoji_pairs(sas: &SasVerification) -> Option<Vec<(String, String)>> {
     })
 }
 
+fn request_state_label(state: &VerificationRequestState) -> &'static str {
+    match state {
+        VerificationRequestState::Created { .. } => "created",
+        VerificationRequestState::Requested { .. } => "requested",
+        VerificationRequestState::Ready { .. } => "ready",
+        VerificationRequestState::Transitioned { .. } => "transitioned",
+        VerificationRequestState::Done => "done",
+        VerificationRequestState::Cancelled(_) => "cancelled",
+    }
+}
+
+fn sas_state_label(state: &SasState) -> &'static str {
+    match state {
+        SasState::Created { .. } => "created",
+        SasState::Started { .. } => "started",
+        SasState::Accepted { .. } => "accepted",
+        SasState::KeysExchanged { .. } => "keys_exchanged",
+        SasState::Confirmed => "confirmed",
+        SasState::Done { .. } => "done",
+        SasState::Cancelled(_) => "cancelled",
+    }
+}
+
 /// Re-derive a flow's replayable state from its live SDK object, or its retained
 /// terminal outcome.
 fn snapshot(entry: &FlowEntry) -> FlowState {
@@ -907,8 +930,8 @@ pub(crate) async fn on_incoming_request(
             request,
             FlowDriverCtx {
                 account_id: ctx.account_id,
-                target_user_id,
-                target_device_id: Some(target_device_id),
+                target_user_id: target_user_id.clone(),
+                target_device_id: Some(target_device_id.clone()),
                 registry: ctx.registry.clone(),
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
@@ -919,6 +942,14 @@ pub(crate) async fn on_incoming_request(
             .expect("just inserted above")
             .driver_handle = Some(handle);
     }
+
+    tracing::info!(
+        account_id = %ctx.account_id,
+        flow_id = %key.1,
+        target_user_id = %target_user_id,
+        target_device_id = %target_device_id,
+        "registered incoming to-device verification request"
+    );
 }
 
 /// Event handler for peer-initiated in-room `m.key.verification.request` messages.
@@ -1058,8 +1089,8 @@ pub(crate) async fn on_incoming_room_request(
             request,
             FlowDriverCtx {
                 account_id: ctx.account_id,
-                target_user_id,
-                target_device_id,
+                target_user_id: target_user_id.clone(),
+                target_device_id: target_device_id.clone(),
                 registry: ctx.registry.clone(),
                 live_tx: ctx.live_tx.clone(),
                 rooms: ctx.rooms.clone(),
@@ -1070,6 +1101,16 @@ pub(crate) async fn on_incoming_room_request(
             .expect("just inserted above")
             .driver_handle = Some(handle);
     }
+
+    tracing::info!(
+        account_id = %ctx.account_id,
+        %room_id,
+        %event_id,
+        flow_id = %registry_key.1,
+        target_user_id = %target_user_id,
+        target_device_id = ?target_device_id,
+        "registered incoming room verification request"
+    );
 
     // The request resolved and a flow is now registered, so commit the side effects
     // we deliberately deferred past the transient-miss window:
@@ -1099,10 +1140,19 @@ struct FlowDriverCtx {
 /// Drive one verification request from its current state through to a
 /// `SasVerification`, then hand off to [`drive_sas`]. Publishes the
 /// `verification.requested` frame, accepts a peer-initiated request, and starts
-/// SAS once ready for a request we initiated.
+/// SAS once ready.
 async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
     let flow_id = request.flow_id().to_owned();
     let key = (ctx.account_id, flow_id.clone());
+
+    tracing::debug!(
+        account_id = %ctx.account_id,
+        %flow_id,
+        target_user_id = %ctx.target_user_id,
+        target_device_id = ?ctx.target_device_id,
+        we_started = request.we_started(),
+        "driving verification request"
+    );
 
     publish(
         &ctx.live_tx,
@@ -1116,15 +1166,27 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
         None,
     );
 
-    // A peer-initiated request must be accepted to advance; for one we initiated
-    // we wait for the peer to be ready instead. Accept advertising SAS only — never
-    // the SDK default set (which includes QR) — so the peer can't steer the flow to
-    // a method this driver doesn't implement.
+    // Subscribe before sending our accept/start response. Some peers answer
+    // quickly enough that creating the stream after the send can miss the
+    // transition into ready/SAS and leave the driver waiting forever while the
+    // snapshot endpoint reports the flow as ready.
+    let changes = request.changes();
+    pin_mut!(changes);
+
+    // A peer-initiated request must be accepted to advance. Advertise SAS only —
+    // never the SDK default set (which includes QR) — so the peer can't steer the
+    // flow to a method this driver doesn't implement.
     if !request.we_started() {
         match tokio::time::timeout(DRIVER_SEND_TIMEOUT, request.accept_with_methods(sas_only()))
             .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    "accepted incoming verification request"
+                );
+            }
             Ok(Err(err)) => {
                 tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept verification request");
             }
@@ -1148,96 +1210,183 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
         }
     }
 
-    let changes = request.changes();
-    pin_mut!(changes);
+    let mut pending_state = Some(request.state());
 
     let sas = loop {
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                // Torn down mid-flight (typically the account logging out). Best-
-                // effort cancel upstream, then drop the entry — it has no terminal
-                // outcome to retain, and leaving it would leak (the TTL sweep only
-                // reclaims entries with `terminal_at` set).
-                cancel_verification_best_effort(
-                    ctx.account_id,
-                    &flow_id,
-                    "request",
-                    request.cancel(),
-                )
-                .await;
-                remove_flow(&ctx.registry, &key);
-                return;
-            }
-            next = changes.next() => match next {
+        let state = if let Some(state) = pending_state.take() {
+            state
+        } else {
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => {
+                    // Torn down mid-flight (typically the account logging out). Best-
+                    // effort cancel upstream, then drop the entry — it has no terminal
+                    // outcome to retain, and leaving it would leak (the TTL sweep only
+                    // reclaims entries with `terminal_at` set).
+                    cancel_verification_best_effort(
+                        ctx.account_id,
+                        &flow_id,
+                        "request",
+                        request.cancel(),
+                    )
+                    .await;
+                    remove_flow(&ctx.registry, &key);
+                    return;
+                }
+                next = changes.next() => match next {
                 None => {
                     remove_flow(&ctx.registry, &key);
                     return;
                 }
-                Some(state) => match state {
-                    VerificationRequestState::Created { .. }
-                    | VerificationRequestState::Requested { .. } => {}
-                    VerificationRequestState::Ready { .. } => {
-                        // The initiating side starts SAS; the accepting side waits
-                        // for the Transitioned below (avoids both starting at once).
-                        if request.we_started() {
-                            match request.start_sas().await {
-                                Ok(Some(sas)) => break sas,
-                                Ok(None) => {}
-                                Err(err) => tracing::warn!(
-                                    account_id = %ctx.account_id, %flow_id, error = %err,
-                                    "failed to start SAS"
-                                ),
-                            }
-                        }
+                    Some(state) => state,
+                },
+            }
+        };
+
+        match state {
+            VerificationRequestState::Created { .. }
+            | VerificationRequestState::Requested { .. } => {
+                tracing::debug!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    state = request_state_label(&state),
+                    "verification request state changed"
+                );
+            }
+            VerificationRequestState::Ready { .. } => {
+                tracing::debug!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    state = request_state_label(&state),
+                    we_started = request.we_started(),
+                    "verification request state changed"
+                );
+                // Matrix allows either side to move a ready request into a
+                // concrete SAS flow. Waiting for only the requester to send
+                // `m.key.verification.start` deadlocks with clients that expect
+                // the responder to start after advertising `m.sas.v1`.
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    "verification request ready; starting SAS"
+                );
+                match tokio::time::timeout(DRIVER_SEND_TIMEOUT, request.start_sas()).await {
+                    Ok(Ok(Some(sas))) => {
+                        tracing::info!(
+                            account_id = %ctx.account_id,
+                            %flow_id,
+                            "started SAS verification"
+                        );
+                        break sas;
                     }
-                    VerificationRequestState::Transitioned { verification } => {
-                        match verification.sas() {
-                            Some(sas) => break sas,
-                            // QR (or any non-SAS) isn't supported here — cancel.
-                            None => {
-                                cancel_verification_best_effort(
-                                    ctx.account_id,
-                                    &flow_id,
-                                    "request",
-                                    request.cancel(),
-                                )
-                                .await;
-                            }
-                        }
+                    Ok(Ok(None)) => {
+                        tracing::info!(
+                            account_id = %ctx.account_id,
+                            %flow_id,
+                            "request.start_sas returned no SAS object"
+                        );
                     }
-                    VerificationRequestState::Done => {
-                        if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                            ctx.rooms.wake(ctx.account_id);
-                        }
-                        publish(
-                            &ctx.live_tx,
+                    Ok(Err(err)) => tracing::warn!(
+                        account_id = %ctx.account_id, %flow_id, error = %err,
+                        "failed to start SAS"
+                    ),
+                    Err(_) => {
+                        tracing::warn!(
+                            account_id = %ctx.account_id,
+                            %flow_id,
+                            timeout_secs = DRIVER_SEND_TIMEOUT.as_secs(),
+                            "timed out starting SAS"
+                        );
+                        cancel_verification_best_effort(
                             ctx.account_id,
                             &flow_id,
-                            &ctx.target_user_id,
-                            ctx.target_device_id.as_deref(),
-                            VerificationFrameKind::Done, None, None, None,
-                        );
-                        return;
-                    }
-                    VerificationRequestState::Cancelled(info) => {
-                        let reason = info.reason().to_owned();
-                        if mark_terminal(
-                            &ctx.registry, &key,
-                            TerminalOutcome::Cancelled(Some(reason.clone())),
-                        ) {
-                            ctx.rooms.wake(ctx.account_id);
-                        }
-                        publish(
-                            &ctx.live_tx,
-                            ctx.account_id,
-                            &flow_id,
-                            &ctx.target_user_id,
-                            ctx.target_device_id.as_deref(),
-                            VerificationFrameKind::Cancelled, None, None, Some(reason),
-                        );
+                            "request",
+                            request.cancel(),
+                        )
+                        .await;
+                        remove_flow(&ctx.registry, &key);
                         return;
                     }
                 }
+            }
+            VerificationRequestState::Transitioned { verification } => {
+                let sas = verification.sas();
+                tracing::debug!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    state = "transitioned",
+                    has_sas = sas.is_some(),
+                    "verification request state changed"
+                );
+                match sas {
+                    Some(sas) => {
+                        tracing::info!(
+                            account_id = %ctx.account_id,
+                            %flow_id,
+                            "verification transitioned to SAS"
+                        );
+                        break sas;
+                    }
+                    // QR (or any non-SAS) isn't supported here — cancel.
+                    None => {
+                        cancel_verification_best_effort(
+                            ctx.account_id,
+                            &flow_id,
+                            "request",
+                            request.cancel(),
+                        )
+                        .await;
+                    }
+                }
+            }
+            VerificationRequestState::Done => {
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    "verification request completed before SAS"
+                );
+                if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
+                    ctx.rooms.wake(ctx.account_id);
+                }
+                publish(
+                    &ctx.live_tx,
+                    ctx.account_id,
+                    &flow_id,
+                    &ctx.target_user_id,
+                    ctx.target_device_id.as_deref(),
+                    VerificationFrameKind::Done,
+                    None,
+                    None,
+                    None,
+                );
+                return;
+            }
+            VerificationRequestState::Cancelled(info) => {
+                let reason = info.reason().to_owned();
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    reason = %reason,
+                    "verification request cancelled"
+                );
+                if mark_terminal(
+                    &ctx.registry,
+                    &key,
+                    TerminalOutcome::Cancelled(Some(reason.clone())),
+                ) {
+                    ctx.rooms.wake(ctx.account_id);
+                }
+                publish(
+                    &ctx.live_tx,
+                    ctx.account_id,
+                    &flow_id,
+                    &ctx.target_user_id,
+                    ctx.target_device_id.as_deref(),
+                    VerificationFrameKind::Cancelled,
+                    None,
+                    None,
+                    Some(reason),
+                );
+                return;
             }
         }
     };
@@ -1253,7 +1402,14 @@ async fn drive_request(request: VerificationRequest, ctx: FlowDriverCtx) {
         entry.sas = Some(sas.clone());
     }
     match tokio::time::timeout(DRIVER_SEND_TIMEOUT, sas.accept()).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            tracing::debug!(
+                account_id = %ctx.account_id,
+                %flow_id,
+                state = sas_state_label(&sas.state()),
+                "accepted SAS verification"
+            );
+        }
         Ok(Err(err)) => {
             tracing::warn!(account_id = %ctx.account_id, %flow_id, error = %err, "failed to accept SAS");
         }
@@ -1279,71 +1435,114 @@ async fn drive_sas(sas: SasVerification, flow_id: String, ctx: FlowDriverCtx) {
     let key = (ctx.account_id, flow_id.clone());
     let changes = sas.changes();
     pin_mut!(changes);
+    let mut pending_state = Some(sas.state());
 
     loop {
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                // See drive_request: drop the entry rather than leak a non-terminal
-                // one the TTL sweep would never reclaim.
-                cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel())
-                    .await;
-                remove_flow(&ctx.registry, &key);
-                return;
-            }
-            next = changes.next() => match next {
-                None => {
+        let state = if let Some(state) = pending_state.take() {
+            state
+        } else {
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => {
+                    // See drive_request: drop the entry rather than leak a non-terminal
+                    // one the TTL sweep would never reclaim.
+                    cancel_verification_best_effort(ctx.account_id, &flow_id, "sas", sas.cancel())
+                        .await;
                     remove_flow(&ctx.registry, &key);
                     return;
                 }
-                Some(state) => match state {
-                    SasState::Created { .. }
-                    | SasState::Started { .. }
-                    | SasState::Accepted { .. }
-                    | SasState::Confirmed => {}
-                    SasState::KeysExchanged { .. } => {
-                        publish(
-                            &ctx.live_tx,
-                            ctx.account_id,
-                            &flow_id,
-                            &ctx.target_user_id,
-                            ctx.target_device_id.as_deref(),
-                            VerificationFrameKind::Sas,
-                            emoji_pairs(&sas), sas.decimals(), None,
-                        );
-                    }
-                    SasState::Done { .. } => {
-                        if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
-                            ctx.rooms.wake(ctx.account_id);
-                        }
-                        publish(
-                            &ctx.live_tx,
-                            ctx.account_id,
-                            &flow_id,
-                            &ctx.target_user_id,
-                            ctx.target_device_id.as_deref(),
-                            VerificationFrameKind::Done, None, None, None,
-                        );
+                next = changes.next() => match next {
+                    None => {
+                        remove_flow(&ctx.registry, &key);
                         return;
                     }
-                    SasState::Cancelled(info) => {
-                        let reason = info.reason().to_owned();
-                        if mark_terminal(
-                            &ctx.registry, &key,
-                            TerminalOutcome::Cancelled(Some(reason.clone())),
-                        ) {
-                            ctx.rooms.wake(ctx.account_id);
-                        }
-                        publish(
-                            &ctx.live_tx,
-                            ctx.account_id,
-                            &flow_id,
-                            &ctx.target_user_id,
-                            ctx.target_device_id.as_deref(),
-                            VerificationFrameKind::Cancelled, None, None, Some(reason),
-                        );
-                        return;
-                    }
+                    Some(state) => state,
+                },
+            }
+        };
+
+        match state {
+            SasState::Created { .. }
+            | SasState::Started { .. }
+            | SasState::Accepted { .. }
+            | SasState::Confirmed => {
+                tracing::debug!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    state = sas_state_label(&state),
+                    "SAS verification state changed"
+                );
+            }
+            SasState::KeysExchanged { .. } => {
+                let emoji = emoji_pairs(&sas);
+                let decimals = sas.decimals();
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    has_emoji = emoji.as_ref().is_some_and(|items| !items.is_empty()),
+                    has_decimals = decimals.is_some(),
+                    "SAS keys exchanged"
+                );
+                publish(
+                    &ctx.live_tx,
+                    ctx.account_id,
+                    &flow_id,
+                    &ctx.target_user_id,
+                    ctx.target_device_id.as_deref(),
+                    VerificationFrameKind::Sas,
+                    emoji,
+                    decimals,
+                    None,
+                );
+            }
+            SasState::Done { .. } => {
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    "SAS verification completed"
+                );
+                if mark_terminal(&ctx.registry, &key, TerminalOutcome::Done) {
+                    ctx.rooms.wake(ctx.account_id);
                 }
+                publish(
+                    &ctx.live_tx,
+                    ctx.account_id,
+                    &flow_id,
+                    &ctx.target_user_id,
+                    ctx.target_device_id.as_deref(),
+                    VerificationFrameKind::Done,
+                    None,
+                    None,
+                    None,
+                );
+                return;
+            }
+            SasState::Cancelled(info) => {
+                let reason = info.reason().to_owned();
+                tracing::info!(
+                    account_id = %ctx.account_id,
+                    %flow_id,
+                    reason = %reason,
+                    "SAS verification cancelled"
+                );
+                if mark_terminal(
+                    &ctx.registry,
+                    &key,
+                    TerminalOutcome::Cancelled(Some(reason.clone())),
+                ) {
+                    ctx.rooms.wake(ctx.account_id);
+                }
+                publish(
+                    &ctx.live_tx,
+                    ctx.account_id,
+                    &flow_id,
+                    &ctx.target_user_id,
+                    ctx.target_device_id.as_deref(),
+                    VerificationFrameKind::Cancelled,
+                    None,
+                    None,
+                    Some(reason),
+                );
+                return;
             }
         }
     }
@@ -1543,6 +1742,15 @@ impl VerificationEngine {
             (None, None) => return Err(VerifyError::NoTarget),
         };
         let flow_id = request.flow_id().to_owned();
+        tracing::info!(
+            account_id = %account_id,
+            %flow_id,
+            target_user_id = %target_user_id,
+            target_device_id = ?target_device_id,
+            is_room_flow = room_id.is_some(),
+            room_id = ?room_id,
+            "started outgoing verification flow"
+        );
 
         // The driver runs under a child of the engine token (so engine shutdown
         // cascades to it) and is also reachable for cancellation via the registry,
@@ -1647,7 +1855,7 @@ impl VerificationEngine {
         // trust-advancing client op that must not run after teardown has begun.
         // Held across the whole verb, including `sas.confirm()` below.
         let _guard = self.lock_active(account_id).await?;
-        let sas = {
+        let (sas, target_user_id, target_device_id) = {
             let reg = self.registry.lock().expect("flow registry poisoned");
             let entry = reg
                 .get(&(account_id, flow_id.to_owned()))
@@ -1659,10 +1867,14 @@ impl VerificationEngine {
                 }
                 None => {}
             }
-            entry
-                .sas
-                .clone()
-                .ok_or_else(|| VerifyError::WrongStage("SAS not yet started".to_owned()))?
+            (
+                entry
+                    .sas
+                    .clone()
+                    .ok_or_else(|| VerifyError::WrongStage("SAS not yet started".to_owned()))?,
+                entry.target_user_id.clone(),
+                entry.target_device_id.clone(),
+            )
         };
 
         // Presence of the SAS object does not mean it can be confirmed: the driver
@@ -1685,13 +1897,67 @@ impl VerificationEngine {
         if let Err(err) = sas.confirm().await {
             // The flow may have raced to terminal between the lock release above and
             // this call: a done flow is idempotent success, a cancelled one is not.
+            // This intentionally mirrors the `drive_sas` Done handler. Both clones
+            // share one SDK state machine, so a completion can publish Done from
+            // both paths; that duplicate frame is accepted to avoid making either
+            // path stale when the other misses a race.
             if sas.is_done() {
+                tracing::info!(
+                    account_id = %account_id,
+                    %flow_id,
+                    "SAS verification completed"
+                );
+                let key = (account_id, flow_id.to_owned());
+                if mark_terminal(&self.registry, &key, TerminalOutcome::Done) {
+                    self.rooms.wake(account_id);
+                }
+                publish(
+                    &self.live_tx,
+                    account_id,
+                    flow_id,
+                    &target_user_id,
+                    target_device_id.as_deref(),
+                    VerificationFrameKind::Done,
+                    None,
+                    None,
+                    None,
+                );
                 return Ok(());
             }
             if sas.is_cancelled() {
                 return Err(cancelled_err(None));
             }
             return Err(VerifyError::Upstream(err.to_string()));
+        }
+        tracing::info!(
+            account_id = %account_id,
+            %flow_id,
+            state = sas_state_label(&sas.state()),
+            "SAS verification confirmed locally"
+        );
+        // See the race comment above: `drive_sas` may also observe this Done
+        // transition and publish the same terminal frame.
+        if sas.is_done() {
+            tracing::info!(
+                account_id = %account_id,
+                %flow_id,
+                "SAS verification completed"
+            );
+            let key = (account_id, flow_id.to_owned());
+            if mark_terminal(&self.registry, &key, TerminalOutcome::Done) {
+                self.rooms.wake(account_id);
+            }
+            publish(
+                &self.live_tx,
+                account_id,
+                flow_id,
+                &target_user_id,
+                target_device_id.as_deref(),
+                VerificationFrameKind::Done,
+                None,
+                None,
+                None,
+            );
         }
         Ok(())
     }
