@@ -274,11 +274,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // than inside `AppState`/`router` — a failure here is fatal at boot,
     // consistent with the search index / media cache above.
     let oauth = if config.oauth.enabled {
-        Some(
-            build_oauth_runtime(&config.oauth)
-                .await
-                .context("configuring oauth")?,
-        )
+        let runtime = build_oauth_runtime(&config.oauth)
+            .await
+            .context("configuring oauth")?;
+        axon_api::spawn_oauth_rate_limit_sweeper(runtime.clone());
+        Some(runtime)
     } else {
         tracing::info!("oauth disabled (oauth.enabled = false); /v1/oauth/* will 404");
         None

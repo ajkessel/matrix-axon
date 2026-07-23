@@ -11,9 +11,19 @@
 //! In-process only (a `governor` keyed limiter, not shared across axon
 //! instances) — acceptable for a single-process personal server; a future
 //! multi-instance deployment would need this centralized.
+//!
+//! Both buckets are keyed stores that grow one entry per distinct key/IP
+//! ever seen and never evict on their own (GH #285): [`spawn_sweeper`]
+//! periodically reclaims idle entries with `retain_recent()` *and* releases
+//! the backing store's spare capacity with `shrink_to_fit()` — the former
+//! alone doesn't shrink the underlying `DashMap`'s allocation, so a one-time
+//! high-cardinality spray would otherwise leave that allocation resident
+//! forever. `check_key` also hashes its (attacker-controlled) input so a
+//! single request can't pin an oversized key in memory.
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -33,6 +43,12 @@ const PER_IP_PER_MINUTE: u32 = 30;
 /// Requests allowed per `state`/`user_code` value, per minute. Tighter than
 /// the per-IP bucket since a single flow legitimately sees very few requests.
 const PER_KEY_PER_MINUTE: u32 = 10;
+
+/// How often the background sweeper (see [`spawn_sweeper`]) reclaims bucket
+/// entries that have gone idle long enough to have fully refilled. Matches
+/// the per-minute quotas above, so a key/IP that's stopped sending requests
+/// is reclaimed within about a minute of going quiet.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The two independent token buckets guarding `/v1/oauth/*`.
 pub struct OAuthRateLimiter {
@@ -54,10 +70,48 @@ impl OAuthRateLimiter {
     }
 
     /// Check (and consume from) the per-`state`/`user_code` bucket, when the
-    /// request carries one.
+    /// request carries one. `key` is hashed before use, never stored
+    /// verbatim: it's an attacker-chosen value (the `state`/`user_code` query
+    /// param, or a `code`/`refresh_token`/`identity_token` form field) that
+    /// could otherwise pin tens of KiB in the keyed store per request (GH
+    /// #285). Hashing bounds every entry to a fixed-size digest regardless of
+    /// input length.
     fn check_key(&self, key: &str) -> bool {
-        self.per_key.check_key(&key.to_owned()).is_ok()
+        self.per_key.check_key(&axon_core::hash_secret(key)).is_ok()
     }
+
+    /// Drop bucket entries idle long enough to have fully refilled, then
+    /// shrink the backing store — the only way `per_ip`/`per_key` stop
+    /// growing without bound, since `governor`'s keyed stores never evict on
+    /// their own (GH #285). `retain_recent()` alone isn't enough: the
+    /// `DashMap` behind each store doesn't release shard capacity just
+    /// because entries were removed from it (same as `Vec::retain` never
+    /// shrinking `capacity`), so a one-time high-cardinality spray would
+    /// leave the attack-time allocation resident forever even with entries
+    /// gone. `shrink_to_fit()` is what actually gives that memory back.
+    /// Called periodically by [`spawn_sweeper`].
+    fn sweep(&self) {
+        self.per_ip.retain_recent();
+        self.per_ip.shrink_to_fit();
+        self.per_key.retain_recent();
+        self.per_key.shrink_to_fit();
+    }
+}
+
+/// Spawn the background task that periodically sweeps both of `runtime`'s
+/// rate-limit buckets (see [`OAuthRateLimiter::sweep`]). Not part of the
+/// server's graceful-shutdown sequence — like `spawn_fd_diagnostics` in
+/// `axon-server`, this is pure in-process cache maintenance with no state to
+/// drain, so it's fine for it to simply stop when the process exits.
+pub fn spawn_sweeper(runtime: Arc<OAuthRuntime>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+        tick.tick().await; // first tick fires immediately; skip it, we just booted
+        loop {
+            tick.tick().await;
+            runtime.rate_limiter.sweep();
+        }
+    });
 }
 
 impl Default for OAuthRateLimiter {
@@ -187,6 +241,58 @@ mod tests {
         }
         // b's bucket is untouched by a's exhaustion.
         assert!(limiter.check_ip(b));
+    }
+
+    #[test]
+    fn check_key_bucket_exhausts_after_its_quota() {
+        let limiter = OAuthRateLimiter::new();
+        for _ in 0..PER_KEY_PER_MINUTE {
+            assert!(limiter.check_key("some-state-value"));
+        }
+        assert!(
+            !limiter.check_key("some-state-value"),
+            "quota should be exhausted"
+        );
+    }
+
+    #[test]
+    fn distinct_keys_have_independent_buckets() {
+        let limiter = OAuthRateLimiter::new();
+        for _ in 0..PER_KEY_PER_MINUTE {
+            assert!(limiter.check_key("state-a"));
+        }
+        // "state-b" hashes to a different bucket, untouched by "state-a"'s
+        // exhaustion.
+        assert!(limiter.check_key("state-b"));
+    }
+
+    #[test]
+    fn oversized_key_does_not_panic_or_bypass_hashing() {
+        // GH #285: an attacker-chosen key up to MAX_KEY_PEEK_BYTES long must
+        // still be hashed down to a fixed-size bucket entry, not stored
+        // verbatim.
+        let limiter = OAuthRateLimiter::new();
+        let huge_key = "x".repeat(MAX_KEY_PEEK_BYTES);
+        assert!(limiter.check_key(&huge_key));
+    }
+
+    #[test]
+    fn sweep_reclaims_bucket_entries() {
+        let limiter = OAuthRateLimiter::new();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        limiter.check_ip(ip);
+        limiter.check_key("some-state-value");
+        assert_eq!(limiter.per_ip.len(), 1);
+        assert_eq!(limiter.per_key.len(), 1);
+
+        // retain_recent() only reclaims entries whose bucket has fully
+        // refilled, which real time hasn't elapsed for yet here, and
+        // shrink_to_fit() never changes entry count — this just confirms
+        // sweep() runs without panicking or removing live entries
+        // prematurely.
+        limiter.sweep();
+        assert_eq!(limiter.per_ip.len(), 1);
+        assert_eq!(limiter.per_key.len(), 1);
     }
 
     #[test]
