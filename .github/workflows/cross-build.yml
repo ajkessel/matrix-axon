@@ -15,6 +15,15 @@ name: Cross-platform build
 # and sqlx's Postgres driver is compiled in directly (no libpq), which is what
 # makes cross-compiling the server crates at all viable without a matching
 # native toolchain per platform.
+#
+# Each of the four build targets above (windows, linux, macos-intel,
+# macos-silicon) uploads three zips — axon-tui-<target> (client only),
+# axon-server-<target> (server only), and axon-<target> (both binaries) — so
+# a release ends up with 12 binary assets plus GitHub's two auto-generated
+# source archives. We intentionally ship per-arch macOS binaries rather than
+# a lipo'd universal binary: it matches how the Windows/Linux zips are
+# already one-arch-per-file, and avoids a fat binary silently masking a
+# broken osxcross target for one architecture.
 
 on:
   push:
@@ -184,9 +193,27 @@ jobs:
         run: CARGO_TARGET_DIR=target/cross/windows cross build --workspace --target x86_64-pc-windows-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/axon-windows.zip target/cross/windows/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon.exe target/cross/windows/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}/axon-tui.exe build/THIRDPARTY LICENSE.md
+        run: |
+          BIN=target/cross/windows/x86_64-pc-windows-gnu/${{ env.PROFILE_DIR }}
+          zip -j target/axon-tui-windows.zip $BIN/axon-tui.exe build/THIRDPARTY LICENSE.md
+          zip -j target/axon-server-windows.zip $BIN/axon.exe build/THIRDPARTY LICENSE.md
+          zip -j target/axon-windows.zip $BIN/axon.exe $BIN/axon-tui.exe build/THIRDPARTY LICENSE.md
 
-      - name: Upload binaries as artifacts
+      - name: Upload axon-tui artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-tui-windows.zip
+          path: target/axon-tui-windows.zip
+          if-no-files-found: error
+
+      - name: Upload axon-server artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-server-windows.zip
+          path: target/axon-server-windows.zip
+          if-no-files-found: error
+
+      - name: Upload combined artifact
         uses: actions/upload-artifact@v7
         with:
           name: axon-windows.zip
@@ -199,7 +226,11 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+        include:
+          - target: x86_64-apple-darwin
+            arch: intel
+          - target: aarch64-apple-darwin
+            arch: silicon
     runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
     if: ${{ github.event.inputs.macos != 'false' }}
     steps:
@@ -261,13 +292,31 @@ jobs:
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
       - name: Zip binaries
-        run: zip -j target/axon-macos.zip target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon target/${{ matrix.target }}/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
+        run: |
+          BIN=target/${{ matrix.target }}/${{ env.PROFILE_DIR }}
+          zip -j target/axon-tui-macos-${{ matrix.arch }}.zip $BIN/axon-tui build/THIRDPARTY LICENSE.md
+          zip -j target/axon-server-macos-${{ matrix.arch }}.zip $BIN/axon build/THIRDPARTY LICENSE.md
+          zip -j target/axon-macos-${{ matrix.arch }}.zip $BIN/axon $BIN/axon-tui build/THIRDPARTY LICENSE.md
 
-      - name: Upload binaries as artifacts
+      - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7
         with:
-          name: axon-macos.zip
-          path: target/axon-macos.zip
+          name: axon-tui-macos-${{ matrix.arch }}.zip
+          path: target/axon-tui-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+      - name: Upload axon-server artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-server-macos-${{ matrix.arch }}.zip
+          path: target/axon-server-macos-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-macos-${{ matrix.arch }}.zip
+          path: target/axon-macos-${{ matrix.arch }}.zip
           if-no-files-found: error
 
   linux:
@@ -310,7 +359,7 @@ jobs:
 
       - name: Build workspace (native Linux)
         if: runner.os == 'linux'
-        run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
+        run: CARGO_TARGET_DIR=target/cross/linux cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
 
       - name: Install cross
         if: runner.os != 'linux'
@@ -320,9 +369,27 @@ jobs:
         if: runner.os != 'linux'
         run: CARGO_TARGET_DIR=target/cross/linux cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
       - name: Zip binaries
-        run: zip -j target/axon-linux.zip target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}/axon-tui build/THIRDPARTY LICENSE.md
+        run: |
+          BIN=target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
+          zip -j target/axon-tui-linux.zip $BIN/axon-tui build/THIRDPARTY LICENSE.md
+          zip -j target/axon-server-linux.zip $BIN/axon build/THIRDPARTY LICENSE.md
+          zip -j target/axon-linux.zip $BIN/axon $BIN/axon-tui build/THIRDPARTY LICENSE.md
 
-      - name: Upload binaries as artifacts
+      - name: Upload axon-tui artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-tui-linux.zip
+          path: target/axon-tui-linux.zip
+          if-no-files-found: error
+
+      - name: Upload axon-server artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: axon-server-linux.zip
+          path: target/axon-server-linux.zip
+          if-no-files-found: error
+
+      - name: Upload combined artifact
         uses: actions/upload-artifact@v7
         with:
           name: axon-linux.zip
