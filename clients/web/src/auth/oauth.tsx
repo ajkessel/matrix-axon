@@ -205,10 +205,7 @@ export function createOAuthAuthProvider({
       const codeVerifier = randomBase64Url(32)
       const codeChallenge = await sha256Base64Url(codeVerifier)
       const state = randomBase64Url(32)
-      const redirectUri = new URL(
-        '/oauth/callback',
-        redirectUriBase,
-      ).toString()
+      const redirectUri = new URL('/oauth/callback', redirectUriBase).toString()
       const storageMode = persistence.rememberMe.value
         ? 'persistent'
         : 'session'
