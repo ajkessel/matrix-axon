@@ -2,6 +2,8 @@ export const SLASH_COMMAND = {
   help: '/help',
   html: '/html',
   jump: '/jump',
+  join: '/join',
+  knock: '/knock',
   leave: '/leave',
   literal: '/literal',
   pin: '/pin',
@@ -74,6 +76,16 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
     aliases: ['/switch'],
     usage: '/room <room>',
     description: 'Switch rooms by name, alias, ID, or number',
+  },
+  {
+    name: SLASH_COMMAND.join,
+    usage: '/join <room-or-matrix-link>',
+    description: 'Join a room by ID, alias, or Matrix link',
+  },
+  {
+    name: SLASH_COMMAND.knock,
+    usage: '/knock <room-or-matrix-link> [reason]',
+    description: 'Request access to a knockable room',
   },
   {
     name: SLASH_COMMAND.leave,

@@ -2,7 +2,7 @@
 
 A human-centric, cross-silo tracker for one recurring problem: Axon ships a
 server capability, one client adopts it, and there is no single place that
-says whether the *other* clients ever caught up. This surfaced concretely in
+says whether the _other_ clients ever caught up. This surfaced concretely in
 review of issue #279 (Adam's comment): TUI had no tracking against web once
 web existed, web now reads ephemeral indicators (typing, receipts) that TUI
 still doesn't, and interactive SAS device verification shipped a full UI in
@@ -10,8 +10,8 @@ TUI but never got one in web.
 
 This doc is **not** auto-generated and does not replace `AGENTS.md`'s
 "Current state" (server-side landing history) or the ADR log (design
-decisions). It answers one question per row: *for a capability the server
-already exposes, which clients actually surface it to a user?*
+decisions). It answers one question per row: _for a capability the server
+already exposes, which clients actually surface it to a user?_
 
 ## How to maintain this
 
@@ -50,7 +50,7 @@ yet)
 | Interactive SAS device verification | Done (7a-6, ADR 0027/0028) | Done — full emoji-modal flow | **Gap** — `AccountsPage.tsx` only mentions SAS in a placeholder label; no verification flow implemented | Not started | Verified by grep, 2026-07-17 |
 | Device-list / picker endpoint | Done (M16, ADR 0060) | **Gap** — no picker UI; verification still requires a blind device id | **Gap** — endpoint appears only in generated `schema.d.ts`; no picker component consumes it | Not started | The exact gap M16's own note anticipated |
 | Room membership (leave/forget/invite/kick/ban/unban) | Done (M19b, ADR 0068) — `POST .../rooms/{room_id}/{leave,forget,invite,kick,ban,unban}` | Not started | Partial (M19-W1) — `/leave`, `/part`, and `/forget`; member-list invite/kick/ban/unban remains | Not started | Server-only for moderation actions; web M19-W5 will add invite/kick/ban/unban |
-| Room entry (join/knock/create) | Done (M19c, ADR 0068) — `POST .../rooms/{join,knock,dm}` and `POST .../rooms` | Not started | Not started | Not started | Server-only; client UI (join-room dialog, create-room flow) is separate follow-up work |
+| Room entry (join/knock/create) | Done (M19c, ADR 0068) — `POST .../rooms/{join,knock,dm}` and `POST .../rooms` | Not started | Partial (M19-W2) — `/join`, `/knock`, Matrix room-link interception, and opt-in browser `matrix:` handler; create-room/DM remains | Not started | Web W3 adds directory join-from-result; W4 adds create-room/DM |
 | Room settings (name/topic/avatar/tags) | Done (M19d, ADR 0068) — `PUT .../rooms/{room_id}/{name,topic}`, `PUT/DELETE .../rooms/{room_id}/avatar`, and `PUT/DELETE .../rooms/{room_id}/tags/{tag}` | Not started | Not started | Not started | Server-only; client UI (room settings panel, tag/favorite toggle) is separate follow-up work. `tags` writes `m.tag` room account data, not a state event |
 | Power levels | Done (M19e, ADR 0068) — `PUT/GET .../rooms/{room_id}/power_levels` | Not started | Not started | Not started | Server-only; client UI (power-levels editor, self-demotion confirmation) is separate follow-up work. Write merges role thresholds and per-user levels into one `m.room.power_levels` event; rejects a change that would strand the caller below the level needed to self-correct unless `acknowledge_self_demotion` is set |
 | Account actions (profile/ignore/directory search) | Done (M19f, ADR 0068) — `PUT .../profile/display_name`, `PUT/DELETE .../profile/avatar`, `GET .../users/{user_id}/profile`, `PUT/DELETE .../users/{user_id}/ignore`, `GET .../directory/public_rooms` | Not started | Not started | Not started | Server-only; client UI (profile editor, ignore-list management, directory search) is separate follow-up work. `public_rooms` is a paginated read, not a mutation like the other four |

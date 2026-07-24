@@ -13,6 +13,8 @@ describe('slash command aliases', () => {
     expect(canonicalSlashCommandName('/ut')).toBe(SLASH_COMMAND.unreadthreads)
     expect(canonicalSlashCommandName('/rooms')).toBe(SLASH_COMMAND.refresh)
     expect(canonicalSlashCommandName('/part')).toBe(SLASH_COMMAND.leave)
+    expect(canonicalSlashCommandName('/join')).toBe(SLASH_COMMAND.join)
+    expect(canonicalSlashCommandName('/knock')).toBe(SLASH_COMMAND.knock)
   })
 
   it('returns command specs for canonical names and aliases', () => {
@@ -20,6 +22,12 @@ describe('slash command aliases', () => {
     expect(slashCommandSpecForInput('/switch')?.name).toBe(SLASH_COMMAND.room)
     expect(slashCommandSpecForInput('/+')?.name).toBe(SLASH_COMMAND.react)
     expect(slashCommandSpecForInput('/part')?.name).toBe(SLASH_COMMAND.leave)
+    expect(slashCommandSpecForInput('/join')?.usage).toBe(
+      '/join <room-or-matrix-link>',
+    )
+    expect(slashCommandSpecForInput('/knock')?.usage).toBe(
+      '/knock <room-or-matrix-link> [reason]',
+    )
     expect(slashCommandSpecForInput('/missing')).toBeUndefined()
   })
 })

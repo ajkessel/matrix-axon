@@ -9,7 +9,12 @@ interface MatrixHtmlRenderContext {
   resolveRoomLink?: (
     href: string,
     label: string,
-  ) => { href: string; label: string; isEventLink: boolean } | null
+  ) => {
+    href: string
+    label: string
+    isEventLink: boolean
+    action: 'open' | 'join'
+  } | null
 }
 
 /**
@@ -107,6 +112,8 @@ const KNOWN_DISPLAY_LINK_SCHEMES = new Set([
   'matrix',
   'magnet',
 ])
+const ALLOWED_URI_REGEXP =
+  /^(?:(?:https?|mailto|ftp|tel|callto|sms|cid|xmpp|matrix|magnet):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i
 
 let configured = false
 
@@ -149,6 +156,7 @@ export function sanitizeOutgoingHtml(html: string): string {
     ALLOWED_ATTR,
     FORBID_CONTENTS: ['mx-reply', 'style', 'script'],
     ALLOW_DATA_ATTR: false,
+    ALLOWED_URI_REGEXP,
   })
 }
 
@@ -187,6 +195,7 @@ export function renderMatrixHtml(
       'data-mxc',
     ],
     RETURN_DOM_FRAGMENT: true,
+    ALLOWED_URI_REGEXP,
   })
 
   const scratch = document.createElement('div')
@@ -262,16 +271,8 @@ export function renderMatrixHtml(
       continue
     }
     if (isRoomPillLink(el)) {
-      el.setAttribute(
-        'class',
-        el.classList.contains('event-pill')
-          ? 'room-pill event-pill'
-          : 'room-pill',
-      )
-      el.setAttribute(
-        'title',
-        isEventPillLink(el) ? 'Jump to message' : 'Jump to room',
-      )
+      el.setAttribute('class', roomPillClass(false, isEventPillLink(el)))
+      el.setAttribute('title', roomPillTitle(false, isEventPillLink(el)))
       continue
     }
     if (spoilers.has(el)) {
@@ -285,6 +286,10 @@ export function renderMatrixHtml(
   // bodies and expects receivers to linkify) become anchors; text inside
   // a/code/pre is left alone.
   linkifyDomTree(scratch)
+  // Intentional second pass: the class-strip loop above removes sender-owned
+  // app classes, including any `room-pill join-pill` on non-local matrix:
+  // anchors. After linkifying bare matrix: text, re-resolve every Matrix link
+  // so known-room pills and unknown-room join pills are app-authored again.
   rewriteMatrixToLinks(scratch, context)
   markDangerousLinks(scratch)
 
@@ -358,17 +363,30 @@ function rewriteMatrixToLinks(
       el.setAttribute('href', roomLink.href)
       el.setAttribute(
         'class',
-        roomLink.isEventLink ? 'room-pill event-pill' : 'room-pill',
+        roomPillClass(roomLink.action === 'join', roomLink.isEventLink),
       )
       el.setAttribute(
         'title',
-        roomLink.isEventLink ? 'Jump to message' : 'Jump to room',
+        roomPillTitle(roomLink.action === 'join', roomLink.isEventLink),
       )
       el.removeAttribute('target')
       el.removeAttribute('rel')
       el.textContent = roomLink.label
     }
   }
+}
+
+function roomPillClass(join: boolean, event: boolean): string {
+  return ['room-pill', join ? 'join-pill' : '', event ? 'event-pill' : '']
+    .filter((part) => part !== '')
+    .join(' ')
+}
+
+function roomPillTitle(join: boolean, event: boolean): string {
+  if (join) {
+    return event ? 'Join room and jump to message' : 'Join room'
+  }
+  return event ? 'Open existing room at this message' : 'Open existing room'
 }
 
 function isMentionPillLink(el: Element): boolean {

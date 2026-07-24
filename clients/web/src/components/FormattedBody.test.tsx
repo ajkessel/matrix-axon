@@ -107,7 +107,28 @@ describe('FormattedBody plain-text linkification', () => {
     expect(hrefs).toEqual(['https://one.example', 'http://two.example'])
   })
 
-  it('does not linkify non-http schemes or plain text', () => {
+  it.each([
+    ['matrix:r/ops%3Aexample.org?via=example.org', 'Join #ops:example.org'],
+    ['matrix:r/a:bostoncoop.net', 'Join #a:bostoncoop.net'],
+    ['matrix:room/a:bostoncoop.net', 'Join #a:bostoncoop.net'],
+  ])(
+    'renders unknown matrix: room URI %s as a join pill in plain text',
+    (href, label) => {
+      const { container } = renderBody({
+        body: `join ${href}`,
+        content: null,
+      })
+      const anchor = container.querySelector('a')!
+      expect(anchor.className).toBe('room-pill join-pill')
+      expect(anchor.getAttribute('href')).toBe(href)
+      expect(anchor.getAttribute('target')).toBeNull()
+      expect(anchor.getAttribute('rel')).toBeNull()
+      expect(anchor.getAttribute('title')).toBe('Join room')
+      expect(anchor.textContent).toBe(label)
+    },
+  )
+
+  it('does not linkify unsupported schemes or plain text', () => {
     const { container } = renderBody({
       body: 'javascript:alert(1) and ftp://x and words',
       content: null,
@@ -223,7 +244,33 @@ describe('FormattedBody plain-text linkification', () => {
     expect(anchor.className).toBe('room-pill')
     expect(anchor.getAttribute('href')).toBe(`/${ACCOUNT}/rooms/!ops%3Ahs`)
     expect(anchor.getAttribute('target')).toBeNull()
-    expect(anchor.getAttribute('title')).toBe('Jump to room')
+    expect(anchor.getAttribute('title')).toBe('Open existing room')
+    expect(anchor.textContent).toBe('Ops')
+  })
+
+  it('turns known matrix:room URIs in plain text into local room pills', async () => {
+    const services = await servicesWithRooms([
+      room({
+        room_id: '!ops:bostoncoop.net',
+        name: 'Ops',
+        canonical_alias: '#a:bostoncoop.net',
+      }),
+    ])
+    const { container } = renderBody(
+      {
+        body: 'visit matrix:room/a:bostoncoop.net',
+        content: null,
+      },
+      services,
+    )
+
+    const anchor = container.querySelector('a')!
+    expect(anchor.className).toBe('room-pill')
+    expect(anchor.getAttribute('href')).toBe(
+      `/${ACCOUNT}/rooms/!ops%3Abostoncoop.net`,
+    )
+    expect(anchor.getAttribute('target')).toBeNull()
+    expect(anchor.getAttribute('title')).toBe('Open existing room')
     expect(anchor.textContent).toBe('Ops')
   })
 
@@ -266,8 +313,26 @@ describe('FormattedBody plain-text linkification', () => {
     expect(anchor.className).toBe('room-pill')
     expect(anchor.getAttribute('href')).toBe(`/${ACCOUNT}/rooms/!ops%3Ahs`)
     expect(anchor.getAttribute('target')).toBeNull()
-    expect(anchor.getAttribute('title')).toBe('Jump to room')
+    expect(anchor.getAttribute('title')).toBe('Open existing room')
     expect(anchor.textContent).toBe('#ops:hs')
+  })
+
+  it('turns unknown matrix:room anchors in formatted bodies into join pills', () => {
+    const { container } = renderBody({
+      body: 'fallback',
+      content: {
+        format: 'org.matrix.custom.html',
+        formatted_body:
+          '<a href="matrix:room/a:bostoncoop.net">matrix:room/a:bostoncoop.net</a>',
+      },
+    })
+
+    const anchor = container.querySelector('a')!
+    expect(anchor.className).toBe('room-pill join-pill')
+    expect(anchor.getAttribute('href')).toBe('matrix:room/a:bostoncoop.net')
+    expect(anchor.getAttribute('target')).toBeNull()
+    expect(anchor.getAttribute('title')).toBe('Join room')
+    expect(anchor.textContent).toBe('Join #a:bostoncoop.net')
   })
 
   it('turns Matrix.to room-event anchors into local event deep links', async () => {
@@ -296,7 +361,9 @@ describe('FormattedBody plain-text linkification', () => {
       `/${ACCOUNT}/rooms/!ops%3Ahs?event=%24event`,
     )
     expect(anchor.getAttribute('target')).toBeNull()
-    expect(anchor.getAttribute('title')).toBe('Jump to message')
+    expect(anchor.getAttribute('title')).toBe(
+      'Open existing room at this message',
+    )
   })
 
   it('turns Matrix.to user anchors in formatted bodies into mention pills', () => {
@@ -317,18 +384,20 @@ describe('FormattedBody plain-text linkification', () => {
     expect(anchor.textContent).toBe('@alice:hs')
   })
 
-  it('leaves unknown Matrix.to room URLs external until join exists', () => {
+  it('turns unknown Matrix.to room URLs into join pills', () => {
     const { container } = renderBody({
       body: 'visit https://matrix.to/#/%23unknown%3Ahs',
       content: null,
     })
 
     const anchor = container.querySelector('a')!
-    expect(anchor.className).toBe('')
+    expect(anchor.className).toBe('room-pill join-pill')
     expect(anchor.getAttribute('href')).toBe(
       'https://matrix.to/#/%23unknown%3Ahs',
     )
-    expect(anchor.getAttribute('target')).toBe('_blank')
+    expect(anchor.getAttribute('target')).toBeNull()
+    expect(anchor.getAttribute('title')).toBe('Join room')
+    expect(anchor.textContent).toBe('Join #unknown:hs')
   })
 })
 

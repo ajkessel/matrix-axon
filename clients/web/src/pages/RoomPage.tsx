@@ -35,6 +35,7 @@ import {
   useMessageComposer,
   type ComposerAction,
 } from '../components/use-message-composer'
+import { localRoomHref, parseMatrixRoomReference } from '../matrix-to'
 import { useModalFocus } from '../components/use-modal-focus'
 import { resolveEmojiShortcode, type EmojiEntry } from '../emoji'
 import { SINGLE_PANE_QUERY } from '../layout'
@@ -88,6 +89,8 @@ const REACTION_COMMAND_ALIASES = new Map([
 const LAST_JOINED_MEMBER_LEAVE_CONFIRM =
   'You are the only joined member in this room. If you leave, there may be no one left to invite you back. Leave this room?'
 
+const ROOM_ENTRY_TIMEOUT = /^(join|knock) timed out after \d+s$/i
+
 const SWIPE_RIGHT_MIN_X = 72
 const SWIPE_RIGHT_MAX_Y = 64
 const SWIPE_RIGHT_AXIS_RATIO = 1.4
@@ -135,6 +138,31 @@ function isHorizontallyScrollable(target: EventTarget | null): boolean {
     el = el.parentElement
   }
   return false
+}
+
+function roomEntryPendingMessage(
+  kind: 'join' | 'knock',
+  roomIdOrAlias: string,
+): string {
+  return `${kind === 'join' ? 'Joining' : 'Knocking on'} ${roomIdOrAlias}…`
+}
+
+function roomEntryFailureMessage(message: string): string {
+  if (!ROOM_ENTRY_TIMEOUT.test(message)) {
+    return message
+  }
+  return `${message}. The homeserver did not finish before Axon's room-entry timeout. The room may still appear after sync catches up; for large federated rooms, try a Matrix.to link with via hints or increase sync.room_entry_timeout_secs.`
+}
+
+function serverNameFromUserId(userId: string | null): string | null {
+  if (userId === null) {
+    return null
+  }
+  const colon = userId.indexOf(':')
+  if (colon === -1 || colon === userId.length - 1) {
+    return null
+  }
+  return userId.slice(colon + 1)
 }
 
 /**
@@ -197,6 +225,7 @@ export function RoomPage() {
   const [roomInfoOpen, setRoomInfoOpen] = useState(false)
   const [jumpOpen, setJumpOpen] = useState(false)
   const [dateJumpStart, setDateJumpStart] = useState<number | null>(null)
+  const [roomEntryStatus, setRoomEntryStatus] = useState<string | null>(null)
   const { openUnreadThreads, setJumpAction, setRoomChrome } = useShellActions()
   const heading = useRef<HTMLHeadingElement>(null)
   const swipeStart = useRef<SwipeStart | null>(null)
@@ -650,6 +679,9 @@ export function RoomPage() {
     if (command.kind === 'leave' || command.kind === 'forget') {
       return handleMembershipCommand(command.kind)
     }
+    if (command.kind === 'join' || command.kind === 'knock') {
+      return handleRoomEntryCommand(command)
+    }
     if (command.kind === 'pin' || command.kind === 'unpin') {
       if (command.target === null) {
         const key = roomKey({ account_id: accountId, room_id: roomId })
@@ -770,6 +802,50 @@ export function RoomPage() {
       return false
     }
     location.route('/', true)
+    return true
+  }
+
+  const handleRoomEntryCommand = async (
+    command: Extract<ComposerCommand, { kind: 'join' | 'knock' }>,
+  ): Promise<boolean> => {
+    timeline.error.value = null
+    const reference = parseMatrixRoomReference(command.target, {
+      allowAliasShorthand: true,
+      defaultAliasServerName: serverNameFromUserId(ownUserId),
+    })
+    if (reference === null) {
+      timeline.error.value = `usage: ${slashCommandUsage(
+        command.kind === 'join' ? SLASH_COMMAND.join : SLASH_COMMAND.knock,
+      )}`
+      return false
+    }
+    setRoomEntryStatus(
+      roomEntryPendingMessage(command.kind, reference.roomIdOrAlias),
+    )
+    let result: Awaited<ReturnType<typeof rooms.joinRoom>>
+    try {
+      result = await (command.kind === 'join'
+        ? rooms.joinRoom(
+            accountId,
+            reference.roomIdOrAlias,
+            reference.serverNames,
+          )
+        : rooms.knockRoom(
+            accountId,
+            reference.roomIdOrAlias,
+            command.reason,
+            reference.serverNames,
+          ))
+    } finally {
+      setRoomEntryStatus(null)
+    }
+    if (!result.ok) {
+      timeline.error.value = roomEntryFailureMessage(result.message)
+      return false
+    }
+    if (command.kind === 'join') {
+      location.route(localRoomHref(accountId, result.roomId, reference.eventId))
+    }
     return true
   }
 
@@ -1065,6 +1141,7 @@ export function RoomPage() {
                 ? 'Message'
                 : `Message ${composerLabelTitle}`
             }
+            status={roomEntryStatus ?? undefined}
             banner={composerBanner}
             onEditLast={editLast}
             onFocus={pinLiveTimelineAfterComposerFocus}
@@ -1201,6 +1278,10 @@ function Timeline({
   const lastOwnEventId = useRef<string | null>(null)
   const stickToBottom = useRef(true)
   const resizePinFrame = useRef<number | null>(null)
+  const highlightedCentering = useRef<{
+    eventId: string | null
+    active: boolean
+  }>({ eventId: null, active: false })
 
   const scheduleResizePin = useCallback(() => {
     if (resizePinFrame.current !== null) {
@@ -1223,6 +1304,19 @@ function Timeline({
     },
     [],
   )
+
+  useLayoutEffect(() => {
+    if (highlightedCentering.current.eventId !== highlighted) {
+      highlightedCentering.current = {
+        eventId: highlighted,
+        active: highlighted !== null,
+      }
+    }
+  }, [highlighted])
+
+  const stopHighlightedCentering = useCallback(() => {
+    highlightedCentering.current.active = false
+  }, [])
 
   // Infinite scroll-back: fetch the next older page when the top sentinel
   // becomes visible. jsdom has no IntersectionObserver; the button below is
@@ -1375,7 +1469,8 @@ function Timeline({
     if (
       highlighted === null ||
       revealed.current !== highlighted ||
-      recentered.current === highlighted
+      recentered.current === highlighted ||
+      !highlightedCentering.current.active
     ) {
       return
     }
@@ -1390,8 +1485,9 @@ function Timeline({
   // A highlighted row can be centered correctly and then drift out of view
   // when row heights settle: thread buttons hydrate, images decode, or
   // formatted bodies resize. While a search/deep-link target is active, keep
-  // that target centered on actual timeline layout changes; ordinary rerenders
-  // still do not yank the user back.
+  // that target centered on actual timeline layout changes. Stop after the
+  // user starts scrolling so the deep-link target does not become a sticky
+  // anchor that fights movement toward newer messages.
   useLayoutEffect(() => {
     if (highlighted === null || typeof ResizeObserver === 'undefined') {
       return
@@ -1406,7 +1502,12 @@ function Timeline({
       }
       highlightedResizeFrame.current = requestAnimationFrame(() => {
         highlightedResizeFrame.current = null
-        centerHighlightedRow(scroller.current, highlighted)
+        if (
+          highlightedCentering.current.eventId === highlighted &&
+          highlightedCentering.current.active
+        ) {
+          centerHighlightedRow(scroller.current, highlighted)
+        }
       })
     }
     const observer = new ResizeObserver(scheduleCenter)
@@ -1447,9 +1548,12 @@ function Timeline({
     <div
       class="timeline"
       ref={scroller}
+      onPointerDown={stopHighlightedCentering}
       onScroll={(event) => {
         stickToBottom.current = isScrolledToTimelineBottom(event.currentTarget)
       }}
+      onTouchStart={stopHighlightedCentering}
+      onWheel={stopHighlightedCentering}
     >
       <div ref={topSentinel} />
       {timeline.atStart.value ? (
@@ -1465,7 +1569,7 @@ function Timeline({
         </button>
       )}
       {visible.length === 0 && (
-        <p class="muted">No displayable events on this page.</p>
+        <EmptyTimelineMessage events={timeline.events.value} />
       )}
       <div class="timeline-list-shell">
         <ol class="event-list" ref={eventList}>
@@ -1540,6 +1644,27 @@ function Timeline({
         </>
       )}
     </div>
+  )
+}
+
+function EmptyTimelineMessage({
+  events,
+}: {
+  events: readonly TimelineEvent[]
+}): JSX.Element {
+  if (events.length === 0) {
+    return (
+      <p class="muted">
+        No messages loaded for this room yet. Newly joined large rooms can take
+        a little while to sync history.
+      </p>
+    )
+  }
+  return (
+    <p class="muted">
+      No displayable events on this page. State events, redactions, or
+      diagnostics may be hidden by timeline settings.
+    </p>
   )
 }
 
@@ -1696,7 +1821,9 @@ type ComposerCommand =
   | { kind: 'formatted-message'; message: FormattedMessage }
   | { kind: 'forget' }
   | { kind: 'help' }
+  | { kind: 'join'; target: string }
   | { kind: 'jump'; date: string | null }
+  | { kind: 'knock'; target: string; reason: string | null }
   | { kind: 'leave' }
   | { kind: 'pin'; target: string | null }
   | { kind: 'react'; reaction: string | null }
@@ -1768,6 +1895,18 @@ function parseComposerCommand(body: string): ComposerCommand | null {
       target: args,
     }
   }
+  if (commandName === SLASH_COMMAND.join) {
+    return args === ''
+      ? { kind: 'usage', name: commandName }
+      : { kind: 'join', target: args }
+  }
+  if (commandName === SLASH_COMMAND.knock) {
+    if (args === '') {
+      return { kind: 'usage', name: commandName }
+    }
+    const [target, reason] = splitCommandTarget(args)
+    return { kind: 'knock', target, reason }
+  }
   if (commandName === SLASH_COMMAND.leave) {
     return args === ''
       ? { kind: 'leave' }
@@ -1818,6 +1957,12 @@ function parseSpoilerArg(arg: string): [string | null, string] {
   }
   const reason = split[0].trim()
   return [reason === '' ? null : reason, split.slice(1).join(' | ')]
+}
+
+function splitCommandTarget(arg: string): [string, string | null] {
+  const [target] = arg.split(/\s+/, 1)
+  const rest = arg.slice(target.length).trim()
+  return [target, rest === '' ? null : rest]
 }
 
 function isOnlyJoinedMember(

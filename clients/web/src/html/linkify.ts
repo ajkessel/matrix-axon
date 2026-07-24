@@ -5,8 +5,8 @@
  * text even inside `formatted_body` and rely on the receiver to linkify.
  */
 
-/** A bare http(s) URL; trailing sentence punctuation is trimmed after. */
-const URL_PATTERN = /https?:\/\/[^\s<>"]+/g
+/** A bare http(s) or matrix: URL; trailing sentence punctuation is trimmed after. */
+const URL_PATTERN = /(?:https?:\/\/|matrix:)[^\s<>"]+/g
 /** Punctuation that reads as sentence structure, not part of the URL. */
 const TRAILING_PUNCTUATION = /[.,;:!?)\]'"]+$/
 
@@ -17,7 +17,7 @@ export interface UrlMatch {
   end: number
 }
 
-/** All bare http(s) URLs in `text`, with sentence punctuation trimmed. */
+/** All bare supported URLs in `text`, with sentence punctuation trimmed. */
 export function matchUrls(text: string): UrlMatch[] {
   const matches: UrlMatch[] = []
   for (const match of text.matchAll(URL_PATTERN)) {
@@ -26,7 +26,7 @@ export function matchUrls(text: string): UrlMatch[] {
     if (trimmed !== null) {
       url = url.slice(0, -trimmed[0].length)
     }
-    if (url === 'http://' || url === 'https://') {
+    if (url === 'http://' || url === 'https://' || url === 'matrix:') {
       continue
     }
     matches.push({ url, start: match.index, end: match.index + url.length })

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
+import {
+  cleanup,
+  fireEvent,
+  render,
+  waitFor,
+  within,
+} from '@testing-library/preact'
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 import {
@@ -86,6 +92,239 @@ describe('App', () => {
     await waitFor(() =>
       expect(getByRole('navigation', { name: 'Rooms' })).toBeTruthy(),
     )
+  })
+
+  it('intercepts Matrix.to room links and joins them in the active account', async () => {
+    installRoomPageHandlers()
+    const joinedRoom = '!joined:hs'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: ACCOUNT_DTO.user_id,
+              room_id: joinedRoom,
+              name: 'Joined',
+              canonical_alias: '#joined:hs',
+              topic: null,
+              last_activity_ts: 0,
+            },
+          ],
+        }),
+      ),
+    )
+    const services = testServices()
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'https://matrix.to/#/%23joined%3Ahs?via=hs'
+    anchor.target = '_blank'
+    anchor.textContent = 'Join'
+    document.body.append(anchor)
+
+    fireEvent.click(anchor)
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#joined:hs',
+      server_names: ['hs'],
+    })
+    anchor.remove()
+  })
+
+  it('intercepts matrix:room links and joins them in the active account', async () => {
+    installRoomPageHandlers()
+    const joinedRoom = '!joined:bostoncoop.net'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+    )
+    const services = testServices()
+    render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'matrix:room/a:bostoncoop.net'
+    anchor.target = '_blank'
+    anchor.textContent = 'Join'
+    document.body.append(anchor)
+
+    fireEvent.click(anchor)
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#a:bostoncoop.net',
+      server_names: [],
+    })
+    anchor.remove()
+  })
+
+  it('surfaces clicked Matrix room-link join failures in the shell', async () => {
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'forbidden',
+              message: 'not invited',
+            },
+          },
+          { status: 403 },
+        ),
+      ),
+    )
+    const services = testServices()
+    const { container, findByText } = render(<App services={services} />)
+    await waitFor(() =>
+      expect(services.accounts.accounts.value).toHaveLength(1),
+    )
+    const anchor = document.createElement('a')
+    anchor.href = 'matrix:room/private:hs'
+    anchor.textContent = 'Join'
+    document.body.append(anchor)
+
+    fireEvent.click(anchor)
+
+    expect(
+      await findByText('Could not join #private:hs: not invited'),
+    ).toBeTruthy()
+    expect(container.querySelector('.shell-banner')).toBeTruthy()
+    expect(window.location.pathname).toBe('/')
+    anchor.remove()
+  })
+
+  it('asks before joining a matrix protocol-handler callback room', async () => {
+    installRoomPageHandlers()
+    const joinedRoom = '!joined:hs'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+    )
+    history.replaceState(
+      null,
+      '',
+      '/?matrix=matrix%3Ar%2Fjoined%253Ahs%3Fvia%3Dhs',
+    )
+
+    const { findByRole } = render(<App services={testServices()} />)
+
+    const dialog = await findByRole('dialog', { name: 'Join room?' })
+    expect(dialog.textContent).toContain('#joined:hs')
+    expect(window.location.search).toBe('')
+    expect(joinBody).toBeNull()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Join' }))
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#joined:hs',
+      server_names: ['hs'],
+    })
+    expect(window.location.search).toBe('')
+  })
+
+  it('opens an already-joined matrix protocol-handler callback room without confirmation', async () => {
+    installRoomPageHandlers()
+    const joinedRoom = '!joined:hs'
+    let joined = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: ACCOUNT_DTO.user_id,
+              room_id: joinedRoom,
+              name: 'Joined',
+              canonical_alias: '#joined:hs',
+              topic: null,
+              last_activity_ts: 0,
+            },
+          ],
+        }),
+      ),
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () => {
+        joined = true
+        return HttpResponse.json({ data: { room_id: joinedRoom } })
+      }),
+    )
+    history.replaceState(
+      null,
+      '',
+      '/?matrix=matrix%3Ar%2Fjoined%253Ahs%3Fvia%3Dhs',
+    )
+
+    const { queryByRole } = render(<App services={testServices()} />)
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    expect(queryByRole('dialog', { name: 'Join room?' })).toBeNull()
+    expect(joined).toBe(false)
+    expect(window.location.search).toBe('')
+  })
+
+  it('cancels a matrix protocol-handler callback without joining', async () => {
+    let joined = false
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () => {
+        joined = true
+        return HttpResponse.json({ data: { room_id: '!joined:hs' } })
+      }),
+    )
+    history.replaceState(null, '', '/?matrix=matrix%3Ar%2Fjoined%253Ahs')
+
+    const { findByRole, queryByRole } = render(
+      <App services={testServices()} />,
+    )
+
+    const dialog = await findByRole('dialog', { name: 'Join room?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() =>
+      expect(queryByRole('dialog', { name: 'Join room?' })).toBeNull(),
+    )
+    expect(joined).toBe(false)
+    expect(window.location.pathname).toBe('/')
+    expect(window.location.search).toBe('')
   })
 
   it('opens the unread-thread drawer from the topbar count', async () => {
@@ -317,6 +556,29 @@ describe('layoutMode (ADR 0062)', () => {
     expect(layoutMode(path)).toBe(mode)
   })
 })
+
+function installRoomPageHandlers(): void {
+  server.use(
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/timeline`,
+      () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+      () => HttpResponse.json({ data: [] }),
+    ),
+    http.get(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
+      HttpResponse.json({ data: { namespace: 'drafts', entries: {} } }),
+    ),
+    http.put(`${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`, () =>
+      HttpResponse.json({ data: { updated_at: '2026-07-23T12:00:00Z' } }),
+    ),
+  )
+}
 
 describe('shell layout (ADR 0062)', () => {
   const shellBody = (container: Element) =>

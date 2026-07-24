@@ -21,6 +21,7 @@ describe('createSettingsStore', () => {
       hideRedactedEvents: false,
       previewRoom: true,
       messageComposerHeight: null,
+      matrixProtocolHandler: false,
       recentReactions: [],
       developerMode: false,
     })

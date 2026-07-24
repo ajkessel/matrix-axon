@@ -105,6 +105,8 @@ function roomsStub() {
     },
     leaveRoom: () => Promise.resolve({ ok: true as const }),
     forgetRoom: () => Promise.resolve({ ok: true as const }),
+    joinRoom: () => Promise.resolve({ ok: true as const, roomId: ROOM }),
+    knockRoom: () => Promise.resolve({ ok: true as const, roomId: ROOM }),
     preview: () => undefined,
     unreadCount: () => 0,
     hydratePreview: () => {},

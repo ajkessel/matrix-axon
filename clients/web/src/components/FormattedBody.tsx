@@ -76,9 +76,9 @@ function linkify(
         </a>
       ) : roomLink !== null ? (
         <a
-          class={`room-pill${roomLink.isEventLink ? ' event-pill' : ''}`}
+          class={`room-pill${roomLink.action === 'join' ? ' join-pill' : ''}${roomLink.isEventLink ? ' event-pill' : ''}`}
           href={roomLink.href}
-          title={roomLink.isEventLink ? 'Jump to message' : 'Jump to room'}
+          title={roomPillTitle(roomLink)}
         >
           {roomLink.label}
         </a>
@@ -94,6 +94,18 @@ function linkify(
     parts.push(...emojiTooltippedParts(text.slice(last), emojiNames))
   }
   return parts
+}
+
+function roomPillTitle(roomLink: {
+  action: 'open' | 'join'
+  isEventLink: boolean
+}): string {
+  if (roomLink.action === 'join') {
+    return roomLink.isEventLink ? 'Join room and jump to message' : 'Join room'
+  }
+  return roomLink.isEventLink
+    ? 'Open existing room at this message'
+    : 'Open existing room'
 }
 
 function routeLocalRoomPillClick(event: MouseEvent): boolean {

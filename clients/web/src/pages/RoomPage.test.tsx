@@ -516,7 +516,7 @@ describe('RoomPage', () => {
     fireEvent.click(link)
 
     expect(await findByText('body in B')).toBeTruthy()
-    expect(queryByText('No displayable events on this page.')).toBeNull()
+    expect(queryByText(/No messages loaded|No displayable events/)).toBeNull()
   })
 
   it('jumps to the destination event after clicking a Matrix.to room-event hyperlink', async () => {
@@ -708,9 +708,17 @@ describe('RoomPage', () => {
       }),
     ])
 
-    expect(await findByText('No displayable events on this page.')).toBeTruthy()
+    expect(await findByText(/No displayable events on this page/)).toBeTruthy()
     expect(queryByText('unsupported event: m.call.invite')).toBeNull()
     expect(container.querySelector('[data-event-id="$call"]')).toBeNull()
+  })
+
+  it('explains that an empty room timeline may still be syncing', async () => {
+    const { findByText } = renderRoom([])
+
+    expect(
+      await findByText(/Newly joined large rooms can take a little while/),
+    ).toBeTruthy()
   })
 
   it('shows per-event diagnostics only in developer mode', async () => {
@@ -724,7 +732,7 @@ describe('RoomPage', () => {
         }),
       ])
 
-    expect(await findByText('No displayable events on this page.')).toBeTruthy()
+    expect(await findByText(/No displayable events on this page/)).toBeTruthy()
     expect(queryByText('unsupported event: m.call.invite')).toBeNull()
     expect(queryByRole('button', { name: 'Inspect' })).toBeNull()
 
@@ -1904,6 +1912,48 @@ describe('RoomPage', () => {
     await triggerObservedResizeFrame()
 
     expect(scrolled).toContain('$old')
+  })
+
+  it('stops keeping a search/deep-link target centered after the user scrolls', async () => {
+    installResizeObserver()
+    const scrolled: string[] = []
+    Element.prototype.scrollIntoView = function () {
+      const id = this.getAttribute('data-event-id')
+      if (id !== null) {
+        scrolled.push(id)
+      }
+    }
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$old', T0 - 5 * DAY) }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$newer', T0), event('$old', T0 - 5 * DAY)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24old`,
+    )
+    const { container, findByText } = render(routedRoomPage(testServices()))
+
+    await findByText('body of $old')
+    await waitFor(() => expect(scrolled).toContain('$old'))
+    scrolled.length = 0
+
+    fireEvent.wheel(container.querySelector<HTMLElement>('.timeline')!)
+    await triggerObservedResizeFrame()
+
+    expect(scrolled).not.toContain('$old')
   })
 
   it('navigating to ?event= inside an open room jumps without a remount (WCR-09)', async () => {

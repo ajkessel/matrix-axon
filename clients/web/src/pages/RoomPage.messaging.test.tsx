@@ -110,15 +110,19 @@ const server = setupServer(
     }),
   ),
   http.get(
-    `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads`,
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/timeline`,
+    () => HttpResponse.json({ data: { events: [], next_cursor: null } }),
+  ),
+  http.get(
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/threads`,
     () => HttpResponse.json({ data: [] }),
   ),
   http.get(
-    `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/members`,
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/members`,
     () => HttpResponse.json({ data: [] }),
   ),
   http.get(
-    `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/:roomId/threads/:rootId/timeline`,
+    `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/threads/:rootId/timeline`,
     () =>
       HttpResponse.json({
         data: { events: [], next_cursor: null },
@@ -2200,9 +2204,7 @@ describe('room command', () => {
 
   it('/search opens the URL-addressed search overlay with its args', async () => {
     const { findByLabelText } = renderRoom([event('$root', 100)])
-    const textarea = (await findByLabelText(
-      'Message Ops',
-    )) as HTMLTextAreaElement
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
 
     fireEvent.input(textarea, { target: { value: '/search deploy failed' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
@@ -2294,6 +2296,249 @@ describe('room command', () => {
     fireEvent.input(textarea, { target: { value: '/rooms' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(roomRequests).toBeGreaterThan(refreshedRequests))
+  })
+
+  it('/join posts the M19c mutation and routes to the joined room', async () => {
+    const joinedRoom = '!joined:hs'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: OWN_USER,
+              room_id: joinedRoom,
+              name: 'Joined',
+              canonical_alias: null,
+              topic: null,
+              last_activity_ts: 0,
+            },
+          ],
+        }),
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/join #joined:hs' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#joined:hs',
+      server_names: [],
+    })
+  })
+
+  it.each([
+    ['/join joined:hs', '#joined:hs'],
+    ['/join joined@hs', '#joined:hs'],
+    ['/join #joined', '#joined:hs'],
+  ])('/join accepts shorthand alias %s', async (command, roomIdOrAlias) => {
+    const joinedRoom = '!joined:hs'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText(
+      command === '/join #joined' ? 'Message Ops' : 'Message',
+    )) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: command } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(joinBody).toEqual({
+        room_id_or_alias: roomIdOrAlias,
+        server_names: [],
+      }),
+    )
+  })
+
+  it('/join shows a pending status while the request is in flight', async () => {
+    const joinedRoom = '!joined:hs'
+    let joinStarted = false
+    let resolveJoin: (response: Response) => void = () => {}
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () => {
+        joinStarted = true
+        return new Promise<Response>((resolve) => {
+          resolveJoin = resolve
+        })
+      }),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const { findByLabelText, findByRole, queryByRole } = renderRoom([
+      event('$root', 100),
+    ])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/join #joined:hs' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    const status = await findByRole('status')
+    expect(status.textContent).toBe('Joining #joined:hs…')
+    expect(status.closest('.composer')).not.toBeNull()
+    await waitFor(() => expect(joinStarted).toBe(true))
+
+    resolveJoin(HttpResponse.json({ data: { room_id: joinedRoom } }))
+    await waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}`,
+      ),
+    )
+    await waitFor(() => expect(queryByRole('status')).toBeNull())
+  })
+
+  it('/join accepts a Matrix.to event link with via hints', async () => {
+    const joinedRoom = '!joined:hs'
+    let joinBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: joinedRoom } })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, {
+      target: {
+        value:
+          '/join https://matrix.to/#/%23joined%3Ahs/%24event?via=hs&via=backup',
+      },
+    })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(window.location.href).toContain(
+        `/${ACCOUNT}/rooms/${encodeURIComponent(joinedRoom)}?event=%24event`,
+      ),
+    )
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#joined:hs',
+      server_names: ['hs', 'backup'],
+    })
+  })
+
+  it('/join leaves the command recoverable when the server rejects it', async () => {
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'forbidden',
+              message: 'not invited',
+            },
+          },
+          { status: 403 },
+        ),
+      ),
+    )
+    const { findByLabelText, findByText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/join #private:hs' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(await findByText('not invited')).toBeTruthy()
+    expect(textarea.value).toBe('/join #private:hs')
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+  })
+
+  it('/join explains ambiguous room-entry timeouts', async () => {
+    server.use(
+      http.post(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`, () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: 'bad_gateway',
+              message: 'join timed out after 30s',
+            },
+          },
+          { status: 502 },
+        ),
+      ),
+    )
+    const { findByLabelText, findByText, queryByRole } = renderRoom([
+      event('$root', 100),
+    ])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/join #matrix:matrix.org' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(
+      await findByText(
+        /The room may still appear after sync catches up; for large federated rooms/,
+      ),
+    ).toBeTruthy()
+    expect(queryByRole('status')).toBeNull()
+    expect(textarea.value).toBe('/join #matrix:matrix.org')
+  })
+
+  it('/knock posts the M19c mutation with a reason and stays in place', async () => {
+    let knockBody: unknown = null
+    server.use(
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/rooms/knock`,
+        async ({ request }) => {
+          knockBody = await request.json()
+          return HttpResponse.json({ data: { room_id: '!private:hs' } })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+    )
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, {
+      target: { value: '/knock #private:hs please let me in' },
+    })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(knockBody).toEqual({
+        room_id_or_alias: '#private:hs',
+        reason: 'please let me in',
+        server_names: [],
+      }),
+    )
+    expect(textarea.value).toBe('')
+    expect(window.location.pathname).toBe(
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
   })
 
   it('/leave posts the M19b mutation, refreshes rooms, and leaves the room route', async () => {

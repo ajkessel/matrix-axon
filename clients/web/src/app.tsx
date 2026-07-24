@@ -12,7 +12,14 @@ import { RoomList } from './components/RoomList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
 import { UnreadThreadsPanel } from './components/UnreadThreadsPanel'
+import { useModalFocus } from './components/use-modal-focus'
 import { layoutMode, SINGLE_PANE_QUERY, useMediaQuery } from './layout'
+import {
+  localRoomHref,
+  parseMatrixRoomReference,
+  resolveMatrixToRoomLink,
+  type MatrixRoomReference,
+} from './matrix-to'
 import { withSearchParam } from './search-tokens'
 import { ShellActionsContext } from './shell-actions'
 import { AccountsPage } from './pages/AccountsPage'
@@ -38,6 +45,16 @@ import {
   useShortcuts,
 } from './shortcuts'
 import { applyTheme } from './stores/settings'
+import type { Account } from './stores/accounts'
+import type { RoomEntryResult, RoomsStore } from './stores/rooms'
+
+interface PendingMatrixJoin {
+  accountId: string
+  accountUserId: string | null
+  reference: MatrixRoomReference
+  joining: boolean
+  error: string | null
+}
 
 /**
  * App root (ADR 0046, M-W3). History routing — signed off under ADR 0046
@@ -254,13 +271,18 @@ function Shell() {
 function ShellChrome() {
   const location = useLocation()
   const { path, query } = location
-  const { accounts, settings, threadUnread } = useServices()
+  const { accounts, rooms, settings, threadUnread } = useServices()
   const mode = layoutMode(path)
   perfMark('shell:render', { path, mode })
   const collapsed = settings.sidebarCollapsed.value
   const [helpOpen, setHelpOpen] = useState(false)
   const [unreadThreadsOpen, setUnreadThreadsOpen] = useState(false)
   const [jumpAction, setJumpActionState] = useState<(() => void) | null>(null)
+  const [roomLinkJoinError, setRoomLinkJoinError] = useState<string | null>(
+    null,
+  )
+  const [pendingMatrixJoin, setPendingMatrixJoin] =
+    useState<PendingMatrixJoin | null>(null)
   const [roomChrome, setRoomChromeState] = useState<{
     title: string | null
     action: (() => void) | null
@@ -272,9 +294,13 @@ function ShellChrome() {
   const accountCount = accounts.accounts.value.length
   const accountsLoading = accounts.loading.value
   const accountsError = accounts.error.value
+  const roomListLoading = rooms.loading.value
+  const roomEntries = rooms.rooms.value
+  const roomTitles = rooms.titles.value
   const unreadThreadCount = threadUnread.count.value
   const roomTitleButton = useRef<HTMLButtonElement>(null)
   const startupThreadScrubbed = useRef(false)
+  const inboundMatrixHandled = useRef<string | null>(null)
 
   const openHelp = (event: KeyboardEvent) => {
     event.preventDefault()
@@ -351,6 +377,160 @@ function ShellChrome() {
       location.route('/accounts', true)
     }
   }, [accountCount, accountsError, accountsLoading, location, path])
+  useEffect(() => {
+    const raw = typeof query.matrix === 'string' ? query.matrix : null
+    if (
+      raw === null ||
+      raw === inboundMatrixHandled.current ||
+      accountsLoading ||
+      accountsError !== null ||
+      roomListLoading
+    ) {
+      return
+    }
+    const accountId = accountIdForRoomEntry(
+      path,
+      accounts.accounts.value,
+      settings.activeAccountId.value,
+    )
+    if (accountId === null) {
+      return
+    }
+    inboundMatrixHandled.current = raw
+    const reference = parseMatrixRoomReference(raw)
+    if (reference === null) {
+      scrubMatrixQuery(location)
+      return
+    }
+    const resolved = resolveMatrixToRoomLink(raw, {
+      accountId,
+      rooms: roomEntries,
+      roomTitles,
+    })
+    if (resolved?.action === 'open') {
+      location.route(resolved.href, true)
+      return
+    }
+    const account = accounts.accounts.value.find(
+      (candidate) => candidate.account_id === accountId,
+    )
+    scrubMatrixQuery(location)
+    setPendingMatrixJoin({
+      accountId,
+      accountUserId: account?.user_id ?? null,
+      reference,
+      joining: false,
+      error: null,
+    })
+  }, [
+    accounts.accounts.value,
+    accountsError,
+    accountsLoading,
+    location,
+    path,
+    query.matrix,
+    roomEntries,
+    roomListLoading,
+    roomTitles,
+    rooms,
+    settings.activeAccountId.value,
+  ])
+  const cancelPendingMatrixJoin = useCallback(() => {
+    setPendingMatrixJoin(null)
+  }, [])
+  const confirmPendingMatrixJoin = useCallback(() => {
+    const pending = pendingMatrixJoin
+    if (pending === null || pending.joining) {
+      return
+    }
+    setPendingMatrixJoin({ ...pending, joining: true, error: null })
+    void rooms
+      .joinRoom(
+        pending.accountId,
+        pending.reference.roomIdOrAlias,
+        pending.reference.serverNames,
+      )
+      .then((result) => {
+        if (!result.ok) {
+          setPendingMatrixJoin((current) =>
+            current?.accountId === pending.accountId &&
+            current.reference === pending.reference
+              ? { ...current, joining: false, error: result.message }
+              : current,
+          )
+          return
+        }
+        setPendingMatrixJoin((current) =>
+          current?.accountId === pending.accountId &&
+          current.reference === pending.reference
+            ? null
+            : current,
+        )
+        location.route(
+          localRoomHref(
+            pending.accountId,
+            result.roomId,
+            pending.reference.eventId,
+          ),
+        )
+      })
+  }, [location, pendingMatrixJoin, rooms])
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return
+      }
+      const anchor = (event.target as Element | null)?.closest?.('a[href]')
+      if (!(anchor instanceof HTMLAnchorElement)) {
+        return
+      }
+      if (anchor.download !== '') {
+        return
+      }
+      const reference = parseMatrixRoomReference(anchor.href)
+      if (reference === null) {
+        return
+      }
+      const accountId = accountIdForRoomEntry(
+        path,
+        accounts.accounts.value,
+        settings.activeAccountId.value,
+      )
+      if (accountId === null) {
+        return
+      }
+      event.preventDefault()
+      setRoomLinkJoinError(null)
+      void joinMatrixRoomReference(
+        location,
+        rooms,
+        accountId,
+        reference,
+        false,
+      ).then((result) => {
+        if (!result.ok) {
+          setRoomLinkJoinError(
+            `Could not join ${reference.roomIdOrAlias}: ${result.message}`,
+          )
+        }
+      })
+    }
+    document.addEventListener('click', onClick)
+    return () => document.removeEventListener('click', onClick)
+  }, [
+    accounts.accounts.value,
+    location,
+    path,
+    rooms,
+    settings.activeAccountId.value,
+  ])
 
   useShortcuts({
     // Bare characters, so `useShortcuts` already withholds them while typing.
@@ -506,6 +686,19 @@ function ShellChrome() {
           </button>
         </header>
 
+        {roomLinkJoinError !== null && (
+          <div class="banner error shell-banner" role="alert">
+            <span>{roomLinkJoinError}</span>
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => setRoomLinkJoinError(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         <div
           class={`shell-body mode-${mode}${collapsed ? ' sidebar-collapsed' : ''}`}
         >
@@ -528,9 +721,140 @@ function ShellChrome() {
         {unreadThreadsOpen && (
           <UnreadThreadsPanel onClose={() => setUnreadThreadsOpen(false)} />
         )}
+        {pendingMatrixJoin !== null && (
+          <MatrixJoinPrompt
+            pending={pendingMatrixJoin}
+            onCancel={cancelPendingMatrixJoin}
+            onJoin={confirmPendingMatrixJoin}
+          />
+        )}
         {helpOpen && <ShortcutsHelp onClose={() => setHelpOpen(false)} />}
       </div>
     </ShellActionsContext.Provider>
+  )
+}
+
+function MatrixJoinPrompt({
+  pending,
+  onCancel,
+  onJoin,
+}: {
+  pending: PendingMatrixJoin
+  onCancel: () => void
+  onJoin: () => void
+}) {
+  const { containerRef } = useModalFocus<HTMLDivElement>()
+  useShortcuts(
+    {
+      Escape: (event) => {
+        event.preventDefault()
+        if (!pending.joining) {
+          onCancel()
+        }
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
+
+  return (
+    <div
+      ref={containerRef}
+      class="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="matrix-join-title"
+    >
+      <section class="overlay-panel matrix-join-dialog">
+        <div class="overlay-head">
+          <h2 id="matrix-join-title">Join room?</h2>
+          <button
+            type="button"
+            class="ghost"
+            disabled={pending.joining}
+            onClick={onCancel}
+          >
+            Close
+          </button>
+        </div>
+        <p>
+          Another app or link requested that Axon join{' '}
+          <code>{pending.reference.roomIdOrAlias}</code>.
+        </p>
+        {pending.accountUserId !== null && (
+          <p class="muted">Account: {pending.accountUserId}</p>
+        )}
+        {pending.error !== null && <p class="error">{pending.error}</p>}
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="ghost"
+            disabled={pending.joining}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button type="button" disabled={pending.joining} onClick={onJoin}>
+            {pending.joining ? 'Joining...' : 'Join'}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function accountIdForRoomEntry(
+  path: string,
+  accounts: readonly Account[],
+  activeAccountId: string | null,
+): string | null {
+  const route = /^\/([^/]+)\/rooms\//.exec(path)
+  if (route !== null) {
+    return decodeURIComponent(route[1])
+  }
+  const active = accounts.find(
+    (account) =>
+      account.state === 'active' && account.account_id === activeAccountId,
+  )
+  if (active !== undefined) {
+    return active.account_id
+  }
+  return (
+    accounts.find((account) => account.state === 'active')?.account_id ?? null
+  )
+}
+
+async function joinMatrixRoomReference(
+  location: ReturnType<typeof useLocation>,
+  rooms: RoomsStore,
+  accountId: string,
+  reference: MatrixRoomReference,
+  scrubQuery: boolean,
+): Promise<RoomEntryResult> {
+  const result = await rooms.joinRoom(
+    accountId,
+    reference.roomIdOrAlias,
+    reference.serverNames,
+  )
+  if (!result.ok) {
+    if (scrubQuery) {
+      scrubMatrixQuery(location)
+    }
+    return result
+  }
+  location.route(
+    localRoomHref(accountId, result.roomId, reference.eventId),
+    scrubQuery,
+  )
+  return result
+}
+
+function scrubMatrixQuery(location: ReturnType<typeof useLocation>): void {
+  const params = new URLSearchParams(window.location.search)
+  params.delete('matrix')
+  const nextQuery = params.toString()
+  location.route(
+    `${location.path}${nextQuery === '' ? '' : `?${nextQuery}`}`,
+    true,
   )
 }
 

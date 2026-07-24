@@ -443,6 +443,61 @@ describe('createRoomsStore', () => {
     expect(store.error.value).toBe("room isn't left or banned")
   })
 
+  it('joins a room through M19c and refreshes authoritative rooms', async () => {
+    let joinBody: unknown = null
+    let listCalls = 0
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => {
+        listCalls += 1
+        return HttpResponse.json({ data: [NAMED] })
+      }),
+      http.post(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/join`,
+        async ({ request }) => {
+          joinBody = await request.json()
+          return HttpResponse.json({ data: { room_id: NAMED.room_id } })
+        },
+      ),
+    )
+    const store = makeStore()
+
+    const result = await store.joinRoom(ACCOUNT, '#ops:hs', ['hs', 'backup'])
+
+    expect(result).toEqual({ ok: true, roomId: NAMED.room_id })
+    expect(joinBody).toEqual({
+      room_id_or_alias: '#ops:hs',
+      server_names: ['hs', 'backup'],
+    })
+    expect(listCalls).toBe(1)
+    expect(store.rooms.value).toEqual([NAMED])
+  })
+
+  it('knocks on a room through M19c with an optional reason', async () => {
+    let knockBody: unknown = null
+    server.use(
+      http.get(`${BASE_URL}/v1/rooms`, () => HttpResponse.json({ data: [] })),
+      http.post(
+        `${BASE_URL}/v1/accounts/${ACCOUNT}/rooms/knock`,
+        async ({ request }) => {
+          knockBody = await request.json()
+          return HttpResponse.json({ data: { room_id: '!private:hs' } })
+        },
+      ),
+    )
+    const store = makeStore()
+
+    const result = await store.knockRoom(ACCOUNT, '#private:hs', 'let me in', [
+      'hs',
+    ])
+
+    expect(result).toEqual({ ok: true, roomId: '!private:hs' })
+    expect(knockBody).toEqual({
+      room_id_or_alias: '#private:hs',
+      reason: 'let me in',
+      server_names: ['hs'],
+    })
+  })
+
   it('surfaces a list-fetch error', async () => {
     server.use(
       http.get(`${BASE_URL}/v1/rooms`, () =>

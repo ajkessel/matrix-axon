@@ -80,6 +80,7 @@ function escapeMarkdownLinkDestination(value: string): string {
 export function Composer({
   placeholder,
   ariaLabel = placeholder,
+  status,
   banner,
   initialValue = '',
   onSubmit,
@@ -100,6 +101,7 @@ export function Composer({
 }: {
   placeholder: string
   ariaLabel?: string
+  status?: string
   banner?: { label: string; excerpt: string; onCancel: () => void }
   initialValue?: string
   onSubmit(body: string): Promise<boolean>
@@ -554,6 +556,11 @@ export function Composer({
 
   return (
     <div class="composer">
+      {status !== undefined && (
+        <div class="composer-status" role="status" aria-live="polite">
+          {status}
+        </div>
+      )}
       {banner !== undefined && (
         <div class="composer-banner">
           <span>

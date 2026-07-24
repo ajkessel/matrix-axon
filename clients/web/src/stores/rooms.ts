@@ -29,6 +29,8 @@ export interface RoomUnreadCounts {
 }
 
 export type RoomMembershipResult = { ok: true } | { ok: false; message: string }
+export type RoomEntryResult =
+  { ok: true; roomId: string } | { ok: false; message: string }
 
 export interface RoomsStore {
   rooms: ReadonlySignal<RoomDto[]>
@@ -49,6 +51,19 @@ export interface RoomsStore {
   leaveRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
   /** Forget one left/banned room through M19b, then refresh room state. */
   forgetRoom(accountId: string, roomId: string): Promise<RoomMembershipResult>
+  /** Join a room by id or alias through M19c, then refresh room state. */
+  joinRoom(
+    accountId: string,
+    roomIdOrAlias: string,
+    serverNames?: readonly string[],
+  ): Promise<RoomEntryResult>
+  /** Knock on a room by id or alias through M19c, then refresh room state. */
+  knockRoom(
+    accountId: string,
+    roomIdOrAlias: string,
+    reason?: string | null,
+    serverNames?: readonly string[],
+  ): Promise<RoomEntryResult>
   /** Latest-message preview for one room. */
   preview(key: string): RoomPreview | undefined
   /** Server-derived unread notification count for one room. */
@@ -497,6 +512,66 @@ export function createRoomsStore(
     )
   }
 
+  async function roomEntryMutation(
+    call: () => Promise<{
+      data?: { data: { room_id: string } }
+      error?: unknown
+    }>,
+  ): Promise<RoomEntryResult> {
+    try {
+      const { data, error: apiError } = await call()
+      if (apiError !== undefined || data === undefined) {
+        const message =
+          apiError === undefined
+            ? 'room entry failed'
+            : apiErrorMessage(apiError)
+        error.value = message
+        return { ok: false, message }
+      }
+      await refresh()
+      error.value = null
+      return { ok: true, roomId: data.data.room_id }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      error.value = message
+      return { ok: false, message }
+    }
+  }
+
+  function joinRoom(
+    accountId: string,
+    roomIdOrAlias: string,
+    serverNames: readonly string[] = [],
+  ): Promise<RoomEntryResult> {
+    return roomEntryMutation(() =>
+      api.POST('/v1/accounts/{account_id}/rooms/join', {
+        params: { path: { account_id: accountId } },
+        body: {
+          room_id_or_alias: roomIdOrAlias,
+          server_names: [...serverNames],
+        },
+      }),
+    )
+  }
+
+  function knockRoom(
+    accountId: string,
+    roomIdOrAlias: string,
+    reason: string | null = null,
+    serverNames: readonly string[] = [],
+  ): Promise<RoomEntryResult> {
+    return roomEntryMutation(() =>
+      api.POST('/v1/accounts/{account_id}/rooms/knock', {
+        params: { path: { account_id: accountId } },
+        body: {
+          room_id_or_alias: roomIdOrAlias,
+          reason,
+          server_names: [...serverNames],
+        },
+      }),
+    )
+  }
+
   function hideRoomLocally(accountId: string, roomId: string): string {
     const key = roomKey({ account_id: accountId, room_id: roomId })
     locallyHiddenRooms.add(key)
@@ -602,6 +677,8 @@ export function createRoomsStore(
     refresh,
     leaveRoom,
     forgetRoom,
+    joinRoom,
+    knockRoom,
     preview: (key) => previewSlot(key).value,
     unreadCount: (key) => unreadSlot(key).value.notificationCount,
     hydratePreview,

@@ -74,6 +74,12 @@ export interface SettingsV1 {
   timeFormat: TimeFormat
   /** User-sized message composer height in CSS pixels; null means default. */
   messageComposerHeight: number | null
+  /**
+   * Whether this browser has opted into registering Axon as a `matrix:`
+   * protocol handler. The browser owns actual registration permission; this
+   * only records the user's preference after a successful registration call.
+   */
+  matrixProtocolHandler: boolean
   /** Most recently used reaction keys, newest first. */
   recentReactions: string[]
   /**
@@ -96,6 +102,7 @@ const DEFAULTS: SettingsV1 = {
   previewRoom: true,
   timeFormat: '12h',
   messageComposerHeight: null,
+  matrixProtocolHandler: false,
   recentReactions: [],
   developerMode: false,
 }
@@ -192,6 +199,10 @@ function parse(raw: string | null): SettingsV1 {
       v1.messageComposerHeight >= 38
         ? Math.round(v1.messageComposerHeight)
         : DEFAULTS.messageComposerHeight,
+    matrixProtocolHandler:
+      typeof v1.matrixProtocolHandler === 'boolean'
+        ? v1.matrixProtocolHandler
+        : DEFAULTS.matrixProtocolHandler,
     recentReactions: Array.isArray(v1.recentReactions)
       ? v1.recentReactions
           .filter((key): key is string => typeof key === 'string')
@@ -217,6 +228,7 @@ export interface SettingsStore {
   previewRoom: Signal<boolean>
   timeFormat: Signal<TimeFormat>
   messageComposerHeight: Signal<number | null>
+  matrixProtocolHandler: Signal<boolean>
   recentReactions: Signal<string[]>
   developerMode: Signal<boolean>
   /**
@@ -251,6 +263,7 @@ export function createSettingsStore(
   const messageComposerHeight = signal<number | null>(
     initial.messageComposerHeight,
   )
+  const matrixProtocolHandler = signal<boolean>(initial.matrixProtocolHandler)
   const recentReactions = signal<string[]>(initial.recentReactions)
   const developerMode = signal<boolean>(initial.developerMode)
 
@@ -268,6 +281,7 @@ export function createSettingsStore(
       previewRoom: previewRoom.value,
       timeFormat: timeFormat.value,
       messageComposerHeight: messageComposerHeight.value,
+      matrixProtocolHandler: matrixProtocolHandler.value,
       recentReactions: recentReactions.value,
       developerMode: developerMode.value,
     }
@@ -291,6 +305,7 @@ export function createSettingsStore(
     previewRoom,
     timeFormat,
     messageComposerHeight,
+    matrixProtocolHandler,
     recentReactions,
     developerMode,
     pinRoom(key: string) {

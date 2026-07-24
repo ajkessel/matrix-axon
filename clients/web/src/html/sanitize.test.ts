@@ -42,6 +42,15 @@ describe('renderMatrixHtml', () => {
     )
   })
 
+  it('keeps matrix: links as safe external anchors', () => {
+    const out = renderMatrixHtml(
+      '<a href="matrix:r/ops%3Aexample.org?via=example.org">Ops</a>',
+    )
+    expect(out).toContain('href="matrix:r/ops%3Aexample.org?via=example.org"')
+    expect(out).toContain('target="_blank"')
+    expect(out).toContain('rel="noopener noreferrer"')
+  })
+
   it('keeps generated room-pill links in-app', () => {
     const out = renderMatrixHtml(
       '<a class="room-pill" href="/acct/rooms/!ops%3Ahs">#Ops</a>',
@@ -49,7 +58,7 @@ describe('renderMatrixHtml', () => {
 
     expect(out).toContain('class="room-pill"')
     expect(out).toContain('href="/acct/rooms/!ops%3Ahs"')
-    expect(out).toContain('title="Jump to room"')
+    expect(out).toContain('title="Open existing room"')
     expect(out).not.toContain('target="_blank"')
   })
 
@@ -60,7 +69,7 @@ describe('renderMatrixHtml', () => {
 
     expect(out).toContain('class="room-pill event-pill"')
     expect(out).toContain('href="/acct/rooms/!ops%3Ahs?event=%24event"')
-    expect(out).toContain('title="Jump to message"')
+    expect(out).toContain('title="Open existing room at this message"')
     expect(out).not.toContain('target="_blank"')
   })
 
@@ -173,6 +182,44 @@ describe('renderMatrixHtml', () => {
       '<a href="https://example.org/x" target="_blank" rel="noopener noreferrer">https://example.org/x</a>',
     )
   })
+
+  it('linkifies bare matrix: URIs in formatted text nodes', () => {
+    const out = renderMatrixHtml('join matrix:r/ops%3Aexample.org?via=hs now.')
+    expect(out).toContain(
+      '<a href="matrix:r/ops%3Aexample.org?via=hs" target="_blank" rel="noopener noreferrer">matrix:r/ops%3Aexample.org?via=hs</a>',
+    )
+  })
+
+  it('linkifies bare matrix:room URIs in formatted text nodes', () => {
+    const out = renderMatrixHtml('join matrix:room/a:bostoncoop.net now.')
+    expect(out).toContain(
+      '<a href="matrix:room/a:bostoncoop.net" target="_blank" rel="noopener noreferrer">matrix:room/a:bostoncoop.net</a>',
+    )
+  })
+
+  it.each(['matrix:r/a:bostoncoop.net', 'matrix:room/a:bostoncoop.net'])(
+    'renders bare unknown Matrix room URI %s as a join pill when a resolver is available',
+    (href) => {
+      const out = renderMatrixHtml(`join ${href} now.`, {
+        resolveRoomLink: (actualHref, label) => {
+          expect(actualHref).toBe(href)
+          expect(label).toBe(href)
+          return {
+            href: actualHref,
+            label: 'Join #a:bostoncoop.net',
+            isEventLink: false,
+            action: 'join',
+          }
+        },
+      })
+
+      expect(out).toContain(
+        `<a href="${href}" class="room-pill join-pill" title="Join room">Join #a:bostoncoop.net</a>`,
+      )
+      expect(out).not.toContain('target="_blank"')
+      expect(out).not.toContain('rel="noopener noreferrer"')
+    },
+  )
 
   it('does not linkify inside existing anchors, code, or pre', () => {
     expect(

@@ -7,6 +7,12 @@
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#ffffff",
+  "protocol_handlers": [
+    {
+      "protocol": "matrix",
+      "url": "/?matrix=%s"
+    }
+  ],
   "icons": [
     {
       "src": "/icon-152.png",

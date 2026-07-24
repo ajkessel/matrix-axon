@@ -29,7 +29,12 @@ redact-with-confirm, reaction toggle, and threads (badges, panel via
 `?thread=`, send-in-thread, and an unread-thread drawer that keeps hidden
 thread replies unread until their thread panel loads), live WebSocket updates
 for timelines/room previews/unread state, and live ephemeral overlays for
-typing indicators plus public read receipts.
+typing indicators plus public read receipts. M19-W room actions have started:
+the composer supports `/leave`, `/part`, `/forget`, `/join`, and `/knock`; the
+shell intercepts Matrix room links for join, and Settings can opt this origin
+into browser-level `matrix:` link handling. Installed PWA builds also declare
+`matrix:` in the web manifest for browsers that register manifest protocol
+handlers with the OS.
 
 Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's

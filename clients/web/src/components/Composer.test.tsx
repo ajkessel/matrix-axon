@@ -108,6 +108,12 @@ describe('Composer drafts (M-W6 step 5b)', () => {
     expect(textarea.value).toBe('')
   })
 
+  it('renders an inline status near the input', () => {
+    const { getByRole } = renderComposer({ status: 'Joining #ops:hs…' })
+
+    expect(getByRole('status').textContent).toBe('Joining #ops:hs…')
+  })
+
   it('intercepts slash commands without sending them as messages', () => {
     const onCommand = vi.fn(() => true)
     const { textarea, form, onSubmit, onDraftChange } = renderComposer({

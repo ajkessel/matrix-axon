@@ -184,6 +184,53 @@ describe('SettingsPage', () => {
     ).toBeTruthy()
   })
 
+  it('registers the browser matrix protocol handler from the opt-in checkbox', () => {
+    const registerProtocolHandler = vi.fn()
+    const restore = mockNavigatorProperty(
+      'registerProtocolHandler',
+      registerProtocolHandler,
+    )
+    const services = testServices()
+    const { getByLabelText, getByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+    const box = getByLabelText('Handle matrix: links') as HTMLInputElement
+
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+
+    expect(registerProtocolHandler).toHaveBeenCalledWith(
+      'matrix',
+      `${window.location.origin}/?matrix=%s`,
+    )
+    expect(services.settings.matrixProtocolHandler.value).toBe(true)
+    expect(box.checked).toBe(true)
+    expect(
+      getByText('Matrix link handling registered for this browser.'),
+    ).toBeTruthy()
+    restore()
+  })
+
+  it('disables matrix protocol registration when unsupported', () => {
+    const restore = mockNavigatorProperty('registerProtocolHandler', undefined)
+    const services = testServices()
+    const { getByLabelText, getByText } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(
+      (getByLabelText('Handle matrix: links') as HTMLInputElement).disabled,
+    ).toBe(true)
+    expect(
+      getByText('This browser does not support protocol-handler registration.'),
+    ).toBeTruthy()
+    restore()
+  })
+
   it('prompts Android users to install when the browser exposes the install event', async () => {
     const restoreUserAgent = mockNavigatorProperty(
       'userAgent',
@@ -210,6 +257,39 @@ describe('SettingsPage', () => {
     )
 
     fireEvent.click(await findByRole('button', { name: 'Add to home screen' }))
+
+    await waitFor(() => expect(prompted).toBe(true))
+    expect(await findByText('Install request accepted.')).toBeTruthy()
+    restoreUserAgent()
+  })
+
+  it('uses Windows desktop install language when Chrome exposes the install event', async () => {
+    const restoreUserAgent = mockNavigatorProperty(
+      'userAgent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/146 Safari/537.36',
+    )
+    cleanupPromptCapture = setupInstallPromptCapture(window)
+    let prompted = false
+    const event = new Event('beforeinstallprompt', {
+      cancelable: true,
+    }) as BeforeInstallPromptEvent
+    Object.assign(event, {
+      platforms: ['web'],
+      prompt: vi.fn(async () => {
+        prompted = true
+      }),
+      userChoice: Promise.resolve({ outcome: 'accepted', platform: 'web' }),
+    })
+    window.dispatchEvent(event)
+    const services = testServices()
+    const { findByRole, findByText, getByRole } = render(
+      <ServicesContext.Provider value={services}>
+        <SettingsPage />
+      </ServicesContext.Provider>,
+    )
+
+    expect(getByRole('heading', { name: 'Desktop app' })).toBeTruthy()
+    fireEvent.click(await findByRole('button', { name: 'Add to Start Menu' }))
 
     await waitFor(() => expect(prompted).toBe(true))
     expect(await findByText('Install request accepted.')).toBeTruthy()

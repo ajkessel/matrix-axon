@@ -5,6 +5,10 @@ import {
   installPromptAvailable,
   promptInstallApp,
 } from '../install-prompt'
+import {
+  matrixProtocolHandlerAvailable,
+  registerMatrixProtocolHandler,
+} from '../matrix-protocol'
 import { useServices } from '../services'
 import { currentPlatform, isApplePlatform } from '../shortcuts'
 import type { Theme, TimeFormat } from '../stores/settings'
@@ -25,6 +29,7 @@ const TIME_FORMATS: { value: TimeFormat; label: string }[] = [
 export function SettingsPage() {
   const { auth, settings, rooms, deviceState } = useServices()
   const [markingRead, setMarkingRead] = useState(false)
+  const [protocolMessage, setProtocolMessage] = useState<string | null>(null)
 
   const markAllRead = async () => {
     setMarkingRead(true)
@@ -49,6 +54,22 @@ export function SettingsPage() {
         rooms.noteUnreadCounts(room.account_id, room.room_id, 0, 0)
       }
       setMarkingRead(false)
+    }
+  }
+
+  const setMatrixProtocolHandler = (enabled: boolean) => {
+    if (!enabled) {
+      settings.matrixProtocolHandler.value = false
+      setProtocolMessage(null)
+      return
+    }
+    const result = registerMatrixProtocolHandler()
+    if (result.ok) {
+      settings.matrixProtocolHandler.value = true
+      setProtocolMessage('Matrix link handling registered for this browser.')
+    } else {
+      settings.matrixProtocolHandler.value = false
+      setProtocolMessage(result.message)
     }
   }
 
@@ -157,6 +178,30 @@ export function SettingsPage() {
       </section>
       <InstallAppSettings />
       <section class="panel">
+        <h2>Matrix links</h2>
+        <label class="setting-row">
+          <input
+            type="checkbox"
+            checked={settings.matrixProtocolHandler.value}
+            disabled={!matrixProtocolHandlerAvailable()}
+            onChange={(event) =>
+              setMatrixProtocolHandler(event.currentTarget.checked)
+            }
+          />
+          Handle <code>matrix:</code> links
+        </label>
+        <p class="muted">
+          Registers this web origin as a browser handler for Matrix room links.
+          Your browser may ask for permission.
+        </p>
+        {!matrixProtocolHandlerAvailable() && (
+          <p class="muted">
+            This browser does not support protocol-handler registration.
+          </p>
+        )}
+        {protocolMessage !== null && <p class="muted">{protocolMessage}</p>}
+      </section>
+      <section class="panel">
         <h2>Accounts</h2>
         <AccountLifecycle />
       </section>
@@ -185,7 +230,8 @@ export function SettingsPage() {
 
 function InstallAppSettings() {
   const [installing, setInstalling] = useState(false)
-  const platform = detectMobileInstallPlatform()
+  const platform = detectInstallPlatform()
+  const copy = installCopy(platform)
   const installed = isInstalledDisplay()
 
   const install = async () => {
@@ -199,13 +245,13 @@ function InstallAppSettings() {
 
   return (
     <section class="panel">
-      <h2>Home screen</h2>
+      <h2>{copy.heading}</h2>
       {installed ? (
-        <p class="muted">Axon is already running from your home screen.</p>
+        <p class="muted">{copy.installed}</p>
       ) : installPromptAvailable.value ? (
         <>
           <button type="button" onClick={() => void install()}>
-            {installing ? 'Opening…' : 'Add to home screen'}
+            {installing ? 'Opening…' : copy.button}
           </button>
           <InstallOutcomeMessage />
         </>
@@ -223,9 +269,7 @@ function InstallAppSettings() {
           show an install button here when it makes the prompt available.
         </p>
       ) : (
-        <p class="muted">
-          Home-screen install is available from supported mobile browsers.
-        </p>
+        <p class="muted">{copy.unavailable}</p>
       )}
     </section>
   )
@@ -244,17 +288,81 @@ function InstallOutcomeMessage() {
   }
 }
 
-function detectMobileInstallPlatform(): 'android' | 'ios' | 'other' {
+type InstallPlatform =
+  'android' | 'ios' | 'linux' | 'macos' | 'windows' | 'other'
+
+interface InstallCopy {
+  heading: string
+  button: string
+  installed: string
+  unavailable: string
+}
+
+function detectInstallPlatform(): InstallPlatform {
   const platform = currentPlatform().toLowerCase()
   const userAgent = navigator.userAgent.toLowerCase()
   const touchPoints = navigator.maxTouchPoints ?? 0
-  if (isApplePlatform(platform, touchPoints)) {
-    return 'ios'
-  }
   if (/android/.test(userAgent)) {
     return 'android'
   }
+  if (/\b(iphone|ipad|ipod)\b/.test(userAgent)) {
+    return 'ios'
+  }
+  if (/win/.test(platform) || /windows/.test(userAgent)) {
+    return 'windows'
+  }
+  if (isApplePlatform(platform, touchPoints)) {
+    return 'macos'
+  }
+  if (/linux|x11/.test(platform) || /linux|x11/.test(userAgent)) {
+    return 'linux'
+  }
   return 'other'
+}
+
+function installCopy(platform: InstallPlatform): InstallCopy {
+  switch (platform) {
+    case 'android':
+    case 'ios':
+      return {
+        heading: 'Home screen',
+        button: 'Add to home screen',
+        installed: 'Axon is already running from your home screen.',
+        unavailable:
+          'Home-screen install is available from supported mobile browsers.',
+      }
+    case 'windows':
+      return {
+        heading: 'Desktop app',
+        button: 'Add to Start Menu',
+        installed: 'Axon is already available from your Start menu.',
+        unavailable:
+          'Desktop app install is available from supported browsers.',
+      }
+    case 'macos':
+      return {
+        heading: 'Desktop app',
+        button: 'Add to Applications',
+        installed: 'Axon is already available from Applications.',
+        unavailable:
+          'Desktop app install is available from supported browsers.',
+      }
+    case 'linux':
+      return {
+        heading: 'Desktop app',
+        button: 'Install desktop app',
+        installed: 'Axon is already available from your app launcher.',
+        unavailable:
+          'Desktop app install is available from supported browsers.',
+      }
+    default:
+      return {
+        heading: 'Install app',
+        button: 'Install Axon',
+        installed: 'Axon is already installed as an app.',
+        unavailable: 'App install is available from supported browsers.',
+      }
+  }
 }
 
 function isInstalledDisplay(): boolean {
