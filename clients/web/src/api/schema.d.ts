@@ -1404,6 +1404,16 @@ export interface components {
                  */
                 origin_ts: number;
                 /**
+                 * @description The `unsigned.prev_content` of a state event — the state content this
+                 *     event replaced, e.g. the previous `m.room.member` membership/displayname
+                 *     (issue #31). A client needs this to tell a real join (`membership`
+                 *     transitions to `"join"` from something else) apart from a displayname or
+                 *     avatar change (`membership` stays `"join"`), since both arrive as
+                 *     `m.room.member` events with `content.membership: "join"`. `null` for
+                 *     message-like events and for state events with no prior state.
+                 */
+                prev_content?: Record<string, never> | null;
+                /**
                  * @description Per-emoji reaction tally (M8), keyed by reaction key:
                  *     `{ "👍": { "count": 2, "senders": [...], "me": true, "my_event_ids": [...] } }`,
                  *     resolved over this event's reactions regardless of pagination (the store
@@ -1727,6 +1737,16 @@ export interface components {
                  * @description `origin_server_ts` in milliseconds.
                  */
                 origin_ts: number;
+                /**
+                 * @description The `unsigned.prev_content` of a state event — the state content this
+                 *     event replaced, e.g. the previous `m.room.member` membership/displayname
+                 *     (issue #31). A client needs this to tell a real join (`membership`
+                 *     transitions to `"join"` from something else) apart from a displayname or
+                 *     avatar change (`membership` stays `"join"`), since both arrive as
+                 *     `m.room.member` events with `content.membership: "join"`. `null` for
+                 *     message-like events and for state events with no prior state.
+                 */
+                prev_content?: Record<string, never> | null;
                 /**
                  * @description Per-emoji reaction tally (M8), keyed by reaction key:
                  *     `{ "👍": { "count": 2, "senders": [...], "me": true, "my_event_ids": [...] } }`,
@@ -2134,6 +2154,16 @@ export interface components {
              * @description `origin_server_ts` in milliseconds.
              */
             origin_ts: number;
+            /**
+             * @description The `unsigned.prev_content` of a state event — the state content this
+             *     event replaced, e.g. the previous `m.room.member` membership/displayname
+             *     (issue #31). A client needs this to tell a real join (`membership`
+             *     transitions to `"join"` from something else) apart from a displayname or
+             *     avatar change (`membership` stays `"join"`), since both arrive as
+             *     `m.room.member` events with `content.membership: "join"`. `null` for
+             *     message-like events and for state events with no prior state.
+             */
+            prev_content?: Record<string, never> | null;
             /**
              * @description Per-emoji reaction tally (M8), keyed by reaction key:
              *     `{ "👍": { "count": 2, "senders": [...], "me": true, "my_event_ids": [...] } }`,
