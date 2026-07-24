@@ -22,6 +22,14 @@ pub(crate) fn relates_to(content: &Value) -> Option<Value> {
     content.get("m.relates_to").cloned()
 }
 
+/// The `unsigned.prev_content` of a state event — the state content it
+/// replaced (issue #31: lets a client distinguish an `m.room.member` real join
+/// from a displayname/avatar change, both of which keep `membership: "join"`).
+/// `None` when absent, e.g. message-like events and first-time state.
+pub(crate) fn prev_content(raw_event: &Value) -> Option<Value> {
+    raw_event.get("unsigned")?.get("prev_content").cloned()
+}
+
 /// For an `m.room.redaction` event, the `event_id` it redacts. Handles both the
 /// top-level `redacts` (pre-v11 rooms) and `content.redacts` (room v11+). `None`
 /// if neither is present or it isn't a string.
@@ -169,6 +177,32 @@ mod tests {
     #[test]
     fn relates_to_absent_is_none() {
         assert_eq!(relates_to(&json!({ "body": "plain" })), None);
+    }
+
+    #[test]
+    fn prev_content_reads_unsigned() {
+        // A displayname change: membership stays "join", only displayname moves —
+        // this is exactly what distinguishes it from a real join (issue #31).
+        let raw_event = json!({
+            "type": "m.room.member",
+            "state_key": "@alice:example.org",
+            "content": { "membership": "join", "displayname": "Alice B" },
+            "unsigned": {
+                "prev_content": { "membership": "join", "displayname": "Alice" }
+            }
+        });
+        let prev = prev_content(&raw_event).expect("prev_content");
+        assert_eq!(prev["membership"], "join");
+        assert_eq!(prev["displayname"], "Alice");
+    }
+
+    #[test]
+    fn prev_content_absent_is_none() {
+        assert_eq!(prev_content(&json!({ "type": "m.room.message" })), None);
+        assert_eq!(
+            prev_content(&json!({ "type": "m.room.member", "unsigned": {} })),
+            None
+        );
     }
 
     #[test]

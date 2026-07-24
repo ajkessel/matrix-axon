@@ -737,6 +737,10 @@ async fn read_api_end_to_end() {
     // event between e1 and e2 would land in the limit-1 page 2 instead of e1.
     let member_event_id = format!("$member-{}:localhost", Uuid::new_v4());
     let member_content = json!({ "membership": "join", "displayname": "Alice" });
+    // `unsigned.prev_content` here models a displayname change: `membership`
+    // stays "join" in both old and new content, which is exactly the case
+    // issue #31 needs `prev_content` to disambiguate from a real join.
+    let member_prev_content = json!({ "membership": "join", "displayname": "Alice Prior" });
     store
         .upsert_event(&NewEvent {
             event_id: &member_event_id,
@@ -749,7 +753,8 @@ async fn read_api_end_to_end() {
             raw_event: json!({
                 "type": "m.room.member",
                 "state_key": "@alice:localhost",
-                "content": member_content
+                "content": member_content,
+                "unsigned": { "prev_content": member_prev_content }
             }),
             megolm_session_id: None,
             redacts: None,
@@ -876,6 +881,7 @@ async fn read_api_end_to_end() {
     assert_eq!(ev["data"]["event_id"], e1.as_str());
     assert_eq!(ev["data"]["body"], "first");
     assert_eq!(ev["data"]["state_key"], Value::Null);
+    assert_eq!(ev["data"]["prev_content"], Value::Null);
     assert_eq!(ev["data"]["redacted"], false);
 
     let (status, member) = get(
@@ -886,6 +892,7 @@ async fn read_api_end_to_end() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(member["data"]["state_key"], "@alice:localhost");
     assert_eq!(member["data"]["sender"], "@jamie:localhost");
+    assert_eq!(member["data"]["prev_content"], member_prev_content);
 
     let (status, members) = get(
         &app,

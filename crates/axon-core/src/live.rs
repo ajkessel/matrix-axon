@@ -232,6 +232,11 @@ pub struct LiveEvent {
     pub sender: String,
     /// Matrix state key for state events. `None` for message-like events.
     pub state_key: Option<String>,
+    /// The `unsigned.prev_content` of a state event — the state content this
+    /// event replaced, e.g. the previous `m.room.member` membership/displayname
+    /// (issue #31). `None` for message-like events and for state events with no
+    /// prior state (e.g. room creation).
+    pub prev_content: Option<Value>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type, e.g. `m.room.message`.

@@ -425,6 +425,7 @@ mod tests {
             room_id: "!r".to_owned(),
             sender: "@u:x".to_owned(),
             state_key: None,
+            prev_content: None,
             origin_ts: 1,
             event_type: event_type.to_owned(),
             content: None,

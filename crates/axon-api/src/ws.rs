@@ -464,6 +464,7 @@ mod tests {
             room_id: "!r:localhost".to_owned(),
             sender: "@a:localhost".to_owned(),
             state_key: None,
+            prev_content: None,
             origin_ts: 42,
             event_type: "m.room.message".to_owned(),
             content: None,

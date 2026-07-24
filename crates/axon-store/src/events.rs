@@ -170,6 +170,11 @@ pub struct TimelineRow {
     pub sender: String,
     /// Matrix state key for state events.
     pub state_key: Option<String>,
+    /// The `unsigned.prev_content` of a state event — the state content this
+    /// event replaced (issue #31), e.g. the previous `m.room.member`
+    /// membership/displayname. `None` for message-like events and for state
+    /// events with no prior state.
+    pub prev_content: Option<Value>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type.
@@ -227,6 +232,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
             room_id: row.try_get("room_id")?,
             sender: row.try_get("sender")?,
             state_key: row.try_get("state_key")?,
+            prev_content: row.try_get("prev_content")?,
             origin_ts: row.try_get("origin_ts")?,
             event_type: row.try_get("event_type")?,
             content: row.try_get("content")?,
@@ -285,6 +291,7 @@ impl sqlx_core::from_row::FromRow<'_, PgRow> for TimelineRow {
 pub(crate) static TIMELINE_SELECT: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT e.id, e.event_id, e.room_id, e.sender, e.raw_event->>'state_key' AS state_key, \
+            e.raw_event->'unsigned'->'prev_content' AS prev_content, \
             e.origin_ts, e.event_type, \
             CASE WHEN r.event_id IS NOT NULL THEN NULL \
                  WHEN edit.new_content IS NOT NULL THEN edit.new_content \

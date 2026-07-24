@@ -724,6 +724,7 @@ async fn persist_event_core(
         .get("state_key")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    let prev_content = crate::meta::prev_content(&raw_val);
 
     let new_ev = NewEvent {
         event_id: &event_id,
@@ -790,6 +791,7 @@ async fn persist_event_core(
             room_id: room_id.clone(),
             sender: ev.sender().as_str().to_owned(),
             state_key: state_key.clone(),
+            prev_content,
             origin_ts,
             event_type: event_type.clone(),
             content: new_ev.content.clone(),

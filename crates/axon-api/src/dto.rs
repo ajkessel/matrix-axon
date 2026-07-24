@@ -84,6 +84,15 @@ pub struct EventDto {
     pub sender: String,
     /// Matrix state key for state events. `null` for message-like events.
     pub state_key: Option<String>,
+    /// The `unsigned.prev_content` of a state event — the state content this
+    /// event replaced, e.g. the previous `m.room.member` membership/displayname
+    /// (issue #31). A client needs this to tell a real join (`membership`
+    /// transitions to `"join"` from something else) apart from a displayname or
+    /// avatar change (`membership` stays `"join"`), since both arrive as
+    /// `m.room.member` events with `content.membership: "join"`. `null` for
+    /// message-like events and for state events with no prior state.
+    #[schema(value_type = Option<Object>)]
+    pub prev_content: Option<Value>,
     /// `origin_server_ts` in milliseconds.
     pub origin_ts: i64,
     /// Matrix event type, e.g. `m.room.message`.
@@ -141,6 +150,7 @@ impl From<axon_core::LiveEvent> for EventDto {
             room_id: e.room_id,
             sender: e.sender,
             state_key: e.state_key,
+            prev_content: e.prev_content,
             origin_ts: e.origin_ts,
             r#type: e.event_type,
             content: e.content,
@@ -169,6 +179,7 @@ impl EventDto {
             room_id: row.room_id,
             sender: row.sender,
             state_key: row.state_key,
+            prev_content: row.prev_content,
             origin_ts: row.origin_ts,
             r#type: row.event_type,
             content: row.content,

@@ -6546,6 +6546,13 @@
                 "format": "int64",
                 "description": "`origin_server_ts` in milliseconds."
               },
+              "prev_content": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The `unsigned.prev_content` of a state event — the state content this\nevent replaced, e.g. the previous `m.room.member` membership/displayname\n(issue #31). A client needs this to tell a real join (`membership`\ntransitions to `\"join\"` from something else) apart from a displayname or\navatar change (`membership` stays `\"join\"`), since both arrive as\n`m.room.member` events with `content.membership: \"join\"`. `null` for\nmessage-like events and for state events with no prior state."
+              },
               "reactions": {
                 "type": [
                   "object",
@@ -7248,6 +7255,13 @@
                   "type": "integer",
                   "format": "int64",
                   "description": "`origin_server_ts` in milliseconds."
+                },
+                "prev_content": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "description": "The `unsigned.prev_content` of a state event — the state content this\nevent replaced, e.g. the previous `m.room.member` membership/displayname\n(issue #31). A client needs this to tell a real join (`membership`\ntransitions to `\"join\"` from something else) apart from a displayname or\navatar change (`membership` stays `\"join\"`), since both arrive as\n`m.room.member` events with `content.membership: \"join\"`. `null` for\nmessage-like events and for state events with no prior state."
                 },
                 "reactions": {
                   "type": [
@@ -8026,6 +8040,13 @@
             "type": "integer",
             "format": "int64",
             "description": "`origin_server_ts` in milliseconds."
+          },
+          "prev_content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The `unsigned.prev_content` of a state event — the state content this\nevent replaced, e.g. the previous `m.room.member` membership/displayname\n(issue #31). A client needs this to tell a real join (`membership`\ntransitions to `\"join\"` from something else) apart from a displayname or\navatar change (`membership` stays `\"join\"`), since both arrive as\n`m.room.member` events with `content.membership: \"join\"`. `null` for\nmessage-like events and for state events with no prior state."
           },
           "reactions": {
             "type": [
