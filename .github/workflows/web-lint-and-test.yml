@@ -11,6 +11,7 @@ on:
       - main
   pull_request:
     paths:
+      - "openapi/openapi.json"
       - "clients/web/**"
       - ".github/workflows/web-lint-and-test.yml"
 
