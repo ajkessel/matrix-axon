@@ -157,6 +157,23 @@ through M-W12 complete parity, hardening, and the desktop shell.
 | **M-W11**  | Hardening & parity audit: core keyboard shortcuts, a11y pass (modal focus, spoilers, SAS dialog), error/empty/loading states, bundle-size budget, parity checklist signed off against the target above.                                                                                                                                                                | full feature parity with TUI; "SPA stable" trigger for Tauri per ADR 0031.                                          |
 | **M-W12**  | Tauri desktop shell: `clients/web/src-tauri/`, Windows + Linux builds, Tauri `AuthProvider` (OS keychain — first payoff of the M-W2 seam), CI build lane.                                                                                                                                                                                                              | Desktop builds ship from the same dist.                                                                             |
 
+**Addendum (Tauri prep, pre-M-W12):** `services.ts`/`ws.ts`/`oauth.tsx` were
+decoupled from hardcoded same-origin assumptions (`apiBaseUrl()` as the single
+server-base accessor; `OAuthAuthOptions.redirectUriBase`) so M-W12 only needs
+to set env vars / pass a deep-link scheme, not touch these call sites. Two
+items remain open and are *not* resolved by that prep:
+
+- **CORS (M-W1.5) config shape**, for whoever implements it: add
+  `cors_allowed_origins: Vec<String>` to `ServerConfig`
+  (`crates/axon-core/src/config.rs`), following the existing
+  `#[serde(default)]` / figment `AXON_SERVER__*` env-override pattern already
+  used there. No `CorsLayer` exists yet anywhere in `crates/axon-api` — this
+  is the recommended shape, not a restructuring. Adding the Tauri origin
+  later is then a one-line addition to that list.
+- **`file://` routing hash-fallback under Tauri** (open question 5 below)
+  remains unresolved and unimplemented — see `clients/web/src/app.tsx:46`,
+  which flags it explicitly as "M-W12's problem."
+
 ### Out of scope for this roadmap
 
 OAuth 2.0 + PKCE (seam only; revisit after this lands in the server),

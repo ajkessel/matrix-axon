@@ -82,13 +82,27 @@ export interface AppServices {
  * separately-hosted deployments (which rely on the server's CORS allow-list,
  * M-W1.5). Unset, the client is same-origin: the Vite dev proxy in
  * development, or a reverse proxy serving app and API together.
+ *
+ * This is the one accessor every server-base-URL consumer (HTTP client,
+ * media, OAuth's `baseUrl`, WebSocket) should go through, so a future build
+ * target with a non-origin base (e.g. Tauri, M-W12) only ever needs to set
+ * this env var — no call site changes.
  */
-function apiBaseUrl(): string {
+export function apiBaseUrl(): string {
   return import.meta.env.VITE_AXON_SERVER_URL ?? '/'
 }
 
 function oauthClientId(): string {
   return import.meta.env.VITE_AXON_OAUTH_CLIENT_ID ?? 'axon-web'
+}
+
+/**
+ * The OAuth redirect callback's origin. Unset, same-origin (today's default).
+ * A future Tauri build (M-W12) would set this to a deep-link scheme instead
+ * of implementing that here — see `OAuthAuthOptions.redirectUriBase`.
+ */
+function oauthRedirectUriBase(): string {
+  return import.meta.env.VITE_AXON_OAUTH_REDIRECT_URI ?? window.location.origin
 }
 
 /** Apply server-derived room unread counts from the live bus (ADR 0070). */
@@ -275,6 +289,7 @@ export function createServices(
     providers: parseOAuthProviders(import.meta.env.VITE_AXON_OAUTH_PROVIDERS),
     baseUrl: apiBaseUrl(),
     clientId: oauthClientId(),
+    redirectUriBase: oauthRedirectUriBase(),
     storage,
     sessionStorage,
   })
@@ -299,7 +314,7 @@ export function createServices(
       if (typeof token !== 'string') {
         throw new Error('live socket requires a synchronously available token')
       }
-      return openLiveSocket(token, import.meta.env.VITE_AXON_SERVER_URL)
+      return openLiveSocket(token, apiBaseUrl())
     },
   })
   const activeRoom = signal<string | null>(null)

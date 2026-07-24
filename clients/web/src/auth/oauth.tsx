@@ -57,6 +57,12 @@ export interface OAuthAuthOptions {
   providers: readonly OAuthProviderConfig[]
   baseUrl: string
   clientId?: string
+  /**
+   * Origin the OAuth callback (`/oauth/callback`) is resolved against.
+   * Defaults to `window.location.origin`. A future Tauri build (M-W12) would
+   * pass a deep-link scheme here instead of changing `startSignIn`.
+   */
+  redirectUriBase?: string
   persistence?: AuthPersistence
   storage?: Storage
   sessionStorage?: Storage
@@ -86,6 +92,7 @@ export function createOAuthAuthProvider({
   providers,
   baseUrl,
   clientId = DEFAULT_CLIENT_ID,
+  redirectUriBase = window.location.origin,
   persistence: providedPersistence,
   storage,
   sessionStorage,
@@ -200,7 +207,7 @@ export function createOAuthAuthProvider({
       const state = randomBase64Url(32)
       const redirectUri = new URL(
         '/oauth/callback',
-        window.location.origin,
+        redirectUriBase,
       ).toString()
       const storageMode = persistence.rememberMe.value
         ? 'persistent'
