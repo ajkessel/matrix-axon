@@ -12,7 +12,7 @@
 
 mod common;
 
-use axon_store::{NewEvent, RoomStateUpsert, Store};
+use axon_store::{AccountState, NewEvent, RoomStateUpsert, Store};
 use common::{insert_message, test_account};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -348,6 +348,40 @@ async fn list_rooms_filters_by_account() {
     assert!(all
         .iter()
         .any(|r| r.room_id == room2 && r.account_id == acc2));
+
+    common::cleanup_account(&pool, acc1).await;
+    common::cleanup_account(&pool, acc2).await;
+}
+
+/// `list_rooms` excludes rooms belonging to a deactivated (logged-out) account,
+/// mirroring `list_accounts`'s active-only filter, while sibling active
+/// accounts' rooms are unaffected.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_rooms_excludes_deactivated_accounts() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let acc1 = test_account(&store, "g1").await;
+    let acc2 = test_account(&store, "g2").await;
+    let room1 = format!("!r1-{}:localhost", Uuid::new_v4());
+    let room2 = format!("!r2-{}:localhost", Uuid::new_v4());
+    insert_message(&store, acc1, &room1, 1_000, "one").await;
+    insert_message(&store, acc2, &room2, 1_000, "two").await;
+
+    store
+        .set_account_state(acc1, AccountState::Deactivated)
+        .await
+        .expect("deactivate acc1");
+
+    let all = store.list_rooms(None).await.expect("list all");
+    assert!(!all.iter().any(|r| r.account_id == acc1));
+    assert!(all
+        .iter()
+        .any(|r| r.room_id == room2 && r.account_id == acc2));
+
+    // Scoping to the deactivated account explicitly also yields nothing.
+    let only1 = store.list_rooms(Some(acc1)).await.expect("list acc1");
+    assert!(only1.is_empty());
 
     common::cleanup_account(&pool, acc1).await;
     common::cleanup_account(&pool, acc2).await;

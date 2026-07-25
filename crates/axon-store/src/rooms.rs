@@ -127,7 +127,7 @@ impl Store {
                  WHERE ($1::uuid IS NULL OR account_id = $1) \
                  GROUP BY account_id, room_id \
              ) a \
-             JOIN accounts ac ON ac.account_id = a.account_id \
+             JOIN accounts ac ON ac.account_id = a.account_id AND ac.state = 'active' \
              WHERE NOT EXISTS ( \
                  SELECT 1 FROM room_state rs \
                    WHERE rs.account_id = a.account_id AND rs.room_id = a.room_id \
