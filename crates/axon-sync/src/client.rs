@@ -15,11 +15,69 @@ use std::path::Path;
 use axon_core::{Credential, SyncConfig};
 use axon_store::{Account, Store};
 use matrix_sdk::{
-    authentication::matrix::MatrixSession, ruma::OwnedUserId, store::RoomLoadSettings, Client,
-    SessionMeta, SessionTokens,
+    authentication::matrix::MatrixSession, cross_process_lock::CrossProcessLockConfig,
+    ruma::OwnedUserId, store::RoomLoadSettings, Client, ClientBuilder, SessionMeta, SessionTokens,
+    SqliteStoreConfig,
 };
 
 use crate::error::{sdk_err, SyncError};
+
+/// The [`ClientBuilder`] every production client is built from, carrying the
+/// settings that must not differ between the first-boot and restore paths.
+///
+/// `SingleProcess` disables the SDK's cross-process store lock. The SDK defaults
+/// to `MultiProcess`, which exists for setups that share one crypto store across
+/// processes (an iOS app plus its notification-service extension, say); holding
+/// it spawns a task that rewrites the `lease_locks` row in
+/// `matrix-sdk-crypto.sqlite3` as its own committed transaction every 50ms, for
+/// as long as the client lives. Axon is a single process that owns its data dir
+/// — it already takes an exclusive Tantivy writer lock there, so a second
+/// process on the same directory is unsupported regardless — and on a spinning
+/// disk that lease renewal is a continuous stream of tiny fsync'd writes (~43
+/// KB/s, ~3.7 GB/day) with the server completely idle.
+fn client_builder(homeserver_url: &str) -> ClientBuilder {
+    Client::builder()
+        .homeserver_url(homeserver_url)
+        .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
+}
+
+/// Connections each SDK SQLite store keeps in its pool.
+///
+/// The SDK default is `num_cpus::get_physical() * 4`, which sizes the pool to
+/// the *host* rather than to the workload: on a 14-core machine that is 56
+/// connections for the crypto store alone, each holding its own page cache (2
+/// MiB below), so one store can reach ~112 MiB of cache. Axon is a personal
+/// server serving a handful of accounts, and SQLite serialises writers anyway —
+/// a deeper pool only buys concurrent *readers*. Eight is what the SDK itself
+/// would pick on a dual-core machine, and leaves headroom over the widest
+/// concurrent fan-out we issue against a single store (the unread-count sweep's
+/// eight-way batch, see `engine::UNREAD_COUNTS_SWEEP_CONCURRENCY`).
+const SQLITE_POOL_MAX_SIZE: usize = 8;
+
+/// Cap on each store's WAL residency after a checkpoint, in bytes. This bounds
+/// what the journal is *truncated back to*, not its peak — SQLite auto-checkpoints
+/// at ~1000 pages (~4 MiB at our 4 KiB page size) regardless.
+///
+/// The SDK's default is 10 MiB, which for a personal server is out of proportion
+/// to the data it fronts: this deployment's crypto store is a 612 KiB database
+/// that had accumulated a 3.9 MiB WAL. Tightening to 2 MiB keeps idle on-disk
+/// footprint closer to the working set without touching checkpoint frequency.
+const SQLITE_JOURNAL_SIZE_LIMIT: u32 = 2 * 1024 * 1024;
+
+/// Store configuration shared by both construction paths.
+///
+/// Note that `cache_size` is deliberately left at the SDK's 2 MiB default rather
+/// than lowered. The SDK bundles a smaller cache into its
+/// `with_low_memory_config` preset, but shrinking the page cache trades memory
+/// for *more* disk reads — the wrong direction for the spinning-disk and
+/// parity-RAID deployments this tuning is aimed at. The win here is bounding the
+/// pool, not starving each connection.
+fn sqlite_config(data_dir: &Path, store_key: &str) -> SqliteStoreConfig {
+    SqliteStoreConfig::new(data_dir)
+        .passphrase(Some(store_key))
+        .pool_max_size(SQLITE_POOL_MAX_SIZE)
+        .journal_size_limit(SQLITE_JOURNAL_SIZE_LIMIT)
+}
 
 /// Build a [`Client`] for `account` and ensure it is authenticated, returning
 /// the ready-to-sync client.
@@ -40,9 +98,8 @@ pub(crate) async fn connect_account(
     let data_dir = config.data_dir.join(account.account_id.to_string());
     create_store_dir(&data_dir).await?;
 
-    let client = Client::builder()
-        .homeserver_url(&account.homeserver_url)
-        .sqlite_store(&data_dir, Some(store_key))
+    let client = client_builder(&account.homeserver_url)
+        .sqlite_store_with_config_and_cache_path(sqlite_config(&data_dir, store_key), None::<&Path>)
         .build()
         .await
         .map_err(sdk_err)?;
@@ -122,9 +179,11 @@ pub(crate) async fn login_new_device(
     let backup = config.data_dir.join(format!("{}.prev", account.account_id));
 
     with_staged_store_dir(&data_dir, &backup, || async {
-        let client = Client::builder()
-            .homeserver_url(&account.homeserver_url)
-            .sqlite_store(&data_dir, Some(store_key))
+        let client = client_builder(&account.homeserver_url)
+            .sqlite_store_with_config_and_cache_path(
+                sqlite_config(&data_dir, store_key),
+                None::<&Path>,
+            )
             .build()
             .await
             .map_err(sdk_err)?;
