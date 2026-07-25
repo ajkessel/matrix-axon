@@ -1676,6 +1676,385 @@ describe('RoomPage', () => {
     fireEvent.click(getByRole('button', { name: 'Close' }))
   })
 
+  describe('scroll anchoring', () => {
+    /** jsdom does no layout, so both the geometry and the observer are faked. */
+    function fakeRect(el: Element, top: number, height: number) {
+      el.getBoundingClientRect = () =>
+        ({
+          top,
+          bottom: top + height,
+          height,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: top,
+          toJSON: () => ({}),
+        }) as DOMRect
+    }
+
+    function installResizeObserver() {
+      const callbacks: ResizeObserverCallback[] = []
+      class FakeResizeObserver {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback)
+        }
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      }
+      vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+      // Both the bottom pin and the anchor observe the list; firing all of
+      // them is what the browser would do.
+      return () => {
+        for (const callback of callbacks) {
+          callback([], null as unknown as ResizeObserver)
+        }
+      }
+    }
+
+    /** A scroller parked in history, with three rows laid out below its top. */
+    async function scrolledBackTimeline() {
+      const fire = installResizeObserver()
+      const view = renderRoom([
+        event('$1', T0),
+        event('$2', T0 + 1),
+        event('$3', T0 + 2),
+      ])
+      await view.findByText('body of $3')
+      const el = view.container.querySelector('.timeline') as HTMLElement
+      let scrollTop = 800
+      Object.defineProperty(el, 'scrollHeight', {
+        configurable: true,
+        value: 2000,
+      })
+      Object.defineProperty(el, 'clientHeight', {
+        configurable: true,
+        value: 500,
+      })
+      Object.defineProperty(el, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (next: number) => {
+          scrollTop = next
+        },
+      })
+      fakeRect(el, 0, 500)
+      const rows = [
+        ...view.container.querySelectorAll<HTMLElement>('li.event-row'),
+      ]
+      rows.forEach((row, index) => fakeRect(row, 10 + index * 50, 50))
+      return { ...view, el, rows, fire, top: () => scrollTop }
+    }
+
+    afterEach(() => vi.unstubAllGlobals())
+
+    it('puts back a shift caused by a row above the reader growing', async () => {
+      const { el, rows, fire, top } = await scrolledBackTimeline()
+
+      // Scrolling away from the bottom takes the topmost visible row as the
+      // anchor — `$1`, sitting 10px below the scroller's top edge.
+      fireEvent.scroll(el)
+      expect(top()).toBe(800)
+
+      // A row above it corrects from its placeholder height to its real one,
+      // pushing everything down 85px — the shift measured on the phone.
+      rows.forEach((row, index) => fakeRect(row, 95 + index * 50, 50))
+      fire()
+
+      // Scrolled down by exactly as much as the content moved down, so what
+      // the reader was looking at has not moved at all.
+      expect(top()).toBe(885)
+    })
+
+    it('leaves the bottom pin alone when the reader is at the live end', async () => {
+      const { rows, fire, top } = await scrolledBackTimeline()
+      // No scroll event, so `stickToBottom` is still the mount default: the
+      // reader is at the tail and the bottom pin owns the scroll position.
+      rows.forEach((row, index) => fakeRect(row, 95 + index * 50, 50))
+      fire()
+
+      expect(top()).toBe(800)
+    })
+
+    it('measures growth net of the reader scrolling in between', async () => {
+      // The anchor is taken once and outlives the scrolling that follows —
+      // it has to, since retaking it mid-scroll forces the layout that
+      // renders the incoming rows, and so records their growth as already
+      // having happened. The reader's own movement must cancel out exactly.
+      const { el, rows, fire, top } = await scrolledBackTimeline()
+      fireEvent.scroll(el)
+
+      // Scrolled back 200px: every row moves down by 200, nothing grew.
+      el.scrollTop = 600
+      rows.forEach((row, index) => fakeRect(row, 210 + index * 50, 50))
+      fire()
+      expect(top()).toBe(600)
+
+      // Now a row above grows 85px, with no further scrolling. Only the
+      // growth is put back — not the 200px the reader travelled.
+      rows.forEach((row, index) => fakeRect(row, 295 + index * 50, 50))
+      fire()
+      expect(top()).toBe(685)
+    })
+
+    it('anchors below a row straddling the top edge, not to it', async () => {
+      // The straddling row is the one being revealed and rendered for the
+      // first time, so it is the likeliest to correct its own height. Its top
+      // does not move when it grows downward, so anchoring to it would measure
+      // no shift while everything below it moved.
+      const { el, rows, fire, top } = await scrolledBackTimeline()
+      fakeRect(rows[0], -20, 50) // straddles: top above the edge, bottom below
+      fakeRect(rows[1], 30, 50)
+      fakeRect(rows[2], 80, 50)
+      fireEvent.scroll(el)
+
+      // The straddling row grows by 85px; rows below it move down.
+      fakeRect(rows[0], -20, 135)
+      fakeRect(rows[1], 115, 50)
+      fakeRect(rows[2], 165, 50)
+      fire()
+
+      expect(top()).toBe(885)
+    })
+
+    it('takes a fresh anchor when the held row leaves the slice', async () => {
+      const { el, rows, fire, top } = await scrolledBackTimeline()
+      fireEvent.scroll(el)
+
+      // The anchor row is removed — a slice replacement, or the retained-slice
+      // trim. Nothing to hold, so the scroll position is left where it is.
+      rows[0].remove()
+      rows.slice(1).forEach((row, index) => fakeRect(row, 95 + index * 50, 50))
+      fire()
+
+      expect(top()).toBe(800)
+    })
+  })
+
+  describe('automatic scroll-back', () => {
+    /**
+     * jsdom has no `IntersectionObserver`, which is what normally sends the
+     * timeline down the button fallback. These tests install one so the
+     * observer path itself can be exercised; `fire` plays the "top sentinel
+     * came into view" callback. Element rects are all zero in jsdom, so the
+     * chain's own re-measure always reads "still on screen" — which is what
+     * makes the cap the thing under test.
+     */
+    function installIntersectionObserver() {
+      const callbacks: IntersectionObserverCallback[] = []
+      class FakeIntersectionObserver {
+        constructor(callback: IntersectionObserverCallback) {
+          callbacks.push(callback)
+        }
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+        takeRecords() {
+          return []
+        }
+      }
+      vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
+      return () => {
+        // The top sentinel is the first observer RoomPage creates.
+        callbacks[0]?.(
+          [{ isIntersecting: true } as IntersectionObserverEntry],
+          null as unknown as IntersectionObserver,
+        )
+      }
+    }
+
+    afterEach(() => vi.unstubAllGlobals())
+
+    /** A state event: fetched and stored, but filtered out of the view. */
+    const hidden = (id: string, ts: number) =>
+      event(id, ts, { type: 'm.room.member', state_key: '@bob:hs' })
+
+    it('keeps paging across pages that add no visible rows', async () => {
+      // Every page is state events, so the timeline's height never changes
+      // and no second intersection callback would ever arrive. Before the
+      // chain, scroll-back stalled here after exactly one page.
+      let calls = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(TIMELINE_PATH, () => {
+          calls += 1
+          return HttpResponse.json({
+            data: {
+              events: [hidden(`$s${calls}`, T0 - calls)],
+              next_cursor: `older-${calls}`,
+            },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const fire = installIntersectionObserver()
+      render(routedRoomPage(testServices()))
+      await waitFor(() => expect(calls).toBe(1))
+
+      fire()
+
+      // One arrival at the top pulls up to the cap, then leaves the rest to
+      // the button rather than walking history unattended.
+      await waitFor(() => expect(calls).toBe(6))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(calls).toBe(6)
+    })
+
+    it('keeps paging after the slice reaches its retained cap', async () => {
+      // Full pages, so the store starts trimming its newest end partway
+      // through. A chain that measured progress by slice *length* would read
+      // the trim as "nothing loaded" and stall from there on.
+      let calls = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(TIMELINE_PATH, () => {
+          calls += 1
+          return HttpResponse.json({
+            data: {
+              events: Array.from({ length: 50 }, (_, i) =>
+                hidden(`$s${calls}-${i}`, T0 - calls * 100 - i),
+              ),
+              next_cursor: `older-${calls}`,
+            },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const fire = installIntersectionObserver()
+      render(routedRoomPage(testServices()))
+      await waitFor(() => expect(calls).toBe(1))
+
+      // Four arrivals at the top: 20 pages, well past the 12-page cap.
+      for (const expected of [6, 11, 16, 21]) {
+        fire()
+        await waitFor(() => expect(calls).toBe(expected))
+      }
+    })
+
+    it('crosses a page that lands but adds nothing to the slice', async () => {
+      // The reported stall: scroll-back stopping at the same message on every
+      // browser. A page can advance the cursor while contributing no events
+      // at all; reading that as "no progress" ended the chain on the message
+      // before it, and only the button got past it.
+      let calls = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(TIMELINE_PATH, () => {
+          calls += 1
+          return HttpResponse.json({
+            data: {
+              // The third page is empty but the cursor moves on.
+              events:
+                calls === 3 ? [] : [event(`$m${calls}`, T0 - calls * 100)],
+              next_cursor: `older-${calls}`,
+            },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const fire = installIntersectionObserver()
+      const { findByText } = render(routedRoomPage(testServices()))
+      await waitFor(() => expect(calls).toBe(1))
+
+      fire()
+
+      await waitFor(() => expect(calls).toBe(6))
+      // The pages past the empty one are loaded, not stranded behind it.
+      expect(await findByText('body of $m5')).toBeTruthy()
+    })
+
+    it('a scroll resumes the chain without a fresh intersection', async () => {
+      // The chain must not depend on `IntersectionObserver` reporting a
+      // *change*: once it has stopped with the sentinel still on screen, no
+      // such change is coming, and only the reader's scroll can say "more".
+      let calls = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(TIMELINE_PATH, () => {
+          calls += 1
+          return HttpResponse.json({
+            data: {
+              events: [event(`$m${calls}`, T0 - calls * 100)],
+              next_cursor: `older-${calls}`,
+            },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      installIntersectionObserver()
+      const { container } = render(routedRoomPage(testServices()))
+      await waitFor(() => expect(calls).toBe(1))
+
+      const scroller = container.querySelector('.timeline')!
+      fireEvent.scroll(scroller)
+
+      // One chain's worth, from a scroll alone — no observer callback fired.
+      await waitFor(() => expect(calls).toBe(6))
+
+      // And the next scroll starts another, so hitting the cap is never a
+      // dead end for a reader who keeps scrolling.
+      fireEvent.scroll(scroller)
+      await waitFor(() => expect(calls).toBe(11))
+    })
+
+    it('stops the chain at the beginning of history', async () => {
+      let calls = 0
+      server.use(
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({ data: [] }),
+        ),
+        http.get(TIMELINE_PATH, () => {
+          calls += 1
+          return HttpResponse.json({
+            data: {
+              events: [hidden(`$s${calls}`, T0 - calls)],
+              next_cursor: calls >= 3 ? null : `older-${calls}`,
+            },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      const fire = installIntersectionObserver()
+      const { findByText } = render(routedRoomPage(testServices()))
+      await waitFor(() => expect(calls).toBe(1))
+
+      fire()
+
+      expect(await findByText('Beginning of room history.')).toBeTruthy()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(calls).toBe(3)
+    })
+  })
+
   it('load-older prepends the older page', async () => {
     let calls = 0
     server.use(

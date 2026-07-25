@@ -101,6 +101,36 @@ describe('MediaImage', () => {
     expect(box.style.maxHeight).toBe('320px')
   })
 
+  it('holds a height for a dimensionless image, releasing it once loaded', async () => {
+    serveBytes()
+    const { container } = renderImage(image({ w: undefined, h: undefined }))
+    // Nothing to derive a ratio from, so reserve a box rather than collapse to
+    // zero height and snap to full size on decode, mid-scroll.
+    expect(
+      (container.querySelector('.media-image') as HTMLElement).style.minHeight,
+    ).toBe('180px')
+
+    // Once the image is up it sizes the box itself; a short image must not sit
+    // in a tall empty frame.
+    await waitFor(() =>
+      expect(
+        (container.querySelector('.media-image') as HTMLElement).style
+          .minHeight,
+      ).toBe(''),
+    )
+  })
+
+  it('decodes off the main thread so a scroll gesture is not blocked', async () => {
+    serveBytes()
+    const { container } = renderImage(image())
+    await waitFor(() =>
+      expect(container.querySelector('.media-open img')).not.toBeNull(),
+    )
+    expect(
+      container.querySelector('.media-open img')?.getAttribute('decoding'),
+    ).toBe('async')
+  })
+
   it('caps an uploading local preview to the thumbnail box', () => {
     const { container } = renderImage(
       image({ url: null, w: undefined, h: undefined }),

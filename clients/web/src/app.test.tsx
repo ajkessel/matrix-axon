@@ -27,6 +27,7 @@ const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
 const ORIGINAL_STANDALONE = (navigator as Navigator & { standalone?: boolean })
   .standalone
+const ORIGINAL_INNER_HEIGHT = window.innerHeight
 const ACCOUNT_DTO: Account = {
   account_id: ACCOUNT,
   user_id: '@alice:example.org',
@@ -64,6 +65,10 @@ afterEach(() => {
   Object.defineProperty(window, 'visualViewport', {
     configurable: true,
     value: undefined,
+  })
+  Object.defineProperty(window, 'innerHeight', {
+    configurable: true,
+    value: ORIGINAL_INNER_HEIGHT,
   })
   document.documentElement.removeAttribute('style')
   Object.defineProperty(navigator, 'standalone', {
@@ -411,6 +416,103 @@ describe('App', () => {
     expect(
       document.documentElement.style.getPropertyValue('--app-viewport-top'),
     ).toBe('')
+  })
+
+  it('refills the viewport when the keyboard leaves with the focused element', async () => {
+    // The mobile half-height shell: the keyboard shrinks the visual viewport,
+    // then a state change (leaving a thread, following a link) unmounts the
+    // focused composer. iOS dismisses the keyboard without firing a viewport
+    // `resize`, so the shell must not stay pinned to the keyboard-up height.
+    const listeners = new Map<string, EventListener>()
+    const viewport = {
+      offsetTop: 0,
+      offsetLeft: 0,
+      width: 390,
+      height: 800,
+      scale: 1,
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        listeners.set(type, listener)
+      }),
+      removeEventListener: vi.fn(),
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 800,
+    })
+
+    const composer = document.createElement('textarea')
+    document.body.appendChild(composer)
+    render(<App services={testServices()} />)
+    await waitFor(() =>
+      expect(
+        document.documentElement.style.getPropertyValue(
+          '--app-viewport-height',
+        ),
+      ).toBe('800px'),
+    )
+
+    // Keyboard up over a focused field: the shrunken height is honoured.
+    composer.focus()
+    Object.assign(viewport, { height: 380 })
+    listeners.get('resize')?.(new Event('resize'))
+    expect(
+      document.documentElement.style.getPropertyValue('--app-viewport-height'),
+    ).toBe('380px')
+
+    // The state change takes the focused field away. No `resize` follows, and
+    // the visual viewport still reports the keyboard-up height.
+    composer.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+    composer.remove()
+
+    await waitFor(() =>
+      expect(
+        document.documentElement.style.getPropertyValue(
+          '--app-viewport-height',
+        ),
+      ).toBe(''),
+    )
+    // Cleared, so `.shell` falls back to `100dvh` and fills the screen again.
+    expect(
+      document.documentElement.style.getPropertyValue('--app-viewport-top'),
+    ).toBe('')
+  })
+
+  it('keeps tracking a pinch-zoomed viewport with nothing focused', async () => {
+    // Same shape as the stale case but legitimately short: zoomed in, so the
+    // shell must keep following the visible area instead of snapping back.
+    const viewport = {
+      offsetTop: 30,
+      offsetLeft: 12,
+      width: 200,
+      height: 400,
+      scale: 2,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as VisualViewport
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: viewport,
+    })
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: 800,
+    })
+
+    render(<App services={testServices()} />)
+    await waitFor(() =>
+      expect(
+        document.documentElement.style.getPropertyValue(
+          '--app-viewport-height',
+        ),
+      ).toBe('400px'),
+    )
+    expect(
+      document.documentElement.style.getPropertyValue('--app-viewport-top'),
+    ).toBe('30px')
   })
 
   it('reserves the standalone iOS keyboard accessory strip while editing', async () => {

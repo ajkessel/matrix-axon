@@ -109,6 +109,17 @@ const SWIPE_DECISION_THRESHOLD = 10
 // app has already replaced. Declining the band leaves one navigation and the
 // browser's own animation, which at least paints throughout (ADR 0075).
 const NATIVE_BACK_EDGE_PX = 30
+// How far above the scroller a page starts loading, so it arrives during the
+// scroll rather than after the reader has stopped at the top edge.
+const SCROLL_BACK_PREFETCH_PX = 400
+// Pages one arrival at the top may pull automatically. The chain exists to
+// cross runs of filtered-out events, not to walk history unattended.
+const AUTO_SCROLL_BACK_PAGES = 5
+// How far the scroll anchor may drift from the viewport, in viewport heights,
+// before a fresh one is taken. Growth between the anchor and the visible rows
+// is not counted, so it has to stay nearby — but retaking it costs a missed
+// correction, so not too eagerly either.
+const ANCHOR_REACH = 1.5
 
 type SwipeStart = {
   x: number
@@ -1309,6 +1320,83 @@ function Timeline({
     active: boolean
   }>({ eventId: null, active: false })
 
+  /**
+   * The row the reader's eye is on: where it sat relative to the scroller's
+   * top edge, and what the scroll offset was at the time. Holding *both* is
+   * what makes the measurement independent of the reader's own scrolling —
+   * see the anchoring effect below.
+   */
+  const scrollAnchor = useRef<{
+    row: HTMLElement
+    top: number
+    scrollTop: number
+  } | null>(null)
+
+  /**
+   * Take a fresh anchor: the topmost fully visible row, its offset, and the
+   * scroll position it was measured at.
+   *
+   * Deliberately *not* called from the scroll handler. Reading geometry forces
+   * layout, and layout is where `content-visibility` decides to render the
+   * rows coming into view — so a capture during a scroll triggers the very
+   * growth it is meant to measure and records the position after it. That is
+   * what left the correction silent through an entire scroll-back while
+   * working perfectly on a still timeline. The baseline survives the reader's
+   * own scrolling instead (see the effect below), so it only has to be
+   * retaken when it stops describing anything useful.
+   *
+   * Rows come in document order, so the predicates below are monotonic across
+   * them: a binary search settles it in ~10 rect reads rather than walking a
+   * slice that holds hundreds.
+   */
+  const captureAnchor = useCallback(() => {
+    const el = scroller.current
+    const list = eventList.current
+    if (el === null || list === null) {
+      scrollAnchor.current = null
+      return
+    }
+    const rows = list.querySelectorAll<HTMLElement>('li.event-row')
+    const top = el.getBoundingClientRect().top
+    /** First row satisfying a predicate that is monotonic in document order. */
+    const search = (matches: (row: HTMLElement) => boolean) => {
+      let low = 0
+      let high = rows.length - 1
+      let found = -1
+      while (low <= high) {
+        const mid = (low + high) >> 1
+        if (matches(rows[mid])) {
+          found = mid
+          high = mid - 1
+        } else {
+          low = mid + 1
+        }
+      }
+      return found
+    }
+    // The first row entirely at or below the top edge — *not* the one
+    // straddling it. During a scroll-back the straddling row is the one being
+    // revealed and rendered for the first time, so it is the likeliest to
+    // correct its own height; anchoring to it would measure its top, which a
+    // downward growth never moves, and miss the shift entirely. Anchoring
+    // below it puts that growth above the anchor, where it is compensated
+    // like any other. Only a row taller than the viewport leaves nothing
+    // fully visible, and then the straddling row is all there is.
+    const fullyVisible = search((row) => row.getBoundingClientRect().top >= top)
+    const found =
+      fullyVisible === -1
+        ? search((row) => row.getBoundingClientRect().bottom > top)
+        : fullyVisible
+    scrollAnchor.current =
+      found === -1
+        ? null
+        : {
+            row: rows[found],
+            top: rows[found].getBoundingClientRect().top - top,
+            scrollTop: el.scrollTop,
+          }
+  }, [])
+
   const scheduleResizePin = useCallback(() => {
     if (resizePinFrame.current !== null) {
       return
@@ -1352,16 +1440,140 @@ function Timeline({
       return
     }
     const sentinel = topSentinel.current
+    const root = scroller.current
     if (sentinel === null) {
       return
     }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        void timeline.loadOlder()
+    let cancelled = false
+    let pumping = false
+    let requested = false
+    let frame = 0
+
+    // One trigger is not one page: a page of state events, redactions, or
+    // thread replies adds no height, so the sentinel never leaves the band
+    // and nothing would ask again. The chain keeps paging while the sentinel
+    // is in the band, up to a cap per chain — past that an idle reader stops
+    // pulling history, but any further scroll starts a new chain.
+    //
+    // The cap therefore bounds an *unattended* chain, not a session: a reader
+    // who keeps scrolling walks as far back as they keep asking for, which is
+    // the intent. What bounds memory is the store's retained-slice trim.
+    const pump = async () => {
+      if (timeline.atStart.value) {
+        // Nothing left to page. Bailing before the chain starts, rather than
+        // inside it, keeps a reader parked at the beginning of a room from
+        // opening (and marking) a chain on every scroll frame.
+        return
       }
-    })
+      if (pumping) {
+        // Remember the trigger rather than dropping it. A scroll that lands
+        // mid-page used to be lost, and if it was the last one the reader
+        // made, the chain ended with nothing left to wake it.
+        requested = true
+        return
+      }
+      pumping = true
+      perfMark('timeline:auto-page:chain-start', {
+        loaded: timeline.events.value.length,
+      })
+      try {
+        do {
+          requested = false
+          for (let page = 0; page < AUTO_SCROLL_BACK_PAGES; page += 1) {
+            const stop = (reason: string) =>
+              perfMark('timeline:auto-page:stop', {
+                reason,
+                page,
+                loaded: timeline.events.value.length,
+                atStart: timeline.atStart.value,
+                atEnd: timeline.atEnd.value,
+              })
+            if (cancelled) {
+              return
+            }
+            if (timeline.atStart.value) {
+              stop('at-start')
+              return
+            }
+            if (!withinPrefetchBand(sentinel, root)) {
+              stop('out-of-band')
+              return
+            }
+            perfMark('timeline:auto-page:fetch', {
+              page,
+              loaded: timeline.events.value.length,
+            })
+            const advanced = await timeline.loadOlder()
+            perfMark('timeline:auto-page:fetched', {
+              page,
+              advanced,
+              loaded: timeline.events.value.length,
+            })
+            if (!advanced) {
+              // The cursor did not move: end of history, a failed request, or
+              // a page dropped as stale. Retrying now would spin.
+              stop('no-progress')
+              return
+            }
+            if (page + 1 >= AUTO_SCROLL_BACK_PAGES) {
+              stop('cap')
+              break
+            }
+            // Let layout — and the browser's scroll anchoring — settle before
+            // asking where the sentinel ended up.
+            await nextFrame()
+          }
+          // A trigger that arrived mid-chain gets its answer here, so the
+          // chain can never end while the reader is still asking for more.
+        } while (requested && !cancelled)
+      } finally {
+        pumping = false
+        perfMark('timeline:auto-page:chain-end', {
+          loaded: timeline.events.value.length,
+        })
+      }
+    }
+
+    // Two triggers, deliberately. The observer catches the band being entered
+    // without a scroll (content shrinking above, a first paint already at the
+    // top); the scroll listener is what makes the chain recoverable, since it
+    // reports the reader's intent every frame rather than only on an
+    // intersection *change* the browser may never have cause to report again.
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void pump()
+        }
+      },
+      // The root must be the scroller, not the viewport: `rootMargin` grows
+      // the *root's* rect, while an intermediate scroll container clips the
+      // target before the root is ever consulted — margin against the default
+      // root would do nothing here. With it, a page starts loading before the
+      // reader reaches the top, so it lands during the scroll, not after it.
+      { root, rootMargin: `${SCROLL_BACK_PREFETCH_PX}px 0px 0px 0px` },
+    )
     observer.observe(sentinel)
-    return () => observer.disconnect()
+    const onScroll = () => {
+      // One measurement per frame, however many scroll events arrive.
+      if (frame !== 0) {
+        return
+      }
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        if (withinPrefetchBand(sentinel, root)) {
+          void pump()
+        }
+      })
+    }
+    root?.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      cancelled = true
+      observer.disconnect()
+      root?.removeEventListener('scroll', onScroll)
+      if (frame !== 0) {
+        cancelAnimationFrame(frame)
+      }
+    }
   }, [timeline])
 
   // The forward mirror, live only after a jump: the bottom sentinel exists
@@ -1471,6 +1683,100 @@ function Timeline({
     return () => observer.disconnect()
   }, [highlighted, atEnd, scheduleResizePin])
 
+  // Scroll anchoring, done by hand (`overflow-anchor: none` in index.css).
+  //
+  // A row's real height is only known once it has been rendered — the timeline
+  // reserves an estimate for the rest (`content-visibility`), and the estimate
+  // is necessarily wrong for a wrapped body, a reaction row, or an image. When
+  // a row *above* the reader corrects itself, everything below it moves, and a
+  // scroll-back turns into a series of lurches (measured at 50–90px a time on
+  // a phone).
+  //
+  // The browser's own anchoring is supposed to absorb this, but it is uneven
+  // across engines — WebKit only shipped it in Safari 27 — and it has no view
+  // on which row the reader actually cares about. So we hold the topmost
+  // visible row ourselves and put back whatever moved it. `ResizeObserver`
+  // runs before paint, so the correction lands in the same frame and is never
+  // seen. The bottom pin owns the other direction, hence the `stickToBottom`
+  // guard; a deep-link centring pass owns its own target, hence the other.
+  useLayoutEffect(() => {
+    if (typeof ResizeObserver === 'undefined') {
+      return
+    }
+    const el = scroller.current
+    const list = eventList.current
+    if (el === null || list === null) {
+      return
+    }
+    captureAnchor()
+    const observer = new ResizeObserver(() => {
+      const held = scrollAnchor.current
+      if (
+        held === null ||
+        stickToBottom.current ||
+        highlightedCentering.current.active ||
+        // The anchor left the DOM — a slice replacement, or the retained-slice
+        // trim. Nothing to hold on to; take a fresh one below.
+        !held.row.isConnected
+      ) {
+        perfMark('timeline:anchor:skip', {
+          reason:
+            held === null
+              ? 'no-anchor'
+              : stickToBottom.current
+                ? 'stick-to-bottom'
+                : highlightedCentering.current.active
+                  ? 'centering'
+                  : 'detached',
+          // What the correction *would* have been. Carried even when nothing
+          // is applied: it is the only way to see how big the shifts during a
+          // scroll actually are, rather than inferring them from a video.
+          moved:
+            held === null || !held.row.isConnected
+              ? null
+              : Math.round(
+                  held.row.getBoundingClientRect().top -
+                    el.getBoundingClientRect().top -
+                    held.top +
+                    (el.scrollTop - held.scrollTop),
+                ),
+        })
+        captureAnchor()
+        return
+      }
+      // A row's viewport-relative top is `itsOffsetInContent - scrollTop`. So
+      // between two observations:
+      //
+      //   topNow - topThen = grownAbove - (scrollTopNow - scrollTopThen)
+      //
+      // Rearranged, the growth above the anchor is the change in its position
+      // *plus* whatever the reader scrolled in between — which is what lets
+      // the baseline outlive their scrolling instead of being retaken every
+      // frame (and retaken, as it turned out, too late to see anything).
+      const moved =
+        held.row.getBoundingClientRect().top -
+        el.getBoundingClientRect().top -
+        held.top +
+        (el.scrollTop - held.scrollTop)
+      // Sub-pixel drift is layout noise, not a shift worth chasing.
+      if (Math.abs(moved) >= 0.5) {
+        const before = el.scrollTop
+        el.scrollTop += moved
+        // `applied` is read back deliberately: if it does not equal what was
+        // asked for, the scroller refused the write — which is what an
+        // inertial fling owning the scroll position would look like.
+        perfMark('timeline:anchor:correct', {
+          moved: Math.round(moved),
+          requested: Math.round(before + moved),
+          applied: Math.round(el.scrollTop),
+        })
+      }
+      captureAnchor()
+    })
+    observer.observe(list)
+    return () => observer.disconnect()
+  }, [captureAnchor])
+
   // Bring the highlighted (`?event=`) row into view once it exists — after
   // the mount effect above, so a deep link lands on its target rather than
   // the bottom of the page (WCR-09). Once per target id: the user scrolling
@@ -1576,7 +1882,21 @@ function Timeline({
       ref={scroller}
       onPointerDown={stopHighlightedCentering}
       onScroll={(event) => {
-        stickToBottom.current = isScrolledToTimelineBottom(event.currentTarget)
+        const el = event.currentTarget
+        stickToBottom.current = isScrolledToTimelineBottom(el)
+        // The anchor survives scrolling, so it is *not* retaken here — doing
+        // that is what blinded the correction. It only has to stay near the
+        // viewport, since a change between it and the visible rows would go
+        // uncounted. Where it would be without any growth is arithmetic on
+        // `scrollTop`, so the common case costs no geometry read at all.
+        const held = scrollAnchor.current
+        if (
+          held !== null &&
+          Math.abs(held.top - (el.scrollTop - held.scrollTop)) >
+            el.clientHeight * ANCHOR_REACH
+        ) {
+          captureAnchor()
+        }
       }}
       onTouchStart={stopHighlightedCentering}
       onWheel={stopHighlightedCentering}
@@ -1796,6 +2116,28 @@ function JumpDialog({
 
 function isScrolledToTimelineBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= 2
+}
+
+/**
+ * Whether the top sentinel sits within the scroller's prefetch band, measured
+ * from live geometry. The chain asks this itself rather than trusting the
+ * observer: intersections are recomputed at frame boundaries, so what the
+ * callback last reported describes the slice as it was before the page landed
+ * — and the browser only reports *changes*, which is a signal that may never
+ * come again once the chain has stopped.
+ */
+function withinPrefetchBand(sentinel: Element, root: Element | null): boolean {
+  const bounds = (root ?? document.documentElement).getBoundingClientRect()
+  const rect = sentinel.getBoundingClientRect()
+  return (
+    rect.bottom >= bounds.top - SCROLL_BACK_PREFETCH_PX &&
+    rect.top <= bounds.bottom
+  )
+}
+
+/** One frame, so layout and scroll anchoring settle before a re-measure. */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()))
 }
 
 function scrollTimelineToBottom(

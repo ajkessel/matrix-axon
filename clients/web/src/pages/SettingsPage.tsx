@@ -156,6 +156,21 @@ export function SettingsPage() {
           Adds per-event diagnostics to the timeline. Inspect panels show
           decrypted event content already returned by the Axon API.
         </p>
+        <label class="setting-row">
+          <input
+            type="checkbox"
+            checked={settings.perfMarks.value}
+            onChange={(event) =>
+              (settings.perfMarks.value = event.currentTarget.checked)
+            }
+          />
+          Performance instrumentation
+        </label>
+        <p class="muted">
+          Records timing marks and draws a live scroll-anchoring readout over
+          the app — the numbers a screen recording needs on a phone, where there
+          is no console to read marks from.
+        </p>
       </section>
       <section class="panel">
         <h2>Room list</h2>

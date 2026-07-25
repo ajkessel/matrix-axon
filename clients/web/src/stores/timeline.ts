@@ -53,6 +53,16 @@ export type TimelineEvent = EventDto & {
 /** Page size for both the initial page and each scroll-back page. */
 const PAGE_LIMIT = 50
 
+/**
+ * How many events a scroll-back keeps loaded before it starts dropping the
+ * newest end. The timeline is not DOM-windowed — a row mounts per event and
+ * lives until the room closes (issue #315) — so an unbounded scroll-back grows
+ * the DOM, the memory, and above all the teardown cost that ADR 0071 measured
+ * on the phone "back to room list" transition. Twelve pages is well past a
+ * screenful on any device, so the cap is invisible in normal reading.
+ */
+const RETAINED_EVENT_LIMIT = PAGE_LIMIT * 12
+
 export interface TimelineStore {
   /** Loaded events, oldest first (display order). */
   events: ReadonlySignal<TimelineEvent[]>
@@ -83,7 +93,18 @@ export interface TimelineStore {
   /** Load the newest page, replacing any loaded slice. */
   loadLatest(): Promise<void>
   /** Prepend the next older page (infinite scroll-back). */
-  loadOlder(): Promise<void>
+  /**
+   * Resolves to whether the page *landed* — the cursor moved on. `false` means
+   * nothing was fetched at all: no cursor left, a sibling load already in
+   * flight, a failed request, or a page dropped as stale. That is the caller's
+   * signal to stop paging.
+   *
+   * A page that lands but contributes nothing the view renders still returns
+   * `true`. Runs of state events, redactions, or thread replies are ordinary
+   * history, and treating them as failure is what strands an automatic
+   * scroll-back on the message before them.
+   */
+  loadOlder(): Promise<boolean>
   /**
    * Append the next newer run after a jump (forward scroll toward the
    * present). The read API pages backwards only, so this probes `at_ts`
@@ -281,6 +302,30 @@ export function createTimelineStore(
     })
   }
 
+  /**
+   * Bound a scrolled-back slice by dropping its newest end, and report whether
+   * anything went. Only the newest end can go: `nextCursor` is opaque and
+   * describes the page *below* the current oldest event, so trimming the head
+   * would leave the cursor pointing past the events it dropped and the next
+   * scroll-back would splice a silent gap into history (the WCR-03 hazard).
+   *
+   * Local echoes are never dropped — they are the user's unsent work, and the
+   * cut stops short of the oldest one rather than taking it.
+   */
+  function trimRetainedTail(slice: TimelineEvent[]): TimelineEvent[] {
+    if (slice.length <= RETAINED_EVENT_LIMIT) {
+      return slice
+    }
+    // The same history/echo split `loadNewer` and `refreshHead` use: echoes
+    // are not history, they ride at the tail wherever the history ends.
+    const history = slice.filter((event) => event.localEcho === undefined)
+    if (history.length <= RETAINED_EVENT_LIMIT) {
+      return slice
+    }
+    const echoes = slice.filter((event) => event.localEcho !== undefined)
+    return [...history.slice(0, RETAINED_EVENT_LIMIT), ...echoes]
+  }
+
   async function fetchPage(query: {
     cursor?: string
     at_ts?: number
@@ -461,6 +506,14 @@ export function createTimelineStore(
     const loaded = events.value
     const headIds = new Set(page.events.map((e) => e.event_id))
     const overlaps = loaded.some((e) => headIds.has(e.event_id))
+    if (!overlaps && !reachedEnd.value) {
+      // A slice deliberately parked in history — a date jump, or a scroll-back
+      // that trimmed its tail — shares nothing with the head *by design*, and
+      // the cursor chain below it is still sound. Replacing it here would
+      // teleport a reader to the newest page on every reconnect, which is the
+      // very thing WCR-05 set out to stop; `loadNewer` is what walks forward.
+      return
+    }
     if (!overlaps) {
       sliceGeneration += 1
       events.value = page.events
@@ -1162,21 +1215,40 @@ export function createTimelineStore(
     async loadOlder() {
       const cursor = nextCursor.value
       if (cursor === null || loadingOlder.value) {
-        return
+        return false
       }
       loadingOlder.value = true
       const generation = sliceGeneration
-      const page = await fetchPage({ cursor })
-      // A slice replacement while this page was in flight means the cursor it
-      // was fetched against no longer describes the loaded slice — prepending
-      // would splice unrelated history in. Drop it (WCR-03).
-      if (page !== null && generation === sliceGeneration) {
-        events.value = [...page.events, ...events.value]
+      try {
+        const page = await fetchPage({ cursor })
+        // A slice replacement while this page was in flight means the cursor
+        // it was fetched against no longer describes the loaded slice —
+        // prepending would splice unrelated history in. Drop it (WCR-03).
+        if (page === null || generation !== sliceGeneration) {
+          return false
+        }
+        const merged = [...page.events, ...events.value]
+        const retained = trimRetainedTail(merged)
+        if (retained.length !== merged.length) {
+          // The slice no longer runs to the room's tail. That is exactly the
+          // state a date jump creates, so the machinery for it already
+          // exists: `ingestLive` stops appending the present onto the past,
+          // the bottom sentinel appears, and `loadNewer` walks forward when
+          // the reader comes back down.
+          reachedEnd.value = false
+        }
+        events.value = retained
         nextCursor.value = page.next
         reachedStart.value = page.next === null
         resolveReplyTargets(page.events)
+        // The cursor moved, whether or not the page carried anything this
+        // view will draw.
+        return true
+      } finally {
+        // `finally`, so a throw between here and the fetch cannot strand the
+        // flag: a latched `loadingOlder` makes every later page a no-op.
+        loadingOlder.value = false
       }
-      loadingOlder.value = false
     },
   }
 }

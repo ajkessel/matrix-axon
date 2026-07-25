@@ -102,6 +102,16 @@ export interface ThreadReadMarker extends ReadMarker {
   rootEventId: string
 }
 
+/**
+ * What the store knows about one key's local writes: the tick of the newest
+ * one, the newest tick the server has acked, and when that ack arrived.
+ */
+interface LocalWrite {
+  written: number
+  acked: number
+  ackedAt: number
+}
+
 /** Parse a marker's wire value (`{event_id, origin_ts}`); `null` if malformed. */
 function parseMarker(value: unknown): ReadMarker | null {
   if (typeof value !== 'object' || value === null) {
@@ -188,6 +198,60 @@ export function createDeviceStateStore(
   /** Debounced pending writes per scope: `key -> value | null`. */
   const pending = new Map<string, Map<string, unknown>>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
+  /**
+   * Monotonic tick, bumped on every local write and every server ack of one.
+   * It orders a `GET` response against the local writes that response may not
+   * reflect — see `settled`.
+   */
+  let clock = 0
+  /**
+   * Per-key local-write bookkeeping; see `settled`. One entry per distinct key
+   * ever written locally, never evicted. A draft per room is bounded by joined
+   * rooms; a thread read-marker per thread is not, and this tab can stay open
+   * indefinitely — more so on the standalone/PWA path. Bounding it is issue
+   * #368; the entries are three numbers each, so the growth is slow, not
+   * absent.
+   */
+  const local = new Map<string, LocalWrite>()
+
+  function noteWrite(ck: string): void {
+    const rec = local.get(ck)
+    if (rec === undefined) {
+      local.set(ck, { written: ++clock, acked: -1, ackedAt: -1 })
+    } else {
+      rec.written = ++clock
+    }
+  }
+
+  /** Record that the server accepted the write each key held at `sent`. */
+  function noteAck(sent: ReadonlyMap<string, number>): void {
+    const at = ++clock
+    for (const [ck, written] of sent) {
+      const rec = local.get(ck)
+      // A write made while the PUT was in flight has a higher `written` tick,
+      // so it stays unacked and keeps its clobber protection.
+      if (rec !== undefined && written > rec.acked) {
+        rec.acked = written
+        rec.ackedAt = at
+      }
+    }
+  }
+
+  /**
+   * Whether a server value fetched at tick `issued` may overwrite our cached
+   * one. It may only when every local write to the key was acked *before* the
+   * fetch was issued: an unacked write is a draft edit the server has not seen
+   * (offline, or still debounced), and an ack that landed after the fetch was
+   * issued may not be reflected in the response. Either way the local value is
+   * the newer one, so the fetch must leave it alone — otherwise a reconnect
+   * re-read resurrects the server's stale draft over what the user is typing.
+   */
+  function settled(ck: string, issued: number): boolean {
+    const rec = local.get(ck)
+    return (
+      rec === undefined || (rec.written <= rec.acked && rec.ackedAt < issued)
+    )
+  }
 
   function writeCache(
     accountId: string,
@@ -197,6 +261,9 @@ export function createDeviceStateStore(
   ): void {
     const next = new Map(entries.value)
     const ck = cacheKey(accountId, namespace, key)
+    // Only local writes reach `writeCache`; the fetch and frame paths build
+    // their maps directly, so this is the one place a write is noted.
+    noteWrite(ck)
     if (value === null || value === undefined) {
       next.delete(ck)
     } else {
@@ -212,6 +279,7 @@ export function createDeviceStateStore(
     // Best-effort: a hydrate that fails leaves the cache empty until the next
     // reconnect re-read; a rejection must not escape the fire-and-forget call
     // sites (WCR-02).
+    const issued = ++clock
     let data
     try {
       ;({ data } = await api.GET('/v1/devices/{device_id}/state/{namespace}', {
@@ -228,7 +296,11 @@ export function createDeviceStateStore(
     }
     const next = new Map(entries.value)
     for (const [key, entry] of Object.entries(data.data.entries)) {
-      next.set(cacheKey(accountId, namespace, key), entry.value)
+      const ck = cacheKey(accountId, namespace, key)
+      // Never let the fetched view clobber an edit the server hasn't acked.
+      if (settled(ck, issued)) {
+        next.set(ck, entry.value)
+      }
     }
     entries.value = next
     hydratedScopes.value = new Set(hydratedScopes.value).add(
@@ -300,6 +372,15 @@ export function createDeviceStateStore(
         )
       }
     }
+    // Snapshot which local write each key holds *now*: the response acks these
+    // ticks and no later one, so a keystroke during the flight stays protected.
+    const sent = new Map<string, number>()
+    for (const key of batch.keys()) {
+      const written = local.get(cacheKey(accountId, namespace, key))?.written
+      if (written !== undefined) {
+        sent.set(cacheKey(accountId, namespace, key), written)
+      }
+    }
     // `null` entries are sent verbatim as tombstones (ADR 0048).
     await api
       .PUT('/v1/devices/{device_id}/state/{namespace}', {
@@ -309,7 +390,7 @@ export function createDeviceStateStore(
         },
         body: { entries: Object.fromEntries(batch) },
       })
-      .then(() => {}, requeue)
+      .then(() => noteAck(sent), requeue)
   }
 
   function schedulePut(
@@ -341,6 +422,13 @@ export function createDeviceStateStore(
     const next = new Map(entries.value)
     for (const [key, value] of Object.entries(change.entries)) {
       const ck = cacheKey(frame.accountId, change.namespace, key)
+      // A sibling's write loses to a local edit the server hasn't acked yet —
+      // the same rule the fetch path applies, so a frame arriving mid-outage
+      // can't erase what the user is typing either.
+      const rec = local.get(ck)
+      if (rec !== undefined && rec.written > rec.acked) {
+        continue
+      }
       if (value === null) {
         next.delete(ck)
       } else {

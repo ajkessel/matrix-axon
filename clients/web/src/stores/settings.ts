@@ -87,6 +87,13 @@ export interface SettingsV1 {
    * Off by default because event content can include decrypted message data.
    */
   developerMode: boolean
+  /**
+   * Emit the `performance.mark` instrumentation and draw its on-screen
+   * readout. A development aid: the marks are cheap but not free, and the
+   * readout sits over the app. Previously reachable only by hand-editing the
+   * URL (`?perf=1`), which is fine for a harness and hostile on a phone.
+   */
+  perfMarks: boolean
 }
 
 const DEFAULTS: SettingsV1 = {
@@ -105,6 +112,7 @@ const DEFAULTS: SettingsV1 = {
   matrixProtocolHandler: false,
   recentReactions: [],
   developerMode: false,
+  perfMarks: false,
 }
 
 const MAX_RECENT_REACTIONS = 3
@@ -213,6 +221,8 @@ function parse(raw: string | null): SettingsV1 {
       typeof v1.developerMode === 'boolean'
         ? v1.developerMode
         : DEFAULTS.developerMode,
+    perfMarks:
+      typeof v1.perfMarks === 'boolean' ? v1.perfMarks : DEFAULTS.perfMarks,
   }
 }
 
@@ -231,6 +241,7 @@ export interface SettingsStore {
   matrixProtocolHandler: Signal<boolean>
   recentReactions: Signal<string[]>
   developerMode: Signal<boolean>
+  perfMarks: Signal<boolean>
   /**
    * Pin a room key, or re-pin an already-pinned one to the top — most
    * recently pinned first (ADR 0038).
@@ -266,6 +277,7 @@ export function createSettingsStore(
   const matrixProtocolHandler = signal<boolean>(initial.matrixProtocolHandler)
   const recentReactions = signal<string[]>(initial.recentReactions)
   const developerMode = signal<boolean>(initial.developerMode)
+  const perfMarks = signal<boolean>(initial.perfMarks)
 
   effect(() => {
     const envelope: SettingsV1 = {
@@ -284,6 +296,7 @@ export function createSettingsStore(
       matrixProtocolHandler: matrixProtocolHandler.value,
       recentReactions: recentReactions.value,
       developerMode: developerMode.value,
+      perfMarks: perfMarks.value,
     }
     try {
       storage.setItem(STORAGE_KEY, JSON.stringify(envelope))
@@ -308,6 +321,7 @@ export function createSettingsStore(
     matrixProtocolHandler,
     recentReactions,
     developerMode,
+    perfMarks,
     pinRoom(key: string) {
       pinnedRooms.value = [key, ...pinnedRooms.value.filter((k) => k !== key)]
     },

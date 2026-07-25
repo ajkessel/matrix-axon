@@ -1243,6 +1243,11 @@ button.pin[aria-pressed='true'] {
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+  /* `RoomPage` anchors this scroller itself. The browser's own anchoring picks
+     its anchor by heuristic, arrived in WebKit only in Safari 27, and would
+     otherwise correct the same shift twice. One implementation, same behaviour
+     on every engine. */
+  overflow-anchor: none;
 }
 
 .timeline-edge {
@@ -1290,15 +1295,16 @@ p.timeline-edge {
   align-items: start;
   padding: 0.35rem 0.5rem;
   border-radius: 6px;
-  /* The timeline is not DOM-windowed: a long history mounts a row per event.
-     Skipping layout/paint for the rows outside the viewport keeps scrolling —
-     and, above all, the phone "back to room list" teardown — from scaling with
-     history length, without touching the scroll machinery (sentinels,
-     stick-to-bottom, jump-to-event, prepend anchoring). `auto` remembers each
-     row's real rendered height; the fallback covers a single-line row before
-     it has ever been rendered. Diagnosed by the ADR 0070 perf harness. */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 2.5rem;
+  /* No `content-visibility` here, deliberately. Skipping layout for offscreen
+     rows means their height is a guess until they render, and the guess is
+     wrong by 60-130px for a wrapped body or a reaction row — measured on a
+     phone, in the marks this file's scroll anchoring emits. Every one of those
+     corrections lands above the reader mid-scroll-back, which is what made
+     scrolling lurch. It was introduced against the ADR 0071 diagnosis that the
+     phone "back to room list" cost scaled with timeline length; ADR 0075 then
+     found the real cause (racing WebKit's own swipe-back) and fixed it, so
+     there is nothing left on the other side of the trade. Windowing (#315) is
+     the way back to a bounded row count. */
 }
 
 @media (min-width: 48rem) {
@@ -3592,4 +3598,24 @@ audio.media-player {
   padding: 0;
   font: inherit;
   color: inherit;
+}
+
+/* The `?perf=1` scroll-anchoring readout (`PerfOverlay`). Fixed and
+   non-interactive so watching the timeline cannot perturb it, and small
+   enough to leave the messages readable in a screen recording. */
+.perf-overlay {
+  position: fixed;
+  right: 0.25rem;
+  bottom: 4.5rem;
+  z-index: 200;
+  max-width: 92vw;
+  padding: 0.3rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #7cf07c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: pre;
+  pointer-events: none;
 }

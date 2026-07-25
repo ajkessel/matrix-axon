@@ -24,6 +24,7 @@ describe('createSettingsStore', () => {
       matrixProtocolHandler: false,
       recentReactions: [],
       developerMode: false,
+      perfMarks: false,
     })
   })
 

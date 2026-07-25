@@ -6,6 +6,9 @@ import { Lightbox, LightboxImage } from './Lightbox'
 /** The longest side an inline thumbnail is allowed, in CSS px (Element-ish). */
 const THUMBNAIL_MAX = 320
 
+/** Height held for an image whose event carries no dimensions, in CSS px. */
+const UNSIZED_MIN = 180
+
 /**
  * The displayed width for an image of intrinsic `w`×`h`, scaled down so its
  * longest side is at most `THUMBNAIL_MAX`. Never upscales, so a small image
@@ -94,6 +97,14 @@ export function MediaImage({
         width: `${THUMBNAIL_MAX}px`,
         maxWidth: '100%',
         maxHeight: `${THUMBNAIL_MAX}px`,
+        // No `w`/`h` on the event — older bridges, some clients, stickers — so
+        // there is no ratio to hold. Reserve a plausible box anyway until the
+        // bytes arrive: an unsized image otherwise occupies no height at all
+        // and then snaps to full size on decode, shoving the timeline mid
+        // scroll. Released once the image is up, so a short image does not sit
+        // in a tall empty frame; the residual shift is from the reservation to
+        // the real height, not from zero.
+        ...(state.status === 'ready' ? {} : { minHeight: `${UNSIZED_MIN}px` }),
       }
 
   const alt = media.caption ?? media.filename
@@ -109,7 +120,12 @@ export function MediaImage({
           {previewUrl !== undefined && previewUrl !== null ? (
             // Still uploading: the local file, not the proxy. No open/lightbox —
             // there is nothing on the server to open yet.
-            <img class="media-preview" src={previewUrl} alt={alt} />
+            <img
+              class="media-preview"
+              src={previewUrl}
+              alt={alt}
+              decoding="async"
+            />
           ) : decodeFailed ? (
             <p class="muted placeholder">
               Encrypted media — server could not decrypt
@@ -127,6 +143,9 @@ export function MediaImage({
               <img
                 src={state.url}
                 alt={alt}
+                // Keep decode off the main thread: a photo decoding inline is
+                // a stutter in the middle of a scroll gesture on a phone.
+                decoding="async"
                 onError={() => setDecodeFailed(true)}
               />
             </button>

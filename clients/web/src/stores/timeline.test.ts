@@ -519,6 +519,187 @@ describe('createTimelineStore', () => {
     })
   })
 
+  it('loadOlder reports a landed page, an empty one included', async () => {
+    let calls = 0
+    server.use(
+      http.get(TIMELINE_PATH, () => {
+        calls += 1
+        if (calls === 1) {
+          return HttpResponse.json({
+            data: { events: [event('$2', 200)], next_cursor: 'c1' },
+          })
+        }
+        if (calls === 2) {
+          // Landed, cursor moved on, nothing in it for this view.
+          return HttpResponse.json({ data: { events: [], next_cursor: 'c2' } })
+        }
+        return HttpResponse.json({
+          data: { events: [event('$1', 100)], next_cursor: null },
+        })
+      }),
+    )
+    const store = makeStore()
+    await store.loadLatest()
+
+    // An empty page is progress: the cursor moved, so paging can continue.
+    expect(await store.loadOlder()).toBe(true)
+    expect(store.events.value.map((e) => e.event_id)).toEqual(['$2'])
+
+    expect(await store.loadOlder()).toBe(true)
+    expect(store.events.value.map((e) => e.event_id)).toEqual(['$1', '$2'])
+
+    // Out of history: nothing was fetched, so the caller must stop.
+    expect(store.atStart.value).toBe(true)
+    expect(await store.loadOlder()).toBe(false)
+  })
+
+  it('loadOlder reports a failed fetch and clears its in-flight flag', async () => {
+    let calls = 0
+    server.use(
+      http.get(TIMELINE_PATH, () => {
+        calls += 1
+        return calls === 1
+          ? HttpResponse.json({
+              data: { events: [event('$2', 200)], next_cursor: 'c1' },
+            })
+          : HttpResponse.error()
+      }),
+    )
+    const store = makeStore()
+    await store.loadLatest()
+
+    expect(await store.loadOlder()).toBe(false)
+    // A latched flag would make every later page a silent no-op.
+    expect(store.loadingOlder.value).toBe(false)
+  })
+
+  describe('retained-slice bound', () => {
+    /** History paged 50 at a time by an index cursor, newest page first. */
+    function cursorPagedHistory(total: number) {
+      // Ascending ts, so page 0 is the newest 50 and the cursor walks older.
+      const all = Array.from({ length: total }, (_, i) =>
+        event(`$e${i}`, (i + 1) * 100),
+      )
+      return http.get(TIMELINE_PATH, ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor')
+        const page = cursor === null ? 0 : Number(cursor)
+        const end = total - page * 50
+        const start = Math.max(0, end - 50)
+        return HttpResponse.json({
+          data: {
+            events: all.slice(start, end).reverse(),
+            next_cursor: start === 0 ? null : String(page + 1),
+          },
+        })
+      })
+    }
+
+    it('drops the newest end once a scroll-back passes the cap', async () => {
+      server.use(cursorPagedHistory(1000))
+      const store = makeStore()
+      await store.loadLatest()
+      expect(store.atEnd.value).toBe(true)
+
+      for (let page = 0; page < 15; page += 1) {
+        await store.loadOlder()
+      }
+
+      // 16 pages fetched, 12 pages' worth kept — from the oldest end, which
+      // is where the reader is.
+      expect(store.events.value).toHaveLength(600)
+      expect(store.events.value[0].event_id).toBe('$e200')
+      expect(store.events.value.at(-1)?.event_id).toBe('$e799')
+      // The slice no longer runs to the room's tail.
+      expect(store.atEnd.value).toBe(false)
+    })
+
+    it('a trimmed slice stops taking live events and walks back forward', async () => {
+      server.use(cursorPagedHistory(1000))
+      const store = makeStore()
+      await store.loadLatest()
+      for (let page = 0; page < 15; page += 1) {
+        await store.loadOlder()
+      }
+      expect(store.atEnd.value).toBe(false)
+
+      // Parked in history: a live frame must not splice the present onto the
+      // past — exactly the rule a date jump already relies on.
+      store.ingestLive(event('$live', 500_000))
+      expect(store.events.value.at(-1)?.event_id).toBe('$e799')
+
+      // Coming back down walks forward through what the trim dropped.
+      await store.loadNewer()
+      expect(store.events.value.at(-1)?.event_id).not.toBe('$e799')
+    })
+
+    it('never trims a pending local echo off the tail', async () => {
+      server.use(
+        cursorPagedHistory(1000),
+        http.post(SEND_PATH, () =>
+          HttpResponse.json({ data: { event_id: '$sent' } }),
+        ),
+        // The reconcile misses, so the echo stays pending across the trim.
+        http.get(EVENT_PATH, () => new HttpResponse(null, { status: 404 })),
+      )
+      const store = makeStore()
+      await store.loadLatest()
+      await store.send('unsent work', { senderId: '@alice:hs' })
+      expect(store.events.value.at(-1)?.localEcho?.status).toBe('pending')
+
+      for (let page = 0; page < 15; page += 1) {
+        await store.loadOlder()
+      }
+
+      const echoes = store.events.value.filter((e) => e.localEcho !== undefined)
+      expect(echoes).toHaveLength(1)
+      expect(echoes[0].localEcho?.body).toBe('unsent work')
+      // It rides at the tail, after the retained history.
+      expect(store.events.value.at(-1)?.localEcho?.status).toBe('pending')
+    })
+
+    it('a reconnect leaves a trimmed slice parked instead of teleporting', async () => {
+      server.use(cursorPagedHistory(1000))
+      const store = makeStore()
+      await store.loadLatest()
+      for (let page = 0; page < 15; page += 1) {
+        await store.loadOlder()
+      }
+      const parked = store.events.value.map((e) => e.event_id)
+
+      // The gap-fill head shares nothing with a slice this far back. Without
+      // the parked check it replaced the slice wholesale, yanking a reader
+      // hundreds of events forward mid-scroll-back.
+      await store.loadLatest()
+
+      expect(store.events.value.map((e) => e.event_id)).toEqual(parked)
+      expect(store.atEnd.value).toBe(false)
+    })
+
+    it('still gap-fills a slice that claimed to be at the tail', async () => {
+      let head = 0
+      server.use(
+        http.get(TIMELINE_PATH, () => {
+          head += 1
+          return HttpResponse.json({
+            data:
+              head === 1
+                ? { events: [event('$3', 300)], next_cursor: 'c1' }
+                : { events: [event('$9', 900)], next_cursor: 'c8' },
+          })
+        }),
+      )
+      const store = makeStore()
+      await store.loadLatest()
+      expect(store.atEnd.value).toBe(true)
+
+      // A real gap opened while offline: the slice said it was at the tail
+      // and is not, so the head must still replace it.
+      await store.loadLatest()
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$9'])
+      expect(store.atEnd.value).toBe(true)
+    })
+  })
+
   it('resolves reply targets locally, then by fetch, caching misses', async () => {
     const reply = event('$reply', 300, {
       relates_to: { 'm.in_reply_to': { event_id: '$1' } },

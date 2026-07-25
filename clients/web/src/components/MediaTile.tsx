@@ -67,7 +67,7 @@ export function MediaTile({
         onClick={onOpen}
       >
         <div ref={ref} class="media-tile-poster">
-          {poster !== null && <img src={poster} alt="" />}
+          {poster !== null && <img src={poster} alt="" decoding="async" />}
         </div>
         <span class="media-tile-glyph" aria-hidden="true">
           {isVideo ? '▶' : '📄'}

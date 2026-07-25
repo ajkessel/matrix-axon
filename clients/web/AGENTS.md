@@ -64,6 +64,14 @@ before starting a milestone.
   `uponSanitizeElement` hook copies a safe `mxc://` src to `data-mxc` and
   always drops `src`, so a remote `http(s)` src (a tracking pixel we cannot
   proxy) never survives; `FormattedBody` resolves `data-mxc` after mount.
+- **Timeline scrolling** (`RoomPage`, ADR 0076): the scroller is anchored by
+  hand (`overflow-anchor: none`) — a held row plus the scroll offset it was
+  measured at, so the measurement survives the reader's own scrolling. Do not
+  re-capture the anchor per scroll event: reading geometry forces the layout
+  that renders incoming rows, so the capture triggers the growth it means to
+  measure. `.event-row` deliberately carries **no** `content-visibility`; its
+  size guesses were the shifts. Windowing (#315) is the way back to a bounded
+  row count.
 - **Media** (`src/media/`, ADR 0064): a browser cannot put a bearer token on
   `<img src>`, so `MediaService` fetches every `mxc://` through the proxy and
   hands the DOM a blob URL. The cache **refcounts** — the timeline is not
@@ -124,6 +132,49 @@ api.GET(...)`, a background `.then`) must attach a rejection handler: wrap
   in `device-state.ts` and rendered invisibly, making the code look like it
   joined on a space; it fooled the 2026-07 review into reporting exactly
   that (WCR-11's premise was this artifact, not a real space).
+
+## Diagnosing reports that only reproduce on someone else's device
+
+The loop is in `docs/adr/0077-web-on-device-perf-readout.md`; the tooling is
+**Settings → Performance instrumentation** (no URL editing, no tethering to a
+Mac). Ask for a screen recording, read the on-screen readout out of the video,
+and measure the behaviour from the same frames. These are the lessons that cost
+the most time in the ADR 0076 investigation:
+
+- **Try the scripted reproduction before asking for a recording.**
+  `playwright.config.ts` has a **WebKit project at the iPhone 13 profile**
+  (viewport, UA, scale factor, touch), added by ADR 0071 and running here on
+  Linux — no Mac, no device. Layout bugs are input-independent, so a spec that
+  scrolls and records an element's `getBoundingClientRect().top` measures a
+  shift directly, in seconds per iteration. The ADR 0076 investigation ran nine
+  record-and-analyse cycles to measure what `page.evaluate` would have returned
+  as a number. Keep the device loop for what only a device can show: CPU-bound
+  behaviour, real momentum scrolling, and confirming a fix in the reporter's
+  hands.
+- **Instrument for the device that has the problem.** iOS Safari has no
+  on-device console, so a mark only a desktop console can reach does not help
+  with the reports that most need help. `PerfOverlay` draws the tail of selected
+  marks over the app precisely so a recording captures the numbers and the
+  behaviour they explain in the same frames. When adding instrumentation, ask
+  whether the reporter could read it.
+- **Instrument the app before theorising about the engine.** Every
+  browser-behaviour hypothesis in that investigation was wrong — missing WebKit
+  scroll anchoring, inertial scrolling overriding `scrollTop`, the correction
+  causing the jump — and every actual defect was ours. Reading a value back
+  after writing it (`applied === requested`) falsified a day of theory in one
+  recording.
+- **Confirm the deployed bundle contains the fix before debugging it.** Mark
+  names are string literals and survive minification, so
+  `(await (await fetch(src)).text()).includes('some:mark:name')` settles it in
+  one line. A stale deploy looks exactly like a fix that does not work.
+- **A video is a measuring instrument.** Frame extraction plus 2D phase
+  correlation gives per-frame displacement. Two traps: 1D row-mean profiles
+  alias against the ~50px message-row pitch, and only near-still frames yield
+  meaningful displacements — a collapsed correlation peak (< 0.5) means the
+  content was _replaced_, not moved (a page landing, a slice replacement).
+- **The overlay is a ten-line buffer.** A chatty mark crowds out everything
+  else; a chain that re-armed on every scroll frame once hid the very marks
+  under investigation. Curate `OVERLAY_PREFIXES` (`src/perf.ts`) when adding.
 
 ## Test environment gotchas (all discovered the hard way)
 

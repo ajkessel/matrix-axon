@@ -328,6 +328,126 @@ describe('createDeviceStateStore', () => {
     vi.useRealTimers()
   })
 
+  it('a reconnect re-read does not clobber an unsynced draft edit', async () => {
+    vi.useFakeTimers()
+    // The server holds what it acked before the outage; the client typed more
+    // while offline, so the re-read must not roll the draft back to 'hello
+    // there'. The PUT stays down across the re-read: connectivity returns, the
+    // GET lands, and only then does the re-queued write get through.
+    let stored = 'hello'
+    let online = true
+    server.use(
+      http.get(STATE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            namespace: 'drafts',
+            entries: {
+              [ROOM]: {
+                value: { text: stored },
+                device_id: 'self',
+                updated_at: '2026-01-01T00:00:00Z',
+              },
+            },
+          },
+        }),
+      ),
+      http.put(STATE_PATH, async ({ request }) => {
+        const body = (await request.json()) as {
+          entries: Record<string, { text: string } | null>
+        }
+        if (!online) {
+          return HttpResponse.error()
+        }
+        stored = body.entries[ROOM]?.text ?? ''
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store, live, socket } = setup()
+    store.hydrateDrafts(ACCT)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.draft(ACCT, ROOM)).toBe('hello')
+
+    // Typed and synced, then the network drops mid-composition.
+    store.setDraft(ACCT, ROOM, 'hello there')
+    await vi.advanceTimersByTimeAsync(800)
+    expect(stored).toBe('hello there')
+    live.start()
+    socket().emitOpen()
+    online = false
+    store.setDraft(ACCT, ROOM, 'hello there, offline tail')
+    await vi.advanceTimersByTimeAsync(800) // PUT fails, batch re-queues
+
+    // The socket comes back and the reconnect re-read lands first.
+    socket().emitClose()
+    await vi.advanceTimersByTimeAsync(1000) // retry PUT still failing
+    socket().emitOpen() // reconnects bumps → re-GET of the drafts scope
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.draft(ACCT, ROOM)).toBe('hello there, offline tail')
+
+    // Then the re-queued write finally gets through, carrying the full draft.
+    online = true
+    await vi.advanceTimersByTimeAsync(800)
+    expect(stored).toBe('hello there, offline tail')
+    expect(store.draft(ACCT, ROOM)).toBe('hello there, offline tail')
+    vi.useRealTimers()
+  })
+
+  it('a re-read issued before its ack does not roll a draft back', async () => {
+    vi.useFakeTimers()
+    // The subtler race: the GET is issued while the write is unacked, the PUT
+    // is acked while the GET is in flight, and the response — computed before
+    // the PUT landed — still carries the old text. It must not be applied.
+    let release = () => {}
+    const inFlight = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get(STATE_PATH, async () => {
+        await inFlight
+        return HttpResponse.json({
+          data: {
+            namespace: 'drafts',
+            entries: {
+              [ROOM]: {
+                value: { text: 'stale' },
+                device_id: 'self',
+                updated_at: '2026-01-01T00:00:00Z',
+              },
+            },
+          },
+        })
+      }),
+      http.put(STATE_PATH, () =>
+        HttpResponse.json({ data: { updated_at: '2026-01-01T00:00:00Z' } }),
+      ),
+    )
+    const { store } = setup()
+    store.setDraft(ACCT, ROOM, 'fresh local text')
+    store.hydrateDrafts(ACCT) // GET issued with the write still unacked
+    await vi.advanceTimersByTimeAsync(800) // PUT acks 'fresh local text'
+    release()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.draft(ACCT, ROOM)).toBe('fresh local text')
+    vi.useRealTimers()
+  })
+
+  it("a sibling's frame does not clobber an unsynced local draft edit", async () => {
+    vi.useFakeTimers()
+    server.use(http.put(STATE_PATH, () => HttpResponse.error()))
+    const { store, live, socket } = setup()
+    live.start()
+    socket().emitOpen()
+
+    store.setDraft(ACCT, ROOM, 'typing offline')
+    await vi.advanceTimersByTimeAsync(800) // PUT fails; the write is unacked
+    socket().emitMessage(draftsFrame('sibling', { [ROOM]: { text: 'theirs' } }))
+    expect(store.draft(ACCT, ROOM)).toBe('typing offline')
+    vi.useRealTimers()
+  })
+
   it('re-queues a network-failed batch read-marker PUT', async () => {
     vi.useFakeTimers()
     const bodies: unknown[] = []

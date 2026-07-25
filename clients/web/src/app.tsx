@@ -8,6 +8,7 @@ import {
   useState,
 } from 'preact/hooks'
 import { ConnectionIndicator } from './components/ConnectionIndicator'
+import { PerfOverlay } from './components/PerfOverlay'
 import { RoomList } from './components/RoomList'
 import { SearchOverlay } from './components/SearchOverlay'
 import { ShortcutsHelp } from './components/ShortcutsHelp'
@@ -28,7 +29,7 @@ import { NotFound } from './pages/NotFound'
 import { RoomPage } from './pages/RoomPage'
 import { RoomsIndex } from './pages/RoomsIndex'
 import { SettingsPage } from './pages/SettingsPage'
-import { perfMark, perfMarkFrames } from './perf'
+import { perfEnabled, perfMark, perfMarkFrames, setPerfEnabled } from './perf'
 import { setupInstallPromptCapture } from './install-prompt'
 import {
   createServices,
@@ -70,6 +71,13 @@ export function App({ services }: { services?: AppServices }) {
   const svc = useMemo(() => services ?? createServices(), [])
 
   useEffect(() => applyTheme(svc.settings, document.documentElement), [svc])
+  // The stored preference drives instrumentation; `?perf=1` still wins for a
+  // single session, since `perfEnabled` latches it before this runs.
+  useEffect(() => {
+    if (!perfEnabled()) {
+      setPerfEnabled(svc.settings.perfMarks.value)
+    }
+  }, [svc, svc.settings.perfMarks.value])
   useVisualViewportShell()
   useStandaloneKeyboardAccessoryInset()
   useInstallPromptCapture()
@@ -93,6 +101,7 @@ export function App({ services }: { services?: AppServices }) {
       ) : (
         <SignedOut />
       )}
+      <PerfOverlay />
     </ServicesContext.Provider>
   )
 }
@@ -116,22 +125,78 @@ function useVisualViewportShell(): void {
       return
     }
     const update = () => {
+      // A short visual viewport is only legitimate while the keyboard is up or
+      // the page is pinch-zoomed. When neither holds, the reading is stale:
+      // iOS does not reliably fire a viewport `resize` when the keyboard goes
+      // away *with* the element that had focus — closing a thread panel or
+      // following a link unmounts the focused composer, and the dismissal
+      // arrives with no event. Pinning the fixed shell to that stale height
+      // would leave it covering only the top of the screen with bare
+      // background below, so fall back to the CSS `100dvh` sizing and let the
+      // next real event take over.
+      if (isViewportHeightStale(viewport)) {
+        clear()
+        return
+      }
       root.style.setProperty('--app-viewport-top', `${viewport.offsetTop}px`)
       root.style.setProperty('--app-viewport-left', `${viewport.offsetLeft}px`)
       root.style.setProperty('--app-viewport-width', `${viewport.width}px`)
       root.style.setProperty('--app-viewport-height', `${viewport.height}px`)
     }
+    // The keyboard leaves over about a frame, and a blur that comes from the
+    // focused node being removed reports the pre-dismissal size, so re-measure
+    // once the event loop has drained (the `focusout` idiom used for the
+    // accessory inset below).
+    const updateAfterBlur = () => setTimeout(update)
     update()
     viewport.addEventListener('resize', update)
     viewport.addEventListener('scroll', update)
     window.addEventListener('orientationchange', update)
+    window.addEventListener('resize', update)
+    window.addEventListener('pageshow', update)
+    document.addEventListener('focusin', update)
+    document.addEventListener('focusout', updateAfterBlur)
     return () => {
       viewport.removeEventListener('resize', update)
       viewport.removeEventListener('scroll', update)
       window.removeEventListener('orientationchange', update)
+      window.removeEventListener('resize', update)
+      window.removeEventListener('pageshow', update)
+      document.removeEventListener('focusin', update)
+      document.removeEventListener('focusout', updateAfterBlur)
       clear()
     }
   }, [])
+}
+
+/** How far under the layout viewport counts as a shrink, not rounding (px). */
+const VIEWPORT_SHRINK_EPSILON = 1
+/** How far `scale` may drift from 1 and still count as un-zoomed. */
+const VIEWPORT_ZOOM_EPSILON = 0.01
+
+/**
+ * Whether `viewport.height` is shorter than the window for no reason we can
+ * see — no editable focused (so no keyboard) and no pinch zoom. Browsers that
+ * do not report `scale` are left alone: without it a zoom cannot be told from
+ * a stale reading, and the event listeners still correct the common cases.
+ */
+function isViewportHeightStale(viewport: VisualViewport): boolean {
+  return (
+    !isEditableFocused() &&
+    typeof viewport.scale === 'number' &&
+    viewport.scale <= 1 + VIEWPORT_ZOOM_EPSILON &&
+    viewport.height < window.innerHeight - VIEWPORT_SHRINK_EPSILON
+  )
+}
+
+/** Whether focus sits in a text field — the app's proxy for "keyboard up". */
+function isEditableFocused(): boolean {
+  const active = document.activeElement
+  return (
+    active instanceof HTMLElement &&
+    (active.matches('textarea, input') ||
+      active.getAttribute('contenteditable') === 'true')
+  )
 }
 
 function useStandaloneKeyboardAccessoryInset(): void {
@@ -143,11 +208,7 @@ function useStandaloneKeyboardAccessoryInset(): void {
       root.style.removeProperty('--app-standalone-composer-bottom-padding')
     }
     const update = () => {
-      const active = document.activeElement
-      const editableFocused =
-        active instanceof HTMLElement &&
-        (active.matches('textarea, input') ||
-          active.getAttribute('contenteditable') === 'true')
+      const editableFocused = isEditableFocused()
       if (isApplePlatform() && isStandaloneDisplay(standaloneMedia)) {
         root.style.setProperty(
           '--app-standalone-composer-bottom-padding',
