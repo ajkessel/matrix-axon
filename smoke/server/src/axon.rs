@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::redact::{redact_json, redact_url};
 use crate::util::path_segment;
 use crate::wire::{
-    AccountDto, ApiResponse, EventDto, RoomDto, SendResultDto, ThreadSummaryDto, TimelinePage,
-    WsEnvelope,
+    AccountDto, ApiResponse, EventDto, RoomDto, SendResultDto, StagedUploadDto, ThreadSummaryDto,
+    TimelinePage, WsEnvelope,
 };
 
 #[derive(Clone)]
@@ -159,6 +159,58 @@ impl AxonClient {
         .await
     }
 
+    /// Stage raw media bytes for a later `send_media` call (`POST
+    /// …/media/uploads`).
+    pub async fn stage_upload(
+        &self,
+        account_id: Uuid,
+        kind: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<StagedUploadDto> {
+        let path = format!("/v1/accounts/{account_id}/media/uploads");
+        let raw = self
+            .request_bytes(
+                Method::POST,
+                &path,
+                &[("kind", kind), ("filename", filename)],
+                content_type,
+                bytes,
+            )
+            .await?;
+        let envelope: ApiResponse<StagedUploadDto> = serde_json::from_value(raw)?;
+        Ok(envelope.data)
+    }
+
+    /// Send a staged upload into a room (`POST …/send-media`), optionally
+    /// scoped to a thread and/or an explicit reply — see [`crate::scenarios`]
+    /// for the relation-shape assertions this exists to drive (#266).
+    pub async fn send_media(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        upload_id: Uuid,
+        thread_root: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> anyhow::Result<SendResultDto> {
+        let mut body = serde_json::json!({ "upload_id": upload_id });
+        if let Some(root) = thread_root {
+            body["thread_root"] = Value::String(root.to_owned());
+        }
+        if let Some(reply) = reply_to {
+            body["reply_to"] = Value::String(reply.to_owned());
+        }
+        self.post_envelope(
+            &format!(
+                "/v1/accounts/{account_id}/rooms/{}/send-media",
+                path_segment(room_id)
+            ),
+            body,
+        )
+        .await
+    }
+
     pub async fn mark_read(
         &self,
         account_id: Uuid,
@@ -254,11 +306,52 @@ impl AxonClient {
         if let Some(ref body) = body {
             request = request.json(body);
         }
+        let journaled_body = body.map(redact_json);
+        self.send_and_journal(method, path, url, request, journaled_body)
+            .await
+    }
+
+    /// Like [`Self::request`], but for the staged-upload endpoint: a raw
+    /// `application/octet-stream`-ish body plus query params, rather than a
+    /// JSON body.
+    async fn request_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        content_type: &str,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let request = self
+            .http
+            .request(method.clone(), &url)
+            .query(query)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(bytes);
+        let journaled_body =
+            Some(serde_json::json!({ "query": query, "content_type": content_type }));
+        self.send_and_journal(method, path, url, request, journaled_body)
+            .await
+    }
+
+    /// Send an already-built request and record it to the journal, shared by
+    /// [`Self::request`] (JSON body) and [`Self::request_bytes`] (raw bytes +
+    /// query params) — only the request construction and the journaled
+    /// request-body representation differ between the two.
+    async fn send_and_journal(
+        &self,
+        method: Method,
+        path: &str,
+        url: String,
+        request: reqwest::RequestBuilder,
+        journaled_request_body: Option<Value>,
+    ) -> anyhow::Result<Value> {
         let mut entry = JournalEntry {
             method: method.as_str().to_owned(),
             url: redact_url(&url),
             status: None,
-            request_body: body.clone().map(redact_json),
+            request_body: journaled_request_body,
             response_body: None,
             error: None,
         };

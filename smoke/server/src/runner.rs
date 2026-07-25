@@ -101,6 +101,9 @@ pub async fn run(
         ("relation_reads", |c| {
             Box::pin(crate::scenarios::relation_reads(c))
         }),
+        ("media_thread_member", |c| {
+            Box::pin(crate::scenarios::media_thread_member(c))
+        }),
         ("graceful_stack_shutdown", |c| {
             Box::pin(crate::scenarios::graceful_stack_shutdown(c))
         }),

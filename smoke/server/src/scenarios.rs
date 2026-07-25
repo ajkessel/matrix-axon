@@ -379,6 +379,88 @@ pub async fn relation_reads(ctx: &Ctx) -> ScenarioOutcome {
     )
 }
 
+/// Regression coverage for issue #266: a media send with `thread_root` and no
+/// `reply_to` must land on the wire as a thread member (`rel_type: m.thread`,
+/// no `m.in_reply_to`), not the SDK reply-fallback shape other clients would
+/// render as a reply to the thread root. Exercises the manual upload path in
+/// `SdkGateway::send_thread_member_attachment` end to end against a real
+/// Synapse, reusing the thread already seeded in `Smoke Relations`. The raw
+/// event content is fetched straight from the homeserver (not through Axon's
+/// own event DTO, which only summarizes relations) so the assertion is on the
+/// actual wire shape.
+pub async fn media_thread_member(ctx: &Ctx) -> ScenarioOutcome {
+    ScenarioOutcome::from_result(
+        async {
+            let account_id = ctx.manifest.axon_account_id;
+            let room_id = ctx.manifest.rooms.relations.room_id.clone();
+            let thread_root = ctx.manifest.fixtures.relations.thread_root_event_id.clone();
+
+            let bytes =
+                format!("server-smoke media thread member {}", &ctx.run_id[..8]).into_bytes();
+            let upload = ctx
+                .axon
+                .stage_upload(account_id, "file", "thread-note.txt", "text/plain", bytes)
+                .await?;
+            let send = ctx
+                .axon
+                .send_media(
+                    account_id,
+                    &room_id,
+                    upload.upload_id,
+                    Some(&thread_root),
+                    None,
+                )
+                .await?;
+            if send.event_id.is_empty() {
+                bail!("send-media response event_id was empty");
+            }
+
+            let peer_token = ctx.matrix.login(&ctx.manifest.accounts.peer).await?;
+            let content = ctx
+                .matrix
+                .get_event_content(&peer_token, &room_id, &send.event_id)
+                .await?;
+
+            if content.get("msgtype").and_then(Value::as_str) != Some("m.file") {
+                bail!("media event had unexpected msgtype: {content}");
+            }
+            let relates_to = content
+                .get("m.relates_to")
+                .ok_or_else(|| anyhow!("media event missing m.relates_to: {content}"))?;
+            if relates_to.get("rel_type").and_then(Value::as_str) != Some("m.thread") {
+                bail!("media event m.relates_to was not a thread relation: {relates_to}");
+            }
+            if relates_to.get("event_id").and_then(Value::as_str) != Some(thread_root.as_str()) {
+                bail!("media event thread relation pointed at the wrong root: {relates_to}");
+            }
+            if relates_to.get("m.in_reply_to").is_some() {
+                bail!(
+                    "media event carried an m.in_reply_to fallback — other clients would \
+                     render it as a reply to the thread root (#266): {relates_to}"
+                );
+            }
+
+            wait_for(
+                "media thread member reaches the thread timeline",
+                ctx.timeout,
+                || async {
+                    let page = ctx
+                        .axon
+                        .thread_timeline(account_id, &room_id, &thread_root)
+                        .await?;
+                    Ok(page
+                        .events
+                        .iter()
+                        .any(|event| event.event_id == send.event_id))
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await,
+    )
+}
+
 pub async fn graceful_stack_shutdown(ctx: &Ctx) -> ScenarioOutcome {
     ScenarioOutcome::from_result(
         async {

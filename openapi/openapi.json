@@ -8878,7 +8878,7 @@
               "string",
               "null"
             ],
-            "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set without `reply_to`, the\nthread root is used as the reply fallback."
+            "description": "Send into this thread, identified by its root event id\n(`rel_type: m.thread`). Optional; when set with `reply_to`, the reply\nis scoped to the thread. Without `reply_to`, this is a thread member,\nnot a reply."
           },
           "upload_id": {
             "type": "string",

@@ -156,6 +156,16 @@ pub struct SendResultDto {
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
+pub struct StagedUploadDto {
+    pub upload_id: Uuid,
+    pub kind: String,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ThreadSummaryDto {
     pub root_event_id: String,
     pub reply_count: i64,

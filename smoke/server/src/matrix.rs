@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use reqwest::{Client, Method};
 use serde_json::Value;
 
@@ -79,6 +79,37 @@ impl MatrixClient {
             )
             .await?;
         Ok(response.event_id)
+    }
+
+    /// Fetch an event straight from the homeserver's client-server API
+    /// (`GET …/rooms/{roomId}/event/{eventId}`) and return its raw `content`.
+    /// Used to assert the exact `m.relates_to` shape Axon sent — Axon's own
+    /// `/v1/` event DTO summarizes relations rather than exposing them
+    /// verbatim, so this bypasses Axon entirely for that assertion.
+    pub async fn get_event_content(
+        &self,
+        token: &str,
+        room_id: &str,
+        event_id: &str,
+    ) -> anyhow::Result<Value> {
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/event/{}",
+            path_segment(room_id),
+            path_segment(event_id)
+        );
+        let event: Value = self
+            .request(
+                Method::GET,
+                &path,
+                Some(token),
+                None,
+                Duration::from_secs(30),
+            )
+            .await?;
+        event
+            .get("content")
+            .cloned()
+            .ok_or_else(|| anyhow!("event {event_id} response had no content"))
     }
 
     pub async fn wait_for_event(

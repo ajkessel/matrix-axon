@@ -2608,8 +2608,9 @@ export interface components {
             reply_to?: string | null;
             /**
              * @description Send into this thread, identified by its root event id
-             *     (`rel_type: m.thread`). Optional; when set without `reply_to`, the
-             *     thread root is used as the reply fallback.
+             *     (`rel_type: m.thread`). Optional; when set with `reply_to`, the reply
+             *     is scoped to the thread. Without `reply_to`, this is a thread member,
+             *     not a reply.
              */
             thread_root?: string | null;
             /**

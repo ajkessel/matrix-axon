@@ -29,12 +29,15 @@ use matrix_sdk::ruma::api::client::room::{create_room, Visibility};
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::directory::Filter;
 use matrix_sdk::ruma::events::reaction::ReactionEventContent;
-use matrix_sdk::ruma::events::relation::Annotation;
+use matrix_sdk::ruma::events::relation::{Annotation, Thread};
 use matrix_sdk::ruma::events::room::encryption::RoomEncryptionEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    AddMentions, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
+    AddMentions, FileInfo, FileMessageEventContent, ImageMessageEventContent, MessageType,
+    Relation as MessageRelation, ReplyWithinThread, RoomMessageEventContent,
+    TextMessageEventContent,
 };
 use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent};
+use matrix_sdk::ruma::events::room::{ImageInfo, MediaSource};
 use matrix_sdk::ruma::events::tag::{TagInfo, TagName, UserTagName};
 use matrix_sdk::ruma::events::{InitialStateEvent, StateEventType};
 use matrix_sdk::ruma::{
@@ -403,38 +406,155 @@ fn attachment_info(kind: MediaSendKind, size_bytes: u64) -> Result<AttachmentInf
     })
 }
 
+/// Build the SDK [`Reply`] for a media send that carries a `reply_to` — a
+/// plain reply, or an explicit reply scoped to a thread. Returns `None` for an
+/// unrelated send. The `thread_root`-only "thread member, not a reply" shape
+/// is *not* handled here: [`thread_member_root`] intercepts it before this
+/// function is ever called, because the SDK's `Reply`/`make_for_thread` has
+/// no way to express it without a fallback `m.in_reply_to` (see
+/// [`SdkGateway::send_media`]).
 fn attachment_reply(relation: Relation<'_>) -> Result<Option<Reply>, GatewayError> {
-    let reply_to = relation
+    let Some(reply_to) = relation
         .reply_to
         .map(|id| EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("reply_to: {e}"))))
-        .transpose()?;
-    let thread_root = relation
-        .thread_root
-        .map(|id| {
-            EventId::parse(id).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))
-        })
-        .transpose()?;
-
-    let Some(event_id) = reply_to.or(thread_root) else {
+        .transpose()?
+    else {
         return Ok(None);
     };
-    let (enforce_thread, add_mentions) = match (relation.thread_root, relation.reply_to) {
-        (Some(_), Some(_)) => (
+
+    let (enforce_thread, add_mentions) = if let Some(root) = relation.thread_root {
+        EventId::parse(root).map_err(|e| GatewayError::Invalid(format!("thread_root: {e}")))?;
+        (
             EnforceThread::Threaded(ReplyWithinThread::Yes),
             AddMentions::Yes,
-        ),
-        (Some(_), None) => (
-            EnforceThread::Threaded(ReplyWithinThread::No),
-            AddMentions::No,
-        ),
-        (None, Some(_)) => (EnforceThread::Unthreaded, AddMentions::Yes),
-        (None, None) => unreachable!("event_id checked above"),
+        )
+    } else {
+        (EnforceThread::Unthreaded, AddMentions::Yes)
     };
     Ok(Some(Reply {
-        event_id,
+        event_id: reply_to,
         enforce_thread,
         add_mentions,
     }))
+}
+
+/// Whether `relation` is the "thread member, not a reply" shape (`thread_root`
+/// set, `reply_to` absent) — the one shape [`attachment_reply`] can't build.
+/// Returns the parsed thread root when so; `None` for every other shape (no
+/// relation, a plain reply, or an explicit in-thread reply), which the caller
+/// should route through the normal SDK attachment/reply path instead.
+fn thread_member_root(relation: Relation<'_>) -> Result<Option<OwnedEventId>, GatewayError> {
+    match (relation.thread_root, relation.reply_to) {
+        (Some(root), None) => {
+            Ok(Some(EventId::parse(root).map_err(|e| {
+                GatewayError::Invalid(format!("thread_root: {e}"))
+            })?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Upload `bytes` for a media send, matching the room's current encryption
+/// state — encrypted upload for an encrypted room, plain upload otherwise —
+/// mirroring what `Room::send_attachment` does internally (matrix-sdk 0.18
+/// `room/mod.rs::prepare_and_send_attachment`), which isn't exposed for reuse.
+async fn upload_media_source(
+    room: &Room,
+    content_type: &mime::Mime,
+    bytes: Vec<u8>,
+) -> Result<MediaSource, GatewayError> {
+    let encrypted = room
+        .latest_encryption_state()
+        .await
+        .map_err(map_sdk_err)?
+        .is_encrypted();
+    if encrypted {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let file = room
+            .client()
+            .upload_encrypted_file(&mut cursor)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(MediaSource::Encrypted(Box::new(file)))
+    } else {
+        let resp = room
+            .client()
+            .media()
+            .upload(content_type, bytes, None)
+            .await
+            .map_err(map_sdk_err)?;
+        Ok(MediaSource::Plain(resp.content_uri))
+    }
+}
+
+/// Build the `m.image`/`m.file` [`MessageType`] for an already-uploaded
+/// `source`, mirroring matrix-sdk's private `make_media_type!` for the two
+/// kinds [`MediaSendKind`] supports. A caption becomes the event body (with
+/// the original filename kept in `filename`); otherwise the filename is the
+/// body and `filename` is left unset, matching `Room::send_attachment`'s
+/// convention (MSC2530).
+fn media_message_type(
+    kind: MediaSendKind,
+    filename: String,
+    content_type: &mime::Mime,
+    source: MediaSource,
+    info: AttachmentInfo,
+    caption: Option<&str>,
+) -> MessageType {
+    let (body, filename) = match caption {
+        Some(caption) => (caption.to_owned(), Some(filename)),
+        None => (filename, None),
+    };
+    let mimetype = Some(content_type.as_ref().to_owned());
+
+    match kind {
+        MediaSendKind::Image => {
+            let mut info: ImageInfo = info.into();
+            info.mimetype = mimetype;
+            let mut content = ImageMessageEventContent::new(body, source);
+            content.filename = filename;
+            content.info = Some(Box::new(info));
+            MessageType::Image(content)
+        }
+        MediaSendKind::File => {
+            let mut info: FileInfo = info.into();
+            info.mimetype = mimetype;
+            let mut content = FileMessageEventContent::new(body, source);
+            content.filename = filename;
+            content.info = Some(Box::new(info));
+            MessageType::File(content)
+        }
+    }
+}
+
+/// Send a media attachment as a thread member (`thread_root` without
+/// `reply_to`): upload directly via [`upload_media_source`], then attach
+/// `Thread::without_fallback` — `rel_type: m.thread` with no `m.in_reply_to` —
+/// so it can't render as a reply in other clients (#266). See
+/// [`SdkGateway::send_media`] for why this bypasses `room.send_attachment`.
+async fn send_thread_member_attachment(
+    room: &Room,
+    attachment: MediaAttachment,
+    content_type: &mime::Mime,
+    info: AttachmentInfo,
+    caption: Option<&str>,
+    thread_root: OwnedEventId,
+) -> Result<String, GatewayError> {
+    let source = upload_media_source(room, content_type, attachment.bytes).await?;
+    let msg_type = media_message_type(
+        attachment.kind,
+        attachment.filename,
+        content_type,
+        source,
+        info,
+        caption,
+    );
+    let mut content = RoomMessageEventContent::new(msg_type);
+    content.relates_to = Some(MessageRelation::Thread(Thread::without_fallback(
+        thread_root,
+    )));
+    let resp = room.send(content).await.map_err(map_sdk_err)?;
+    Ok(resp.response.event_id.to_string())
 }
 
 fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayError> {
@@ -576,8 +696,20 @@ impl SdkGateway {
         Ok(resp.response.event_id.to_string())
     }
 
-    /// Send a staged media attachment as an `m.image` or `m.file`, letting the
-    /// SDK own media upload, encrypted-file metadata, and final room send.
+    /// Send a staged media attachment as an `m.image` or `m.file`.
+    ///
+    /// `thread_root` without `reply_to` (a thread member, not a reply) can't be
+    /// expressed through the SDK's typed reply/attachment helper: `AttachmentConfig`
+    /// only accepts a [`Reply`], and matrix-sdk 0.18's `make_for_thread`
+    /// unconditionally sets a fallback `m.in_reply_to` even when no reply was
+    /// requested (`room/reply.rs`; confirmed by the SDK's own
+    /// `test_start_thread` unit test) — other clients render that fallback as
+    /// a genuine reply to the thread root (#266). So that one relation shape
+    /// is built by hand in [`send_thread_member_attachment`], driving the
+    /// upload directly instead of through `room.send_attachment`. Every other
+    /// shape (no relation, a plain reply, or an explicit in-thread reply)
+    /// keeps going through the SDK helper below, which already gets those
+    /// right.
     pub async fn send_media(
         &self,
         account_id: Uuid,
@@ -589,6 +721,19 @@ impl SdkGateway {
         let room = self.room(account_id, room_id).await?;
         let content_type = effective_mime(attachment.kind, attachment.content_type.as_deref())?;
         let info = attachment_info(attachment.kind, attachment.size_bytes)?;
+
+        if let Some(thread_root) = thread_member_root(relation)? {
+            return send_thread_member_attachment(
+                &room,
+                attachment,
+                &content_type,
+                info,
+                caption,
+                thread_root,
+            )
+            .await;
+        }
+
         let reply = attachment_reply(relation)?;
         let caption = caption.map(TextMessageEventContent::plain);
         let config = AttachmentConfig::new()
@@ -1264,20 +1409,22 @@ impl SdkGateway {
 #[cfg(test)]
 mod tests {
     use axon_core::{CreateRoomRequest, MediaSendKind, PowerLevelChanges, Relation, RoomPreset};
-    use matrix_sdk::attachment::AttachmentInfo;
+    use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
-    use matrix_sdk::ruma::events::room::message::{AddMentions, ReplyWithinThread};
+    use matrix_sdk::ruma::events::room::message::{AddMentions, MessageType, ReplyWithinThread};
     use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsSource};
+    use matrix_sdk::ruma::events::room::MediaSource;
     use matrix_sdk::ruma::events::tag::TagName;
-    use matrix_sdk::ruma::{Int, RoomVersionId, UserId};
+    use matrix_sdk::ruma::{Int, OwnedMxcUri, RoomVersionId, UserId};
     use serde_json::json;
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
-        check_self_demotion_guardrail, effective_mime, merge_power_level_changes,
-        message_relates_to, parse_room_id_or_alias, parse_server_name, parse_server_names,
-        parse_tag_name, parse_user_id, validate_tag_order, MAX_TAG_NAME_BYTES,
+        check_self_demotion_guardrail, effective_mime, media_message_type,
+        merge_power_level_changes, message_relates_to, parse_room_id_or_alias, parse_server_name,
+        parse_server_names, parse_tag_name, parse_user_id, thread_member_root, validate_tag_order,
+        MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -1555,6 +1702,64 @@ mod tests {
         );
     }
 
+    fn plain_media_source() -> MediaSource {
+        MediaSource::Plain(OwnedMxcUri::from("mxc://example.org/abc"))
+    }
+
+    #[test]
+    fn media_message_type_builds_image_without_caption() {
+        let content_type: mime::Mime = "image/png".parse().expect("valid mime");
+        let info = AttachmentInfo::Image(BaseImageInfo {
+            size: Some(123u32.into()),
+            ..BaseImageInfo::default()
+        });
+        let msg_type = media_message_type(
+            MediaSendKind::Image,
+            "cat.png".to_owned(),
+            &content_type,
+            plain_media_source(),
+            info,
+            None,
+        );
+        let MessageType::Image(content) = msg_type else {
+            panic!("expected an image message type");
+        };
+        // No caption: the filename is the body, and `filename` is left unset
+        // (MSC2530) — a set `filename` alongside an identical `body` would
+        // make clients treat the filename as a user-written caption.
+        assert_eq!(content.body, "cat.png");
+        assert_eq!(content.filename, None);
+        let info = content.info.expect("image info");
+        assert_eq!(info.mimetype.as_deref(), Some("image/png"));
+        assert_eq!(u64::from(info.size.expect("image size")), 123);
+    }
+
+    #[test]
+    fn media_message_type_builds_file_with_caption() {
+        let content_type: mime::Mime = "application/pdf".parse().expect("valid mime");
+        let info = AttachmentInfo::File(BaseFileInfo {
+            size: Some(456u32.into()),
+        });
+        let msg_type = media_message_type(
+            MediaSendKind::File,
+            "report.pdf".to_owned(),
+            &content_type,
+            plain_media_source(),
+            info,
+            Some("quarterly report"),
+        );
+        let MessageType::File(content) = msg_type else {
+            panic!("expected a file message type");
+        };
+        // A caption becomes the body, with the original filename preserved
+        // separately (MSC2530) — otherwise the caption text would be lost.
+        assert_eq!(content.body, "quarterly report");
+        assert_eq!(content.filename.as_deref(), Some("report.pdf"));
+        let info = content.info.expect("file info");
+        assert_eq!(info.mimetype.as_deref(), Some("application/pdf"));
+        assert_eq!(u64::from(info.size.expect("file size")), 456);
+    }
+
     #[test]
     fn message_relates_to_maps_thread_member_without_reply() {
         let relates_to = message_relates_to(Relation {
@@ -1652,20 +1857,17 @@ mod tests {
     }
 
     #[test]
-    fn attachment_reply_maps_thread_without_explicit_reply_to_root_fallback() {
-        let reply = attachment_reply(Relation {
+    fn attachment_reply_returns_none_for_thread_member_only() {
+        // thread_root without reply_to is the "thread member, not a reply"
+        // shape (#266) — that's `thread_member_root`'s job, not this
+        // function's, precisely because this function has no way to express
+        // it without a fallback `m.in_reply_to`.
+        assert!(attachment_reply(Relation {
             reply_to: None,
             thread_root: Some(THREAD_ROOT),
         })
-        .expect("thread relation")
-        .expect("reply metadata");
-
-        assert_eq!(reply.event_id.as_str(), THREAD_ROOT);
-        assert_eq!(
-            reply.enforce_thread,
-            EnforceThread::Threaded(ReplyWithinThread::No)
-        );
-        assert_eq!(reply.add_mentions, AddMentions::No);
+        .expect("thread_root-only is not an error")
+        .is_none());
     }
 
     #[test]
@@ -1697,12 +1899,61 @@ mod tests {
         );
 
         let bad_thread = attachment_reply(Relation {
-            reply_to: None,
+            reply_to: Some(REPLY_EVENT),
             thread_root: Some("not-an-event-id"),
         })
         .expect_err("bad thread id should fail");
         assert!(
             matches!(bad_thread, GatewayError::Invalid(message) if message.starts_with("thread_root:"))
+        );
+    }
+
+    #[test]
+    fn thread_member_root_returns_none_without_thread_root() {
+        assert!(thread_member_root(Relation::default())
+            .expect("unrelated attachment")
+            .is_none());
+        assert!(thread_member_root(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: None,
+        })
+        .expect("plain reply")
+        .is_none());
+    }
+
+    #[test]
+    fn thread_member_root_returns_none_when_reply_to_is_also_set() {
+        // thread_root + reply_to is an explicit in-thread reply, which
+        // `attachment_reply` already handles correctly — not this function's
+        // job.
+        assert!(thread_member_root(Relation {
+            reply_to: Some(REPLY_EVENT),
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("thread reply")
+        .is_none());
+    }
+
+    #[test]
+    fn thread_member_root_parses_thread_root_only() {
+        let root = thread_member_root(Relation {
+            reply_to: None,
+            thread_root: Some(THREAD_ROOT),
+        })
+        .expect("thread member")
+        .expect("thread root present");
+        assert_eq!(root.as_str(), THREAD_ROOT);
+    }
+
+    #[test]
+    fn thread_member_root_rejects_invalid_event_id() {
+        let err = thread_member_root(Relation {
+            reply_to: None,
+            thread_root: Some("not-an-event-id"),
+        })
+        .expect_err("bad thread id should fail");
+        assert!(
+            matches!(err, GatewayError::Invalid(message) if message.starts_with("thread_root:"))
         );
     }
 
