@@ -65,10 +65,28 @@ pub enum Command {
     JumpToDate(i64),
     /// /top — jump to the earliest message the Axon server has for the current room.
     JumpToTop,
+    /// /leave or /part — leave the selected room.
+    Leave,
+    /// /forget [room] — forget the selected or named left/banned room.
+    Forget(Option<String>),
+    /// /invite <user> — invite a user to the selected room.
+    Invite(String),
+    /// /kick <user> [reason] — kick a user from the selected room.
+    Kick(UserReasonCommand),
+    /// /ban <user> [reason] — ban a user from the selected room.
+    Ban(UserReasonCommand),
+    /// /unban <user> [reason] — unban a user from the selected room.
+    Unban(UserReasonCommand),
     Invalid(String),
     ApiUnsupported(String),
     Unknown(String),
     Empty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserReasonCommand {
+    pub user_id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -142,9 +160,14 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand::supported("/spoiler", true),
     SlashCommand::supported("/jump", true),
     SlashCommand::supported("/top", false),
+    SlashCommand::supported("/leave", false),
+    SlashCommand::supported("/part", false),
+    SlashCommand::supported("/forget", true),
+    SlashCommand::supported("/invite", true),
+    SlashCommand::supported("/kick", true),
+    SlashCommand::supported("/ban", true),
+    SlashCommand::supported("/unban", true),
     SlashCommand::api_unsupported("/join", true),
-    SlashCommand::api_unsupported("/leave", false),
-    SlashCommand::api_unsupported("/part", false),
 ];
 
 /// Group boundaries for the help popup: `(start_index, section_title)`.
@@ -155,9 +178,10 @@ pub(crate) const HELP_COMMAND_GROUPS: &[(usize, &str)] = &[
     (14, "Account management"),
     (18, "Information"),
     (22, "Message actions"),
-    (27, "Verification"),
-    (29, "System"),
-    (35, "Pending"),
+    (27, "Room actions"),
+    (34, "Verification"),
+    (36, "System"),
+    (42, "Pending"),
 ];
 
 pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
@@ -301,6 +325,42 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         insert_text: "/thread",
         description: "open the thread on, or start a thread from, the selected message",
     },
+    // ── Room actions ────────────────────────────────────────────────────────
+    HelpCommand {
+        label: "/leave, /part",
+        insert_text: "/leave",
+        description: "leave the selected room after confirmation",
+    },
+    HelpCommand {
+        label: "/forget [room]",
+        insert_text: "/forget ",
+        description: "forget the selected or named room after confirmation",
+    },
+    HelpCommand {
+        label: "/invite <user>",
+        insert_text: "/invite ",
+        description: "invite a Matrix user to the selected room",
+    },
+    HelpCommand {
+        label: "/kick <user> [reason]",
+        insert_text: "/kick ",
+        description: "kick a user from the selected room after confirmation",
+    },
+    HelpCommand {
+        label: "/ban <user> [reason]",
+        insert_text: "/ban ",
+        description: "ban a user from the selected room after confirmation",
+    },
+    HelpCommand {
+        label: "/unban <user> [reason]",
+        insert_text: "/unban ",
+        description: "unban a user from the selected room after confirmation",
+    },
+    HelpCommand {
+        label: "/join <room>",
+        insert_text: "/join ",
+        description: "pending TUI-M19-2",
+    },
     // ── Verification ─────────────────────────────────────────────────────────
     HelpCommand {
         label: "/verify <device_id|@user:server>",
@@ -354,16 +414,6 @@ pub(crate) const HELP_COMMANDS: &[HelpCommand] = &[
         label: "/top",
         insert_text: "/top",
         description: "jump to the earliest available message in the current room",
-    },
-    HelpCommand {
-        label: "/join <room>",
-        insert_text: "/join ",
-        description: "pending Axon API support",
-    },
-    HelpCommand {
-        label: "/leave, /part",
-        insert_text: "/leave",
-        description: "pending Axon API support",
     },
 ];
 
@@ -501,6 +551,17 @@ pub fn parse(input: &str) -> Command {
             "/jump requires a date (YYYY-MM-DD, M/D/YYYY, or \"January 15 2025\")".to_owned(),
         ),
         "top" => Command::JumpToTop,
+        "leave" | "part" => Command::Leave,
+        "forget" => Command::Forget((!arg.trim().is_empty()).then(|| arg.trim().to_owned())),
+        "invite" if !arg.trim().is_empty() => Command::Invite(arg.trim().to_owned()),
+        "invite" => Command::Invalid("/invite requires a Matrix user id".to_owned()),
+        "kick" => {
+            parse_user_reason_command(arg, "/kick").map_or_else(Command::Invalid, Command::Kick)
+        }
+        "ban" => parse_user_reason_command(arg, "/ban").map_or_else(Command::Invalid, Command::Ban),
+        "unban" => {
+            parse_user_reason_command(arg, "/unban").map_or_else(Command::Invalid, Command::Unban)
+        }
         other => {
             let command_name = format!("/{other}");
             if SLASH_COMMANDS
@@ -515,6 +576,27 @@ pub fn parse(input: &str) -> Command {
             }
         }
     }
+}
+
+fn parse_user_reason_command(arg: &str, command: &str) -> Result<UserReasonCommand, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err(format!("{command} requires a Matrix user id"));
+    }
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let user_id = parts.next().unwrap_or_default().trim();
+    if user_id.is_empty() {
+        return Err(format!("{command} requires a Matrix user id"));
+    }
+    let reason = parts
+        .next()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned);
+    Ok(UserReasonCommand {
+        user_id: user_id.to_owned(),
+        reason,
+    })
 }
 
 /// Scan an *unquoted* `/send` argument for its leading path token:
@@ -943,6 +1025,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_room_membership_actions() {
+        assert_eq!(parse("/leave"), Command::Leave);
+        assert_eq!(parse("/part"), Command::Leave);
+        assert_eq!(parse("/forget"), Command::Forget(None));
+        assert_eq!(
+            parse("/forget #old:example.org"),
+            Command::Forget(Some("#old:example.org".to_owned()))
+        );
+        assert_eq!(
+            parse("/invite @bob:example.org"),
+            Command::Invite("@bob:example.org".to_owned())
+        );
+        assert!(matches!(parse("/invite"), Command::Invalid(_)));
+        assert_eq!(
+            parse("/kick @bob:example.org off topic"),
+            Command::Kick(UserReasonCommand {
+                user_id: "@bob:example.org".to_owned(),
+                reason: Some("off topic".to_owned()),
+            })
+        );
+        assert_eq!(
+            parse("/ban @bob:example.org"),
+            Command::Ban(UserReasonCommand {
+                user_id: "@bob:example.org".to_owned(),
+                reason: None,
+            })
+        );
+        assert_eq!(
+            parse("/unban @bob:example.org time served"),
+            Command::Unban(UserReasonCommand {
+                user_id: "@bob:example.org".to_owned(),
+                reason: Some("time served".to_owned()),
+            })
+        );
+    }
+
+    #[test]
     fn parses_quit_aliases() {
         assert_eq!(parse("/quit"), Command::Quit);
         assert_eq!(parse("/q"), Command::Quit);
@@ -1055,14 +1174,6 @@ mod tests {
         assert_eq!(
             parse("/join #room:localhost"),
             Command::ApiUnsupported("/join is not supported by the current Axon API".to_owned())
-        );
-        assert_eq!(
-            parse("/leave"),
-            Command::ApiUnsupported("/leave is not supported by the current Axon API".to_owned())
-        );
-        assert_eq!(
-            parse("/part"),
-            Command::ApiUnsupported("/part is not supported by the current Axon API".to_owned())
         );
     }
 

@@ -476,6 +476,7 @@ async fn run_app(
     let (relations_tx, mut relations_rx) = mpsc::unbounded_channel();
     let (members_tx, mut members_rx) = mpsc::unbounded_channel();
     let (drafts_tx, mut drafts_rx) = mpsc::unbounded_channel();
+    let (room_action_tx, mut room_action_rx) = mpsc::unbounded_channel();
     let mut app = App::new(client, account_filter, config, picker);
     app.set_lifecycle_sender(lifecycle_tx);
     app.set_media_sender(media_tx);
@@ -483,6 +484,7 @@ async fn run_app(
     app.set_relations_sender(relations_tx);
     app.set_members_sender(members_tx);
     app.set_drafts_sender(drafts_tx);
+    app.set_room_action_sender(room_action_tx);
     app.set_device_id(app::load_or_create_device_id(&app.config_path));
     app.refresh_accounts().await;
     app.refresh_rooms().await;
@@ -609,6 +611,9 @@ async fn run_app(
             }
             Some(outcome) = lifecycle_rx.recv() => {
                 app.handle_lifecycle_outcome(outcome).await;
+            }
+            Some(outcome) = room_action_rx.recv() => {
+                app.handle_room_action_outcome(outcome).await;
             }
             Some(result) = media_rx.recv() => {
                 app.handle_media_result(result);

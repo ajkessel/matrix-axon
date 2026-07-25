@@ -204,6 +204,9 @@ impl App {
             .rooms
             .iter()
             .any(|room| RoomKey::from(room) == key);
+        if known_room && self.is_own_membership_departure(&event, &key) {
+            return LiveFrameAction::RefreshRooms;
+        }
         if self
             .selected_room()
             .is_some_and(|room| RoomKey::from(room) == key)
@@ -317,6 +320,21 @@ impl App {
                 LiveFrameAction::RefreshRooms
             }
         }
+    }
+
+    fn is_own_membership_departure(&self, event: &EventDto, key: &RoomKey) -> bool {
+        if !matches!(event.membership_change().as_deref(), Some("leave" | "ban")) {
+            return false;
+        }
+        let Some(state_key) = event.state_key() else {
+            return false;
+        };
+        self.rooms
+            .rooms
+            .iter()
+            .find(|room| RoomKey::from(*room) == *key)
+            .and_then(|room| room.account_user_id.as_deref())
+            == Some(state_key)
     }
 
     pub(crate) fn is_own_event(&self, event: &EventDto) -> bool {

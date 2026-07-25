@@ -51,6 +51,9 @@ impl App {
         if self.complete_verify_command_input(reverse) {
             return;
         }
+        if self.complete_room_action_user_command_input(reverse) {
+            return;
+        }
         if self.complete_filter_command_input(reverse) {
             return;
         }
@@ -407,6 +410,55 @@ impl App {
     /// map), matched by user id, localpart, or display name. The account's own user
     /// is excluded — verifying yourself is self-verification, not cross-user.
     fn verify_completion_candidates(&self, target: &str) -> Vec<String> {
+        self.selected_room_user_candidates(target)
+    }
+
+    pub(crate) fn complete_room_action_user_command_input(&mut self, reverse: bool) -> bool {
+        let Some((command, target)) = room_action_user_target_prefix(&self.input.buffer) else {
+            return false;
+        };
+        let target = target.trim_start();
+        if target.chars().any(char::is_whitespace) {
+            return true;
+        }
+        let query = self
+            .input
+            .verify_command_completion
+            .as_ref()
+            .map(|(query, _)| query.clone())
+            .unwrap_or_else(|| target.to_owned());
+        let candidates = self.selected_room_user_candidates(&query);
+        if candidates.is_empty() {
+            self.input.verify_command_completion = None;
+            self.status = Status::Info(if query.trim().is_empty() {
+                "no known users in this room yet".to_owned()
+            } else {
+                format!("no user matches: {query}")
+            });
+            return true;
+        }
+        let selected = if let Some((_, current)) = self.input.verify_command_completion.as_ref() {
+            cycle_index(*current, candidates.len(), reverse)
+        } else if reverse {
+            candidates.len() - 1
+        } else {
+            0
+        };
+        let user_id = &candidates[selected];
+        self.input.buffer = format!("{command} {user_id}");
+        self.move_cursor_to_end();
+        self.input.verify_command_completion = Some((query, selected));
+        self.status = Status::Info(format!(
+            "[{}/{}] {} - Tab/Shift-Tab to cycle, Enter to run {}",
+            selected + 1,
+            candidates.len(),
+            user_id,
+            command
+        ));
+        true
+    }
+
+    fn selected_room_user_candidates(&self, target: &str) -> Vec<String> {
         let Some(room) = self.selected_room() else {
             return Vec::new();
         };
@@ -860,6 +912,12 @@ fn slash_command_candidates(prefix: &str) -> Vec<SlashCommand> {
 
 fn send_target_prefix(input: &str) -> Option<&str> {
     command_target_prefix(input, "/send")
+}
+
+fn room_action_user_target_prefix(input: &str) -> Option<(&'static str, &str)> {
+    ["/invite", "/kick", "/ban", "/unban"]
+        .into_iter()
+        .find_map(|command| command_target_prefix(input, command).map(|target| (command, target)))
 }
 
 /// `Some(target)` while the caller is still typing the path token; `None`

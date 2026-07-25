@@ -35,6 +35,7 @@ pub(crate) use media::{
 mod reactions;
 mod relations;
 mod render;
+mod room_actions;
 mod rooms;
 mod search_flow;
 mod timeline;
@@ -46,6 +47,7 @@ pub(crate) use render::{
     message_layout, selected_line_style, ImageThumbRows, RelationContext, ReplyPreview,
     ThreadBadge, IMAGE_THUMB_ROWS,
 };
+pub(crate) use room_actions::{PendingRoomAction, RoomActionOutcome};
 pub(crate) use rooms::{account_localpart, apply_edits, dm_title_from_members};
 #[cfg(test)]
 use timeline::should_show_event;
@@ -73,6 +75,9 @@ pub(crate) enum Mode {
     },
     ConfirmDelete {
         account: AccountDto,
+    },
+    ConfirmRoomAction {
+        action: PendingRoomAction,
     },
     RoomList,
     AccountList,
@@ -747,6 +752,12 @@ pub(crate) struct App {
     /// line survives until the result lands rather than being clobbered by a
     /// second `/send` started mid-upload.
     pub(crate) media_send_busy: bool,
+    /// True while an M19 room membership/moderation action is in flight, so
+    /// progress and outcome status are not overwritten by unrelated refreshes.
+    pub(crate) room_action_busy: bool,
+    /// Sender for results of in-flight M19 room actions spawned off the event
+    /// loop. `None` until the main loop wires up the channel (and in unit tests).
+    pub(crate) room_action_tx: Option<mpsc::UnboundedSender<RoomActionOutcome>>,
     /// User-toggled hide for the accounts panel (independent of account count).
     pub(crate) accounts_panel_hidden: bool,
     /// User-toggled hide for the rooms panel.
@@ -1039,6 +1050,8 @@ impl App {
             lifecycle_tx: None,
             lifecycle_busy: false,
             media_send_busy: false,
+            room_action_busy: false,
+            room_action_tx: None,
             image_cache: HashMap::new(),
             image_cache_order: VecDeque::new(),
             media_tx: None,
@@ -1090,6 +1103,10 @@ impl App {
     /// Wire up the channel the main loop drains for spawned login/logout results.
     pub(crate) fn set_lifecycle_sender(&mut self, tx: mpsc::UnboundedSender<LifecycleOutcome>) {
         self.lifecycle_tx = Some(tx);
+    }
+
+    pub(crate) fn set_room_action_sender(&mut self, tx: mpsc::UnboundedSender<RoomActionOutcome>) {
+        self.room_action_tx = Some(tx);
     }
 
     /// Wire up the channel the main loop drains for completed image downloads.
@@ -1271,6 +1288,7 @@ impl App {
     pub(crate) fn is_mid_command(&self) -> bool {
         self.lifecycle_busy
             || self.media_send_busy
+            || self.room_action_busy
             || matches!(
                 self.mode,
                 Mode::LoginUsername
@@ -1278,6 +1296,7 @@ impl App {
                     | Mode::RecoveryKey { .. }
                     | Mode::ConfirmLogout { .. }
                     | Mode::ConfirmDelete { .. }
+                    | Mode::ConfirmRoomAction { .. }
                     | Mode::Editing { .. }
                     | Mode::Reacting { .. }
                     | Mode::Unreacting { .. }
@@ -1754,6 +1773,12 @@ impl App {
                 self.start_thread_from_selected_message().await;
             }
             Command::UnreadThreads => self.open_unread_threads_picker(),
+            Command::Leave => self.start_leave_room(),
+            Command::Forget(target) => self.start_forget_room(target.as_deref()),
+            Command::Invite(user_id) => self.start_invite_user(&user_id),
+            Command::Kick(input) => self.start_kick_user(input),
+            Command::Ban(input) => self.start_ban_user(input),
+            Command::Unban(input) => self.start_unban_user(input),
             Command::Verify(device_id) => self.start_verification(device_id),
             Command::Bundle(event_id) => self.show_verification_bundle(&event_id).await,
             Command::Help => self.open_popup(PopupKind::Help),
@@ -2789,6 +2814,112 @@ mod tests {
         app
     }
 
+    fn seed_room_caches(app: &mut App, key: &RoomKey) {
+        app.rooms.unread.insert(key.clone(), 2);
+        app.rooms.display_names.insert(key.clone(), HashMap::new());
+        app.room_titles
+            .insert(key.clone(), "Cached title".to_owned());
+        app.messages.events.insert(
+            key.clone(),
+            vec![event_with_id(
+                "$cached",
+                "m.room.message",
+                Some("hello"),
+                serde_json::json!({ "msgtype": "m.text", "body": "hello" }),
+            )],
+        );
+        app.messages
+            .history_cursors
+            .insert(key.clone(), "cursor".to_owned());
+        app.thread_summaries.insert(key.clone(), HashMap::new());
+        app.relation_refresh_latest.insert(key.clone(), 1);
+        app.members_refresh_after
+            .insert(key.clone(), std::time::Instant::now());
+        app.unread_threads.insert(key.clone(), HashMap::new());
+    }
+
+    fn assert_room_caches_pruned(app: &App, key: &RoomKey) {
+        assert!(!app.rooms.unread.contains_key(key));
+        assert!(!app.rooms.display_names.contains_key(key));
+        assert!(!app.room_titles.contains_key(key));
+        assert!(!app.messages.events.contains_key(key));
+        assert!(!app.messages.history_cursors.contains_key(key));
+        assert!(!app.thread_summaries.contains_key(key));
+        assert!(!app.relation_refresh_latest.contains_key(key));
+        assert!(!app.members_refresh_after.contains_key(key));
+        assert!(!app.unread_threads.contains_key(key));
+    }
+
+    async fn spawn_api_stub(responses: Vec<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test API stub");
+        let address = listener.local_addr().expect("test API stub address");
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept API request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).await.expect("read API request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write API response");
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn rooms_response_body(rooms: &[RoomDto]) -> String {
+        let data: Vec<_> = rooms
+            .iter()
+            .map(|room| {
+                serde_json::json!({
+                    "account_id": room.account_id,
+                    "account_user_id": room.account_user_id,
+                    "room_id": room.room_id,
+                    "name": room.name,
+                    "topic": room.topic,
+                    "avatar_url": room.avatar_url,
+                    "canonical_alias": room.canonical_alias,
+                    "last_activity_ts": room.last_activity_ts,
+                    "last_event_id": room.last_event_id,
+                })
+            })
+            .collect();
+        serde_json::json!({ "data": data }).to_string()
+    }
+
+    fn empty_timeline_response_body() -> String {
+        serde_json::json!({
+            "data": {
+                "events": [],
+                "next_cursor": null,
+            }
+        })
+        .to_string()
+    }
+
+    fn empty_members_response_body() -> String {
+        serde_json::json!({ "data": [] }).to_string()
+    }
+
     #[test]
     fn visible_room_indices_filters_dms_groups_unread_and_favorites() {
         // index 0: a DM (no name/alias); 1: a named group; 2: another DM.
@@ -3029,6 +3160,73 @@ mod tests {
     }
 
     #[test]
+    fn room_refresh_prunes_caches_for_rooms_that_drop_out() {
+        let kept = room("!kept:example.com", None, Some("Kept"));
+        let departed = room("!departed:example.com", None, Some("Departed"));
+        let departed_key = RoomKey::from(&departed);
+        let mut app = app_with_rooms(vec![kept.clone(), departed]);
+        app.rooms.selected = Some(1);
+        seed_room_caches(&mut app, &departed_key);
+
+        app.apply_room_refresh(vec![kept]);
+
+        assert_room_caches_pruned(&app, &departed_key);
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!kept:example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn leave_outcome_prunes_departed_caches_after_post_leave_refresh() {
+        let departed = room("!departed:example.com", None, Some("Departed"));
+        let next = room("!next:example.com", None, Some("Next"));
+        let departed_key = RoomKey::from(&departed);
+        let base_url = spawn_api_stub(vec![
+            rooms_response_body(std::slice::from_ref(&next)),
+            empty_timeline_response_body(),
+            empty_members_response_body(),
+        ])
+        .await;
+        let mut app = App::new(
+            AxonClient::new(base_url, None),
+            None,
+            TuiConfig::test_default(),
+            Picker::halfblocks(),
+        );
+        app.rooms.rooms = vec![departed.clone(), next.clone()];
+        app.rooms.selected = Some(0);
+        seed_room_caches(&mut app, &departed_key);
+
+        app.handle_room_action_outcome(RoomActionOutcome {
+            action: PendingRoomAction {
+                kind: super::room_actions::RoomActionKind::Leave,
+                key: departed_key.clone(),
+                room_title: departed.title().to_owned(),
+                user_id: None,
+                reason: None,
+            },
+            result: Ok(()),
+        })
+        .await;
+
+        assert_eq!(
+            app.rooms
+                .rooms
+                .iter()
+                .map(|room| room.room_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["!next:example.com"]
+        );
+        assert_eq!(
+            app.selected_room().map(|room| room.room_id.as_str()),
+            Some("!next:example.com")
+        );
+        assert_room_caches_pruned(&app, &departed_key);
+        assert_eq!(app.status, "left Departed");
+    }
+
+    #[test]
     fn status_lists_active_and_deactivated_accounts() {
         let active_id = Uuid::from_u128(1);
         let logged_out_id = Uuid::from_u128(2);
@@ -3145,6 +3343,72 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn own_live_leave_event_for_selected_room_requests_room_refresh() {
+        let mut room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        room.account_user_id = Some("@me:example.com".to_owned());
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let mut event = event_with_state_key(
+            "$leave:example.com",
+            "m.room.member",
+            Some("@me:example.com"),
+            None,
+            serde_json::json!({ "membership": "leave" }),
+        );
+        event.room_id = room.room_id.clone();
+
+        let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+
+        assert_eq!(action, LiveFrameAction::RefreshRooms);
+    }
+
+    #[test]
+    fn own_live_ban_event_for_unselected_room_requests_room_refresh() {
+        let mut target = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        target.account_user_id = Some("@me:example.com".to_owned());
+        let mut other = room(
+            "!other:example.com",
+            Some("#other:example.com"),
+            Some("Other"),
+        );
+        other.account_user_id = Some("@me:example.com".to_owned());
+        let mut app = app_with_rooms(vec![other, target.clone()]);
+        app.rooms.selected = Some(0);
+        let mut event = event_with_state_key(
+            "$ban:example.com",
+            "m.room.member",
+            Some("@me:example.com"),
+            None,
+            serde_json::json!({ "membership": "ban" }),
+        );
+        event.room_id = target.room_id.clone();
+
+        let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+
+        assert_eq!(action, LiveFrameAction::RefreshRooms);
+    }
+
+    #[test]
+    fn peer_live_leave_event_for_known_room_does_not_request_room_refresh() {
+        let mut room = room("!room:example.com", Some("#room:example.com"), Some("Room"));
+        room.account_user_id = Some("@me:example.com".to_owned());
+        let mut app = app_with_rooms(vec![room.clone()]);
+        app.rooms.selected = Some(0);
+        let mut event = event_with_state_key(
+            "$leave:example.com",
+            "m.room.member",
+            Some("@peer:example.com"),
+            None,
+            serde_json::json!({ "membership": "leave" }),
+        );
+        event.room_id = room.room_id.clone();
+
+        let action = app.handle_live_frame(LiveFrame::Timeline(Box::new(event)));
+
+        assert_eq!(action, LiveFrameAction::None);
     }
 
     #[test]

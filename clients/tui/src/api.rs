@@ -389,6 +389,103 @@ impl AxonClient {
         self.send_no_body(message_mutation(request)).await
     }
 
+    pub async fn leave_room(&self, account_id: Uuid, room_id: &str) -> Result<(), ApiError> {
+        self.room_membership_no_body(account_id, room_id, "leave")
+            .await
+    }
+
+    pub async fn forget_room(&self, account_id: Uuid, room_id: &str) -> Result<(), ApiError> {
+        self.room_membership_no_body(account_id, room_id, "forget")
+            .await
+    }
+
+    pub async fn invite_user(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .room_membership_request(account_id, room_id, "invite")
+            .json(&serde_json::json!({ "user_id": user_id }));
+        self.send_no_body(message_mutation(request)).await
+    }
+
+    pub async fn kick_user(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        self.moderate_user(account_id, room_id, "kick", user_id, reason)
+            .await
+    }
+
+    pub async fn ban_user(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        self.moderate_user(account_id, room_id, "ban", user_id, reason)
+            .await
+    }
+
+    pub async fn unban_user(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        self.moderate_user(account_id, room_id, "unban", user_id, reason)
+            .await
+    }
+
+    async fn room_membership_no_body(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        verb: &str,
+    ) -> Result<(), ApiError> {
+        let request = self.room_membership_request(account_id, room_id, verb);
+        self.send_no_body(message_mutation(request)).await
+    }
+
+    fn room_membership_request(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        verb: &str,
+    ) -> reqwest::RequestBuilder {
+        self.http.post(format!(
+            "{}/v1/accounts/{}/rooms/{}/{}",
+            self.base_url,
+            account_id,
+            path_segment(room_id),
+            verb
+        ))
+    }
+
+    async fn moderate_user(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+        verb: &str,
+        user_id: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let request = self.room_membership_request(account_id, room_id, verb);
+        let mut payload = serde_json::json!({ "user_id": user_id });
+        if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
+            payload["reason"] = serde_json::json!(reason);
+        }
+        self.send_no_body(message_mutation(request).json(&payload))
+            .await
+    }
+
     /// Stage raw upload bytes ahead of a `send_media` call (ADR 0059/0062,
     /// `POST …/media/uploads`). `kind` is `"image"` or `"file"`; the server
     /// rejects `"image"` unless `content_type` is `image/*`. `filename` is

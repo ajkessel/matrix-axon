@@ -71,6 +71,12 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/whoami` | Show your Matrix ID and display name for the selected room's account. |
 | `/whereami` | Show a room information popup for the selected room. Up/Down/PageUp/PageDown scroll the popup. |
 | `/send <path> [caption]` | Upload a local file and send it to the current room, with an optional caption. `<path>` Tab-completes against the filesystem; dragging a file into the terminal window also fills it in (quoted or backslash-escaped paths from the drop are unescaped automatically). Honors a pending `/reply` or open thread the same way a plain send does. |
+| `/leave`, `/part` | Leave the selected room after `[y/N]` confirmation. The room list refreshes from Axon after the homeserver accepts the leave. |
+| `/forget [room]` | Forget the selected room, or a room resolved like `/room <room>`, after `[y/N]` confirmation. |
+| `/invite <user>` | Invite a Matrix user ID to the selected room. |
+| `/kick <user> [reason]` | Kick a Matrix user ID from the selected room after `[y/N]` confirmation. |
+| `/ban <user> [reason]` | Ban a Matrix user ID from the selected room after `[y/N]` confirmation. |
+| `/unban <user> [reason]` | Unban a Matrix user ID from the selected room after `[y/N]` confirmation. |
 | `/react [emoji]` | React to the selected message, or the most recent displayed message when none is selected. With an emoji or shortcode such as `/react +1`, send immediately; without one, open the selector. |
 | `/unreact` | Withdraw one of your reactions from the selected or most recent displayed message. A sole reaction is withdrawn immediately; Tab cycles when several exist. |
 | `/reply` | Reply to the selected or most recent displayed message; pending Axon API support. |
@@ -80,8 +86,7 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/help`, `/?` | Show available slash commands. |
 | `/refresh` (`/rooms` alias) | Refresh the room list and redraw the terminal display. |
 | `/quit` | Exit. |
-| `/join <room>` | Known command for joining a room; pending Axon API support. |
-| `/leave`, `/part` | Known commands for leaving the current room; pending Axon API support. |
+| `/join <room>` | Known command for joining a room; pending TUI-M19-2 implementation. |
 
 Room switching is forgiving. For a room with canonical alias
 `#test:example.com`, all of these can match:
@@ -94,7 +99,8 @@ Room switching is forgiving. For a room with canonical alias
 /room #test:example.com
 ```
 
-Use Tab to complete slash commands, `/room` room names, and emoji names after
+Use Tab to complete slash commands, `/room` room names, selected-room users for
+`/invite`, `/kick`, `/ban`, and `/unban`, and emoji names after
 `/react`; it also cycles active accounts for `/logout`, `/recover`, and `/account`, plus all
 client-visible accounts for `/delete`. Use Shift-Tab to cycle backward through
 matching options. When several

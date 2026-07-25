@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -34,13 +34,14 @@ impl App {
             room_list_title_from_cache(&self.room_titles, room)
         });
         let selected_key = self.selected_room().map(RoomKey::from);
+        let previous_keys: Vec<RoomKey> = self.rooms.rooms.iter().map(RoomKey::from).collect();
+        let refreshed_keys: HashSet<RoomKey> = rooms.iter().map(RoomKey::from).collect();
         self.rooms.rooms = rooms;
-        self.rooms.unread.retain(|key, _| {
-            self.rooms
-                .rooms
-                .iter()
-                .any(|room| RoomKey::from(room) == *key)
-        });
+        for key in previous_keys {
+            if !refreshed_keys.contains(&key) {
+                self.prune_room_caches(&key);
+            }
+        }
         self.rooms.selected = selected_key
             .and_then(|key| {
                 self.rooms
@@ -73,6 +74,18 @@ impl App {
             self.status = Status::from(format!("refreshed {} rooms", self.rooms.rooms.len()));
         }
         self.request_unnamed_room_titles();
+    }
+
+    fn prune_room_caches(&mut self, key: &RoomKey) {
+        self.rooms.display_names.remove(key);
+        self.rooms.unread.remove(key);
+        self.room_titles.remove(key);
+        self.messages.events.remove(key);
+        self.messages.history_cursors.remove(key);
+        self.thread_summaries.remove(key);
+        self.relation_refresh_latest.remove(key);
+        self.members_refresh_after.remove(key);
+        self.unread_threads.remove(key);
     }
 
     /// Kick off background `/members` fetches for rooms that have no

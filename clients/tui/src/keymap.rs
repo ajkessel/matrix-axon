@@ -104,6 +104,9 @@ impl App {
                 }
                 Mode::ConfirmLogout { account } => self.handle_confirm_logout_key(key, account),
                 Mode::ConfirmDelete { account } => self.handle_confirm_delete_key(key, account),
+                Mode::ConfirmRoomAction { action } => {
+                    self.handle_confirm_room_action_key(key, action)
+                }
                 Mode::RoomList => self.handle_room_list_key(key).await,
                 Mode::AccountList => self.handle_account_list_key(key).await,
                 Mode::MessageList => self.handle_message_list_key(key).await,
@@ -721,6 +724,20 @@ impl App {
         }
     }
 
+    fn handle_confirm_room_action_key(
+        &mut self,
+        key: KeyEvent,
+        action: crate::app::PendingRoomAction,
+    ) {
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.perform_room_action(action);
+        } else if matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
+            || self.shortcuts.clear_input.matches(key)
+        {
+            self.cancel_room_action_confirmation();
+        }
+    }
+
     async fn handle_editing_key(&mut self, key: KeyEvent, event_id: String) {
         if self.handle_input_navigation_key(key) {
             return;
@@ -918,6 +935,7 @@ impl App {
                 | Mode::RecoveryKey { .. }
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
+                | Mode::ConfirmRoomAction { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -1015,6 +1033,7 @@ impl App {
                 | Mode::RecoveryKey { .. }
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
+                | Mode::ConfirmRoomAction { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
@@ -1073,6 +1092,7 @@ impl App {
                 | Mode::RecoveryKey { .. }
                 | Mode::ConfirmLogout { .. }
                 | Mode::ConfirmDelete { .. }
+                | Mode::ConfirmRoomAction { .. }
                 | Mode::Editing { .. }
                 | Mode::Reacting { .. }
                 | Mode::Unreacting { .. }
