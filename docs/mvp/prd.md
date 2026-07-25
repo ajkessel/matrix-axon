@@ -2,6 +2,8 @@
 
 Related docs: [`tech-spec.md`](./tech-spec.md), [`implementation.md`](./implementation.md).
 
+> **Status: MVP has not shipped.** This document freezes at MVP ship per `implementation.md`'s "Documentation for agentic contributors" convention; until then it's still a living plan. See `implementation.md`'s status banner and milestone-resequencing table for what has actually landed and what's still gating MVP (currently: deployment docs, `docs/self-hosting.md`).
+
 ## Project
 
 **Axon** is a self-hosted **BFF (backend-for-frontend)** for Matrix: a persistent state layer that sits between a user's homeserver(s) and their clients, holding the persistent state, search index, and per-device coherence that Matrix clients otherwise reinvent themselves. Clients consume it through a documented, versioned HTTP + WebSocket API.
@@ -82,7 +84,9 @@ A terminal client (Rust) that exercises the agent API end-to-end. It is the refe
 - Minimal search input that hits `/v1/search`, scoped to the active room or all rooms.
 - Auth: paste a token minted by the agent CLI.
 
-It does not need to be polished. It exists to validate the API surface and to give Riley a usable client on day one. A web client remains a credible later addition built against the same `/v1/` API.
+It does not need to be polished. It exists to validate the API surface and to give Riley a usable client on day one.
+
+> **Sequencing update.** The web client described here as "a credible later addition" was pulled forward and is now under active, parallel development (`axon-web`, ADR 0031/0046) rather than waiting for post-MVP. This does not change the MVP success criteria below, which remain gated on `axon-tui` — the web client is additional work happening alongside MVP completion, not a substitute for it. See `docs/client-parity.md` for how far each client actually is.
 
 ## Out of scope for MVP
 
@@ -97,7 +101,7 @@ These are deliberately deferred. Many appear on the post-MVP roadmap.
 - **Migration tooling from existing clients.** Onboarding is fresh sync only.
 - **QR-code device verification.** Interactive SAS (emoji) verification and recovery-key device verification ship as a first-class account-lifecycle API (and `axon-tui` can drive them); QR-code verification is a follow-up.
 - **Native desktop / iOS clients.** A reference iOS app is a separate future project; the MVP ships generated Swift stubs only.
-- **Full OAuth 2.0 server.** Bearer tokens for MVP; OAuth + PKCE later. *(Post-MVP: M14 revisits this — ADR 0054 proposes axon become its own OAuth 2.0 authorization server; in design, no code landed.)*
+- **Full OAuth 2.0 server.** Bearer tokens for MVP; OAuth + PKCE later. *(Post-MVP, shipped ahead of MVP freeze: M14 landed — axon is its own minimal OAuth 2.0 authorization server and an OIDC relying party to Google/Microsoft, ADR 0054. Bearer tokens remain the wire protocol; OAuth is an additional way to mint one.)*
 - **Bridge metadata normalization.** Bridged events flow as ordinary Matrix events; clients render whatever the bridge places in event content.
 - **Per-room or per-language search analyzers.** One default language-agnostic analyzer for MVP.
 - **Durable media storage backend (S3-compatible).** MVP uses local disk cache only.

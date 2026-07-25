@@ -4,9 +4,11 @@
 
 Related docs: [`prd.md`](./prd.md), [`implementation.md`](./implementation.md).
 
+> **Status: MVP has not shipped.** This document freezes at MVP ship per `implementation.md`'s convention; until then, treat it as a living record — several items below (web client, OAuth) have already moved from "post-MVP roadmap" to "shipped ahead of freeze" as the sequencing evolved. See `implementation.md`'s status banner for current progress.
+
 ## Context & goals
 
-Axon is the agent described in [`prd.md`](./prd.md): a self-hosted persistent state layer for one human's Matrix accounts, consumed by arbitrary clients (`axon-tui`, a terminal client, is the MVP reference client; web and native clients are deferred) through a stable HTTP + WebSocket API.
+Axon is the agent described in [`prd.md`](./prd.md): a self-hosted persistent state layer for one human's Matrix accounts, consumed by arbitrary clients (`axon-tui`, a terminal client, is the MVP reference client; a web client, `axon-web`, was pulled forward from the roadmap below and is now under active parallel development — see ADR 0031/0046; native mobile/desktop clients remain deferred) through a stable HTTP + WebSocket API.
 
 This document records the architectural decisions for the MVP and the tradeoffs we weighed. It is not an implementation guide — that is [`implementation.md`](./implementation.md).
 
@@ -138,7 +140,7 @@ One bidirectional WebSocket at `/v1/ws`. Server → client carries timeline even
 
 MVP issues long-lived bearer tokens via an `axon token issue` CLI subcommand. Each token is bound to a human-readable label / device name, hashed at rest, and individually revocable. axum middleware validates `Authorization: Bearer …` on every `/v1/…` request.
 
-Full OAuth 2.0 + PKCE is on the roadmap. The token storage table, the middleware, and the API shape are designed so OAuth issuance can drop in without breaking the wire protocol. Tradeoffs we accepted:
+Full OAuth 2.0 + PKCE was on the roadmap and has since shipped ahead of MVP freeze: axon is its own minimal OAuth 2.0 authorization server plus an OIDC relying party to Google/Microsoft, behind the same `TokenVerifier` seam described below (M14, ADR 0054). Sign-in with Apple remains deferred to the iOS client work. The token storage table, the middleware, and the API shape were designed so OAuth issuance could drop in without breaking the wire protocol, and it did. Tradeoffs we accepted for the original bearer-only MVP scope:
 
 - **Win:** alpha ships without owning a security-sensitive authorization-server implementation.
 - **Cost:** initial onboarding for `axon-tui` is "paste the token from your CLI" rather than a login flow. Acceptable for the alpha audience.
@@ -192,7 +194,7 @@ Almost every architectural question was resolved during planning. The table belo
 | Event store schema | Hybrid hot-columns + JSONB. |
 | Search analyzer defaults | Single language-agnostic analyzer for MVP. |
 | Push payload format | Push deferred entirely; revisit as a P0 post-MVP track. |
-| OAuth implementation | Bearer tokens for MVP; OAuth 2.0 + PKCE post-MVP. |
+| OAuth implementation | Bearer tokens for MVP; OAuth 2.0 + PKCE was planned post-MVP but shipped ahead of freeze (M14, ADR 0054). |
 | Live-update transport | WebSocket with custom envelope. |
 | API versioning policy | Path-prefix `/v1/`, SemVer; previous major supported two minor releases after next major GA. |
 | Migration story | Fresh sync only for MVP. |
@@ -231,16 +233,16 @@ We do not build any federation code in v1.
 
 ## Roadmap signposts
 
-Post-MVP, roughly in priority order:
+Originally post-MVP, roughly in priority order — several of these have since shipped or begun ahead of MVP freeze, noted inline:
 
-1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP.
-2. **Full OAuth 2.0 + PKCE.**
-3. **Bridge metadata normalization.**
-4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks).
-5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it.
-6. **Per-room / per-language search analyzers.**
-7. **Spaces as first-class API resources.**
-8. **Native clients** (iOS first, then desktop) and a web client. See [ADR 0031](../adr/0031-client-strategy.md) for the client strategy.
-9. **Federation of agents v2.**
+1. **Push** (APNs first, then FCM and web push). P0 immediately after MVP. *(Not started.)*
+2. ~~Full OAuth 2.0 + PKCE.~~ *(Shipped ahead of freeze — M14, ADR 0054.)*
+3. **Bridge metadata normalization.** *(Not started.)*
+4. **Import-from-existing-client onboarding** (Element X store reader, maybe gomuks). *(Not started.)*
+5. **Durable media storage** (S3-compatible backend) when a hosted Axon deployment needs it. *(Not started; still explicitly out of scope — see "What not to build" in `implementation.md`.)*
+6. **Per-room / per-language search analyzers.** *(Not started.)*
+7. **Spaces as first-class API resources.** *(Not started.)*
+8. **Native clients** (iOS first, then desktop) and a web client. See [ADR 0031](../adr/0031-client-strategy.md) for the client strategy. *(Web client (`axon-web`) pulled forward and under active parallel development, well beyond the original alpha scope — see `docs/client-parity.md`. iOS/Android/macOS native clients have not started.)*
+9. **Federation of agents v2.** *(Not started.)*
 
 (Threads moved *into* the MVP as part of relation aggregation; they are no longer a post-MVP track.)

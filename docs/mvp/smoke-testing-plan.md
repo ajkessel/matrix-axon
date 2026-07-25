@@ -1,5 +1,7 @@
 # Smoke Testing Plan
 
+> **Status:** S1 has shipped, but as an opt-in gate rather than the originally-planned required PR job — `scripts/smoke-gate.sh all` runs locally / via the pre-commit hook's `RUN_SMOKE=` opt-in and via the manual `smoke.yml` workflow, not on every PR by default. Most of S2's journey coverage (login, the full mutation set, live updates/resilience, the live-stack journey) is also built out under the same harness. S3 (dedicated Windows/macOS PTY runners) and S4 (external-homeserver profile) have not started. This plan predates 7b bearer-token auth landing — see the note under "Assumptions" below, which is now stale in one respect.
+
 ## Summary
 
 Stand up black-box smoke coverage for the two shipped binaries:
@@ -239,9 +241,12 @@ not raw ANSI. Driver surface: `spawn`, `send_keys`, `resize`,
 
 ## Assumptions
 
-- The API has no authentication yet and lifecycle verbs are loopback-guarded;
-  the harness runs on the server's host. When bearer-token auth lands, the
-  harness gains a token configuration knob and the `attached` profile uses it.
+- **Stale as of 7b (ADR 0029):** this was written when the API had no
+  authentication and lifecycle verbs were loopback-guarded. Bearer-token auth
+  now gates all of `/v1/`, including the WebSocket, so the harness needs a
+  token configuration knob (mint via the CLI, pass to the `attached` profile)
+  rather than treating the API as open. Confirm current harness code reflects
+  this before relying on this section.
 - `/v1/ws` is a best-effort live tail with no replay, so scenarios connect
   before triggering events and fall back to HTTP reads for anything missed.
 - Unencrypted rooms are sufficient for smoke; E2EE remains covered by

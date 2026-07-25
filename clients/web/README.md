@@ -4,7 +4,7 @@ Preact + TypeScript + Vite SPA for axon (ADR 0046). This package is
 self-contained: it is not a Cargo workspace member and has its own pnpm
 lockfile.
 
-**Status (through M-W5 + M-W7):** a usable read/write client — SSO sign-in
+**Status (through M-W10, plus M19-W1, M19-W2, and M19-W3):** a usable read/write client — SSO sign-in
 through Axon OAuth Path A with token-paste fallback, the full account
 lifecycle (under `/accounts`, including 4S recovery-key import with offline
 key-format validation and success/error feedback), theme +
@@ -18,27 +18,36 @@ display, UTD/redaction placeholders, `?event=` highlighting, plain-text URL
 linkification), media (M-W8, ADR 0064: inline images and stickers with a
 full-size lightbox, download cards for files/audio/video, all fetched through
 the authenticated media proxy as blob URLs; inline `<img>` re-admitted to the
-sanitizer for `mxc://` only), media _send_ (M-W8.5, ADR 0065: attach by
+sanitizer for `mxc://` only), an inline preview for audio/video/PDF/text
+attachments (ADR 0072) and syntax-highlighted code blocks and text attachments
+(ADR 0073, highlight.js), media _send_ (M-W8.5, ADR 0065: attach by
 paperclip, drag-and-drop onto the room or thread pane, or paste; the composer's
 text becomes the caption; staged upload then `send-media`, with an optimistic
 echo that shows the picked image while its bytes are still going up, and
-Retry/Discard on failure — one file at a time, images and files only), and full
+Retry/Discard on failure — one file at a time, images and files only), full
 messaging: composer with markdown-on-send, member/room autocomplete that emits
 pill links in sent and edited text, reply (ADR 0032), edit,
 redact-with-confirm, reaction toggle, and threads (badges, panel via
 `?thread=`, send-in-thread, and an unread-thread drawer that keeps hidden
-thread replies unread until their thread panel loads), live WebSocket updates
-for timelines/room previews/unread state, and live ephemeral overlays for
-typing indicators plus public read receipts. M19-W room actions have started:
-the composer supports `/leave`, `/part`, `/forget`, `/join`, and `/knock`; the
-shell intercepts Matrix room links for join, and Settings can opt this origin
-into browser-level `matrix:` link handling. Installed PWA builds also declare
-`matrix:` in the web manifest for browsers that register manifest protocol
-handlers with the OS. The rooms index has a visible "Find or Join a Room"
-surface for direct room ID/alias/Matrix-link entry plus public room-directory
-search, defaulting to the account homeserver and suggesting `matrix.org` and
-`matrixrooms.info` without querying third-party directories until the user
-asks.
+thread replies unread until their thread panel loads), full-text message
+search (M-W10, ADR 0066: a URL-addressed overlay opened with `/`, `Ctrl-G`, a
+topbar button, or `/search`, with chip/token filters and client-side
+re-sorting), `/leave`, `/part`, and `/forget` room-membership slash commands
+(M19-W1 — invite/kick/ban/unban from the member list are not yet implemented,
+see `docs/client-parity.md`), room entry via `/join <room-or-matrix-link>` and
+`/knock <room-or-matrix-link> [reason]` (M19-W2: parses raw room ids/aliases,
+matrix.to links, and `matrix:` URIs; intercepts Matrix room links in the
+signed-in shell, showing an unknown target as a join pill; can register the
+web origin as a browser-level `matrix:` protocol handler from Settings, with a
+matching PWA manifest declaration for browsers that register manifest
+protocol handlers with the OS), a "Find or Join a Room" surface in the rooms
+index for direct room ID/alias/Matrix-link entry plus public room-directory
+search (M19-W3, defaulting to the account homeserver and suggesting
+`matrix.org` and `matrixrooms.info` without querying third-party directories
+until the user asks), TUI-parity keyboard shortcuts with a `/shortcuts` help
+overlay (ADR 0078, web keyboard shortcuts), live WebSocket updates for
+timelines/room previews/unread state, and live ephemeral overlays for typing
+indicators plus public read receipts.
 
 Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's
@@ -118,7 +127,18 @@ AXON_DEV_ALLOWED_HOSTS=axon-web.example.net,axon-dev.local pnpm dev
 ```
 
 Deployed builds make real cross-origin calls and depend on server-side CORS
-support (ADR 0046, milestone M-W1.5).
+support (ADR 0046, milestone M-W1.5). Unlike `AXON_SERVER_URL` above (a
+dev-server-only proxy target), a separately-hosted deployment bakes the
+server's origin into the built bundle at build time:
+
+```sh
+VITE_AXON_SERVER_URL=https://axon.example.com pnpm build
+```
+
+Leave it unset for a same-origin deployment (the default Docker Compose
+stack's single front door, or the Vite dev proxy) — the client then requests
+`/` and relies on the reverse proxy or dev server to route it, with no CORS
+involved.
 
 ### Build identity
 
@@ -211,6 +231,8 @@ can still slot in later behind the same seam.
 | `pnpm check:api`                    | Check generated API types for drift            |
 | `pnpm test`                         | Vitest, single run                             |
 | `pnpm test:watch`                   | Vitest, watch mode                             |
+| `pnpm test:e2e`                     | Playwright e2e suite (Chromium)                |
+| `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`) |
 | `pnpm lint`                         | ESLint + Prettier check                        |
 | `pnpm format` / `pnpm format:check` | Prettier write / check                         |
 

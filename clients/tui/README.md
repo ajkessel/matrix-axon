@@ -20,8 +20,8 @@ Options:
 
 The bearer token is read from `--token`, then `AXON_TOKEN`, then
 `[server].bearer_token` in the config file. Empty token values are ignored.
-The server URL is read from `--base-url`, then `[server].base_url`, then the
-loopback default.
+The server URL is read from `--base-url`, then `AXON_BASE_URL`, then
+`[server].base_url`, then the loopback default.
 
 ## What works today
 
@@ -36,6 +36,7 @@ loopback default.
 - Reacts to the selected message with an emoji (`POST /v1/.../events/{event_id}/reactions`).
 - Uploads and sends a local file to the selected room with `/send <path> [caption]` (`POST /v1/.../media/uploads` then `POST /v1/.../send-media`), with filesystem Tab completion and drag-and-drop: dropping a file into the terminal window fills in its path.
 - Withdraws the current user's reactions by redacting their reaction events.
+- Replies to a message (`/reply`, `r`) and starts a thread from one (`/thread`, `t`), sending with `reply_to`/`thread_root` on `POST .../send` (ADR 0032). Renders a reply-context preview line above a replying event and a `↳ N replies` badge on thread roots, resolved from the loaded slice with cross-window fallback lookups.
 - Logs Matrix accounts in through Axon's lifecycle API (Axon resolves the homeserver server-side), with masked password entry.
 - Logs active accounts out while retaining their archived data.
 - Multi-account panel and account filtering, with keyboard navigation and search across Accounts, Rooms, and Messages.
@@ -48,9 +49,10 @@ loopback default.
 
 ## Not Yet Implemented
 
-- Sending replies and threads is waiting on Axon API support.
-- Rendering reply/thread relationships is still pending.
-- Complete `/whereami` room details, including full alias and member lists, are waiting on Axon API support.
+These are client-side gaps, not API gaps — the Axon API already supports them (e.g. `POST .../rooms/join`); the TUI just doesn't drive them yet. See `docs/client-parity.md` for the full cross-client picture.
+
+- Joining a room from the TUI (leaving, forgetting, and moderation actions are covered below under Commands).
+- Complete `/whereami` room details, including full alias and member lists.
 
 ## Commands
 
@@ -79,8 +81,8 @@ Type `/help` or `/?` in the entry line to show a popup with available commands. 
 | `/unban <user> [reason]` | Unban a Matrix user ID from the selected room after `[y/N]` confirmation. |
 | `/react [emoji]` | React to the selected message, or the most recent displayed message when none is selected. With an emoji or shortcode such as `/react +1`, send immediately; without one, open the selector. |
 | `/unreact` | Withdraw one of your reactions from the selected or most recent displayed message. A sole reaction is withdrawn immediately; Tab cycles when several exist. |
-| `/reply` | Reply to the selected or most recent displayed message; pending Axon API support. |
-| `/thread` | Start a thread from the selected or most recent displayed message; pending Axon API support. |
+| `/reply` | Reply to the selected or most recent displayed message. |
+| `/thread` | Start a thread from the selected or most recent displayed message. |
 | `/unreadthreads`, `/ut` | Open the unread-thread picker: threads with unseen replies across all rooms, with sender/body previews. `Enter` jumps to the thread and opens its panel; `Esc` closes. Also on the `unread_threads` shortcut (default `Alt-T`). |
 | `/shortcuts` | Show active keyboard shortcuts from the config file. |
 | `/help`, `/?` | Show available slash commands. |
@@ -102,8 +104,9 @@ Room switching is forgiving. For a room with canonical alias
 Use Tab to complete slash commands, `/room` room names, selected-room users for
 `/invite`, `/kick`, `/ban`, and `/unban`, and emoji names after
 `/react`; it also cycles active accounts for `/logout`, `/recover`, and `/account`, plus all
-client-visible accounts for `/delete`. Use Shift-Tab to cycle backward through
-matching options. When several
+client-visible accounts for `/delete`, and cached selected-room member user IDs for
+`/invite`, `/kick`, `/ban`, and `/unban` when those members are already known locally.
+Use Shift-Tab to cycle backward through matching options. When several
 visible rooms match `/room`, completion advances to their
 longest common prefix and lists the remaining suffixes. Enter reports an
 ambiguity until the text identifies one room. While Tab completion is partial,
@@ -170,8 +173,8 @@ When focus is on the **Input** pane:
 | `d` | Redact the selected message immediately. |
 | `Shift-R` | React to the selected message: type an emoji name, `Tab` to cycle matches, `Enter` to send. |
 | `Shift-U` | Withdraw one of your reactions from the selected message; `Tab` cycles when several exist. |
-| `r` | Reply to the selected message (pending Axon API support). |
-| `t` | Start a thread (pending Axon API support). |
+| `r` | Reply to the selected message. |
+| `t` | Start a thread from the selected message. |
 | `Ctrl-A`, `Home` | Move to start of the entry line. |
 | `Ctrl-E`, `End` | Move to end of the entry line. |
 | `Left` / `Right` | Move within the entry line. |

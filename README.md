@@ -4,7 +4,9 @@ Axon is a self-hosted personal agent for [Matrix](https://matrix.org). It sits b
 
 Matrix's encrypted and decentralized architecture can make full client usability challenging. This "middle" layer aims to solve that challenge. It is similar to the [back-end for front-end](https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html) concept, with the added wrinkle that it is intended to run as a separate instance per user. Old-timers may find a familiar with analogy with [ZNC Bouncer](https://en.wikipedia.org/wiki/ZNC), an agent that sits between an IRC client and an IRC server.
 
-See [`docs/mvp/prd.md`](docs/mvp/prd.md) for the full product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and https://axon.bostoncoop.net for the OpenAPI specification.
+What sets Axon apart from other Matrix clients is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Two reference clients already consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a browser and Tauri desktop client — proof that building a third is a client-only project, not a fork. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
+
+See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and https://axon.bostoncoop.net for the latest OpenAPI specification.
 
 ## User quick start with Docker
 
@@ -13,7 +15,7 @@ Run the full Axon stack — server **and** the web client — from prebuilt imag
 **Prereqs:** Docker, plus a GitHub token with `read:packages` that the maintainer has granted access to the beta images. The repo is private, so the same token also needs `contents:read` to fetch the Compose file (a fine-grained token scoped to this repo works; or ask the maintainer to send you `deploy/docker-compose.beta.yml` directly and skip step 2). Once this repo is open-source and public, no login will be required and you can go from zero to a full stack with just two lines.
 
 ```sh
-# 1. Sign in to the image registry
+# 1. Sign in to the image registry, where $PAT is your GitHub Personal Access Token (see https://github.com/settings/tokens )
 echo "$PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
 
 # 2. Fetch the one-file Compose, then start it (images pull automatically)
@@ -198,6 +200,7 @@ cargo run -p axon-tui
 In another shell:
 ```bash
 curl localhost:8080/healthz     # -> {"status":"ok"}
+curl -H "Authorization: Bearer <token>" localhost:8080/v1/status  # backfill/sync/build status, once a token exists
 ```
 
 If the server starts interactively against a database with no Matrix accounts
@@ -292,7 +295,7 @@ Two kinds of `AXON_`-prefixed environment variables exist:
 | ---------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `AXON_CONFIG`    | server, all CLI subcommands           | Path to `axon.toml`, when not passed via `--config`. Falls back to `./axon.toml`, then the platform config dir. |
 | `DATABASE_URL`   | server, all CLI subcommands           | Postgres connection string. Also settable as `AXON_DATABASE__URL` or `[database].url`.             |
-| `AXON_BASE_URL`  | `axon utd redecrypt` (HTTP CLI calls) | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
+| `AXON_BASE_URL`  | `axon utd redecrypt` (HTTP CLI calls), TUI | Base URL of the running axon-server to call. **Defaults to `http://127.0.0.1:8080` — set explicitly for any non-local server.** |
 | `AXON_TOKEN`     | `axon utd redecrypt`, TUI             | Bearer token sent with the request, in place of `--token` (web does not consume token from env)     |
 | `RUST_LOG`       | server                                | Overrides `log.level` / `AXON_LOG__LEVEL` with a raw `tracing` filter directive.                    |
 
@@ -316,6 +319,16 @@ axon token revoke --label my-client   # or by label, if it uniquely identifies o
 ```
 
 Tokens are instance-scoped — one token grants access to all accounts on that Axon instance. Supply the token to clients via their config file or environment; see [`clients/tui/README.md`](clients/tui/README.md) for the TUI.
+
+**OAuth / SSO sign-in (Google, Microsoft).** Axon can also act as its own minimal OAuth 2.0 authorization server and OIDC relying party (ADR 0054), so the web client can sign in via SSO instead of pasting a bearer token. This is separate from — and does not replace — the CLI token path above; both mint the same kind of bearer token underneath. Configure a provider (`oauth.providers.google` / `.microsoft` in `axon.toml`), then bind the owner's identity once from the command line:
+
+```bash
+axon oauth bind --provider google      # or --provider microsoft
+axon oauth identities list
+axon oauth identities unbind <id>       # revokes every token/refresh token that identity minted
+```
+
+`bind` prints a URL — open it in any browser, on this machine or elsewhere, since it only needs to reach Axon's already-running `/v1/` surface — and polls until that browser leg completes or the 10-minute handshake expires. Sign-in with Apple is not yet supported (deferred to the iOS client work).
 
 For first launch only, an interactive server can mint the first credential from
 the one-time `/bootstrap/<code>` URL printed at startup instead of requiring
