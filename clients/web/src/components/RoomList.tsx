@@ -126,6 +126,8 @@ export function RoomList() {
   const filterInput = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLUListElement>(null)
   const scroller = useRef<HTMLElement | null>(null)
+  const actionsMenu = useRef<HTMLDetailsElement>(null)
+  const firstRoomAction = useRef<HTMLAnchorElement>(null)
 
   useEffect(() => {
     void rooms.refresh()
@@ -135,6 +137,30 @@ export function RoomList() {
       void accountStore.refresh()
     }
   }, [accountStore, accountStore.loading.value])
+  useEffect(() => {
+    if (actionsMenu.current !== null) {
+      actionsMenu.current.open = false
+    }
+  }, [location.path])
+  useEffect(() => {
+    const closeActionsMenuOnOutsidePointer = (event: PointerEvent) => {
+      const menu = actionsMenu.current
+      if (
+        menu === null ||
+        !menu.open ||
+        (event.target instanceof Node && menu.contains(event.target))
+      ) {
+        return
+      }
+      menu.open = false
+    }
+    document.addEventListener('pointerdown', closeActionsMenuOnOutsidePointer)
+    return () =>
+      document.removeEventListener(
+        'pointerdown',
+        closeActionsMenuOnOutsidePointer,
+      )
+  }, [])
 
   const allRooms = rooms.rooms.value
   const accounts = accountStore.accounts.value
@@ -565,6 +591,22 @@ export function RoomList() {
     // Every chord here carries a modifier, so it is safe from the composer.
     { whileTyping: true },
   )
+  useShortcuts({
+    '+': (event) => {
+      event.preventDefault()
+      settings.sidebarCollapsed.value = false
+      if (layoutMode(location.path) === 'utility') {
+        location.route('/')
+      }
+      setTimeout(() => {
+        if (actionsMenu.current === null) {
+          return
+        }
+        actionsMenu.current.open = true
+        firstRoomAction.current?.focus()
+      })
+    },
+  })
 
   /**
    * Arrow/Escape handling shared by the filter input and the room links.
@@ -678,23 +720,55 @@ export function RoomList() {
             </button>
           )}
         </span>
-        <label class="sort-select">
-          Sort
-          <select
-            title={hint('Cycle sort order', KEYS.cycleSort)}
-            aria-keyshortcuts={keyAria(KEYS.cycleSort)}
-            value={settings.roomSort.value}
-            onChange={(event) =>
-              (settings.roomSort.value = event.currentTarget.value as RoomSort)
-            }
+        <div class="room-control-row">
+          <label class="sort-select">
+            Sort
+            <select
+              title={hint('Cycle sort order', KEYS.cycleSort)}
+              aria-keyshortcuts={keyAria(KEYS.cycleSort)}
+              value={settings.roomSort.value}
+              onChange={(event) =>
+                (settings.roomSort.value = event.currentTarget
+                  .value as RoomSort)
+              }
+            >
+              {SORTS.map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <details
+            class="room-actions-menu"
+            ref={actionsMenu}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && actionsMenu.current?.open) {
+                event.preventDefault()
+                actionsMenu.current.open = false
+              }
+            }}
           >
-            {SORTS.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+            <summary
+              title={hint('Room actions', KEYS.roomActions)}
+              aria-label="Room actions"
+              aria-keyshortcuts={keyAria(KEYS.roomActions)}
+            >
+              <span aria-hidden="true" />
+            </summary>
+            <div class="room-actions-popover">
+              <a ref={firstRoomAction} href="/rooms/discover">
+                Find or join room
+              </a>
+              <button type="button" disabled title="Planned for M19-W4">
+                Create room
+              </button>
+              <button type="button" disabled title="Planned for M19-W4">
+                Start direct message
+              </button>
+            </div>
+          </details>
+        </div>
         {showAccountFilter && (
           <label class="sort-select">
             Account

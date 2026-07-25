@@ -79,8 +79,9 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   },
   {
     name: SLASH_COMMAND.join,
-    usage: '/join <room-or-matrix-link>',
-    description: 'Join a room by ID, alias, or Matrix link',
+    usage: '/join [room-or-matrix-link]',
+    description:
+      'Open room discovery, or join a room by ID, alias, or Matrix link',
   },
   {
     name: SLASH_COMMAND.knock,

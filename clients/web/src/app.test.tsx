@@ -16,8 +16,9 @@ import {
   it,
   vi,
 } from 'vitest'
-import { App } from './app.tsx'
+import { App, accountIdForRoomEntry } from './app.tsx'
 import { layoutMode, SINGLE_PANE_QUERY } from './layout'
+import type { Account } from './stores/accounts'
 import type { EventDto } from './stores/timeline'
 import { memoryStorage } from './test/memory-storage'
 import { TEST_BASE_URL, testServices } from './test/services'
@@ -26,7 +27,7 @@ const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const ROOM = '!room:hs'
 const ORIGINAL_STANDALONE = (navigator as Navigator & { standalone?: boolean })
   .standalone
-const ACCOUNT_DTO = {
+const ACCOUNT_DTO: Account = {
   account_id: ACCOUNT,
   user_id: '@alice:example.org',
   homeserver_url: 'https://matrix.example.org',
@@ -217,6 +218,15 @@ describe('App', () => {
     expect(container.querySelector('.shell-banner')).toBeTruthy()
     expect(window.location.pathname).toBe('/')
     anchor.remove()
+  })
+
+  it('does not throw when resolving room-entry account from a malformed route segment', () => {
+    expect(() =>
+      accountIdForRoomEntry('/%E0%A4%A/rooms/', [ACCOUNT_DTO], ACCOUNT),
+    ).not.toThrow()
+    expect(
+      accountIdForRoomEntry('/%E0%A4%A/rooms/', [ACCOUNT_DTO], ACCOUNT),
+    ).toBeNull()
   })
 
   it('asks before joining a matrix protocol-handler callback room', async () => {
@@ -548,6 +558,7 @@ describe('layoutMode (ADR 0062)', () => {
     ['/acct-1/rooms/%21ops%3Ahs', 'room'],
     ['/accounts', 'utility'],
     ['/settings', 'utility'],
+    ['/rooms/discover', 'room-entry'],
     ['/nonsense', 'utility'],
     // A room URL missing its room id is not a room surface.
     ['/acct-1/rooms/', 'utility'],
@@ -610,6 +621,17 @@ describe('shell layout (ADR 0062)', () => {
     // Nothing to collapse there, so the toggle is gone rather than pointing
     // aria-controls at an already-hidden sidebar.
     expect(queryByRole('button', { name: 'Hide rooms' })).toBeNull()
+  })
+
+  it('keeps the sidebar controls available on the room discovery page', async () => {
+    history.replaceState(null, '', '/rooms/discover')
+    const { container, getByRole } = render(<App services={testServices()} />)
+
+    await waitFor(() =>
+      expect(shellBody(container).className).toContain('mode-room-entry'),
+    )
+    expect(getByRole('navigation', { name: 'Rooms' })).toBeTruthy()
+    expect(getByRole('button', { name: 'Hide rooms' })).toBeTruthy()
   })
 
   it('the collapse toggle flips aria-expanded and persists the flag', async () => {
@@ -721,6 +743,43 @@ describe('shell keyboard shortcuts (ADR 0063)', () => {
     await waitFor(() =>
       expect(queryByRole('dialog', { name: 'Help' })).toBeNull(),
     )
+  })
+
+  it('shows commands first and collapses shortcut help in single-pane layout', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          media: query,
+          matches: query === SINGLE_PANE_QUERY,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    )
+    const { getByRole, findByRole } = render(<App services={testServices()} />)
+
+    fireEvent.click(getByRole('button', { name: 'Keyboard shortcuts' }))
+    const dialog = await findByRole('dialog', { name: 'Help' })
+    const commandSection = within(dialog)
+      .getByRole('heading', { name: 'Commands' })
+      .closest('section')!
+    const shortcutDetails = dialog.querySelector(
+      '.shortcut-details',
+    ) as HTMLDetailsElement
+
+    expect(shortcutDetails).toBeTruthy()
+    expect(shortcutDetails.open).toBe(false)
+    expect(shortcutDetails.querySelector('summary')?.textContent).toBe(
+      'Keyboard shortcuts',
+    )
+    expect(commandSection.compareDocumentPosition(shortcutDetails)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(commandSection.textContent).toContain('/help')
+    expect(shortcutDetails.textContent).toContain('Ctrl-K')
   })
 
   it('renders shortcut help with macOS modifier labels on Apple platforms', async () => {

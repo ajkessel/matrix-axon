@@ -79,6 +79,7 @@ describe('SHORTCUTS', () => {
         typeof row.keys === 'string' ? row.keys : row.keys.label,
       ),
     )
+    expect(keys).toContain(KEYS.roomActions.label)
     expect(keys).toContain(KEYS.filterRooms.label)
     expect(keys).toContain(KEYS.cycleFilter.label)
     expect(keys).toContain(KEYS.showHelp.label)

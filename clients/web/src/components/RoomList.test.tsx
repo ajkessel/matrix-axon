@@ -153,6 +153,22 @@ function renderPage(
   return { services, ...utils }
 }
 
+function roomActionsDetails(container: ParentNode): HTMLDetailsElement {
+  const details = container.querySelector('.room-actions-menu')
+  if (!(details instanceof HTMLDetailsElement)) {
+    throw new Error('expected room actions details menu')
+  }
+  return details
+}
+
+function roomActionsSummary(container: ParentNode): HTMLElement {
+  const summary = roomActionsDetails(container).querySelector('summary')
+  if (!(summary instanceof HTMLElement)) {
+    throw new Error('expected room actions summary')
+  }
+  return summary
+}
+
 function roomPointerEvent(
   type: string,
   init: {
@@ -192,6 +208,89 @@ describe('RoomList', () => {
     expect(links).toContain(
       `/${ACCOUNT}/rooms/${encodeURIComponent('!ops:hs')}`,
     )
+  })
+
+  it('offers room actions from the control menu', async () => {
+    const { container, findByText, getByRole } = renderPage()
+
+    expect(await findByText('Ops')).toBeTruthy()
+    const summary = roomActionsSummary(container)
+    expect(summary.getAttribute('aria-label')).toBe('Room actions')
+    expect(summary.getAttribute('title')).toBe('Room actions (+)')
+    expect(summary.getAttribute('aria-keyshortcuts')).toBe('+')
+    expect(summary.getAttribute('role')).toBeNull()
+    expect(
+      getByRole('link', { name: 'Find or join room' }).getAttribute('href'),
+    ).toBe('/rooms/discover')
+    expect(
+      (getByRole('button', { name: 'Create room' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true)
+    expect(
+      (
+        getByRole('button', {
+          name: 'Start direct message',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true)
+  })
+
+  it('opens the room actions menu with +', async () => {
+    const { container, findByText, getByRole } = renderPage()
+
+    expect(await findByText('Ops')).toBeTruthy()
+    const details = roomActionsDetails(container)
+    expect(details.open).toBe(false)
+
+    fireEvent.keyDown(document.body, { key: '+' })
+
+    await waitFor(() => expect(details.open).toBe(true))
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        getByRole('link', { name: 'Find or join room' }),
+      ),
+    )
+  })
+
+  it('closes the room actions menu after navigation', async () => {
+    const { container, findByText, getByRole } = renderPage()
+
+    expect(await findByText('Ops')).toBeTruthy()
+    const details = roomActionsDetails(container)
+    details.open = true
+
+    fireEvent.click(getByRole('link', { name: 'Find or join room' }))
+
+    await waitFor(() => expect(details.open).toBe(false))
+  })
+
+  it('closes the room actions menu with Escape', async () => {
+    const { container, findByText, getByRole } = renderPage()
+
+    expect(await findByText('Ops')).toBeTruthy()
+    const details = roomActionsDetails(container)
+    details.open = true
+
+    fireEvent.keyDown(getByRole('link', { name: 'Find or join room' }), {
+      key: 'Escape',
+    })
+
+    expect(details.open).toBe(false)
+  })
+
+  it('closes the room actions menu after clicking outside', async () => {
+    const { container, findByText, getByRole } = renderPage()
+
+    expect(await findByText('Ops')).toBeTruthy()
+    const details = roomActionsDetails(container)
+    details.open = true
+
+    fireEvent.pointerDown(getByRole('link', { name: 'Find or join room' }))
+    expect(details.open).toBe(true)
+
+    fireEvent.pointerDown(document.body)
+
+    await waitFor(() => expect(details.open).toBe(false))
   })
 
   it('opens a room on a mobile tap', async () => {

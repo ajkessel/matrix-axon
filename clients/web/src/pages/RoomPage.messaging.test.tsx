@@ -200,7 +200,9 @@ function mockSinglePane() {
   )
 }
 
-function swipeRight(target: Element, startX = 24, endX = 132) {
+// The defaults start clear of the left edge band that the browser's own
+// swipe-back owns (`NATIVE_BACK_EDGE_PX`), which the handler declines.
+function swipeRight(target: Element, startX = 90, endX = 198) {
   fireEvent.touchStart(target, {
     touches: [{ clientX: startX, clientY: 220 }],
   })
@@ -1313,7 +1315,7 @@ describe('threads', () => {
     }
   })
 
-  it('mobile swipe-right claims the touchmove once a rightward drag is detected, so a slow drag cannot fall through to the browser back gesture', async () => {
+  it('mobile swipe-right claims the touchmove once a rightward drag is detected, so scrolling and selection do not fight the pan', async () => {
     const media = mockSinglePane()
     try {
       const { container, findByLabelText } = renderRoom(
@@ -1323,12 +1325,56 @@ describe('threads', () => {
       await findByLabelText('Message Ops')
       const body = container.querySelector('.room-body')!
 
-      fireEvent.touchStart(body, { touches: [{ clientX: 24, clientY: 220 }] })
+      fireEvent.touchStart(body, { touches: [{ clientX: 90, clientY: 220 }] })
       const notPrevented = fireEvent.touchMove(body, {
-        touches: [{ clientX: 60, clientY: 222 }],
+        touches: [{ clientX: 126, clientY: 222 }],
       })
 
       expect(notPrevented).toBe(false)
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  // A swipe from the left edge races the browser's own back gesture, which
+  // ignores `preventDefault`: both fire, and the page then stalls ~500ms
+  // without painting while the browser animates a stale snapshot. Declining
+  // the band is what keeps that to a single navigation (ADR 0075).
+  it('mobile swipe-right starting in the browser back-gesture edge band does not navigate', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      // Same travel as an accepted swipe — only the origin differs.
+      swipeRight(body, 12, 120)
+
+      expect(window.location.pathname).toContain('/rooms/')
+    } finally {
+      media.mockRestore()
+    }
+  })
+
+  it('mobile swipe-right in the edge band leaves the touchmove unclaimed for the browser', async () => {
+    const media = mockSinglePane()
+    try {
+      const { container, findByLabelText } = renderRoom(
+        [event('$root', 100)],
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+      )
+      await findByLabelText('Message Ops')
+      const body = container.querySelector('.room-body')!
+
+      fireEvent.touchStart(body, { touches: [{ clientX: 12, clientY: 220 }] })
+      const notPrevented = fireEvent.touchMove(body, {
+        touches: [{ clientX: 48, clientY: 222 }],
+      })
+
+      expect(notPrevented).toBe(true)
     } finally {
       media.mockRestore()
     }
@@ -2446,6 +2492,18 @@ describe('room command', () => {
       room_id_or_alias: '#joined:hs',
       server_names: ['hs', 'backup'],
     })
+  })
+
+  it('/join without a target opens the find/join room interface', async () => {
+    const { findByLabelText } = renderRoom([event('$root', 100)])
+    const textarea = (await findByLabelText('Message')) as HTMLTextAreaElement
+
+    fireEvent.input(textarea, { target: { value: '/join' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(window.location.pathname).toBe('/rooms/discover'),
+    )
   })
 
   it('/join leaves the command recoverable when the server rejects it', async () => {

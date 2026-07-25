@@ -7,7 +7,13 @@ import { useModalFocus } from './use-modal-focus'
  * from `SHORTCUTS`; slash commands are rendered from `SLASH_COMMANDS`, keeping
  * both lists single-sourced without mixing commands into shortcut rows.
  */
-export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
+export function ShortcutsHelp({
+  mobile = false,
+  onClose,
+}: {
+  mobile?: boolean
+  onClose: () => void
+}) {
   const { containerRef } = useModalFocus<HTMLDivElement>()
   useShortcuts(
     {
@@ -34,42 +40,66 @@ export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
             Close
           </button>
         </div>
-        <section class="shortcut-group">
-          <h3>Keyboard shortcuts</h3>
-          {SHORTCUTS.map(({ group, rows }) => (
-            <section key={group} class="shortcut-subgroup">
-              <h4>{group}</h4>
-              <dl class="shortcut-list">
-                {rows.map((row, index) => (
-                  <div key={`${group}-${index}`} class="shortcut-row">
-                    <dt>
-                      <kbd>
-                        {typeof row.keys === 'string'
-                          ? shortcutLabel(row.keys)
-                          : keyLabel(row.keys)}
-                      </kbd>
-                    </dt>
-                    <dd>{row.description}</dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
-          ))}
-        </section>
-        <section class="shortcut-group">
-          <h3>Commands</h3>
+        {mobile ? (
+          <>
+            <CommandsHelp />
+            <details class="shortcut-details">
+              <summary>Keyboard shortcuts</summary>
+              <KeyboardShortcutsHelp />
+            </details>
+          </>
+        ) : (
+          <>
+            <KeyboardShortcutsHelp />
+            <CommandsHelp />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function KeyboardShortcutsHelp() {
+  return (
+    <section class="shortcut-group">
+      <h3>Keyboard shortcuts</h3>
+      {SHORTCUTS.map(({ group, rows }) => (
+        <section key={group} class="shortcut-subgroup">
+          <h4>{group}</h4>
           <dl class="shortcut-list">
-            {SLASH_COMMANDS.map((command) => (
-              <div key={command.name} class="shortcut-row">
+            {rows.map((row, index) => (
+              <div key={`${group}-${index}`} class="shortcut-row">
                 <dt>
-                  <kbd>{command.usage}</kbd>
+                  <kbd>
+                    {typeof row.keys === 'string'
+                      ? shortcutLabel(row.keys)
+                      : keyLabel(row.keys)}
+                  </kbd>
                 </dt>
-                <dd>{command.description}</dd>
+                <dd>{row.description}</dd>
               </div>
             ))}
           </dl>
         </section>
-      </div>
-    </div>
+      ))}
+    </section>
+  )
+}
+
+function CommandsHelp() {
+  return (
+    <section class="shortcut-group">
+      <h3>Commands</h3>
+      <dl class="shortcut-list">
+        {SLASH_COMMANDS.map((command) => (
+          <div key={command.name} class="shortcut-row">
+            <dt>
+              <kbd>{command.usage}</kbd>
+            </dt>
+            <dd>{command.description}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   )
 }

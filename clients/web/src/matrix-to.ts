@@ -385,7 +385,9 @@ function serverNameFromRoomId(roomId: string): string | null {
   return serverNameFromRoomReference(roomId)
 }
 
-function serverNameFromRoomReference(roomIdOrAlias: string): string | null {
+export function serverNameFromRoomReference(
+  roomIdOrAlias: string,
+): string | null {
   const colon = roomIdOrAlias.indexOf(':')
   if (colon === -1 || colon === roomIdOrAlias.length - 1) {
     return null

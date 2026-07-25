@@ -508,19 +508,15 @@ function ShellChrome() {
       }
       event.preventDefault()
       setRoomLinkJoinError(null)
-      void joinMatrixRoomReference(
-        location,
-        rooms,
-        accountId,
-        reference,
-        false,
-      ).then((result) => {
-        if (!result.ok) {
-          setRoomLinkJoinError(
-            `Could not join ${reference.roomIdOrAlias}: ${result.message}`,
-          )
-        }
-      })
+      void joinMatrixRoomReference(location, rooms, accountId, reference).then(
+        (result) => {
+          if (!result.ok) {
+            setRoomLinkJoinError(
+              `Could not join ${reference.roomIdOrAlias}: ${result.message}`,
+            )
+          }
+        },
+      )
     }
     document.addEventListener('click', onClick)
     return () => document.removeEventListener('click', onClick)
@@ -708,6 +704,7 @@ function ShellChrome() {
           <main>
             <Router>
               <Route path="/" component={RoomsIndex} />
+              <Route path="/rooms/discover" component={RoomsIndex} />
               <Route path="/accounts" component={AccountsPage} />
               <Route path="/settings" component={SettingsPage} />
               <Route path="/licenses" component={LicensesPage} />
@@ -728,7 +725,12 @@ function ShellChrome() {
             onJoin={confirmPendingMatrixJoin}
           />
         )}
-        {helpOpen && <ShortcutsHelp onClose={() => setHelpOpen(false)} />}
+        {helpOpen && (
+          <ShortcutsHelp
+            mobile={singlePane}
+            onClose={() => setHelpOpen(false)}
+          />
+        )}
       </div>
     </ShellActionsContext.Provider>
   )
@@ -802,14 +804,14 @@ function MatrixJoinPrompt({
   )
 }
 
-function accountIdForRoomEntry(
+export function accountIdForRoomEntry(
   path: string,
   accounts: readonly Account[],
   activeAccountId: string | null,
 ): string | null {
   const route = /^\/([^/]+)\/rooms\//.exec(path)
   if (route !== null) {
-    return decodeURIComponent(route[1])
+    return safeDecodeURIComponent(route[1])
   }
   const active = accounts.find(
     (account) =>
@@ -823,12 +825,19 @@ function accountIdForRoomEntry(
   )
 }
 
+function safeDecodeURIComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return null
+  }
+}
+
 async function joinMatrixRoomReference(
   location: ReturnType<typeof useLocation>,
   rooms: RoomsStore,
   accountId: string,
   reference: MatrixRoomReference,
-  scrubQuery: boolean,
 ): Promise<RoomEntryResult> {
   const result = await rooms.joinRoom(
     accountId,
@@ -836,15 +845,9 @@ async function joinMatrixRoomReference(
     reference.serverNames,
   )
   if (!result.ok) {
-    if (scrubQuery) {
-      scrubMatrixQuery(location)
-    }
     return result
   }
-  location.route(
-    localRoomHref(accountId, result.roomId, reference.eventId),
-    scrubQuery,
-  )
+  location.route(localRoomHref(accountId, result.roomId, reference.eventId))
   return result
 }
 

@@ -89,16 +89,26 @@ const REACTION_COMMAND_ALIASES = new Map([
 const LAST_JOINED_MEMBER_LEAVE_CONFIRM =
   'You are the only joined member in this room. If you leave, there may be no one left to invite you back. Leave this room?'
 
+// Coupled to the current M19 server error message. Prefer a typed room-entry
+// timeout code here if the `/rooms/{join,knock}` error envelope grows one.
 const ROOM_ENTRY_TIMEOUT = /^(join|knock) timed out after \d+s$/i
 
 const SWIPE_RIGHT_MIN_X = 72
 const SWIPE_RIGHT_MAX_Y = 64
 const SWIPE_RIGHT_AXIS_RATIO = 1.4
-// How far a touch has to travel before we commit to a direction. Small
-// enough to claim the gesture (via preventDefault) well before the
-// browser's own edge-swipe-back recognizer does, large enough not to
-// mistake a tap's jitter for a swipe.
+// How far a touch has to travel before we commit to a direction: small
+// enough to claim the gesture early, large enough not to mistake a tap's
+// jitter for a swipe.
 const SWIPE_DECISION_THRESHOLD = 10
+// A band along the left edge belongs to the browser's own swipe-back, which
+// we cannot pre-empt: WebKit's is a UIKit recognizer on the scroll view, not
+// a cancelable touch default, so `preventDefault` in `handleTouchMove` does
+// not call it off. Racing it is worse than losing to it — the app routes to
+// the room list and WebKit traverses back ~40ms later, and the page then
+// sits ~500ms without producing a frame while WebKit animates a snapshot the
+// app has already replaced. Declining the band leaves one navigation and the
+// browser's own animation, which at least paints throughout (ADR 0075).
+const NATIVE_BACK_EDGE_PX = 30
 
 type SwipeStart = {
   x: number
@@ -679,7 +689,15 @@ export function RoomPage() {
     if (command.kind === 'leave' || command.kind === 'forget') {
       return handleMembershipCommand(command.kind)
     }
-    if (command.kind === 'join' || command.kind === 'knock') {
+    if (command.kind === 'join') {
+      const target = command.target
+      if (target === null) {
+        location.route('/rooms/discover')
+        return true
+      }
+      return handleRoomEntryCommand({ kind: 'join', target })
+    }
+    if (command.kind === 'knock') {
       return handleRoomEntryCommand(command)
     }
     if (command.kind === 'pin' || command.kind === 'unpin') {
@@ -806,7 +824,9 @@ export function RoomPage() {
   }
 
   const handleRoomEntryCommand = async (
-    command: Extract<ComposerCommand, { kind: 'join' | 'knock' }>,
+    command:
+      | { kind: 'join'; target: string }
+      | { kind: 'knock'; target: string; reason: string | null },
   ): Promise<boolean> => {
     timeline.error.value = null
     const reference = parseMatrixRoomReference(command.target, {
@@ -903,27 +923,33 @@ export function RoomPage() {
 
   const handleTouchStart = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
     swipeLocked.current = false
+    const touch = event.touches[0]
     if (
       !window.matchMedia(SINGLE_PANE_QUERY).matches ||
       event.touches.length !== 1 ||
+      // Guarded by the length check above, so `touch` is present here.
+      touch.clientX < NATIVE_BACK_EDGE_PX ||
       isGestureControl(event.target) ||
       isHorizontallyScrollable(event.target)
     ) {
       swipeStart.current = null
       return
     }
-    const touch = event.touches[0]
     swipeStart.current = { x: touch.clientX, y: touch.clientY }
   }
 
   /**
    * Claims the gesture as soon as it looks like a rightward swipe, well
    * before the touch travels far enough to satisfy the touchend thresholds.
-   * `preventDefault` here is what actually stops the browser's native
-   * edge-swipe-back from taking over on a slow drag — CSS `touch-action`
-   * can't do this without also disabling touch-scrolling for the code
-   * blocks/tables nested inside the timeline (both need real horizontal
-   * panning), so this has to be a targeted, per-gesture opt-out instead.
+   * `preventDefault` here suppresses the scrolling and text selection that
+   * would otherwise fight our pan; CSS `touch-action` can't do that without
+   * also disabling touch-scrolling for the code blocks/tables nested inside
+   * the timeline (both need real horizontal panning), so this has to be a
+   * targeted, per-gesture opt-out instead.
+   *
+   * What it does *not* do is stop the browser's native edge-swipe-back —
+   * that recognizer ignores cancelled touch events, which is why
+   * `handleTouchStart` declines the edge band outright (ADR 0075).
    */
   const handleTouchMove = (event: JSX.TargetedTouchEvent<HTMLDivElement>) => {
     const start = swipeStart.current
@@ -1821,7 +1847,7 @@ type ComposerCommand =
   | { kind: 'formatted-message'; message: FormattedMessage }
   | { kind: 'forget' }
   | { kind: 'help' }
-  | { kind: 'join'; target: string }
+  | { kind: 'join'; target: string | null }
   | { kind: 'jump'; date: string | null }
   | { kind: 'knock'; target: string; reason: string | null }
   | { kind: 'leave' }
@@ -1896,9 +1922,7 @@ function parseComposerCommand(body: string): ComposerCommand | null {
     }
   }
   if (commandName === SLASH_COMMAND.join) {
-    return args === ''
-      ? { kind: 'usage', name: commandName }
-      : { kind: 'join', target: args }
+    return { kind: 'join', target: args === '' ? null : args }
   }
   if (commandName === SLASH_COMMAND.knock) {
     if (args === '') {

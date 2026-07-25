@@ -23,7 +23,7 @@ describe('slash command aliases', () => {
     expect(slashCommandSpecForInput('/+')?.name).toBe(SLASH_COMMAND.react)
     expect(slashCommandSpecForInput('/part')?.name).toBe(SLASH_COMMAND.leave)
     expect(slashCommandSpecForInput('/join')?.usage).toBe(
-      '/join <room-or-matrix-link>',
+      '/join [room-or-matrix-link]',
     )
     expect(slashCommandSpecForInput('/knock')?.usage).toBe(
       '/knock <room-or-matrix-link> [reason]',

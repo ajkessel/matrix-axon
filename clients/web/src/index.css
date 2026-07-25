@@ -9,6 +9,7 @@
   --muted: #6a6a74;
   --border: #d9d9e0;
   --accent: #3556c4;
+  --accent-strong: #2444a8;
   /* The open room's row. Hover is `--bg-raised`, a neutral lightness shift, so
      the selected row differs in *hue* — otherwise the two read the same. */
   --accent-soft: #e7ebf8;
@@ -37,6 +38,7 @@
     --muted: #9c9ca8;
     --border: #34343e;
     --accent: #7c96ec;
+    --accent-strong: #9aacff;
     --accent-soft: #242839;
     --accent-soft-hover: #2a3046;
     --danger: #e5776f;
@@ -63,6 +65,7 @@
   --muted: #9c9ca8;
   --border: #34343e;
   --accent: #7c96ec;
+  --accent-strong: #9aacff;
   --accent-soft: #242839;
   --accent-soft-hover: #2a3046;
   --danger: #e5776f;
@@ -418,8 +421,8 @@ body {
   max-width: none;
 }
 
-.rooms-index {
-  color: var(--muted);
+.sidebar .room-control-row {
+  justify-content: space-between;
 }
 
 @media (min-width: 48rem) {
@@ -442,6 +445,10 @@ body {
   }
 
   .shell-body.mode-room .sidebar {
+    display: none;
+  }
+
+  .shell-body.mode-room-entry .sidebar {
     display: none;
   }
 
@@ -819,6 +826,110 @@ h2 {
   gap: 0.4rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.room-control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.room-actions-menu {
+  position: relative;
+  flex: none;
+}
+
+.room-actions-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.room-actions-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.room-actions-menu summary span {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.room-actions-menu summary span::before,
+.room-actions-menu summary span::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.05rem;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+  transform: translate(-50%, -50%);
+}
+
+.room-actions-menu summary span::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.room-actions-menu[open] summary,
+.room-actions-menu summary:hover,
+.room-actions-menu summary:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.room-actions-popover {
+  position: absolute;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 0.25rem;
+  min-width: 13rem;
+  margin-top: 0.35rem;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.room-actions-popover a,
+.room-actions-popover button {
+  display: block;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.35rem 0.55rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.room-actions-popover a:hover,
+.room-actions-popover a:focus-visible,
+.room-actions-popover button:not(:disabled):hover,
+.room-actions-popover button:not(:disabled):focus-visible {
+  background: var(--bg-raised);
+}
+
+.room-actions-popover button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 select {
@@ -2511,6 +2622,18 @@ p.timeline-edge {
   margin: 1rem 0 0.4rem;
 }
 
+.shortcut-details {
+  margin-top: 1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.shortcut-details > summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .shortcut-subgroup h4 {
   margin: 0.65rem 0 0.2rem;
   color: var(--fg);
@@ -2814,6 +2937,59 @@ input[type='checkbox'] {
 .inline-form label {
   margin-bottom: 0;
   flex: 1;
+}
+
+.room-discovery {
+  max-width: 58rem;
+}
+
+.room-discovery-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.room-discovery-panel h2,
+.room-discovery-panel p {
+  margin-top: 0;
+}
+
+.field-label,
+.room-directory-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.room-directory-form {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 18rem) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.public-room-results {
+  margin-top: 0.5rem;
+}
+
+.link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: var(--accent-strong);
+}
+
+@media (max-width: 44rem) {
+  .room-directory-form {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Media (ADR 0064). The reservation box holds an image's aspect ratio before

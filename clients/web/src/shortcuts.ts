@@ -155,6 +155,7 @@ export interface ShortcutHelp {
  * and left stale in another.
  */
 export const KEYS = {
+  roomActions: { label: '+', aria: '+' },
   filterRooms: { label: 'Ctrl-K', aria: 'Control+K' },
   cycleFilter: { label: 'Ctrl-Shift-Y', aria: 'Control+Shift+Y' },
   cycleSort: { label: 'Ctrl-Shift-S', aria: 'Control+Shift+S' },
@@ -251,6 +252,7 @@ export const SHORTCUTS: { group: string; rows: ShortcutHelp[] }[] = [
   {
     group: 'Rooms',
     rows: [
+      { keys: KEYS.roomActions, description: 'Open room actions' },
       { keys: KEYS.filterRooms.label, description: 'Filter rooms by name' },
       { keys: '↑ / ↓', description: 'Move through the room list' },
       { keys: 'Enter', description: 'Open the selected room' },

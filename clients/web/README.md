@@ -34,7 +34,11 @@ the composer supports `/leave`, `/part`, `/forget`, `/join`, and `/knock`; the
 shell intercepts Matrix room links for join, and Settings can opt this origin
 into browser-level `matrix:` link handling. Installed PWA builds also declare
 `matrix:` in the web manifest for browsers that register manifest protocol
-handlers with the OS.
+handlers with the OS. The rooms index has a visible "Find or Join a Room"
+surface for direct room ID/alias/Matrix-link entry plus public room-directory
+search, defaulting to the account homeserver and suggesting `matrix.org` and
+`matrixrooms.info` without querying third-party directories until the user
+asks.
 
 Note for deployment: history routing means the host must rewrite unknown
 paths to `index.html` (the Vite dev server already does). ADR 0030's

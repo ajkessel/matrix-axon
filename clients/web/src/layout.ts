@@ -2,13 +2,15 @@ import { useEffect, useState } from 'preact/hooks'
 
 /**
  * Which of the three shell layouts the current path wants (ADR 0062):
- * `room` and `rooms` are the two-pane surfaces (sidebar + right pane), while
- * `utility` is the full-width centered column with no sidebar at all.
+ * `room`, `rooms`, and `room-entry` are the two-pane desktop surfaces
+ * (sidebar + right pane), while `utility` is the full-width centered column
+ * with no sidebar at all. `room-entry` becomes main-only on mobile so the
+ * find/join form remains reachable from the room list route.
  *
  * Lives apart from `app.tsx` so the room list can consult it — the shell
  * imports the room list, so the room list cannot import the shell.
  */
-export type LayoutMode = 'room' | 'rooms' | 'utility'
+export type LayoutMode = 'room' | 'rooms' | 'room-entry' | 'utility'
 
 /**
  * The single-pane media query (ADR 0062): below this width only one pane
@@ -24,7 +26,10 @@ export function layoutMode(path: string): LayoutMode {
   if (ROOM_PATH.test(path)) {
     return 'room'
   }
-  return path === '/' ? 'rooms' : 'utility'
+  if (path === '/') {
+    return 'rooms'
+  }
+  return path === '/rooms/discover' ? 'room-entry' : 'utility'
 }
 
 export function useMediaQuery(query: string): boolean {
