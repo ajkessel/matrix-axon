@@ -1,4 +1,4 @@
-# ADR 0074 — TUI rollout: M19 room and account actions
+# ADR 0079 — TUI rollout: M19 room and account actions
 
 **Status:** Proposed — TUI-side companion to ADR 0068 and ADR 0069.
 
