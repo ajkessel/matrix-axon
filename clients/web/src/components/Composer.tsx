@@ -122,7 +122,7 @@ export function Composer({
   onDraftChange?(value: string): void
   /**
    * `ArrowUp` on an empty composer, with no reply/edit already in progress
-   * (ADR 0063). The parent decides which message that is, and whether one
+   * (ADR 0078). The parent decides which message that is, and whether one
    * exists at all — omit to disable, as the thread panel's composer does.
    */
   onEditLast?(): void
@@ -147,7 +147,7 @@ export function Composer({
   autoFocus?: boolean
   onFocus?(): void
   /**
-   * A counter the parent bumps to pull focus here (ADR 0063). The value is
+   * A counter the parent bumps to pull focus here (ADR 0078). The value is
    * meaningless; only a change matters.
    */
   focusRequest?: number
@@ -336,7 +336,7 @@ export function Composer({
     }
   }, [autoFocus])
 
-  // Focus on request (ADR 0063). Only on a *change*: focusing on mount would
+  // Focus on request (ADR 0078). Only on a *change*: focusing on mount would
   // fight the narrow-layout heading focus RoomPage takes on room open.
   const focusedAt = useRef(focusRequest)
   useEffect(() => {
@@ -777,7 +777,7 @@ export function Composer({
                 setCaret(wholeMessageCaret)
                 return
               }
-              // Resize from the composer itself (ADR 0063 keyboard reach): the
+              // Resize from the composer itself (ADR 0078 keyboard reach): the
               // drag grip's arrow keys only work once it has focus, and its tab
               // position is not consistent across browsers. `mod+shift` + a
               // punctuation key is browser-safe and — unlike any arrow chord —

@@ -2031,7 +2031,7 @@ describe('threads', () => {
   })
 })
 
-describe('keyboard shortcuts (ADR 0063)', () => {
+describe('keyboard shortcuts (ADR 0078)', () => {
   it('ArrowUp on an empty composer edits your last message', async () => {
     const { findByLabelText, findByText } = renderRoom([
       event('$theirs', 100),
@@ -2793,7 +2793,7 @@ describe('room command', () => {
   })
 })
 
-describe('staged Escape when focus has drifted (ADR 0063)', () => {
+describe('staged Escape when focus has drifted (ADR 0078)', () => {
   it('cancels a reply banner even when the composer is not focused', async () => {
     const { findByLabelText, findAllByRole, findByText, queryByText } =
       renderRoom([event('$1', 100)])

@@ -127,7 +127,7 @@ events fall back to their filename body; redacted events render as deleted.
 
 ### Entry points: `/`, `Ctrl-G`, a topbar button, and `/search`
 
-Following ADR 0063's rule — a bare chord needs a modifier twin, because the
+Following ADR 0078's rule — a bare chord needs a modifier twin, because the
 composer owns focus — search binds **`/`** (the GitHub/Zulip convention;
 `useShortcuts` already withholds bare characters while typing) and
 **`mod+g`** with `whileTyping`, reachable from the composer. `Ctrl-G` is the

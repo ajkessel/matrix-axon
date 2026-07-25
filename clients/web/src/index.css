@@ -1066,7 +1066,7 @@ select {
   font-weight: 600;
 }
 
-/* Arrow keys rove focus through these links (ADR 0063), so the focus ring has
+/* Arrow keys rove focus through these links (ADR 0078), so the focus ring has
    to be visible and distinct from the selected row. `outline-offset` is
    negative because `.room-list` clips overflow. */
 .room-link:focus-visible {
@@ -2613,7 +2613,7 @@ p.timeline-edge {
   border-radius: var(--border-radius);
 }
 
-/* ---- shortcuts help (ADR 0063) ---- */
+/* ---- shortcuts help (ADR 0078) ---- */
 
 .help-button {
   padding-inline: 0.6rem;

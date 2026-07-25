@@ -11,7 +11,7 @@ const BASE_URL = `http://127.0.0.1:${PORT}`
  * starts fresh.
  *
  * Lanes: live sockets (ADR 0061), two-pane layout (ADR 0062), keyboard
- * shortcuts (ADR 0063).
+ * shortcuts (ADR 0078).
  *
  * One worker, because the mock backend is a single process with shared state:
  * `two-tabs-live` posts `/__e2e/drop-sockets`, which severs *every* connected

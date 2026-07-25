@@ -1,4 +1,4 @@
-# ADR 0063 — Web client keyboard shortcuts
+# ADR 0078 — Web client keyboard shortcuts
 
 ## Context
 

@@ -20,7 +20,7 @@ function key(init: KeyboardEventInit & { key: string }): KeyboardEvent {
   return new KeyboardEvent('keydown', init)
 }
 
-describe('chordOf (ADR 0063)', () => {
+describe('chordOf (ADR 0078)', () => {
   it('leaves unmodified keys as their printed key', () => {
     expect(chordOf(key({ key: 'Escape' }))).toBe('Escape')
     expect(chordOf(key({ key: 'ArrowUp' }))).toBe('ArrowUp')

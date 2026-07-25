@@ -51,7 +51,7 @@ function activeElementDeep(
 }
 
 /**
- * The modal focus contract (ADR 0063 pattern; WCR-14), shared by every
+ * The modal focus contract (ADR 0078 pattern; WCR-14), shared by every
  * overlay: on mount, remember the focused element and move focus to the
  * first focusable inside the container; while mounted, trap Tab inside it
  * (wrapping at both ends, and pulling focus back in if it ever ends up

@@ -215,7 +215,7 @@ describe('Composer drafts (M-W6 step 5b)', () => {
   })
 
   /**
-   * `Ctrl-↑` is "previous room" (ADR 0063). The composer holds focus most of
+   * `Ctrl-↑` is "previous room" (ADR 0078). The composer holds focus most of
    * the time, so an unguarded `key === 'ArrowUp'` here claimed the chord: it
    * opened an edit *and* — by calling `preventDefault()` — stopped the room
    * from changing, since `useShortcuts` ignores a defaultPrevented event.

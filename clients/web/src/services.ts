@@ -69,7 +69,7 @@ export interface AppServices {
   /** The thread panel currently open, so live replies there do not badge it. */
   activeThread: Signal<ActiveThread | null>
   /**
-   * Bumped to pull focus back to the open room's composer (ADR 0063) — the
+   * Bumped to pull focus back to the open room's composer (ADR 0078) — the
    * staged Escape's last stage, and where the room list's Escape lands. A
    * counter rather than a method so the composer can react to it as a signal;
    * the thread panel's composer deliberately ignores it.

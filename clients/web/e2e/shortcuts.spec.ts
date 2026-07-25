@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { active, LAST_ROOM_URL, openRoom, ROOM_URL, signIn } from './helpers'
 
 /**
- * Keyboard shortcuts (ADR 0063). These need a real browser: the chords carry
+ * Keyboard shortcuts (ADR 0078). These need a real browser: the chords carry
  * modifiers a synthetic jsdom event never reproduces faithfully, focus moves
  * through elements CSS can hide, and Preact's after-paint effect flush — the
  * source of the stale-closure bug the Ctrl-B test guards — has no jsdom analogue.

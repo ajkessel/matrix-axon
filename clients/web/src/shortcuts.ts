@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'preact/hooks'
 
 /**
- * Keyboard shortcuts (ADR 0063).
+ * Keyboard shortcuts (ADR 0078).
  *
  * The TUI's chords cannot be mirrored literally: its room-list bindings are
  * all `Alt`-modified (ADR 0042) because a terminal has one focused pane and

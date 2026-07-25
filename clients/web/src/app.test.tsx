@@ -784,7 +784,7 @@ describe('shell layout (ADR 0062)', () => {
   })
 })
 
-describe('shell keyboard shortcuts (ADR 0063)', () => {
+describe('shell keyboard shortcuts (ADR 0078)', () => {
   it('Ctrl-B toggles the sidebar, and is inert on a utility page', async () => {
     const services = testServices()
     const { container } = render(<App services={services} />)

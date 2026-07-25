@@ -1047,7 +1047,7 @@ export function RoomPage() {
   }
 
   /**
-   * The staged Escape (ADR 0063). The edit-history modal claims it first in the
+   * The staged Escape (ADR 0078). The edit-history modal claims it first in the
    * capture phase, and the focused composer claims it to cancel its own banner.
    * What is left lands here: cancel a reply/edit, else close the thread panel,
    * and either way hand the keyboard back to the composer.

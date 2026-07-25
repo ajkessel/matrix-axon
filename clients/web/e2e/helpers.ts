@@ -30,7 +30,7 @@ export async function openRoom(page: Page): Promise<void> {
 
 /**
  * A stable descriptor of `document.activeElement` — real focus is what the
- * keyboard layer moves around (ADR 0063), so assertions read it directly.
+ * keyboard layer moves around (ADR 0078), so assertions read it directly.
  */
 export function active(page: Page): Promise<string> {
   return page.evaluate(() => {

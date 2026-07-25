@@ -60,7 +60,7 @@ describe('EditHistory', () => {
     expect(dialog.parentElement?.parentElement).toBe(document.body)
   })
 
-  it('closes on Escape (ADR 0063) and marks the event handled', async () => {
+  it('closes on Escape (ADR 0078) and marks the event handled', async () => {
     const { onClose, findByRole } = renderHistory()
     await findByRole('dialog', { name: 'Edit history' })
 

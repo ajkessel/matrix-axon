@@ -541,7 +541,7 @@ describe('RoomList', () => {
   })
 })
 
-describe('RoomList keyboard shortcuts (ADR 0063)', () => {
+describe('RoomList keyboard shortcuts (ADR 0078)', () => {
   const ctrl = { ctrlKey: true }
 
   it('Ctrl-K focuses the name filter and un-collapses the sidebar', async () => {
