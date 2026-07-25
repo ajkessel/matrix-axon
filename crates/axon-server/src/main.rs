@@ -266,6 +266,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         FilesystemStagedUploads::new(store.clone(), &config.media)
             .context("configuring staged media uploads")?,
     );
+    // M15c reconcile (ADR 0059, GH #286): resets crash-wedged `sending` rows,
+    // prunes row-less staged-upload files, and sweeps already-expired staged
+    // rows, all before any client traffic can race it. `spawn_expiry_sweeper`
+    // then repeats the expiry sweep for the rest of the process's life.
+    uploads.reconcile_boot().await;
+    crate::uploads::spawn_expiry_sweeper(uploads.clone());
     let backfill_status = Arc::new(status::BackfillStatusAdapter(sync_engine.backfill_health()));
     let sync_status = Arc::new(status::SyncStatusAdapter(sync_engine.sync_health()));
 

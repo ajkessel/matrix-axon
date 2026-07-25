@@ -72,8 +72,11 @@ So staged uploads are treated like durable crash-recoverable work-in-progress:
 - bytes live under a dedicated uploads directory under Axon's data area
 - a DB row records `account_id`, `upload_id`, `kind`, `filename`,
   `content_type`, `size_bytes`, `path`, `state`, `expires_at`, and timestamps
-- boot reconcile prunes expired rows/files and orphan files, and resets any stale
-  "sending" rows back to reusable staged state
+- boot reconcile resets any stale "sending" rows back to reusable staged
+  state, prunes orphan files (row-less, including a crash-orphaned partial
+  write), and sweeps already-expired staged rows/files; an in-process sweep
+  then repeats that expiry pruning periodically for the rest of the process's
+  uptime, not just across restarts (M15c, GH #286)
 
 ### Keep `axon-api` SDK-free via ports, as with M6 and M11
 

@@ -21,6 +21,8 @@ CREATE TRIGGER media_uploads_set_updated_at
     BEFORE UPDATE ON media_uploads
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
--- Serves account-scoped lookup/delete and the M15c expiry reconcile.
+-- Serves account-scoped lookup/delete. The M15c expiry sweep is unscoped by
+-- account, so it needs its own index — see
+-- 20260725120000_media_uploads_expiry_sweep_index.sql.
 CREATE INDEX media_uploads_account_state_expires_idx
     ON media_uploads (account_id, state, expires_at);

@@ -58,3 +58,9 @@ libc = { workspace = true }
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
 chrono = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# Non-optional here (unlike the `dev-tools`-gated dep above) so `uploads.rs`'s
+# tests can drive raw state transitions the store API doesn't expose, without
+# requiring `--features dev-tools` just to run `cargo test`.
+sqlx-core = { workspace = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }

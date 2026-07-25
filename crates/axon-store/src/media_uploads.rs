@@ -4,6 +4,11 @@
 //! table is the durable index that lets Axon recover pending local mutations
 //! after restart. Filesystem cleanup is owned by the composition-root staging
 //! service, while the store keeps the account-scoped metadata transactional.
+//!
+//! M15c (GH #286) adds the pruning/reconciliation leg:
+//! [`Store::reconcile_sending_media_uploads`] and [`Store::list_media_upload_ids`]
+//! back the composition-root's boot reconcile, and
+//! [`Store::delete_expired_media_uploads`] backs its periodic expiry sweep.
 
 use chrono::{DateTime, Utc};
 use sqlx_core::row::Row;
@@ -186,7 +191,8 @@ impl Store {
 
     /// Claim a staged upload for sending. The state transition is atomic, so two
     /// clients cannot send the same upload concurrently. Expired uploads are not
-    /// claimable; M15c owns pruning/reconciliation of stale rows and files.
+    /// claimable; [`delete_expired_media_uploads`](Self::delete_expired_media_uploads)
+    /// is what eventually prunes them (M15c).
     pub async fn claim_staged_media_upload(
         &self,
         account_id: Uuid,
@@ -248,5 +254,69 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
+    }
+
+    /// Reset every row a crash left in `sending` back to `staged` (M15c, ADR
+    /// 0059, GH #286). `claim_upload` flips a row to `sending` before reading
+    /// its file and driving the Matrix send; if axon dies before
+    /// `complete_upload`/`release_upload` runs, no API path ever deletes or
+    /// resets a `sending` row, so it would otherwise wedge forever. Meant to
+    /// be called once at boot, before any client traffic, over every account
+    /// at once — a wedged row from a stale process has no per-account caller
+    /// left to release it. Returns the number of rows reset.
+    ///
+    /// Unconditionally global, with no process/instance scoping: this
+    /// assumes a single axon process is ever live against a given database
+    /// at once (true today). If that ever changes, booting one instance
+    /// would reset another's genuinely in-flight `sending` rows and permit a
+    /// duplicate send of the same upload — revisit with e.g. a
+    /// `pg_try_advisory_lock` around the boot reconcile before running
+    /// multiple instances against one database.
+    pub async fn reconcile_sending_media_uploads(&self) -> Result<u64, StoreError> {
+        let result = sqlx_core::query::query(
+            "UPDATE media_uploads SET state = 'staged' WHERE state = 'sending'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete staged rows whose `expires_at` has passed, returning their
+    /// metadata so the caller can unlink the backing files (M15c, ADR 0059,
+    /// GH #286): an abandoned staged upload (crash, lost network, abandoned
+    /// compose) is never claimed, so nothing else ever removes it. Restricted
+    /// to `state = 'staged'` — `expires_at` only ever gated *claiming*, so a
+    /// `sending` row past its original `expires_at` is still an in-flight
+    /// send and must not be deleted out from under `complete_upload`/
+    /// `release_upload`.
+    pub async fn delete_expired_media_uploads(&self) -> Result<Vec<MediaUpload>, StoreError> {
+        let sql = format!(
+            "DELETE FROM media_uploads \
+             WHERE state = 'staged' AND expires_at <= now() \
+             RETURNING {MEDIA_UPLOAD_COLUMNS}"
+        );
+        let rows = sqlx_core::query_as::query_as::<Postgres, MediaUpload>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// Every `(account_id, upload_id)` pair with a live row, in any state.
+    /// Feeds the boot orphan-file scan (M15c, ADR 0059, GH #286) — the same
+    /// row-existence-keyed pattern as
+    /// [`list_all_account_ids`](crate::Store::list_all_account_ids) feeding
+    /// `axon-sync`'s `prune_orphan_store_dirs`/`prune_orphan_media_dirs`: a
+    /// staged-upload file on disk with no id in this list has no row in any
+    /// state and is safe to remove.
+    pub async fn list_media_upload_ids(&self) -> Result<Vec<(Uuid, Uuid)>, StoreError> {
+        let ids = sqlx_core::query::query("SELECT account_id, upload_id FROM media_uploads")
+            .try_map(|row: PgRow| {
+                let account_id: Uuid = row.try_get("account_id")?;
+                let upload_id: Uuid = row.try_get("upload_id")?;
+                Ok((account_id, upload_id))
+            })
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(ids)
     }
 }

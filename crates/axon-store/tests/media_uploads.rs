@@ -261,3 +261,192 @@ async fn account_delete_cascades_media_upload_rows() {
     .expect("count uploads");
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reconcile_sending_media_uploads_resets_stale_sending_rows() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "media-upload-reconcile").await;
+    let sending_id = Uuid::new_v4();
+    let staged_id = Uuid::new_v4();
+
+    for (upload_id, filename) in [(sending_id, "sending.bin"), (staged_id, "staged.bin")] {
+        store
+            .insert_media_upload(&NewMediaUpload {
+                upload_id,
+                account_id,
+                kind: MediaUploadKind::File,
+                filename,
+                content_type: None,
+                size_bytes: 10,
+                path: "/tmp/file",
+                expires_at: Utc::now() + Duration::hours(1),
+            })
+            .await
+            .expect("insert upload");
+    }
+    store
+        .claim_staged_media_upload(account_id, sending_id)
+        .await
+        .expect("claim upload")
+        .expect("claimed row");
+
+    let reset = store
+        .reconcile_sending_media_uploads()
+        .await
+        .expect("reconcile sending uploads");
+    assert_eq!(reset, 1, "only the wedged 'sending' row is reset");
+
+    let reconciled = store
+        .get_media_upload(account_id, sending_id)
+        .await
+        .expect("get reconciled upload")
+        .expect("row still present");
+    assert_eq!(reconciled.state, MediaUploadState::Staged);
+    let untouched = store
+        .get_media_upload(account_id, staged_id)
+        .await
+        .expect("get untouched upload")
+        .expect("row still present");
+    assert_eq!(untouched.state, MediaUploadState::Staged);
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn delete_expired_media_uploads_prunes_staged_but_spares_sending() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "media-upload-sweep").await;
+    let expired_staged_id = Uuid::new_v4();
+    let expired_sending_id = Uuid::new_v4();
+    let live_id = Uuid::new_v4();
+
+    store
+        .insert_media_upload(&NewMediaUpload {
+            upload_id: expired_staged_id,
+            account_id,
+            kind: MediaUploadKind::Image,
+            filename: "expired-staged.png",
+            content_type: None,
+            size_bytes: 10,
+            path: "/tmp/expired-staged",
+            expires_at: Utc::now() - Duration::minutes(1),
+        })
+        .await
+        .expect("insert expired staged upload");
+    store
+        .insert_media_upload(&NewMediaUpload {
+            upload_id: expired_sending_id,
+            account_id,
+            kind: MediaUploadKind::Image,
+            filename: "expired-sending.png",
+            content_type: None,
+            size_bytes: 10,
+            path: "/tmp/expired-sending",
+            expires_at: Utc::now() - Duration::minutes(1),
+        })
+        .await
+        .expect("insert expired sending upload");
+    sqlx_core::query::query(
+        "UPDATE media_uploads SET state = 'sending' WHERE account_id = $1 AND upload_id = $2",
+    )
+    .bind(account_id)
+    .bind(expired_sending_id)
+    .execute(&pool)
+    .await
+    .expect("mark sending");
+    store
+        .insert_media_upload(&NewMediaUpload {
+            upload_id: live_id,
+            account_id,
+            kind: MediaUploadKind::Image,
+            filename: "live.png",
+            content_type: None,
+            size_bytes: 10,
+            path: "/tmp/live",
+            expires_at: Utc::now() + Duration::hours(1),
+        })
+        .await
+        .expect("insert live upload");
+
+    let deleted = store
+        .delete_expired_media_uploads()
+        .await
+        .expect("delete expired uploads");
+    assert_eq!(deleted.len(), 1, "only the expired staged row is deleted");
+    assert_eq!(deleted[0].upload_id, expired_staged_id);
+    assert_eq!(deleted[0].path, "/tmp/expired-staged");
+
+    assert!(
+        store
+            .get_media_upload(account_id, expired_staged_id)
+            .await
+            .expect("get expired staged")
+            .is_none(),
+        "expired staged row is gone"
+    );
+    assert!(
+        store
+            .get_media_upload(account_id, expired_sending_id)
+            .await
+            .expect("get expired sending")
+            .is_some(),
+        "expired-but-sending row survives the sweep"
+    );
+    assert!(
+        store
+            .get_media_upload(account_id, live_id)
+            .await
+            .expect("get live upload")
+            .is_some(),
+        "unexpired row survives the sweep"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn list_media_upload_ids_includes_every_state() {
+    let store = common::migrated_store().await;
+    let pool = common::raw_pool().await;
+    let account_id = test_account(&store, "media-upload-ids").await;
+    let staged_id = Uuid::new_v4();
+    let sending_id = Uuid::new_v4();
+
+    for upload_id in [staged_id, sending_id] {
+        store
+            .insert_media_upload(&NewMediaUpload {
+                upload_id,
+                account_id,
+                kind: MediaUploadKind::File,
+                filename: "file.bin",
+                content_type: None,
+                size_bytes: 10,
+                path: "/tmp/file",
+                expires_at: Utc::now() + Duration::hours(1),
+            })
+            .await
+            .expect("insert upload");
+    }
+    store
+        .claim_staged_media_upload(account_id, sending_id)
+        .await
+        .expect("claim upload")
+        .expect("claimed row");
+
+    let ids = store
+        .list_media_upload_ids()
+        .await
+        .expect("list media upload ids");
+    assert!(ids.contains(&(account_id, staged_id)), "staged row listed");
+    assert!(
+        ids.contains(&(account_id, sending_id)),
+        "sending row listed"
+    );
+
+    common::cleanup_account(&pool, account_id).await;
+}
