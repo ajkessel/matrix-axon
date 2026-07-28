@@ -1,0 +1,326 @@
+use std::collections::HashMap;
+
+use super::completion::emoji_cycle_status;
+use super::{cycle_index, App, Mode, OwnReaction, RoomKey, Status};
+
+impl App {
+    pub(crate) async fn start_unreact_from_selected_message(&mut self) {
+        let Some(target_event_id) = self.selected_message_id().map(str::to_owned) else {
+            self.status = Status::from("select a displayed message before unreacting".to_owned());
+            return;
+        };
+        let choices = match self.own_reactions_for(&target_event_id) {
+            Ok(choices) => choices,
+            Err(message) => {
+                self.status = Status::from(message);
+                return;
+            }
+        };
+        match choices.as_slice() {
+            [] => {
+                self.status = Status::from("you have no reactions on this message".to_owned());
+            }
+            [only] => {
+                self.withdraw_reaction(&target_event_id, only.clone()).await;
+            }
+            _ => {
+                self.status = unreact_selection_status(&choices, 0);
+                self.mode = Mode::Unreacting {
+                    target_event_id,
+                    choices,
+                    selected: 0,
+                };
+            }
+        }
+    }
+
+    pub(super) fn own_reactions_for(
+        &self,
+        target_event_id: &str,
+    ) -> Result<Vec<OwnReaction>, String> {
+        // The withdrawable reaction ids come from the server-aggregated tally on
+        // the target message (`my_event_ids`), not from scanning raw reaction
+        // events — the collapsed timeline (M8) no longer carries them.
+        let Some(target) = self
+            .selected_raw_events()
+            .iter()
+            .find(|event| event.event_id == target_event_id)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(reactions) = &target.reactions else {
+            return Ok(Vec::new());
+        };
+        let mut choices: Vec<_> = reactions
+            .iter()
+            .filter(|(_, tally)| tally.me && !tally.my_event_ids.is_empty())
+            .map(|(key, tally)| OwnReaction {
+                key: key.clone(),
+                event_ids: tally.my_event_ids.clone(),
+            })
+            .collect();
+        choices.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(choices)
+    }
+
+    pub(crate) async fn withdraw_reaction(&mut self, target_event_id: &str, reaction: OwnReaction) {
+        let Some(room) = self.selected_room().cloned() else {
+            self.status = Status::from("no room selected".to_owned());
+            return;
+        };
+        let total = reaction.event_ids.len();
+        // Track which redactions actually landed so the optimistic tally update
+        // reflects partial progress on failure.
+        let mut withdrawn: Vec<String> = Vec::with_capacity(total);
+        for (index, event_id) in reaction.event_ids.iter().enumerate() {
+            match self
+                .client
+                .redact_event(room.account_id, &room.room_id, event_id, None)
+                .await
+            {
+                Ok(_) => withdrawn.push(event_id.clone()),
+                Err(err) => {
+                    self.remove_local_reaction(target_event_id, &reaction.key, &withdrawn);
+                    self.status = Status::Info(format!(
+                        "unreact failed after {index}/{total} withdrawals: {err}"
+                    ));
+                    return;
+                }
+            }
+        }
+        self.remove_local_reaction(target_event_id, &reaction.key, &withdrawn);
+        self.status = Status::EventAction {
+            debug: format!("withdrew reaction {}", reaction.key),
+            redacted: "withdrew reaction",
+        };
+    }
+
+    /// Optimistically drop the account user's own reaction(s) for `key` from the
+    /// target message's server-aggregated tally. The collapsed timeline (M8) no
+    /// longer carries raw `m.reaction` rows, so redacting them does not update the
+    /// on-row aggregate the TUI now renders from — without this patch the badge
+    /// and unreact choice would persist (and re-redact already-redacted ids) until
+    /// the next full reload. Removing the owner's last id clears `me` and drops the
+    /// owner's single distinct-sender contribution from `count`; a key with no
+    /// remaining count is removed entirely.
+    pub(super) fn remove_local_reaction(
+        &mut self,
+        target_event_id: &str,
+        key: &str,
+        withdrawn: &[String],
+    ) {
+        if withdrawn.is_empty() {
+            return;
+        }
+        let Some(room) = self.selected_room().cloned() else {
+            return;
+        };
+        let room_key = RoomKey::from(&room);
+        let Some(events) = self.messages.events.get_mut(&room_key) else {
+            return;
+        };
+        let Some(event) = events.iter_mut().find(|e| e.event_id == target_event_id) else {
+            return;
+        };
+        let Some(reactions) = event.reactions.as_mut() else {
+            return;
+        };
+        if let Some(tally) = reactions.get_mut(key) {
+            tally.my_event_ids.retain(|id| !withdrawn.contains(id));
+            if tally.my_event_ids.is_empty() && tally.me {
+                tally.me = false;
+                tally.count = tally.count.saturating_sub(1);
+            }
+            if tally.count <= 0 {
+                reactions.remove(key);
+            }
+        }
+        if reactions.is_empty() {
+            event.reactions = None;
+        }
+    }
+
+    /// Optimistically add the account user's own reaction to the target message's
+    /// server-aggregated tally so the badge appears and the reaction can be
+    /// withdrawn immediately, before the next timeline reload re-derives the
+    /// authoritative aggregate. A first reaction for `key` adds the owner's
+    /// distinct-sender contribution to `count` and sets `me`; the returned
+    /// reaction event id is recorded for later withdrawal.
+    pub(super) fn apply_local_reaction(
+        &mut self,
+        target_event_id: &str,
+        key: &str,
+        reaction_event_id: String,
+    ) {
+        let Some(room) = self.selected_room().cloned() else {
+            return;
+        };
+        let room_key = RoomKey::from(&room);
+        let Some(events) = self.messages.events.get_mut(&room_key) else {
+            return;
+        };
+        let Some(event) = events.iter_mut().find(|e| e.event_id == target_event_id) else {
+            return;
+        };
+        let reactions = event.reactions.get_or_insert_with(HashMap::new);
+        let tally = reactions
+            .entry(key.to_owned())
+            .or_insert_with(|| crate::api::ReactionTally {
+                count: 0,
+                me: false,
+                my_event_ids: Vec::new(),
+            });
+        if !tally.me {
+            tally.count += 1;
+            tally.me = true;
+        }
+        if !tally.my_event_ids.contains(&reaction_event_id) {
+            tally.my_event_ids.push(reaction_event_id);
+        }
+    }
+
+    pub(crate) fn start_react_to_selected_message(&mut self) {
+        let Some(event) = self.selected_message_event() else {
+            self.status = Status::from("select a displayed message before reacting".to_owned());
+            return;
+        };
+        if event.event_id.starts_with("local-echo:") {
+            self.status = Status::from(super::PENDING_ECHO_MSG.to_owned());
+            return;
+        }
+        let event_id = event.event_id.clone();
+        // Settle the room's draft before the buffer is cleared for the reaction,
+        // so returning to compose restores it instead of tombstoning it (M12).
+        self.flush_pending_draft_now();
+        self.input.buffer.clear();
+        self.input.cursor = 0;
+        self.input.react_tab = None;
+        self.mode = Mode::Reacting {
+            event_id: event_id.clone(),
+        };
+        self.status = Status::EventAction {
+            debug: format!("react to {} - type emoji, Enter to send", event_id),
+            redacted: "react to message - type emoji, Enter to send",
+        };
+    }
+
+    pub(crate) async fn send_react(&mut self, event_id: &str, key: &str) {
+        if key.is_empty() {
+            self.status = Status::from("reaction key cannot be empty".to_owned());
+            return;
+        }
+        let Some(room) = self.selected_room().cloned() else {
+            self.status = Status::from("no room selected".to_owned());
+            return;
+        };
+        let result = self
+            .client
+            .react(room.account_id, &room.room_id, event_id, key)
+            .await;
+        self.status = match result {
+            Ok(r) => {
+                self.apply_local_reaction(event_id, key, r.event_id.clone());
+                Status::EventAction {
+                    debug: format!("reacted: {}", r.event_id),
+                    redacted: "reacted",
+                }
+            }
+            Err(err) => Status::Info(format!("react failed: {err}")),
+        };
+    }
+
+    pub(crate) fn update_react_status(&mut self, event_id: &str) {
+        if self.input.buffer.is_empty() {
+            self.status = Status::EventAction {
+                debug: format!("react to {event_id} - type emoji name, Enter to send"),
+                redacted: "react to message - type emoji name, Enter to send",
+            };
+            return;
+        }
+        let matches = emoji_matches(&self.input.buffer);
+        self.status = Status::Info(match matches.as_slice() {
+            [] => format!("no emoji matches '{}'", self.input.buffer),
+            [single] => format!("{} {} - Enter to send", single.as_str(), single.name()),
+            _ => {
+                let shown: Vec<_> = matches
+                    .iter()
+                    .take(5)
+                    .map(|e| format!("{} {}", e.as_str(), e.name()))
+                    .collect();
+                let more = matches.len().saturating_sub(5);
+                if more == 0 {
+                    format!("matches: {} - Tab/Shift-Tab to select", shown.join(", "))
+                } else {
+                    format!(
+                        "matches: {}, +{more} more - Tab/Shift-Tab to select",
+                        shown.join(", ")
+                    )
+                }
+            }
+        });
+    }
+
+    pub(crate) fn complete_react_input(&mut self, reverse: bool) {
+        let matches = emoji_matches(&self.input.buffer);
+        if matches.len() < 2 {
+            return;
+        }
+        let next = self
+            .input
+            .react_tab
+            .map(|index| cycle_index(index, matches.len(), reverse))
+            .unwrap_or_else(|| if reverse { matches.len() - 1 } else { 0 });
+        self.input.react_tab = Some(next);
+        self.status = Status::Info(emoji_cycle_status(next, &matches));
+    }
+}
+
+pub(crate) fn unreact_selection_status(choices: &[OwnReaction], selected: usize) -> Status {
+    let choice = &choices[selected];
+    Status::Info(format!(
+        "[{}/{}] withdraw {} - Tab/Shift-Tab to cycle, Enter to confirm",
+        selected + 1,
+        choices.len(),
+        choice.key
+    ))
+}
+
+pub(crate) fn emoji_matches(query: &str) -> Vec<&'static emojis::Emoji> {
+    if query.is_empty() {
+        return vec![];
+    }
+    let q = query.to_ascii_lowercase();
+    emojis::iter()
+        .filter(|emoji| emoji.name().to_ascii_lowercase().contains(q.as_str()))
+        .collect()
+}
+
+/// Build `event_id -> [(key, count)]` reaction badges from the server-aggregated
+/// `reactions` map on each event. The collapsed timeline no longer carries raw
+/// `m.reaction` rows (M8), so the tally is read from the message it annotates
+/// rather than re-counted from reaction events. A redacted message shows no
+/// badges; reactions with a zero count are dropped.
+pub(crate) fn collect_reactions(
+    events: &[crate::api::EventDto],
+) -> HashMap<String, Vec<(String, usize)>> {
+    let mut map: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    for event in events {
+        if event.redacted {
+            continue;
+        }
+        let Some(reactions) = &event.reactions else {
+            continue;
+        };
+        let mut pairs: Vec<(String, usize)> = reactions
+            .iter()
+            .filter(|(_, tally)| tally.count > 0)
+            .map(|(key, tally)| (key.clone(), tally.count as usize))
+            .collect();
+        if pairs.is_empty() {
+            continue;
+        }
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        map.insert(event.event_id.clone(), pairs);
+    }
+    map
+}

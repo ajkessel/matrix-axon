@@ -1,0 +1,66 @@
+[package]
+name = "axon-server"
+description = "Axon binary — wires all crates together and owns the process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "axon"
+path = "src/main.rs"
+
+[build-dependencies]
+chrono = { workspace = true, features = ["clock"] }
+
+[features]
+default = []
+dev-tools = ["dep:sqlx-core", "dep:crc"]
+
+[dependencies]
+axon-core   = { workspace = true }
+axon-store  = { workspace = true }
+axon-sync   = { workspace = true }
+axon-crypto = { workspace = true }
+axon-search = { workspace = true }
+axon-media  = { workspace = true }
+axon-api    = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "process"] }
+tokio-util = { workspace = true }
+axum  = { workspace = true }
+anyhow = { workspace = true }
+# Implements axon-api's async MessageSender trait for the gateway adapter.
+async-trait = { workspace = true }
+uuid = { workspace = true }
+# Subcommand parsing for the `axon` binary (`axon token …`, M7b).
+clap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# `axon init` (M13, ADR 0051): CSPRNG for the generated store_key, toml_edit to
+# render the starter config, and `url` to parse the Postgres URL when offering to
+# start a matching local Docker container.
+rand = { workspace = true }
+toml_edit = { workspace = true }
+url = { workspace = true }
+percent-encoding = { workspace = true }
+sqlx-postgres = { workspace = true }
+sqlx-core = { workspace = true, optional = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }
+crc = { workspace = true, optional = true }
+crossterm = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+dotenvy = { workspace = true }
+libc = { workspace = true }
+# OAuth 2.0 authorization server (M14, ADR 0054): builds each configured
+# provider's `GenericOidcProvider` (discovery-doc fetch) at boot.
+reqwest = { workspace = true, features = ["json", "form", "rustls"] }
+chrono = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# Non-optional here (unlike the `dev-tools`-gated dep above) so `uploads.rs`'s
+# tests can drive raw state transitions the store API doesn't expose, without
+# requiring `--features dev-tools` just to run `cargo test`.
+sqlx-core = { workspace = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }

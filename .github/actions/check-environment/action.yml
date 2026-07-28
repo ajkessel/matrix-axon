@@ -1,0 +1,35 @@
+name: Check environment
+description: "Checks for disk space and optionally docker"
+
+inputs:
+  require-docker:
+    description: "Also verify the runner's Docker daemon is reachable"
+    required: false
+    default: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: test environment
+      shell: bash
+      run: whoami
+
+    - name: Docker access check
+      shell: bash
+      if: ${{ inputs.require-docker == 'true' }}
+      run: docker run --rm hello-world
+
+    - name: Assert Minimum Disk Space
+      shell: bash
+      run: |
+        AVAILABLE_GB=$(df -h . | awk 'NR==2 {print $4}' | sed 's/Gi*//')
+        REQUIRED_GB=15
+
+        echo "Available space: ${AVAILABLE_GB} GB"
+        echo "Required space: ${REQUIRED_GB} GB"
+
+        if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
+          echo "❌ Error: Insufficient disk space available on the runner."
+          exit 1
+        fi
+        echo "✅ Sufficient disk space verified."

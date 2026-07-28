@@ -1,0 +1,27 @@
+[package]
+name = "axon-core"
+description = "Shared types, errors, and configuration for Axon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+chrono     = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+figment    = { workspace = true, features = ["toml", "env"] }
+directories = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+uuid       = { workspace = true }
+# Shared high-entropy secret generation/hashing (`secret` module): the one
+# primitive both axon-store's bearer tokens and axon-api's OAuth tokens/codes
+# need, factored out so the two don't carry independent copies.
+rand       = { workspace = true }
+sha2       = { workspace = true }
+base64     = { workspace = true }
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }

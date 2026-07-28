@@ -1,0 +1,11 @@
+[package]
+name = "axon-crypto"
+description = "Thin verification surface over matrix-rust-sdk cryptography."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axon-core = { workspace = true }

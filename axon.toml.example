@@ -1,0 +1,185 @@
+# Copy to axon.toml and adjust, or set the same values via environment
+# variables. axon.toml is gitignored.
+#
+# For a fresh install, the easy path is `axon init`: it generates a minimal
+# config (a random store_key + the Postgres URL) in the platform config
+# directory, so you only touch this file to change a default. This file is the
+# full reference.
+#
+# Precedence (lowest to highest): these defaults < this file < DATABASE_URL <
+# AXON_-prefixed env vars (nested with "__", e.g. AXON_SERVER__PORT=9090).
+#
+# axon looks for a config file at --config <PATH>, else $AXON_CONFIG, else
+# ./axon.toml, else <platform config dir>/axon.toml (e.g. ~/.config/axon/axon.toml
+# on Linux); if none exists it runs from environment variables and built-in
+# defaults alone.
+
+[server]
+# Bind address. Defaults to loopback; put a reverse proxy in front for external
+# access, or set 0.0.0.0 to bind all interfaces.
+host = "127.0.0.1"
+port = 8080
+# When the server is launched interactively with no accounts and no credentials,
+# it can offer a one-time web bootstrap for the first client credential. The
+# server prints a per-boot /bootstrap/<code> URL and locks the bootstrap surface
+# after six wrong bootstrap URLs. By default that temporary surface is
+# loopback-only; set true only when a trusted TLS/proxy/VPN path fronts the
+# server during first setup. The lockout counter is process-local and shared
+# by every caller, so enabling this lets a remote client lock the operator's
+# own setup flow in six requests, forcing a restart.
+bootstrap_web_allow_remote = false
+# Optional human-facing web-client URL. When set, the one-time bootstrap success
+# page links here after showing the freshly minted credential. Tokens are never
+# placed in this URL.
+# web_client_url = "https://axon.example.com/app"
+
+[database]
+# Required. Also accepted via the bare DATABASE_URL env var.
+url = "postgres://axon:axon@127.0.0.1:5432/axon"
+max_connections = 5
+
+[log]
+# Full tracing EnvFilter directive. Overridden by RUST_LOG. The built-in default
+# is "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error" —
+# matrix-rust-sdk's crypto machinery is muted because it logs routine, expected
+# conditions (a UTD whose key hasn't arrived yet, a startup backfill sweep, a
+# backup-downloaded room key that doesn't decrypt) at info/warn, which floods
+# local dev. Add `,matrix_sdk_crypto=debug` (or similar) here if you're
+# debugging decryption/backup issues and want that detail back.
+level = "info,matrix_sdk_crypto=error,matrix_sdk::encryption::backups=error"
+
+[sync]
+# Directory for the matrix-rust-sdk state + crypto stores (one subdir per
+# account). MUST be durable: losing it forces a re-login and the loss of
+# historical Megolm decryption keys.
+#
+# Defaults to the platform data directory when unset (Linux:
+# ~/.local/share/axon/sync; macOS: ~/Library/Application Support/axon/sync;
+# Windows: %APPDATA%\axon\data\sync). Uncomment to override, or set
+# AXON_SYNC__DATA_DIR. If you are upgrading from a build that defaulted to
+# ./axon-data, either move that tree here or pin the old path below.
+# data_dir = "axon-data/sync"
+# Per-room timeline window the sliding-sync list requests. The matrix-sdk default
+# is 1 (latest event only); raising it makes each room archive its last N events,
+# giving the timeline read real depth to page through. Default 20.
+timeline_limit = 20
+# Capacity of the live-event bus feeding the /v1/ws WebSocket: how many recent
+# events the bus holds for a connected client before a client that can't keep up
+# starts dropping the oldest (and is told it lagged). Bigger tolerates slower or
+# burstier clients at the cost of more memory; it never back-pressures sync.
+# Default 1024.
+live_event_buffer = 1024
+# Allowlist of room-scoped ephemeral event types (m.typing, m.receipt, ...)
+# forwarded verbatim onto the live-event bus as an "ephemeral.passthrough"
+# /v1/ws frame (ADR 0056). A type not on this list is dropped (fails closed,
+# logged at debug level); an empty list disables ephemeral forwarding
+# entirely. Default ["m.typing", "m.receipt"].
+#
+# m.presence is left off the default deliberately, and listing it here alone
+# does NOT enable it: presence is account-scoped and needs its own handler
+# registration in axon-sync (real code, not just this list), on top of the
+# lag-domain question still being open. Adding it here anyway logs a boot
+# warning rather than silently forwarding nothing.
+ephemeral_event_types = ["m.typing", "m.receipt"]
+# Per-call timeout for an outbound ephemeral send (read receipt / typing), in
+# seconds. Default 10.
+# ephemeral_send_timeout_secs = 10
+# Per-call timeout for an outbound room-membership mutation (leave/forget/
+# invite/kick/ban/unban) or room-settings mutation (name/topic/remove_avatar/
+# tags), in seconds. Both share this one timeout: local-room state/account-
+# data writes, no federation resolution involved. Avatar-set reuses media's
+# upstream_upload_timeout_secs instead, since it does a real media upload.
+# Default 15.
+# membership_mutation_timeout_secs = 15
+# Per-call timeout for an outbound room-entry mutation (join/knock/
+# create_room/create_dm), in seconds. Longer than the membership timeout
+# above since these can involve federation resolution. Default 30.
+# room_entry_timeout_secs = 30
+# By default, each pending UTD is retried once by the startup sweep; later room-key
+# arrivals and explicit retries still back-fill rows. Set true to retry every
+# pending UTD on every process start (legacy behavior, expensive on large
+# permanently-undecryptable backlogs).
+always_redecrypt_utds_on_startup = false
+# Symmetric key used to (a) encrypt each account's access token at rest via
+# pgcrypto and (b) passphrase the SDK's SQLite store. Required once any account
+# exists. Keep it secret; prefer setting it via AXON_SYNC__STORE_KEY rather
+# than committing it here.
+store_key = "change-me"
+
+# Accounts are added at runtime, not provisioned from config: POST
+# /v1/accounts/login (password) or POST /v1/accounts/import (an existing
+# access_token + device_id) — see the API docs. The server boots and serves
+# HTTP with no accounts configured.
+
+# [search]
+# Directory for the Tantivy full-text index. MUST be durable (rebuildable from
+# Postgres, but expensive to reseed). Defaults to the platform data directory
+# when unset (Linux: ~/.local/share/axon/search; macOS:
+# ~/Library/Application Support/axon/search; Windows: %APPDATA%\axon\data\search).
+# Override here or via AXON_SEARCH__INDEX_PATH.
+# index_path = "axon-data/search"
+
+# [media]
+# Directory for the bounded media LRU cache (one subdir per account). Disposable
+# — a lost cache simply re-fetches from the homeserver — so it defaults under the
+# platform CACHE directory, not the data dir (Linux: ~/.cache/axon/media; macOS:
+# ~/Library/Caches/axon/media; Windows: %LOCALAPPDATA%\axon\cache\media). Override
+# here or via AXON_MEDIA__CACHE_DIR.
+# cache_dir = "axon-data/media"
+# Durable staging directory for client-originated media uploads (M15). Pending
+# uploads are in-flight local mutations, so this defaults under the platform DATA
+# directory, not the disposable cache. Override here or via
+# AXON_MEDIA__UPLOADS_DIR.
+# uploads_dir = "axon-data/uploads"
+# max_upload_bytes = 104857600
+# upload_request_timeout_secs = 60
+# upstream_upload_timeout_secs = 60
+# max_concurrent_uploads = 4
+# staged_upload_ttl_secs = 86400
+
+# [oauth]
+# Axon as its own OAuth 2.0 authorization server to its clients (public
+# clients, PKCE mandatory) and an OIDC relying party to Google/Microsoft/Apple
+# (M14, ADR 0054). Disabled by default — every /v1/oauth/* route 404s and
+# existing CLI-token deployments are unaffected until an operator opts in.
+# enabled = false
+# This axon instance's externally-reachable base URL (no trailing slash),
+# used to build each upstream provider's callback URL. Required once
+# `enabled = true`; axon refuses to boot without it.
+# external_base_url = "https://myaxon.example.com"
+# How long a minted access token verifies for, in seconds. Default 3600 (1h).
+# access_token_ttl_secs = 3600
+# How long a minted refresh token is redeemable for, in seconds. Default
+# 2592000 (30 days).
+# refresh_token_ttl_secs = 2592000
+#
+# Statically pre-registered OAuth clients (no dynamic client registration).
+# Repeat [[oauth.clients]] for each client app; redirect_uris is an exact-match
+# allow-list, not a prefix match.
+# [[oauth.clients]]
+# client_id = "axon-ios"
+# redirect_uris = ["axon://oauth/callback"]
+#
+# [oauth.providers.google]
+# Google sign-in via the discovery-doc-driven generic OIDC provider.
+# enabled = false
+# issuer = "https://accounts.google.com"
+# client_id = "your-client-id.apps.googleusercontent.com"
+# Prefer AXON_OAUTH__PROVIDERS__GOOGLE__CLIENT_SECRET over committing this here.
+# client_secret = "change-me"
+#
+# [oauth.providers.microsoft]
+# Azure AD sign-in. The multi-tenant endpoints (common/organizations/consumers)
+# publish a {tenantid}-templated issuer, which axon validates by substituting
+# the token's own `tid` claim — no extra config needed for that.
+# enabled = false
+# issuer = "https://login.microsoftonline.com/common/v2.0"
+# client_id = "00000000-0000-0000-0000-000000000000"
+# Prefer AXON_OAUTH__PROVIDERS__MICROSOFT__CLIENT_SECRET over committing this here.
+# client_secret = "change-me"
+#
+# [oauth.providers.apple]
+# Sign in with Apple. NOT YET IMPLEMENTED — axon refuses to boot with
+# `enabled = true` here until M14c ships AppleProvider. The fields exist now so
+# this config shape won't change again when it does.
+# enabled = false

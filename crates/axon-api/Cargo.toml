@@ -1,0 +1,61 @@
+[package]
+name = "axon-api"
+description = "axum HTTP and WebSocket handlers; OpenAPI spec via utoipa."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axon-core  = { workspace = true }
+axon-store = { workspace = true }
+# `ws` enables the WebSocket extractor for /v1/ws (not in axum's defaults).
+axum       = { workspace = true, features = ["ws"] }
+bytes      = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid       = { workspace = true, features = ["serde"] }
+utoipa     = { workspace = true, features = ["axum_extras", "uuid"] }
+base64     = { workspace = true }
+# `MessageSender` is an async trait used behind `Arc<dyn …>` in AppState.
+async-trait = { workspace = true }
+futures-util = { workspace = true, features = ["std"] }
+# broadcast channel (live-event bus) + time (periodic WS token revalidation);
+# fs + io-util let the media handler seek/stream cached files for range requests.
+tokio      = { workspace = true, features = ["sync", "time", "fs", "io-util"] }
+# ReaderStream wraps a cached file as a streaming media response body.
+tokio-util = { workspace = true, features = ["io"] }
+tracing    = { workspace = true }
+# Per-request access logging (method/path/status/latency) on the router (M15b
+# follow-up: the upload/send-media handlers were otherwise silent on the
+# request path, so a stalled request left no server-side trace at all).
+tower-http = { workspace = true, features = ["trace"] }
+# OAuth 2.0 authorization server (M14, ADR 0054). `rustls` matches the feature
+# spelling used elsewhere in the workspace (clients/tui) so Cargo unifies on
+# the single already-locked reqwest/aws-lc-rs TLS provider (see axon-store's
+# Cargo.toml comment on why two providers in one process TLS-panics).
+reqwest       = { workspace = true, features = ["json", "form", "rustls"] }
+jsonwebtoken  = { workspace = true }
+governor      = { workspace = true }
+url           = { workspace = true }
+thiserror     = { workspace = true }
+rand          = { workspace = true }
+sha2          = { workspace = true }
+chrono        = { workspace = true, features = ["clock"] }
+mime          = { workspace = true }
+
+[dev-dependencies]
+# DB-gated HTTP integration test: drive the real router with tower's oneshot,
+# seed/clean up directly through the pool. The WS test additionally binds a real
+# listener and connects a tungstenite client over a TCP socket.
+tokio             = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+# `connect` gives connect_async over plain ws:// (no TLS feature needed for the
+# loopback test listener).
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }
+futures-util      = { workspace = true, features = ["std"] }
+tower             = { version = "0.5", default-features = false, features = ["util"] }
+uuid              = { workspace = true, features = ["v4"] }
+sqlx-core         = { workspace = true }
+# Construct DeviceStateFrame timestamps in the WS wire-shape tests.
+chrono            = { workspace = true, features = ["clock"] }

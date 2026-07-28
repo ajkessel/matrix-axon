@@ -1,0 +1,25 @@
+[package]
+name = "axon-smoke-local-stack"
+description = "Reusable local Axon + Synapse + Postgres smoke-test stack helper."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# This crate is a black-box smoke helper. It must not depend on any product
+# axon-* crate; callers reuse it by process invocation and JSON manifest.
+
+[[bin]]
+name = "axon-smoke-local-stack"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true, features = ["clock", "serde"] }
+clap = { workspace = true }
+reqwest = { workspace = true, features = ["json", "query", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+uuid = { workspace = true, features = ["v4", "serde"] }

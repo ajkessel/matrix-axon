@@ -1,0 +1,59 @@
+name: Migrations are forward-only
+
+# Deliberately `pull_request` rather than `push`, and deliberately its own
+# workflow: the check needs the *canonical* main as its base, and this is the
+# only trigger that supplies one without a credential.
+#
+# `matrix-axon/matrix-axon` is private, and a job running on a fork
+# (`matrix-axon-adam`) has a `GITHUB_TOKEN` scoped to that fork alone — it
+# cannot read the canonical repo, so a push-triggered job has no way to fetch
+# it (verified: `fatal: repository '.../matrix-axon.git/' not found`). Its own
+# `origin/main` lags, and a stale base holds published migrations at stale
+# bytes, which reads as though the branch had modified them.
+#
+# On a pull request the base branch is already in the checkout, so there is
+# nothing to fetch and no token to arrange. It also puts the gate where the
+# merge actually happens. Branch pushes before a PR exists are covered by the
+# same script in `.githooks/pre-push`.
+#
+# `pull_request` alone, deliberately: every step below is driven by the event's
+# `head.sha`/`base.ref`, which are unset for a manual dispatch, so adding
+# `workflow_dispatch` would only offer a run that cannot do the job. To check a
+# tree by hand, run the script directly — it takes a base ref.
+on:
+  pull_request:
+
+jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
+  migrations-immutable:
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    steps:
+      # The PR head, not the default merge ref, so `base.sha..HEAD` is exactly
+      # the commits the branch adds. Full history: the check walks that range,
+      # which a shallow clone doesn't have.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Migrations are forward-only
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Prefer the base branch's live tip to the event's `base.sha`, which
+          # is recorded when the PR is opened and goes stale as main advances.
+          # A stale base holds published migrations at stale bytes and blames
+          # the branch for main's own changes — precisely the failure this
+          # check was rewritten to stop making. On a pull_request event the job
+          # runs in the base repo, so `origin` is always the canonical repo.
+          # `base.sha` remains the fallback.
+          base="$BASE_SHA"
+          if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" >/dev/null; then
+            base="origin/$BASE_REF"
+          fi
+          echo "base: $base ($(git rev-parse --short "${base:-HEAD}"))"
+          scripts/check-migrations-immutable.sh "$base"

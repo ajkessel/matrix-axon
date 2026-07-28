@@ -1,0 +1,48 @@
+[package]
+name = "axon-sync"
+description = "matrix-rust-sdk sync engine wrapper (Simplified Sliding Sync)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axon-core   = { workspace = true }
+axon-media  = { workspace = true }
+axon-search = { workspace = true }
+axon-store  = { workspace = true }
+
+# matrix-sdk + matrix-sdk-ui must move together (version skew breaks the build).
+# bundled-sqlite vendors SQLite (no system libsqlite3 needed) for the SDK's own
+# state + crypto store; e2e-encryption enables Olm/Megolm. Both are also in the
+# default feature set, but we name them so the build doesn't silently break if
+# upstream defaults change.
+matrix-sdk = { workspace = true, features = [
+    "e2e-encryption",
+    "bundled-sqlite",
+] }
+matrix-sdk-ui = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# `rt` gives TaskTracker (dynamic supervised-task spawning at runtime login).
+tokio-util = { workspace = true, features = ["rt"] }
+# StreamExt::next for the room-key arrival stream.
+futures-util = { workspace = true, features = ["std"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+serde_json = { workspace = true }
+mime = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+fs4 = { workspace = true }
+# `MediaFetcher` (axon-media) is an async trait implemented by SdkMediaProxy.
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# DB-gated lifecycle tests: seed/clean account rows directly through the pool
+# (the active no-op / deleting-conflict / invalid-MXID branches need no homeserver).
+sqlx-core = { workspace = true }
+# Homeserver-discovery tests: a tiny loopback HTTP server standing in for the
+# mxdomain (well-known) and the homeserver (versions probe).
+axum = { workspace = true }
+tokio = { workspace = true, features = ["net"] }

@@ -1,0 +1,232 @@
+#!/usr/bin/env sh
+# Start axon from a source checkout: check prerequisites, start a local
+# developer Postgres when needed, and run Cargo.
+# Uses a local Postgres instance if one is reachable; otherwise starts one via
+# Docker Compose and tears it down on exit.
+
+script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd) || exit 1
+env_file="$script_dir/.env"
+
+compose() {
+	docker compose --project-directory "$script_dir" \
+		-f "$script_dir/docker-compose.yml" "$@"
+}
+
+# --- Detect a local (non-Docker) Postgres instance ---
+# Returns 0 if reachable, 1 if not.  Requires pg_isready or nc to be on PATH;
+# if neither is available the function returns 1 (fall back to Docker).
+detect_local_pg() {
+	_host="${1:-127.0.0.1}"
+	_port="${2:-5432}"
+	if command -v pg_isready >/dev/null 2>&1; then
+		pg_isready -h "$_host" -p "$_port" -q 2>/dev/null
+	elif command -v nc >/dev/null 2>&1; then
+		nc -z -w1 "$_host" "$_port" 2>/dev/null
+	else
+		return 1
+	fi
+}
+
+# --- Determine target early ---
+
+case "${1:-server}" in
+server) _pkg="axon-server" ;;
+tui) _pkg="axon-tui" ;;
+clean) _pkg="clean" ;;
+*)
+	echo "Error: unknown target '$1'. Valid targets: server (default), tui, clean."
+	exit 1
+	;;
+esac
+
+# --- Prerequisites ---
+
+need_cmd() {
+	if ! command -v "$1" >/dev/null 2>&1; then
+		echo "Error: '$1' is not installed or not in PATH."
+		echo ""
+		echo "$2"
+		exit 1
+	fi
+}
+
+if [ "$_pkg" != "clean" ]; then
+	need_cmd cargo "Install Rust (includes cargo):
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  Or visit: https://www.rust-lang.org/tools/install"
+fi
+
+# Docker prerequisite check is deferred until after .env is loaded, so that
+# POSTGRES_HOST/PORT are set before local-Postgres detection runs.
+
+# --- Load .env if present ---
+
+if [ -f "$env_file" ]; then
+	_fixed="$(mktemp)"
+	tr -d '\r' <"$env_file" >"$_fixed"
+	if ! cmp -s "$_fixed" "$env_file"; then
+		echo "Note: .env has Windows-style line endings (CRLF); converting to Unix (LF)."
+		mv "$_fixed" "$env_file"
+	else
+		rm -f "$_fixed"
+	fi
+
+	# Match dotenv precedence: values already exported by the caller win.
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=$(printf '%s\n' "$line" | sed 's/^[[:space:]]*//')
+		case "$line" in
+		'' | '#'*) continue ;;
+		export\ *) line=${line#export } ;;
+		esac
+
+		name=${line%%=*}
+		case "$name" in
+		'' | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
+		esac
+
+		eval "current_value=\${$name-}"
+		if [ -z "$current_value" ]; then
+			value=${line#*=}
+			export "$name=$value"
+		fi
+	done <"$env_file"
+fi
+
+# --- Detect local Postgres (after .env so POSTGRES_HOST/PORT are available) ---
+
+_local_pg=0
+if [ "$_pkg" = "axon-server" ] || [ "$_pkg" = "clean" ]; then
+	_pg_host="${POSTGRES_HOST:-127.0.0.1}"
+	_pg_port="${POSTGRES_PORT:-5432}"
+	if detect_local_pg "$_pg_host" "$_pg_port"; then
+		_local_pg=1
+	fi
+fi
+
+# --- Check Docker prerequisites (only when Docker will actually be used) ---
+
+if [ "$_local_pg" = "0" ] && { [ "$_pkg" = "axon-server" ] || [ "$_pkg" = "clean" ]; }; then
+	if [ "$(uname -s)" = "Darwin" ]; then
+		tip="brew install --cask docker
+Or visit: https://docs.docker.com/desktop/mac/install/
+
+You will need to start Docker Desktop from Applications after installing, and keep it running while using axon-server."
+	else
+		tip="sudo apt install docker.io docker-compose-v2"
+	fi
+	need_cmd docker "Install Docker: ${tip}"
+
+	if ! docker info >/dev/null 2>&1; then
+		echo "Error: Docker is installed but the daemon is not running."
+		echo ""
+		if [ "$(uname -s)" = "Darwin" ]; then
+			echo "Open Docker Desktop from Applications and try again."
+		else
+			echo "Start the Docker daemon and try again:"
+			echo "  sudo systemctl start docker"
+		fi
+		exit 1
+	fi
+fi
+
+# --- Run ---
+
+if [ "$_pkg" = "clean" ]; then
+	if [ "$_local_pg" = "1" ]; then
+		echo "Note: a local Postgres instance is running at ${_pg_host}:${_pg_port}."
+		echo "The 'clean' target only manages the Docker-managed database volume."
+		echo "Nothing was changed."
+		echo ""
+		echo "To drop the database manually, run:"
+		echo "  psql -h ${_pg_host} -p ${_pg_port} -U ${POSTGRES_USER:-axon} -c 'DROP DATABASE IF EXISTS ${POSTGRES_DB:-axon};'"
+		exit 0
+	fi
+	echo "Warning: this will permanently destroy all Postgres data."
+	printf "Continue? [y/N] "
+	read -r answer
+	case "$answer" in
+	[yY] | [yY][eE][sS])
+		compose down -v
+		exit $?
+		;;
+	*)
+		echo "Aborted."
+		exit 1
+		;;
+	esac
+fi
+
+if [ "$_pkg" = "axon-server" ]; then
+	if [ "$_local_pg" = "1" ]; then
+		echo "Local Postgres detected at ${_pg_host}:${_pg_port} — skipping Docker."
+	else
+		trap 'compose down' EXIT
+
+		if ! compose up -d --wait postgres; then
+			echo "Error: Docker Compose could not start the Postgres service."
+			echo "Review the Docker output above; no database reset was attempted."
+			exit 1
+		fi
+
+		postgres_user=${POSTGRES_USER:-axon}
+		postgres_password=${POSTGRES_PASSWORD:-axon}
+		postgres_db=${POSTGRES_DB:-axon}
+		postgres_port=${POSTGRES_PORT:-5432}
+
+		pg_check() {
+			docker run --rm --network host \
+				-e "PGPASSWORD=$postgres_password" postgres:16 \
+				psql -h 127.0.0.1 -p "$postgres_port" \
+				-U "$postgres_user" -d "$postgres_db" -c "SELECT 1" 2>&1
+		}
+
+		if ! postgres_error=$(pg_check); then
+			case "$postgres_error" in
+			*"password authentication failed"* | *"role "*" does not exist"* | *"database "*" does not exist"*) ;;
+			*)
+				echo "Error: could not run the Postgres credential check:"
+				printf '%s\n' "$postgres_error"
+				echo "No database reset was attempted."
+				exit 1
+				;;
+			esac
+
+			echo "Error: could not connect to the Compose Postgres service with its configured credentials."
+			echo "The database volume was likely initialized with a different password."
+			echo ""
+			printf "Reset the database now? This destroys all existing data. [y/N] "
+			read -r reset_db
+			case "$reset_db" in
+			[yY] | [yY][eE][sS])
+				if ! compose down -v; then
+					echo "Error: Docker Compose could not remove the existing database volume."
+					exit 1
+				fi
+				if ! compose up -d --wait postgres; then
+					echo "Error: Docker Compose could not restart Postgres after the reset."
+					exit 1
+				fi
+				if ! postgres_error=$(pg_check); then
+					echo "Error: Postgres still rejects the configured credentials after the reset."
+					printf '%s\n' "$postgres_error"
+					exit 1
+				fi
+				;;
+			*)
+				echo "Aborting. Update the Compose Postgres credentials to match the existing"
+				echo "database, or run 'docker compose down -v' from the project directory to reset."
+				exit 1
+				;;
+			esac
+		fi
+	fi
+fi
+
+if [ -z "${AXON_CONFIG+x}" ] && [ -f "$script_dir/axon.toml" ]; then
+	AXON_CONFIG="$script_dir/axon.toml"
+	export AXON_CONFIG
+fi
+
+# Shift off the consumed target arg so $@ contains only extra args for the binary.
+[ $# -gt 0 ] && shift
+cargo run --manifest-path "$script_dir/Cargo.toml" -p "$_pkg" -- "$@"

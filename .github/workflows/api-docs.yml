@@ -1,0 +1,27 @@
+name: Deploy API docs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'openapi/openapi.json'
+      - '.github/workflows/api-docs.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy-docs:
+    runs-on: [api-builder]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+
+      - name: Build Redoc HTML
+        run: |
+          mkdir -p public
+          mkdir -p ~/api-docs
+          npx @redocly/cli build-docs openapi/openapi.json --output=public/index.html
+          cp public/index.html ~/api-docs

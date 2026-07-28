@@ -1,0 +1,13 @@
+# Caddy reverse proxy for the `caddy` compose profile (ADR 0052).
+# Automatic Let's Encrypt HTTPS for {$DOMAIN}, terminating TLS in front of the
+# `web` front door (SPA + proxied API) on the compose bridge, so the browser and
+# TUI both work over TLS same-origin. Set DOMAIN (and ideally ACME_EMAIL) in
+# deploy/.env. ACME_EMAIL is optional but recommended for expiry notices.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	reverse_proxy web:8080
+}

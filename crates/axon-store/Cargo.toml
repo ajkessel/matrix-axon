@@ -1,0 +1,29 @@
+[package]
+name = "axon-store"
+description = "Postgres-backed event store, room state, and account data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axon-core = { workspace = true }
+# Depend on the driver crates directly rather than the `sqlx` umbrella: the
+# umbrella unconditionally pulls `sqlx-sqlite` into the resolution graph, whose
+# `libsqlite3-sys` (links = "sqlite3") collides with matrix-sdk's rusqlite at an
+# incompatible version. Going direct keeps sqlx-sqlite out of the graph entirely.
+# aws-lc-rs (not ring) to match matrix-sdk's reqwest: rustls 0.23 refuses to
+# auto-pick a process-default CryptoProvider when two are compiled in, so both
+# TLS users must agree on one provider or TLS panics at runtime.
+sqlx-core = { workspace = true, features = ["migrate", "_rt-tokio", "_tls-rustls-aws-lc-rs"] }
+sqlx-postgres = { workspace = true, features = ["migrate", "uuid", "chrono", "json"] }
+include_dir = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

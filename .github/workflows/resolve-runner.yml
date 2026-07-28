@@ -1,0 +1,54 @@
+name: Resolve runner
+
+# Single source of truth for the "which runner should this job use" decision
+# that used to be hand-copied into every workflow's `strategy.matrix.runner`
+# (10 near-identical copies across cross-build.yml, check-environment.yml,
+# integration.yml, lint-and-clippy.yml, lint-and-test.yml, and smoke.yml): on
+# the matrix-axon org, target the self-hosted `binary-builder` runner group
+# (optionally narrowed to one label); everywhere else (forks, other owners),
+# fall back to `ubuntu-latest` so CI is actually runnable there.
+#
+# A job's own `runs-on` can't reference that job's own step outputs, so this
+# has to be a separate job/workflow rather than a composite action — callers
+# depend on this job and read its output: `runs-on: ${{
+# fromJson(needs.resolve-runner.outputs.runner-json) }}`.
+
+on:
+  workflow_call:
+    inputs:
+      group:
+        description: "Self-hosted runner group name (used only when repository_owner == 'matrix-axon')"
+        required: false
+        type: string
+        default: binary-builder
+      runner-label:
+        description: "Specific label to narrow the group to (e.g. a single named machine); empty selects the whole group"
+        required: false
+        type: string
+        default: ''
+    outputs:
+      runner-json:
+        description: "JSON value to pass through fromJson() for a job's runs-on field"
+        value: ${{ jobs.resolve.outputs.runner-json }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          RUNNER_GROUP: ${{ inputs.group }}
+          RUNNER_LABEL: ${{ inputs.runner-label }}
+        run: |
+          if [ "$REPO_OWNER" != "matrix-axon" ]; then
+            json='["ubuntu-latest"]'
+          elif [ -n "$RUNNER_LABEL" ]; then
+            json=$(jq -nc --arg group "$RUNNER_GROUP" --arg label "$RUNNER_LABEL" '{group: $group, labels: [$label]}')
+          else
+            json=$(jq -nc --arg group "$RUNNER_GROUP" '{group: $group}')
+          fi
+          echo "runner-json=$json" >> "$GITHUB_OUTPUT"

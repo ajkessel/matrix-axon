@@ -1,0 +1,11 @@
+{
+  "type": "m.room.message",
+  "sender": "@alice:example.org",
+  "event_id": "$decrypted1:example.org",
+  "origin_server_ts": 1700000000000,
+  "room_id": "!room:example.org",
+  "content": {
+    "msgtype": "m.text",
+    "body": "hello from a re-decrypted message"
+  }
+}

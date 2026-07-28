@@ -1,0 +1,23 @@
+[package]
+name = "axon-media"
+description = "Media proxy with bounded LRU disk cache for MXC URLs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axon-core = { workspace = true }
+
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "rt", "macros"] }
+uuid = { workspace = true, features = ["v4"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

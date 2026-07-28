@@ -1,0 +1,249 @@
+# clients/web — agent & developer notes
+
+Preact + TypeScript + Vite SPA (ADR 0046). Setup, scripts, and env vars are
+in [README.md](README.md); this file is the working knowledge that isn't
+obvious from the code. The governing design is
+`docs/adr/0046-web-client-framework-and-roadmap.md` — read its roadmap table
+before starting a milestone.
+
+## Ground rules
+
+- **One silo per PR** (project-wide rule): a web PR touches only this
+  package (plus its CI workflow). Server changes — even one-line ones this
+  client needs — are separate PRs on separate bookmarks.
+- **The OpenAPI contract is the boundary.** `src/api/schema.d.ts` is
+  generated (`pnpm gen:api`) and committed; CI fails if it drifts from
+  `openapi/openapi.json`. Never hand-edit it; never widen a type to work
+  around the contract — if the server lacks a field, model the gap
+  explicitly (see the `sync_state` note below).
+- **TUI parity is the spec for shared semantics.** Room-list
+  sort/filter/titles (`src/stores/room-list.ts`) are ported from
+  `clients/tui/src/app/rooms.rs`; the HTML subset mirrors
+  `clients/tui/src/html.rs`. When behavior is ambiguous, read the TUI
+  source and match it — and leave a comment pointing at the Rust original.
+- **Live testing:** message sends and other mutations against the live
+  server go to the "Axon Testing" room only
+  (`!SScJmZuEkBUnuydXdf:bostoncoop.net`). Everything else is a real account.
+  Reads are safe anywhere. Mint tokens with `axon token issue`, revoke when
+  done.
+
+## Architecture
+
+- **Service graph** (`src/services.ts`): auth provider → typed API client →
+  stores, built once in `createServices()`, provided via context
+  (`useServices()`). Tests build the same graph over msw + in-memory
+  storage via `src/test/services.ts` — components never construct services.
+- **State is @preact/signals** in plain store factories
+  (`src/stores/*.ts`), unit-testable without rendering. Direct
+  `signal.value = x` writes are the idiom; the `react-hooks/immutability`
+  lint rule is disabled for exactly this reason.
+- **Auth seam** (`src/auth/provider.ts`, per ADR 0031): `getToken()` (sync
+  or async), `onAuthFailure()`, `LoginBootstrap` UI slot. Token-paste over
+  `localStorage` is the alpha implementation; OAuth/PKCE and a Tauri
+  keychain provider must fit this interface without consumer changes.
+- **Settings** (`src/stores/settings.ts`): one schema-versioned
+  `localStorage` envelope. Add fields with defaults (old envelopes must
+  parse); bump the version only for incompatible reshapes. Anything
+  unparseable resets to defaults.
+- **Timelines** (`src/stores/timeline.ts`): server pages newest-first;
+  stores hold ascending display order. One factory serves both the room
+  timeline and thread timelines (`threadRoot` param). Sends render an
+  optimistic local echo (`TimelineEvent.localEcho`, a client-only extension
+  of `EventDto` — not server-driven, same pattern as `sync_state` below) with
+  a synthetic `local:<uuid>` event id, then reconcile by re-fetching the
+  confirmed event and patching it in place, or marking the echo `failed`
+  (retryable via `retrySend`/discardable via `discardSend`) on error;
+  edit/redact/react use the same re-fetch-and-patch shape against a real
+  event id (scroll position survives throughout — no full reload).
+- **Sanitizer** (`src/html/sanitize.ts`): DOMPurify + Matrix subset +
+  transforms (data-mx-color/bg → inline style, spoilers → click-to-reveal,
+  legacy `font color`, mx-reply dropped with contents, bare-URL
+  linkification skipping a/code/pre). Gotcha: custom attributes whose
+  values look like URI schemes need `ADD_URI_SAFE_ATTR` or DOMPurify drops
+  them. `<img>` is admitted for `mxc://` only (M-W8, ADR 0064): the
+  `uponSanitizeElement` hook copies a safe `mxc://` src to `data-mxc` and
+  always drops `src`, so a remote `http(s)` src (a tracking pixel we cannot
+  proxy) never survives; `FormattedBody` resolves `data-mxc` after mount.
+- **Timeline scrolling** (`RoomPage`, ADR 0076): the scroller is anchored by
+  hand (`overflow-anchor: none`) — a held row plus the scroll offset it was
+  measured at, so the measurement survives the reader's own scrolling. Do not
+  re-capture the anchor per scroll event: reading geometry forces the layout
+  that renders incoming rows, so the capture triggers the growth it means to
+  measure. `.event-row` deliberately carries **no** `content-visibility`; its
+  size guesses were the shifts. Windowing (#315) is the way back to a bounded
+  row count.
+- **Media** (`src/media/`, ADR 0064): a browser cannot put a bearer token on
+  `<img src>`, so `MediaService` fetches every `mxc://` through the proxy and
+  hands the DOM a blob URL. The cache **refcounts** — the timeline is not
+  windowed, so a size-based LRU would revoke a URL a mounted `<img>` still
+  points at; `acquire()` returns a handle whose `release()` the caller must
+  call, and only zero-ref entries are eligible for the 32-entry LRU. Lazy-load
+  via one shared `IntersectionObserver` (`useMediaBlob`), which falls back to
+  eager acquire under jsdom. A 200 of raw ciphertext (server lacks the key)
+  fails only at `<img>` decode, caught by `onError`.
+- **Markdown-on-send** (`src/markdown/markdown.ts`): plain prose sends a
+  bare body; detected formatting sends `org.matrix.custom.html`. The server
+  never interprets Markdown. Raw inline HTML in composer input is escaped.
+- **Routing**: history mode (signed off). The deep-link contract is
+  `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
+  search (M-W10) and the mobile clients build on it; do not change it.
+  Deployment requires unknown-path → `index.html` rewrite.
+- **Live ephemerals** (`src/stores/ephemeral.ts`): `ephemeral.passthrough`
+  frames are live-only overlays. `m.typing` is whole-list replace per room,
+  self-expires, and clears on socket gaps. `m.receipt` is parsed from Matrix's
+  nested raw content; the UI renders public read receipts only on the current
+  user's own messages. Presence is still deferred.
+
+## Guardrails (from the 2026-07 review)
+
+Recurring failure modes from the M-W1–M-W8 review
+(`docs/reviews/2026-07-web-client-review.md`); the WCR numbers below refer to
+its findings. The repo-wide guardrails in the root `AGENTS.md` (notably
+"user-entered text must survive a failed mutation" and "every view of server
+state declares its freshness story") apply here too.
+
+- **Keys go on the outermost element a `.map()` returns.** If a row needs a
+  rendered sibling (a day separator), wrap both in `<Fragment key={id}>` —
+  never a bare `<>`. Preact reconciles unkeyed fragments by index, so a
+  prepend attaches per-row state (an open confirm, a picker) to the wrong
+  row. (WCR-01; `RoomList.tsx` learned this once already.)
+- **`openapi-fetch` rejects on network failure; only HTTP errors come back
+  as the `{error}` envelope.** Every fire-and-forget call (`void
+api.GET(...)`, a background `.then`) must attach a rejection handler: wrap
+  it in `inBackground(...)` (`src/api/client.ts`) when failure needs no UI,
+  or handle the rejection yourself when it does (`ServerStatus.tsx`,
+  `EditHistory.tsx`). Corollary: a vitest run whose tests all pass but whose
+  exit code is nonzero with an "Unhandled Errors" block is a **failing**
+  gate; that block is the tripwire for exactly this bug class, never noise
+  to ship past. (WCR-02/04.)
+- **A store method that replaces or splices a signal-held collection must
+  assume a sibling request is in flight.** Guard with a request-generation
+  token and discard stale completions — two responses for the same resource
+  can land out of order (pagination vs. reconnect gap-fill is the canonical
+  interleaving). (WCR-03.)
+- **Overlays follow one modal contract:** capture-phase Escape, focus saved
+  on open and restored on close, Tab trapped inside. Use
+  `useModalFocus()` (`src/components/use-modal-focus.ts`) for the focus
+  half and a capture-phase `useShortcuts` Escape binding for the other;
+  `Lightbox.tsx` shows both together. (WCR-14.)
+- **Mobile overlay exits need a real-browser hit-test.** When a mobile flow
+  opens content from an overlay or drawer — for example Settings back to a
+  room, search result to a timeline, or Room Information member actions to a
+  DM — add/update a Playwright layout spec that checks the destination pane's
+  center with `expectPaneCenterUncovered()` (`e2e/helpers.ts`). A jsdom test
+  and `toBeVisible()` can both pass while a stale fixed panel is still sitting
+  on top of the timeline.
+- **Composite in-memory cache keys join with `'\0'`** (as in
+  `media-service.ts`), never a printable character — and always written as
+  the _escape sequence_, never a raw control byte in source. A raw NUL sat
+  in `device-state.ts` and rendered invisibly, making the code look like it
+  joined on a space; it fooled the 2026-07 review into reporting exactly
+  that (WCR-11's premise was this artifact, not a real space).
+
+## Diagnosing reports that only reproduce on someone else's device
+
+The loop is in `docs/adr/0077-web-on-device-perf-readout.md`; the tooling is
+**Settings → Performance instrumentation** (no URL editing, no tethering to a
+Mac). Ask for a screen recording, read the on-screen readout out of the video,
+and measure the behaviour from the same frames. These are the lessons that cost
+the most time in the ADR 0076 investigation:
+
+- **Try the scripted reproduction before asking for a recording.**
+  `playwright.config.ts` has a **WebKit project at the iPhone 13 profile**
+  (viewport, UA, scale factor, touch), added by ADR 0071 and running here on
+  Linux — no Mac, no device. Layout bugs are input-independent, so a spec that
+  scrolls and records an element's `getBoundingClientRect().top` measures a
+  shift directly, in seconds per iteration. The ADR 0076 investigation ran nine
+  record-and-analyse cycles to measure what `page.evaluate` would have returned
+  as a number. Keep the device loop for what only a device can show: CPU-bound
+  behaviour, real momentum scrolling, and confirming a fix in the reporter's
+  hands.
+- **Instrument for the device that has the problem.** iOS Safari has no
+  on-device console, so a mark only a desktop console can reach does not help
+  with the reports that most need help. `PerfOverlay` draws the tail of selected
+  marks over the app precisely so a recording captures the numbers and the
+  behaviour they explain in the same frames. When adding instrumentation, ask
+  whether the reporter could read it.
+- **Instrument the app before theorising about the engine.** Every
+  browser-behaviour hypothesis in that investigation was wrong — missing WebKit
+  scroll anchoring, inertial scrolling overriding `scrollTop`, the correction
+  causing the jump — and every actual defect was ours. Reading a value back
+  after writing it (`applied === requested`) falsified a day of theory in one
+  recording.
+- **Confirm the deployed bundle contains the fix before debugging it.** Mark
+  names are string literals and survive minification, so
+  `(await (await fetch(src)).text()).includes('some:mark:name')` settles it in
+  one line. A stale deploy looks exactly like a fix that does not work.
+- **A video is a measuring instrument.** Frame extraction plus 2D phase
+  correlation gives per-frame displacement. Two traps: 1D row-mean profiles
+  alias against the ~50px message-row pitch, and only near-still frames yield
+  meaningful displacements — a collapsed correlation peak (< 0.5) means the
+  content was _replaced_, not moved (a page landing, a slice replacement).
+- **The overlay is a ten-line buffer.** A chatty mark crowds out everything
+  else; a chain that re-armed on every scroll frame once hid the very marks
+  under investigation. Curate `OVERLAY_PREFIXES` (`src/perf.ts`) when adding.
+
+## Test environment gotchas (all discovered the hard way)
+
+- jsdom under Node 25 exposes `window.localStorage` as a bare object —
+  inject `memoryStorage()` from `src/test/memory-storage.ts` instead.
+- testing-library auto-cleanup needs vitest globals (not enabled): add
+  `afterEach(cleanup)` in every component test file.
+- msw handler paths: use `:param` segments for ids containing `$`/`:`
+  (Matrix event/room ids) — literal or percent-encoded paths don't match.
+- Generated free-form objects (`content`, `relates_to`) type as
+  `Record<string, never>`; test fixtures take them loosely and cast
+  `as unknown as EventDto`.
+- preact-iso's `Router` type wants ≥ 2 children; add a `default` route.
+- Run pnpm from this directory — from the repo root it fails with
+  `ERR_PNPM_NO_PKG_MANIFEST`.
+
+## Server gaps this client already accounts for
+
+- **ADR 0030 `sync_state`** is unimplemented server-side. The accounts UI
+  reads it opportunistically through one typed extension
+  (`src/stores/accounts.ts`); when the server adds the field, `gen:api`
+  makes it real and the extension alias gets deleted. Tracked in the parent
+  repo's issues.
+- **ADR 0055 `is_direct`** is docs-only; the DM heuristic (blank name +
+  alias, `isLikelyDm`) is the interim, swapped in one function when the
+  server field lands — same plan as the TUI.
+
+## Roadmap position (ADR 0046 table)
+
+M-W1–M-W8.5 are done (M-W7 was built before M-W6
+deliberately — messaging is pure HTTP; M-W8.5, media send, was unblocked late
+by M15's upload API and so sits between M-W8 and M-W9). Remaining: **M-W9**
+(verification/SAS + trust glyphs), **M-W10** (search UI over `GET /v1/search`, deep-linking via
+`?event=`), **M-W11** (hardening/a11y/parity audit), **M-W12** (Tauri —
+no service workers, `document.cookie`, or `window.open` anywhere, ever).
+
+## Testing traps
+
+- **A jsdom `File` is not undici's `Blob`.** Hand a `File` to `fetch` as a
+  request body under vitest and the body arrives at msw as the literal string
+  `"undefined"` — the `Content-Type` still comes through, so the request _looks_
+  right and only the bytes are silently wrong. Upload **bytes** therefore cannot
+  be asserted in a unit test; `e2e/media-send.spec.ts` exists to assert them in
+  a real browser (it compares a digest, since media is binary). Unit tests may
+  still assert the query params, the headers, and the failure mapping.
+- **`tsc --noEmit` is not the typecheck.** Only `pnpm build` (`tsc -b`) uses the
+  project's real config. The generated schema types an event's `content` as
+  `Record<string, never>`, and `--noEmit` waves through assignments to it that
+  the build rejects — which is why local echoes cast (`as unknown as
+TimelineEvent`).
+- **The e2e mock server outlives a single spec file** (`reuseExistingServer`).
+  A spec that appends to its seeded `timeline` array pollutes every later spec;
+  `send-media` deliberately only broadcasts and records for `/events/:id`.
+- **`e2e/media.spec.ts` is flaky here:** headless `IntersectionObserver`
+  sometimes never fires, so lazy-loaded media stays a skeleton and no proxy
+  fetch is issued. It reproduces on unmodified code — don't chase it as a
+  regression in your diff.
+
+## Definition of done for a milestone
+
+`pnpm test && pnpm lint && pnpm format:check && pnpm build` all green; new
+logic has unit tests (stores) and interaction tests (pages, msw-backed);
+README status paragraph updated; a human pass against the live server
+(read-only outside the test room); one commit on a jj bookmark stacked on
+the previous milestone, described but not pushed unless asked.

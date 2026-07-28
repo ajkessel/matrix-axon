@@ -1,0 +1,61 @@
+name: Web e2e
+
+# The M-W6 Playwright lane (ADR 0061): headless Chromium drives the built app
+# against the dependency-free mock backend in `clients/web/e2e/mock-server.mjs`.
+# Manual dispatch only — it needs a browser runner, so it does not gate every
+# push (the M-W1 workflow convention). `pnpm test:e2e` runs the same thing.
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
+  web-e2e:
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+
+    defaults:
+      run:
+        working-directory: clients/web
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: clients/web/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The mock backend serves `dist/`, so the app must be built before the
+      # lane runs; Playwright's webServer only starts the mock.
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run e2e lane
+        run: pnpm test:e2e
+
+      # The CI reporter is `github` (inline annotations), so the artifact worth
+      # keeping is the trace `retries: 1` captures on a first-attempt failure.
+      - uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: playwright-traces
+          path: clients/web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

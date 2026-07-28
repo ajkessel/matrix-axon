@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-axon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-axon}
+      POSTGRES_DB: ${POSTGRES_DB:-axon}
+    ports:
+      # Host port is configurable to avoid clashing with a local Postgres
+      # (e.g. Homebrew/Postgres.app on macOS). Override POSTGRES_PORT in .env
+      # and update DATABASE_URL to match.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - axon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` against the local socket — reports ready only once initdb
+      # has finished and the real server is accepting connections (the brief
+      # initdb bootstrap server doesn't count). Lets `docker compose up --wait`
+      # and the integration script block on actual readiness rather than a fixed
+      # sleep. `$$VAR` escapes compose interpolation so the container shell reads
+      # its own env.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # Local Matrix homeserver for integration testing axon against a real server.
+  # Gated behind the `integration` profile so normal `docker compose up` (and
+  # the Postgres-only dev loop) never starts it:
+  #
+  #   docker compose --profile integration up -d synapse
+  #
+  # Runs as root to keep first-boot signing-key generation + sqlite writes to
+  # the named volume simple (no uid-991 chown dance); fine for a throwaway
+  # localhost server. `--generate-keys` is idempotent, so restarts are cheap.
+  synapse:
+    image: matrixdotorg/synapse:latest
+    profiles: ["integration"]
+    user: root
+    environment:
+      SYNAPSE_SERVER_NAME: localhost
+      SYNAPSE_REPORT_STATS: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        python -m synapse.app.homeserver -c /data/homeserver.yaml --generate-keys &&
+        exec python -m synapse.app.homeserver -c /data/homeserver.yaml
+    volumes:
+      - axon-synapse-data:/data
+      - ./docker/synapse/homeserver.yaml:/data/homeserver.yaml:ro
+      - ./docker/synapse/log.config:/data/log.config:ro
+    ports:
+      - "${SYNAPSE_PORT:-8008}:8008"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/health')"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  axon-pgdata:
+  axon-synapse-data:

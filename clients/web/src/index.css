@@ -1,0 +1,4259 @@
+/* Theme tokens. `system` follows prefers-color-scheme (no data-theme
+   attribute); an explicit choice sets data-theme="light|dark" on <html>
+   (see stores/settings.ts applyTheme). */
+:root {
+  --bg: #ffffff;
+  --bg-raised: #f6f6f8;
+  --panel: #ffffff;
+  --fg: #1a1a20;
+  --muted: #6a6a74;
+  --border: #d9d9e0;
+  --accent: #3556c4;
+  --accent-strong: #2444a8;
+  /* The open room's row. Hover is `--bg-raised`, a neutral lightness shift, so
+     the selected row differs in *hue* — otherwise the two read the same. */
+  --accent-soft: #e7ebf8;
+  --accent-soft-hover: #dae1f4;
+  --danger: #b3362e;
+  --warn: #9a6700;
+  --ok: #1a7f37;
+  --room-avatar-fg: #ffffff;
+  --room-avatar-border: rgb(0 0 0 / 0.14);
+  --room-avatar-0: #3556c4;
+  --room-avatar-1: #0f766e;
+  --room-avatar-2: #a24d00;
+  --room-avatar-3: #8f3a84;
+  --room-avatar-4: #2f6f31;
+  --room-avatar-5: #9b3a2f;
+  --room-avatar-6: #5a4bb0;
+  --room-avatar-7: #27627a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #16161c;
+    --bg-raised: #1f1f28;
+    --panel: #1f1f28;
+    --fg: #e6e6ec;
+    --muted: #9c9ca8;
+    --border: #34343e;
+    --accent: #7c96ec;
+    --accent-strong: #9aacff;
+    --accent-soft: #242839;
+    --accent-soft-hover: #2a3046;
+    --danger: #e5776f;
+    --warn: #d4a72c;
+    --ok: #4ac26b;
+    --room-avatar-fg: #ffffff;
+    --room-avatar-border: rgb(255 255 255 / 0.16);
+    --room-avatar-0: #4868d9;
+    --room-avatar-1: #168178;
+    --room-avatar-2: #b75c0b;
+    --room-avatar-3: #a34c97;
+    --room-avatar-4: #3b7d3e;
+    --room-avatar-5: #ad4a3d;
+    --room-avatar-6: #6b5bc4;
+    --room-avatar-7: #34718a;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #16161c;
+  --bg-raised: #1f1f28;
+  --panel: #1f1f28;
+  --fg: #e6e6ec;
+  --muted: #9c9ca8;
+  --border: #34343e;
+  --accent: #7c96ec;
+  --accent-strong: #9aacff;
+  --accent-soft: #242839;
+  --accent-soft-hover: #2a3046;
+  --danger: #e5776f;
+  --warn: #d4a72c;
+  --ok: #4ac26b;
+  --room-avatar-fg: #ffffff;
+  --room-avatar-border: rgb(255 255 255 / 0.16);
+  --room-avatar-0: #4868d9;
+  --room-avatar-1: #168178;
+  --room-avatar-2: #b75c0b;
+  --room-avatar-3: #a34c97;
+  --room-avatar-4: #3b7d3e;
+  --room-avatar-5: #ad4a3d;
+  --room-avatar-6: #6b5bc4;
+  --room-avatar-7: #34718a;
+}
+
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+
+  /* Layout (ADR 0062). */
+  --sidebar-width: 22rem;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* ---- shell ---- */
+
+.shell {
+  position: fixed;
+  top: var(--app-viewport-top, 0);
+  left: var(--app-viewport-left, 0);
+  display: flex;
+  flex-direction: column;
+  width: var(--app-viewport-width, 100%);
+  height: calc(
+    var(--app-viewport-height, 100dvh) -
+      var(--app-keyboard-accessory-inset, 0px)
+  );
+  min-height: 0;
+  overflow: hidden;
+}
+
+.topbar {
+  flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  /* Brand, nav, indicator and two buttons do not fit a phone on one line. */
+  flex-wrap: wrap;
+}
+
+.topbar-icon {
+  display: none;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.composer-send-icon {
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+@media (min-width: 48rem) {
+  .composer-send-icon {
+    display: none;
+  }
+}
+
+.topbar-rooms-button,
+.topbar-room-title {
+  display: none;
+}
+
+.topbar-icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.topbar-count-badge {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.45rem;
+  min-width: 1.05rem;
+  height: 1.05rem;
+  padding: 0 0.22rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.05rem;
+  text-align: center;
+}
+
+@media (max-width: 47.99rem) {
+  .topbar {
+    flex-wrap: nowrap;
+    gap: 0.45rem;
+    padding: 0.45rem 0.55rem;
+  }
+
+  .mobile-room-shell .topbar-brand {
+    display: none;
+  }
+
+  .mobile-room-shell .topbar-rooms-button {
+    display: inline-flex;
+    flex: none;
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  .topbar-nav {
+    flex: none;
+  }
+
+  .topbar-label,
+  .conn-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .mobile-room-shell .topbar-room-title {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    padding: 0.25rem 0.35rem;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .mobile-room-shell .topbar-room-title span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conn {
+    flex: none;
+    gap: 0;
+    padding-inline: 0.2rem;
+  }
+
+  .topbar nav {
+    flex: none;
+  }
+
+  .topbar nav a,
+  .topbar-icon-button,
+  .help-button {
+    flex: none;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0.35rem;
+  }
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 1rem;
+  flex: 1;
+}
+
+.topbar nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.topbar nav a:hover {
+  color: var(--fg);
+}
+
+@media (max-width: 47.99rem) {
+  .topbar .topbar-icon {
+    display: block;
+  }
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.conn-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.conn-live .conn-dot {
+  background: var(--ok);
+}
+
+.conn-connecting .conn-dot,
+.conn-reconnecting .conn-dot {
+  background: var(--warn);
+}
+
+.conn-offline .conn-dot {
+  background: var(--danger);
+}
+
+.conn-reconnecting .conn-dot {
+  animation: conn-pulse 1s ease-in-out infinite;
+}
+
+@keyframes conn-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-reconnecting .conn-dot {
+    animation: none;
+  }
+}
+
+/* ---- two-pane body (ADR 0062) ----
+
+   Two breakpoints, written as literals because custom properties are not
+   allowed in `@media` conditions:
+
+     48rem — below it only one pane shows, chosen by the route.
+     64rem — below it the thread panel reverts to a fixed overlay drawer.
+
+   Both panes stay mounted at every width; `display: none` decides what is
+   visible, so the sidebar never loses its scroll position or its filters. */
+
+.shell-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* `overflow-x: hidden` is not redundant with `overflow-y: auto`: a box that
+   scrolls on one axis computes `visible` to `auto` on the other, so both panes
+   were horizontal scroll containers by accident. Content that is legitimately
+   wider than the pane (a code block, a table) scrolls inside its own box, so
+   nothing here is unreachable — but sub-pixel layout, which a 3x phone screen
+   produces constantly, made `scrollWidth` exceed `clientWidth` by a pixel and
+   handed the timeline a horizontal scrollbar it should never have had. */
+.sidebar {
+  flex: 0 0 var(--sidebar-width);
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1rem;
+  border-right: 1px solid var(--border);
+  box-sizing: border-box;
+}
+
+.shell main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1.5rem;
+  box-sizing: border-box;
+}
+
+/* Utility pages (accounts, licenses, 404) keep the old centered column and
+   drop the sidebar at every width — they are not room surfaces. */
+.shell-body.mode-utility .sidebar {
+  display: none;
+}
+
+.shell-body.mode-utility main {
+  max-width: 56rem;
+  width: 100%;
+  margin-inline: auto;
+}
+
+/* The sidebar's controls stack: they were laid out for a 56rem column, and
+   the five filter chips do not fit one line of it. */
+.sidebar .room-controls {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.6rem;
+}
+
+.sidebar .filter-group {
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+}
+
+.sidebar .name-filter-shell {
+  max-width: none;
+}
+
+.sidebar .room-control-row {
+  justify-content: space-between;
+}
+
+@media (min-width: 48rem) {
+  .shell-body.sidebar-collapsed .sidebar {
+    display: none;
+  }
+}
+
+/* Single pane: the route picks which one. `/` is the room list, a room URL is
+   the timeline — exactly the pre-0062 behavior, reached via the brand link or
+   browser back. */
+@media (max-width: 47.99rem) {
+  .shell.mobile-room-shell main {
+    padding-top: 0.4rem;
+    padding-bottom: 0.35rem;
+  }
+
+  .mobile-room-shell .timeline {
+    margin-top: 0.25rem;
+  }
+
+  .shell-body.mode-room .sidebar {
+    display: none;
+  }
+
+  .shell-body.mode-room-entry .sidebar {
+    display: none;
+  }
+
+  .shell-body.mode-rooms main {
+    display: none;
+  }
+
+  .shell-body.mode-rooms .sidebar {
+    flex: 1;
+    border-right: none;
+  }
+}
+
+.signin {
+  max-width: 28rem;
+  margin: 4rem auto;
+  padding: 0 1rem;
+}
+
+.signin-options,
+.sso-options {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.signin-divider {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.remember-me {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+}
+
+.sso-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+  gap: 0.75rem;
+  border-radius: 4px;
+  padding: 0 1rem;
+  font:
+    500 14px/20px 'Google Sans',
+    Roboto,
+    Arial,
+    sans-serif;
+}
+
+.sso-button:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+
+.sso-button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.sso-icon {
+  display: inline-flex;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+}
+
+.sso-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.sso-google {
+  border-color: #747775;
+  background: #ffffff;
+  color: #1f1f1f;
+}
+
+.sso-microsoft {
+  border-color: #8c8c8c;
+  background: #ffffff;
+  color: #5e5e5e;
+}
+
+.sso-apple {
+  border-color: #000000;
+  background: #000000;
+  color: #ffffff;
+}
+
+.sso-generic {
+  border-color: var(--border);
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.error {
+  color: var(--danger);
+}
+
+/* ---- shared elements ---- */
+
+a {
+  color: var(--accent);
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+
+h2 {
+  font-size: 1.05rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.page > h1 {
+  margin-top: 0;
+}
+
+.room-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* Row: stream beside thread (ADR 0062). */
+.room-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-stream {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  /* Containing block for the drag-and-drop overlay (M-W8.5). */
+  position: relative;
+}
+
+.room-head h1:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.room-title-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin: 1.25rem 0;
+  background: var(--bg-raised);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.banner.error {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+}
+
+.shell-banner {
+  flex: none;
+  margin: 0.75rem 1.25rem 0;
+}
+
+.banner.notice.success {
+  border: 1px solid var(--ok);
+  color: var(--ok);
+}
+
+.banner.notice.info {
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+/* Inline validation hint under a form field (e.g. the recovery-key form). */
+.field-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.85em;
+}
+
+.field-hint.error {
+  color: var(--danger);
+}
+
+/* ---- account cards ---- */
+
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.card-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.account-add {
+  margin-top: 1rem;
+}
+
+.account-deactivated .card-head strong {
+  color: var(--muted);
+}
+
+.badge {
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  color: var(--muted);
+}
+
+.badge.state-active {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.sync-running {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.state-deleting,
+.badge.sync-offline,
+.badge.sync-error,
+.badge.sync-terminated {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.badge.verified {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.badge.sync-connecting,
+.badge.sync-syncing,
+.badge.sync-idle {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--danger);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.status-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+}
+
+/* ---- room list ---- */
+
+.room-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.filter-group {
+  display: flex;
+  gap: 0.2rem;
+}
+
+.chip {
+  border-radius: 999px;
+  padding: 0.18rem 0.48rem;
+  font-size: 0.8rem;
+}
+
+.chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.name-filter-shell {
+  position: relative;
+  display: inline-flex;
+  flex: 1;
+  min-width: 10rem;
+  max-width: 16rem;
+}
+
+.name-filter {
+  width: 100%;
+  padding-right: 2.1rem;
+}
+
+.name-filter::-webkit-search-cancel-button,
+.name-filter::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.name-filter-clear {
+  position: absolute;
+  top: 50%;
+  right: 0.2rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  transform: translateY(-50%);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.name-filter-clear:hover,
+.name-filter-clear:focus-visible {
+  color: var(--fg);
+  background: var(--bg-raised);
+}
+
+.sort-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.room-control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.room-actions-menu {
+  position: relative;
+  flex: none;
+}
+
+.room-actions-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+
+.room-actions-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.room-actions-plus {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.room-actions-plus::before,
+.room-actions-plus::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1.05rem;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+  transform: translate(-50%, -50%);
+}
+
+.room-actions-plus::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.room-actions-label {
+  white-space: nowrap;
+}
+
+.room-actions-menu[open] summary,
+.room-actions-menu summary:hover,
+.room-actions-menu summary:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+}
+
+.room-actions-popover {
+  position: absolute;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 0.25rem;
+  min-width: 7.5rem;
+  margin-top: 0.35rem;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.room-actions-menu:not([open]) .room-actions-popover {
+  display: none;
+}
+
+.room-actions-popover a,
+.room-actions-popover button {
+  display: block;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.35rem 0.55rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.room-actions-popover a:hover,
+.room-actions-popover a:focus-visible,
+.room-actions-popover button:not(:disabled):hover,
+.room-actions-popover button:not(:disabled):focus-visible {
+  background: var(--bg-raised);
+}
+
+.room-actions-popover button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+@media (max-width: 47.99rem) {
+  .room-actions-menu summary {
+    min-width: 2.25rem;
+    padding-inline: 0.55rem;
+    border-radius: 999px;
+  }
+
+  .room-actions-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+select {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* Only the rows overlapping the viewport are rendered; the rest are stood in
+   for by the list's own top/bottom padding, set inline. `position: relative`
+   anchors the pinned separator, which is taken out of flow so that every row
+   shares one pitch — the windowing math in `virtual-window.ts` assumes it. */
+.room-list {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.room-row {
+  display: flex;
+  align-items: center;
+}
+
+/* The rule between rows is an inset shadow, not a border: a border would make
+   every row but the first 1px taller, and a list of uniform rows is what lets
+   the window be computed from a single measured pitch. */
+.room-row.rule {
+  box-shadow: inset 0 1px 0 var(--border);
+}
+
+/* Two lines: the name, then a muted account/activity line. Side by side, the
+   nowrap meta could not shrink — `min-width: auto` on a flex item is its
+   min-content width — so the name gave up every pixel instead, and once a
+   second account put a user id in the meta the name vanished entirely. */
+.room-link {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.9rem;
+  color: var(--fg);
+  text-decoration: none;
+  min-width: 0;
+}
+
+.room-avatar {
+  --room-avatar-bg: var(--room-avatar-0);
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--room-avatar-bg);
+  color: var(--room-avatar-fg);
+  border: 1px solid var(--room-avatar-border);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.room-avatar-color-1 {
+  --room-avatar-bg: var(--room-avatar-1);
+}
+
+.room-avatar-color-2 {
+  --room-avatar-bg: var(--room-avatar-2);
+}
+
+.room-avatar-color-3 {
+  --room-avatar-bg: var(--room-avatar-3);
+}
+
+.room-avatar-color-4 {
+  --room-avatar-bg: var(--room-avatar-4);
+}
+
+.room-avatar-color-5 {
+  --room-avatar-bg: var(--room-avatar-5);
+}
+
+.room-avatar-color-6 {
+  --room-avatar-bg: var(--room-avatar-6);
+}
+
+.room-avatar-color-7 {
+  --room-avatar-bg: var(--room-avatar-7);
+}
+
+.room-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center center;
+}
+
+.room-copy {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.room-link:hover {
+  background: var(--bg-raised);
+}
+
+/* The open room. `aria-current="page"` is the state; the styling just reads it,
+   so assistive tech and the eye learn the same thing. The bar is an inset
+   shadow rather than a border so the row's text does not shift by 3px. */
+.room-link[aria-current='page'] {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.room-link[aria-current='page']:hover {
+  background: var(--accent-soft-hover);
+}
+
+.room-link[aria-current='page'] .room-name {
+  font-weight: 600;
+}
+
+/* Arrow keys rove focus through these links (ADR 0078), so the focus ring has
+   to be visible and distinct from the selected row. `outline-offset` is
+   negative because `.room-list` clips overflow. */
+.room-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.room-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.room-title-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+/* `text-overflow` ellipsizes a block's inline content, never a flex item — so
+   the name, not `.room-title`, is what has to own the overflow. Without this
+   the title was hard-clipped with no ellipsis to admit it. */
+.room-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A truncated name is fine; a truncated unread count is not. */
+.room-title .badge,
+.room-title-meta {
+  flex: none;
+}
+
+.room-title-meta,
+.room-meta,
+.room-preview {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-overflow: '...';
+  font-size: 0.85rem;
+}
+
+.room-title-meta {
+  max-width: 35%;
+}
+
+.badge.dm {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.badge.unread-count {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Out of flow (`top` is set inline from the measured pitch), so it marks the
+   pinned boundary without giving that one row a different height. It lands on
+   the boundary row's own rule, which is why that row is asked not to draw one. */
+.room-separator {
+  position: absolute;
+  left: 0.9rem;
+  right: 0.9rem;
+  height: 0;
+  margin: 0;
+  border-top: 1px dashed var(--border);
+  list-style: none;
+  pointer-events: none;
+}
+
+button.pin {
+  font-size: 1rem;
+  padding: 0.35rem 0.7rem;
+}
+
+button.pin[aria-pressed='true'] {
+  color: var(--warn);
+}
+
+/* ---- room timeline ---- */
+
+.room-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.room-head h1 {
+  margin: 0;
+}
+
+@media (max-width: 47.99rem) {
+  .room-head {
+    display: none;
+  }
+}
+
+.room-title-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.room-title-button span {
+  overflow-wrap: anywhere;
+}
+
+.room-title-button::after {
+  content: 'i';
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.room-title-button:hover,
+.room-title-button:focus-visible {
+  color: var(--accent);
+}
+
+.room-title-button:hover::after,
+.room-title-button:focus-visible::after,
+.room-title-button[aria-expanded='true']::after {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* The message scroller — a *nested* scroll container inside `main`, and the
+   element that actually holds the timeline, so it is what a phone scrolls. Its
+   `overflow-y: auto` silently made `overflow-x` compute to `auto` too, so it
+   was a horizontal scroll region as well: content fits on desktop, but iOS
+   rubber-bands a two-axis `auto` container by a sub-pixel, which is the small
+   sideways drift here. `clip` rather than `hidden` because `hidden` still
+   establishes a scroll container iOS can pan — `clip` establishes none. Wide
+   message content (code blocks, tables) carries its own scrollbar, so nothing
+   here becomes unreachable. Matches the `overflow-x: hidden` on `main` and
+   `.sidebar`; `clip` would be marginally stronger but the build's minifier
+   collapses the shorthand and drops a `hidden`→`clip` fallback, which would
+   leave older iOS with no rule at all. */
+.timeline {
+  margin-top: 1rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  /* `RoomPage` anchors this scroller itself. The browser's own anchoring picks
+     its anchor by heuristic, arrived in WebKit only in Safari 27, and would
+     otherwise correct the same shift twice. One implementation, same behaviour
+     on every engine. */
+  overflow-anchor: none;
+}
+
+.timeline-edge {
+  display: block;
+  margin: 0 auto 0.75rem;
+  text-align: center;
+}
+
+p.timeline-edge {
+  color: var(--muted);
+}
+
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.timeline-list-shell {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: 0;
+}
+
+.day-separator {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0.9rem 0 0.4rem;
+  border-bottom: 1px solid var(--border);
+  line-height: 0.1;
+}
+
+.day-separator::before {
+  content: '';
+}
+
+.event-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  column-gap: 0.55rem;
+  align-items: start;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  /* No `content-visibility` here, deliberately. Skipping layout for offscreen
+     rows means their height is a guess until they render, and the guess is
+     wrong by 60-130px for a wrapped body or a reaction row — measured on a
+     phone, in the marks this file's scroll anchoring emits. Every one of those
+     corrections lands above the reader mid-scroll-back, which is what made
+     scrolling lurch. It was introduced against the ADR 0071 diagnosis that the
+     phone "back to room list" cost scaled with timeline length; ADR 0075 then
+     found the real cause (racing WebKit's own swipe-back) and fixed it, so
+     there is nothing left on the other side of the trade. Windowing (#315) is
+     the way back to a bounded row count. */
+}
+
+@media (min-width: 48rem) {
+  .event-row {
+    transition: background-color 120ms ease;
+  }
+
+  .event-row:hover,
+  .event-row:focus-within,
+  .event-row.actions-open {
+    background: var(--bg-raised);
+  }
+
+  .event-row.highlighted:hover,
+  .event-row.highlighted:focus-within,
+  .event-row.highlighted.actions-open {
+    background: var(--accent-soft-hover);
+  }
+}
+
+/* The jump target (`?event=`). Outline alone got lost among busy rows; the
+   tint is the room-list selection's hue-shift trick applied to a message. */
+.event-row.highlighted {
+  outline: 2px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+.event-row:has(.reaction-senders-tooltip) {
+  z-index: 20;
+}
+
+.event-row.state-event {
+  font-size: 0.85rem;
+}
+
+/* A rendered membership/profile transition (ADR 0083) — a sentence about the
+   room, not a message, so it reads as chrome rather than content. */
+.state-notice {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.event-row.pending {
+  opacity: 0.6;
+}
+
+.event-row.failed {
+  border-left: 3px solid var(--danger);
+}
+
+.local-echo-status {
+  font-size: 0.85rem;
+}
+
+.local-echo-status.error {
+  color: var(--danger);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.local-echo-status .ghost {
+  font-size: 0.8rem;
+  padding: 0 0.35rem;
+}
+
+.user-avatar {
+  --user-avatar-bg: var(--room-avatar-0);
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-top: 0.05rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--user-avatar-bg);
+  color: var(--room-avatar-fg);
+  border: 1px solid var(--room-avatar-border);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.user-avatar-color-1 {
+  --user-avatar-bg: var(--room-avatar-1);
+}
+
+.user-avatar-color-2 {
+  --user-avatar-bg: var(--room-avatar-2);
+}
+
+.user-avatar-color-3 {
+  --user-avatar-bg: var(--room-avatar-3);
+}
+
+.user-avatar-color-4 {
+  --user-avatar-bg: var(--room-avatar-4);
+}
+
+.user-avatar-color-5 {
+  --user-avatar-bg: var(--room-avatar-5);
+}
+
+.user-avatar-color-6 {
+  --user-avatar-bg: var(--room-avatar-6);
+}
+
+.user-avatar-color-7 {
+  --user-avatar-bg: var(--room-avatar-7);
+}
+
+.user-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 60%;
+}
+
+.event-content {
+  min-width: 0;
+}
+
+.event-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.event-sender {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.event-head > time,
+.event-head > .event-time-copy,
+.event-head > .local-echo-status {
+  flex: none;
+  white-space: nowrap;
+}
+
+.event-time-copy {
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0 0.125rem;
+  font: inherit;
+  cursor: copy;
+}
+
+.event-time-copy:hover,
+.event-time-copy:focus-visible {
+  color: var(--accent);
+  background: rgba(64, 121, 255, 0.12);
+}
+
+.event-time-copy.failed {
+  color: var(--danger);
+}
+
+.event-copy-status {
+  flex: none;
+  color: var(--accent);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.event-copy-status.error {
+  color: var(--danger);
+}
+
+.edited-marker {
+  font-size: 0.8rem;
+  padding: 0 0.25rem;
+}
+
+.event-body {
+  overflow-wrap: anywhere;
+}
+
+.read-receipts {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.body-text {
+  white-space: pre-wrap;
+}
+
+.body-emoji-only {
+  display: inline-block;
+  font-size: 2.35rem;
+  line-height: 1.05;
+}
+
+.body-html p {
+  margin: 0.35rem 0;
+}
+
+.body-html p:first-child {
+  margin-top: 0;
+}
+
+.body-html p:last-child {
+  margin-bottom: 0;
+}
+
+.body-html blockquote {
+  border-left: 3px solid var(--border);
+  margin: 0.25rem 0;
+  padding-left: 0.6rem;
+  color: var(--muted);
+}
+
+.body-html pre {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+}
+
+.body-html code {
+  background: var(--bg-raised);
+  border-radius: 4px;
+  padding: 0 0.2rem;
+}
+
+.event-body a:not(.mention-pill):not(.room-pill),
+.reply-context a:not(.mention-pill):not(.room-pill) {
+  color: var(--accent);
+  font-weight: 500;
+  text-decoration: none;
+  border-radius: 3px;
+}
+
+.event-body a:not(.mention-pill):not(.room-pill):hover,
+.reply-context a:not(.mention-pill):not(.room-pill):hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  text-decoration: none;
+}
+
+.event-body a:not(.mention-pill):not(.room-pill):focus-visible,
+.reply-context a:not(.mention-pill):not(.room-pill):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  text-decoration: none;
+}
+
+.event-body a.dangerous-link,
+.reply-context a.dangerous-link {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  font-weight: 650;
+}
+
+.event-body a.dangerous-link::after,
+.reply-context a.dangerous-link::after {
+  content: ' ⚠';
+  font-size: 0.85em;
+}
+
+.event-body a.dangerous-link:hover,
+.event-body a.dangerous-link:focus-visible,
+.reply-context a.dangerous-link:hover,
+.reply-context a.dangerous-link:focus-visible {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+}
+
+.mention-pill,
+.room-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  padding: 0 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--fg);
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.room-pill.event-pill {
+  padding-right: 0.75rem;
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.room-pill.join-pill {
+  border-color: color-mix(in srgb, var(--warn) 54%, var(--border));
+  background: color-mix(in srgb, var(--warn) 13%, transparent);
+}
+
+.room-pill.event-pill::after {
+  content: '';
+  position: absolute;
+  right: 0.32rem;
+  top: 50%;
+  width: 0.28rem;
+  height: 0.28rem;
+  border-radius: 999px;
+  background: var(--accent);
+  transform: translateY(-50%);
+  opacity: 0.75;
+}
+
+.mention-pill:hover,
+.mention-pill:focus-visible,
+.room-pill:hover,
+.room-pill:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  text-decoration: none;
+}
+
+.room-pill.join-pill:hover,
+.room-pill.join-pill:focus-visible {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
+}
+
+/* A wide table has to carry its own scrollbar. The timeline pane clips on the
+   x-axis, so a table left to overflow would simply lose its right-hand columns.
+   `display: block` is what gives it a scroll box; `width: fit-content` keeps a
+   narrow table from stretching to the full column width as a block would. */
+.body-html table {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.body-html th,
+.body-html td {
+  border: 1px solid var(--border);
+  padding: 0.2rem 0.5rem;
+}
+
+.placeholder {
+  font-style: italic;
+}
+
+.event-inspector {
+  margin-top: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+.event-inspector-title {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.event-inspector pre {
+  margin: 0;
+  padding: 0.6rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  white-space: pre;
+}
+
+/* Spoilers: hidden until revealed (class toggled by FormattedBody). */
+.spoiler {
+  background: var(--fg);
+  color: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.spoiler.spoiler-revealed {
+  background: var(--bg-raised);
+  color: inherit;
+}
+
+.reply-context {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  border-left: 3px solid var(--accent);
+  margin: 0.15rem 0;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.reply-context-copy {
+  min-width: 0;
+}
+
+.reply-context-body .body-html {
+  display: inline;
+}
+
+.reply-context-body .body-html p {
+  display: inline;
+  margin: 0;
+}
+
+.reactions {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.reaction-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  z-index: 20;
+}
+
+.reaction-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.reaction-chip.mine {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reaction-senders-tooltip {
+  position: absolute;
+  z-index: 20;
+  left: 50%;
+  bottom: calc(100% + 0.4rem);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--panel);
+  box-shadow: 0 0.75rem 1.75rem rgb(0 0 0 / 0.18);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  pointer-events: none;
+  white-space: normal;
+}
+
+/* ---- composer & event actions (M-W7) ---- */
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 60;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  padding: 0.6rem 0;
+  margin-top: 1rem;
+}
+
+.typing-indicator {
+  margin: 0.35rem 0 0;
+  padding: 0 0.55rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.35;
+  min-height: 1.15rem;
+  overflow-wrap: anywhere;
+}
+
+.composer form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.composer-status {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 0.45rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--fg);
+  box-shadow: var(--shadow);
+  font-size: 0.86rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 47.99rem) {
+  .composer {
+    margin-top: 0.5rem;
+    padding: 0.45rem 0
+      calc(0.15rem + var(--app-standalone-composer-bottom-padding, 0px));
+  }
+
+  .composer form {
+    gap: 0.35rem;
+  }
+
+  .composer-resize {
+    display: none;
+  }
+}
+
+.composer-input-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  font: inherit;
+  resize: none;
+  min-height: 2.4rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  box-sizing: border-box;
+}
+
+@media (max-width: 47.99rem) {
+  .composer textarea {
+    min-height: 2.1rem;
+    padding: 0.3rem 0.5rem;
+    line-height: 1.35;
+  }
+}
+
+.composer-resize {
+  position: absolute;
+  top: -0.35rem;
+  right: 0.25rem;
+  z-index: 2;
+  width: 1.4rem;
+  height: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  cursor: ns-resize;
+}
+
+.composer-resize::before {
+  content: '';
+  position: absolute;
+  left: 0.35rem;
+  right: 0.35rem;
+  top: 0.3rem;
+  border-top: 1px solid var(--muted);
+}
+
+.composer-resize:hover,
+.composer-resize:focus-visible {
+  border-color: var(--accent);
+}
+
+.composer-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.15rem 0.6rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+/* ---- media send (M-W8.5, ADR 0065) ---- */
+
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.25rem 0.6rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.composer-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-preview {
+  height: 2.25rem;
+  width: 2.25rem;
+  object-fit: cover;
+  border-radius: 3px;
+}
+
+/* The staged-batch strip (ADR 0081). Several files render as thumbnails
+   rather than as N chips.
+
+   Every size here is explicit and capped. A staged image is the *original* —
+   a phone camera file is thousands of pixels wide — and an unconstrained
+   `<img>` renders at that intrinsic size, filling the viewport. The composer
+   has no room to discover this gracefully. */
+.composer-attachment-strip {
+  margin-bottom: 0.4rem;
+  border-left: 3px solid var(--accent);
+  padding: 0.3rem 0.6rem;
+}
+
+.composer-attachment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 0.35rem;
+  /* Scrolls sideways rather than wrapping into a tall block that would fight
+     `clampComposerHeight` for the field's space. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.composer-attachment-item {
+  position: relative;
+  flex: 0 0 auto;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+
+.composer-attachment-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* A non-image staged file has no preview, so its name stands in. */
+span.composer-attachment-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem;
+  font-size: 0.65rem;
+  text-align: center;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.composer-attachment-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 1.15rem;
+  height: 1.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+  border: 0;
+  border-radius: 999px;
+}
+
+.composer-attachment-remove:hover,
+.composer-attachment-remove:focus-visible {
+  background: #000;
+}
+
+/* Which one the message will caption. */
+.composer-attachment-first {
+  position: absolute;
+  bottom: 1px;
+  left: 2px;
+  min-width: 0.9rem;
+  padding: 0 0.15rem;
+  font-size: 0.6rem;
+  line-height: 1.2;
+  text-align: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: 3px;
+}
+
+.composer-attachment-summary,
+.composer-attachment-skipped {
+  margin: 0.25rem 0 0;
+  font-size: 0.75rem;
+}
+
+.composer-attachment-skipped {
+  margin-bottom: 0.4rem;
+}
+
+/* Visually hidden, but still clickable via the paperclip's `.click()` and
+   reachable by tests — `display: none` would break both. */
+.composer-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.composer-attach {
+  line-height: 1;
+  padding: 0.4rem 0.5rem;
+}
+
+.composer-attach-icon {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.composer-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+@media (max-width: 47.99rem) {
+  .composer-attach,
+  .composer-send {
+    min-width: 2.25rem;
+    min-height: 2.25rem;
+    padding: 0.35rem;
+  }
+
+  .composer-send-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  font-weight: 600;
+  /* The drop lands on the pane beneath; the overlay is a hint, not a target. */
+  pointer-events: none;
+}
+
+/* An image still uploading, rendered from its local blob (no proxy fetch). */
+.media-preview {
+  max-width: 100%;
+  border-radius: 4px;
+  opacity: 0.75;
+}
+
+.slash-command-menu {
+  position: absolute;
+  left: 0;
+  right: 4.5rem;
+  bottom: calc(100% - 0.2rem);
+  z-index: 80;
+  display: grid;
+  gap: 0.15rem;
+  max-height: min(16rem, 45vh);
+  overflow-y: auto;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: var(--panel);
+  box-shadow: 0 1rem 2rem rgb(0 0 0 / 0.18);
+}
+
+.slash-command-option {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+}
+
+.slash-command-option:hover {
+  background: var(--bg-raised);
+}
+
+.slash-command-option.selected {
+  background: var(--accent-soft);
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 0 0 1px var(--accent);
+}
+
+.slash-command-option.selected:hover {
+  background: var(--accent-soft-hover);
+}
+
+.slash-command-name {
+  font-weight: 700;
+}
+
+.slash-command-description {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.event-actions {
+  display: none;
+  gap: 0.15rem;
+  margin-left: auto;
+  opacity: 0;
+}
+
+.event-row:hover .event-actions,
+.event-row:focus-within .event-actions {
+  display: inline-flex;
+  opacity: 1;
+}
+
+.event-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+}
+
+.event-action-tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.event-action-tooltip {
+  display: none;
+}
+
+.event-action-icon {
+  display: none;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+}
+
+.event-actions .ghost {
+  font-size: 0.8rem;
+  padding: 0 0.35rem;
+}
+
+.event-actions .ghost.danger {
+  color: var(--danger);
+}
+
+@media (max-width: 47.99rem) {
+  .event-actions {
+    gap: 0.1rem;
+  }
+
+  .event-row:hover .event-actions,
+  .event-row:focus-within .event-actions {
+    display: none;
+    opacity: 0;
+  }
+
+  .event-row.actions-open .event-actions {
+    display: inline-flex;
+    opacity: 1;
+  }
+
+  .event-actions .event-action-button {
+    width: 1.75rem;
+    height: 1.75rem;
+    min-width: 1.75rem;
+    padding: 0;
+    border-radius: 6px;
+  }
+
+  .event-actions .confirm {
+    gap: 0.1rem;
+  }
+
+  .event-action-icon {
+    display: block;
+  }
+
+  .event-action-tooltip {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 0.35rem);
+    z-index: 30;
+    display: block;
+    transform: translateX(-50%);
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--shadow);
+    font-size: 0.75rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .event-action-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
+
+.reaction-picker-shell {
+  margin: 0.25rem 0;
+}
+
+.reaction-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.reaction-picker button {
+  padding: 0.15rem 0.45rem;
+}
+
+.reaction-picker button:focus,
+.reaction-picker button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.reaction-more {
+  min-width: 2rem;
+}
+
+.reaction-full-picker {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 100;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 28rem;
+  max-width: calc(100vw - 2rem);
+  height: 34rem;
+  max-height: calc(100vh - 2rem);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  background: var(--panel);
+  box-shadow: 0 1.25rem 3rem rgb(0 0 0 / 0.2);
+}
+
+@supports (max-height: 100dvh) {
+  .reaction-full-picker {
+    max-height: calc(100dvh - 2rem);
+  }
+}
+
+.reaction-full-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.reaction-full-picker-host {
+  block-size: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reaction-full-picker-host emoji-picker {
+  display: block;
+  width: 100%;
+  inline-size: 100%;
+  height: 100%;
+  block-size: 100%;
+  --border-radius: 0.9rem;
+  --border-color: transparent;
+  --outline-color: var(--accent);
+  --input-border-color: var(--border);
+  --input-font-color: var(--text);
+  --input-placeholder-color: var(--muted);
+  --input-border-radius: 0.45rem;
+}
+
+.reaction-chip {
+  cursor: pointer;
+}
+
+.thread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.unread-thread-badge {
+  font-weight: 700;
+}
+
+.thread-badge-new {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.05rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+/* ---- side panels ---- */
+
+/* Narrow default: an overlay drawer, because there is no room for a third
+   column. Wide viewports promote it to a real pane below (ADR 0062). */
+.side-panel,
+.thread-panel {
+  position: fixed;
+  top: var(--app-viewport-top, 0);
+  right: 0;
+  bottom: auto;
+  /* Above sticky room chrome on narrow screens; below modal overlays. */
+  z-index: 70;
+  width: min(28rem, 90vw);
+  height: calc(
+    var(--app-viewport-height, 100dvh) -
+      var(--app-keyboard-accessory-inset, 0px)
+  );
+  box-sizing: border-box;
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  padding: 1rem 1.25rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.15);
+}
+
+@media (max-width: 47.99rem) {
+  .side-panel,
+  .thread-panel {
+    width: var(--app-viewport-width, 100%);
+    border-left: 0;
+    box-shadow: none;
+  }
+}
+
+/* Third column: the thread shrinks the timeline instead of covering it. The
+   stream's min-width is what forces the fallback above once three columns no
+   longer fit. */
+@media (min-width: 64rem) {
+  .side-panel,
+  .thread-panel {
+    position: static;
+    flex: 0 0 min(28rem, 40%);
+    width: auto;
+    height: auto;
+    box-shadow: none;
+  }
+
+  .room-stream {
+    min-width: 22rem;
+  }
+}
+
+.thread-root {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.thread-root-copy {
+  min-width: 0;
+}
+
+.thread-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.thread-timeline .timeline-list-shell {
+  justify-content: flex-start;
+}
+
+.thread-list {
+  flex: none;
+}
+
+.room-info-panel {
+  gap: 1rem;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.room-info-panel > .overlay-head,
+.room-info-section {
+  flex: 0 0 auto;
+}
+
+.room-info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.room-info-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.room-info-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.45rem 0.8rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.detail-list dt {
+  color: var(--muted);
+}
+
+.detail-list dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.room-info-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.room-info-leave {
+  margin-left: auto;
+}
+
+.room-info-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.room-info-status.error {
+  color: var(--danger);
+}
+
+.room-invite-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.room-invite-form label {
+  min-width: 0;
+}
+
+.leave-room-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 28rem;
+}
+
+.cancel-invite-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 28rem;
+}
+
+.member-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.member-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.member-person {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.member-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.member-identity-action {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.member-identity-action:hover:not(:disabled),
+.member-identity-action:focus-visible {
+  color: var(--accent);
+}
+
+.member-identity-action:hover:not(:disabled) .member-name,
+.member-identity-action:focus-visible .member-name {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.member-name {
+  font-weight: 600;
+}
+
+.member-copy code {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.membership-join {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.membership-invite {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.membership-action {
+  background: transparent;
+  font-size: 0.75rem;
+  padding: 0.05rem 0.5rem;
+}
+
+.membership-action:hover:not(:disabled),
+.membership-action:focus-visible {
+  background: var(--bg-raised);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.membership-leave,
+.membership-ban {
+  color: var(--muted);
+}
+
+/* ---- overlay (edit history) ---- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.overlay-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  max-width: 36rem;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.jump-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 24rem;
+}
+
+.matrix-join-dialog {
+  display: grid;
+  gap: 0.8rem;
+  max-width: 30rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.unread-threads-overlay {
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding-top: 4.25rem;
+}
+
+.unread-threads-panel {
+  max-width: 31rem;
+}
+
+.unread-threads-empty {
+  margin: 1.25rem 0 0.25rem;
+}
+
+.unread-thread-list {
+  display: grid;
+  gap: 0.55rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.unread-thread-entry {
+  display: grid;
+  width: 100%;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  text-align: left;
+}
+
+.unread-thread-entry:hover,
+.unread-thread-entry:focus-visible {
+  border-color: var(--accent);
+}
+
+.unread-thread-room {
+  font-weight: 700;
+}
+
+.unread-thread-root,
+.unread-thread-latest,
+.unread-thread-entry time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-thread-root,
+.unread-thread-entry time {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.unread-thread-latest {
+  display: flex;
+  gap: 0.35rem;
+}
+
+@media (max-width: 47.99rem) {
+  .unread-threads-overlay {
+    justify-content: center;
+    padding: 0.75rem;
+  }
+
+  .unread-threads-panel {
+    max-width: none;
+    max-height: calc(var(--app-viewport-height, 100dvh) - 1.5rem);
+  }
+}
+
+/* Block-level, not `inline-flex`: shrink-to-fit would let the label's bare text
+   node — an anonymous flex item — wrap mid-sentence beside the checkbox. */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.settings-version {
+  margin-top: 1.5rem;
+  font-size: 0.85rem;
+}
+
+.install-steps {
+  margin: 0;
+  padding-left: 1.35rem;
+  color: var(--muted);
+}
+
+.install-steps li + li {
+  margin-top: 0.35rem;
+}
+
+/* ---- third-party license disclosure ---- */
+
+.license-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--bg-raised);
+}
+
+.license-entry > summary {
+  cursor: pointer;
+}
+
+.license-entry .license-name {
+  font-weight: 600;
+}
+
+.license-text {
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.75rem;
+  max-height: 24rem;
+  overflow: auto;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--border-radius);
+}
+
+/* ---- shortcuts help (ADR 0078) ---- */
+
+.help-button {
+  padding-inline: 0.6rem;
+  font-weight: 600;
+}
+
+.shortcut-group h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 1rem 0 0.4rem;
+}
+
+.shortcut-details {
+  margin-top: 1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.shortcut-details > summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.shortcut-subgroup h4 {
+  margin: 0.65rem 0 0.2rem;
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+
+.shortcut-list {
+  margin: 0;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  column-gap: 1rem;
+  align-items: baseline;
+}
+
+.shortcut-row dt {
+  text-align: right;
+  min-width: 0;
+}
+
+.shortcut-row dd {
+  margin: 0;
+}
+
+.shortcut-row dt,
+.shortcut-row dd {
+  padding: 0.2rem 0;
+}
+
+@media (max-width: 34rem) {
+  .shortcut-row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0.1rem;
+  }
+
+  .shortcut-row dt {
+    text-align: left;
+    padding-bottom: 0;
+  }
+
+  .shortcut-row dd {
+    padding-top: 0;
+  }
+}
+
+kbd {
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+
+.overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* ---- message search (ADR 0066) ---- */
+
+/* Wider than the reading modals and pinned near the top: result lists are
+   long, and a vertically centered panel would jump as pages load. */
+.search-panel {
+  max-width: 44rem;
+  align-self: flex-start;
+  margin-top: 3rem;
+}
+
+.search-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.search-scope,
+.search-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.search-sort {
+  margin-left: auto;
+}
+
+.search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.3rem 0.1rem 0.6rem;
+  background: var(--bg-raised);
+}
+
+.chip-remove {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: var(--fg);
+}
+
+.search-status {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.search-results {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.search-hit {
+  display: block;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.search-hit:hover,
+.search-hit:focus-visible {
+  background: var(--bg-raised);
+}
+
+.search-hit-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.search-hit-room {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.search-hit-time {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.search-hit-body {
+  display: block;
+  margin-top: 0.15rem;
+  overflow-wrap: anywhere;
+}
+
+.search-hit-body.redacted {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.search-hit-body mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.search-load-more {
+  text-align: center;
+  padding: 0.5rem 0;
+}
+
+.overlay-head h2 {
+  margin: 0;
+}
+
+.edit-trail {
+  padding-left: 1.25rem;
+}
+
+.edit-trail li {
+  margin: 0.4rem 0;
+}
+
+/* ---- forms & buttons ---- */
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.ghost,
+a.ghost {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+button.ghost:hover,
+a.ghost:hover {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+  color: var(--fg);
+}
+
+.topbar button.ghost,
+.topbar a.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.topbar button.ghost:hover,
+.topbar a.ghost:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg);
+}
+
+.mobile-room-shell .topbar-rooms-button {
+  color: var(--fg);
+}
+
+.event-actions .ghost,
+.local-echo-status .ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.event-actions .ghost:hover,
+.local-echo-status .ghost:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg);
+}
+
+form label {
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
+input {
+  font: inherit;
+  display: block;
+  width: 100%;
+  max-width: 26rem;
+  box-sizing: border-box;
+  margin-top: 0.15rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+input[type='radio'] {
+  display: inline;
+  width: auto;
+  margin-right: 0.35rem;
+}
+
+/* The rule above sizes text fields — full width, padded, bordered. A checkbox
+   is not one, and had no reset until it left the room header for Settings. */
+input[type='checkbox'] {
+  display: inline;
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.switch,
+.theme-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  color: var(--muted);
+}
+
+.theme-picker {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.inline-form {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.inline-form label {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.room-discovery {
+  max-width: 58rem;
+}
+
+.room-discovery-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.room-discovery-panel h2,
+.room-discovery-panel p {
+  margin-top: 0;
+}
+
+.field-label,
+.room-create-form label,
+.room-dm-form label,
+.room-directory-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.room-create-form,
+.room-dm-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(12rem, 1fr)) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.room-create-form .checkbox-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.room-directory-form {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 18rem) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.public-room-results {
+  margin-top: 0.5rem;
+}
+
+.link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button:hover,
+.link-button:focus-visible {
+  color: var(--accent-strong);
+}
+
+@media (max-width: 44rem) {
+  .room-create-form,
+  .room-dm-form,
+  .room-directory-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Media (ADR 0064). The reservation box holds an image's aspect ratio before
+   its blob resolves, so a late-loading image never shoves scrolled-back
+   content around (the timeline is not re-anchored after mount). */
+.media-figure {
+  margin: 0.25rem 0 0;
+}
+
+.media-image {
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+}
+
+/* No sender dimensions: reserve a modest fixed height instead of a ratio. */
+.media-open {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.media-open:disabled {
+  cursor: default;
+}
+
+.media-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.media-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.media-thumbnail-unsized > .media-open > img,
+.media-thumbnail-unsized > .media-preview {
+  height: auto;
+  max-height: 320px;
+}
+
+.media-caption {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.media-skeleton {
+  width: 100%;
+  height: 100%;
+  min-height: 6rem;
+  border-radius: 8px;
+  background: linear-gradient(
+    100deg,
+    var(--bg-raised) 30%,
+    var(--border) 50%,
+    var(--bg-raised) 70%
+  );
+  background-size: 200% 100%;
+  animation: media-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes media-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .media-skeleton {
+    animation: none;
+  }
+}
+
+/* Non-image attachment card: icon, filename + size, download. */
+.media-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  max-width: min(360px, 100%);
+}
+
+.media-attachment-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.media-attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.media-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-attachment-caption {
+  color: var(--muted);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+/* Tile card for media that opens in the lightbox (ADR 0072): the media is the
+   affordance, so the whole surface is the button. */
+.media-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.25rem 0 0;
+  max-width: min(320px, 100%);
+}
+
+.media-tile-surface {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+  cursor: pointer;
+}
+
+.media-tile-surface:hover,
+.media-tile-surface:focus-visible {
+  border-color: var(--accent, var(--border));
+}
+
+/* A video tile without a sender thumbnail is a dark stage for the play glyph;
+   a document tile is paper. Neither pretends to be a rendered frame — the
+   bytes are not fetched to build one (see the ADR). */
+.media-tile-video .media-tile-surface {
+  background: linear-gradient(160deg, #2b2f36, #14161a);
+}
+
+.media-tile-pdf .media-tile-surface {
+  background: linear-gradient(170deg, #fdfdfb, #e7e5df);
+}
+
+.media-tile-poster {
+  position: absolute;
+  inset: 0;
+}
+
+.media-tile-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.media-tile-glyph {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.25rem;
+  height: 3.25rem;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  /* The ▶ glyph is visually left-heavy inside a circle. */
+  padding-left: 0.15em;
+}
+
+.media-tile-pdf .media-tile-glyph {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.15);
+  padding-left: 0;
+}
+
+.media-tile-kind,
+.media-tile-duration {
+  position: absolute;
+  bottom: 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.66);
+  border-radius: 4px;
+  padding: 0.1rem 0.35rem;
+}
+
+.media-tile-kind {
+  left: 0.5rem;
+}
+
+.media-tile-duration {
+  right: 0.5rem;
+}
+
+.media-tile-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.media-tile-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Inline preview (ADR 0072): the card plus an expanded player below it. The
+   preview is wider than the card, so the wrapper — not `.media-attachment` —
+   owns the outer width. */
+.media-attachment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.media-preview {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.media-player {
+  display: block;
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+
+audio.media-player {
+  width: min(360px, 100%);
+  background: none;
+}
+
+.media-pdf {
+  display: block;
+  width: min(640px, 100%);
+  height: 480px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.media-text {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  max-width: min(640px, 100%);
+  max-height: 24rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Lightbox: full-viewport image over the standard overlay backdrop. */
+.lightbox {
+  flex-direction: column;
+  gap: 1rem;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.lightbox button.lightbox-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1;
+  /* 44px: the smallest reliable touch target, and this is the control you
+     reach for when the tap-outside gesture is not obvious. */
+  width: 2.75rem;
+  height: 2.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  line-height: 1;
+  /* A PDF page is white and a video frame can be any colour, so the ✕ carries
+     its own contrast rather than relying on the backdrop behind it. */
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  backdrop-filter: blur(2px);
+}
+
+.lightbox button.lightbox-save {
+  position: absolute;
+  top: 1rem;
+  /* Left of the ✕, which owns the corner. */
+  right: 4.25rem;
+  z-index: 1;
+  width: 2.75rem;
+  height: 2.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 999px;
+  backdrop-filter: blur(2px);
+}
+
+.lightbox button.lightbox-save:hover:not(:disabled),
+.lightbox button.lightbox-save:focus-visible {
+  background: #000;
+  border-color: #fff;
+}
+
+.lightbox button.lightbox-save:disabled {
+  color: rgba(255, 255, 255, 0.45);
+  cursor: default;
+}
+
+.lightbox button.lightbox-close:hover,
+.lightbox button.lightbox-close:focus-visible {
+  background: rgba(0, 0, 0, 0.88);
+  border-color: rgba(255, 255, 255, 0.8);
+}
+
+/* Paging controls (ADR 0081). Self-contained contrast, like the ✕, because the
+   photo behind them can be any colour.
+
+   On a wide viewport these sit in the letterboxed margin beside the image
+   (`.lightbox-image` is capped at 90vw), so they can afford to be solid and
+   bright without covering any of the photo. The phone rule below moves them
+   out of the image instead of dimming them. */
+.lightbox button.lightbox-page {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  width: 2.75rem;
+  height: 2.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.8rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(20, 20, 22, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 999px;
+  backdrop-filter: blur(2px);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+}
+
+.lightbox-prev {
+  left: 1rem;
+}
+
+.lightbox-next {
+  right: 1rem;
+}
+
+.lightbox button.lightbox-page:hover:not(:disabled),
+.lightbox button.lightbox-page:focus-visible {
+  background: #000;
+  border-color: #fff;
+}
+
+/* Dimmed by colour, deliberately *not* by opacity: opacity is reserved for
+   immersive mode below, and a disabled button that set it too would fight the
+   hidden state and win on specificity. */
+.lightbox button.lightbox-page:disabled {
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(20, 20, 22, 0.5);
+  border-color: rgba(255, 255, 255, 0.25);
+  box-shadow: none;
+  cursor: default;
+}
+
+/* Immersive mode (ADR 0081): a tap on the image hides the chrome so the photo
+   can be seen unobstructed.
+
+   Hidden with opacity, *not* `display: none` or `hidden` — `collectFocusable`
+   skips hidden elements, and emptying the focus trap would let Tab escape the
+   dialog. `pointer-events: none` keeps an invisible control from swallowing
+   the tap that is meant to bring the chrome back; `focusin` (in the component)
+   restores it the moment anything is tabbed to. */
+.lightbox-immersive button.lightbox-close,
+.lightbox-immersive button.lightbox-save,
+.lightbox-immersive button.lightbox-page,
+.lightbox-immersive .lightbox-status,
+.lightbox-immersive .lightbox-save-error,
+.lightbox-immersive .lightbox-caption {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.lightbox-close,
+.lightbox-save,
+.lightbox-page,
+.lightbox-status,
+.lightbox-save-error,
+.lightbox-caption {
+  transition: opacity 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lightbox-close,
+  .lightbox-save,
+  .lightbox-page,
+  .lightbox-status,
+  .lightbox-save-error,
+  .lightbox-caption {
+    transition: none;
+  }
+}
+
+/* The position counter is announced, not read: it stays visible because
+   sighted users need it too, but it is the `role="status"` that carries the
+   change to assistive technology.
+
+   Deliberately in flow rather than absolutely positioned at the bottom edge:
+   `.lightbox` is a centred flex column, so this sits below the figure and
+   cannot collide with a caption. Pinning it to the viewport bottom overlapped
+   the caption of any image tall enough to fill the frame. */
+/* Nothing to say — collapse rather than paint an empty pill. The element
+   stays in the DOM so the live region is already present when text arrives. */
+.lightbox-status:empty {
+  padding: 0;
+  background: none;
+}
+
+.lightbox-status {
+  margin: 0;
+  z-index: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+/* Shaped like the status pill it sits beside, coloured like a failure. The
+   pill treatment matters here: the message lands over an arbitrary photo, and
+   plain text on a bright image is unreadable. */
+.lightbox-save-error {
+  margin: 0;
+  z-index: 1;
+  color: #fff;
+  background: rgba(150, 24, 24, 0.86);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.85rem;
+}
+
+.lightbox-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lightbox-image {
+  display: flex;
+  max-width: 90vw;
+  max-height: 80vh;
+}
+
+/* Paging adds a counter below the figure, which a caption already shares the
+   space with. 80vh of image plus both would overflow a short viewport and
+   clip the photo at the top, so give the image a little back. */
+.lightbox:has(.lightbox-status) .lightbox-image,
+.lightbox:has(.lightbox-status) .lightbox-image img {
+  max-height: 72vh;
+}
+
+.lightbox-image img {
+  max-width: 90vw;
+  max-height: 80vh;
+  object-fit: contain;
+}
+
+.lightbox-caption {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  text-align: center;
+  max-width: min(60ch, 90vw);
+}
+
+/* Video and PDF in the lightbox (ADR 0072). The wrapper is what the media
+   hook's ref observes, so it must not collapse to zero. */
+.lightbox-media {
+  display: flex;
+  /* Centre, never stretch. A stretched `<video>` keeps its own aspect ratio by
+     painting letterbox bars *inside* its box, so the empty space beside the
+     picture would still be the video element — and the tap-to-dismiss gesture,
+     which exempts the media, would have nowhere left to land. Centring puts
+     that space back in this wrapper, where it is backdrop. */
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lightbox-player {
+  max-width: 92vw;
+  max-height: 82vh;
+  /* Transparent, not black: a black box reads as part of the video, so the
+     dismissable area around it should not look like more picture. */
+  background: transparent;
+}
+
+.lightbox-pdf {
+  width: min(1100px, 92vw);
+  /* `dvh` so an iOS URL bar sliding in cannot push the viewer off-screen. */
+  height: min(82vh, 88dvh);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Paged PDF viewer (ADR 0072): a scroll container of lazily rendered pages,
+   because iOS Safari only ever draws page 1 of a framed PDF. */
+.pdf-viewer {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.pdf-pages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Momentum scrolling and snappier paging on touch. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 0.5rem;
+  background: var(--bg-raised);
+}
+
+.pdf-page {
+  display: block;
+  width: 100%;
+  margin: 0 auto 0.5rem;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+}
+
+.pdf-page-count {
+  position: absolute;
+  bottom: 0.6rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  pointer-events: none;
+}
+
+/* On a phone the lightbox *is* full screen: drop the overlay's padding so the
+   document or video gets every pixel, and let the frame fill it. */
+@media (max-width: 640px) {
+  .lightbox {
+    padding: 0;
+    gap: 0;
+  }
+
+  /* A phone has no letterboxed margin to put the arrows in — mid-height they
+     would sit on top of the photo. Drop them into the bottom corners, on the
+     same line as the counter, where they overlap the least interesting part of
+     a picture and are within thumb reach. Being clear of the image also lets
+     them stay fully opaque. */
+  .lightbox button.lightbox-page {
+    top: auto;
+    bottom: 0.75rem;
+    transform: none;
+  }
+
+  .lightbox button.lightbox-prev {
+    left: 0.75rem;
+  }
+
+  .lightbox button.lightbox-next {
+    right: 0.75rem;
+  }
+
+  /* Keep the counter clear of both arrows rather than centred under one. */
+  .lightbox-status {
+    position: absolute;
+    bottom: 1.4rem;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+
+  /* The caption sits above that row so it collides with neither. */
+  .lightbox-figure:has(~ .lightbox-status) .lightbox-caption {
+    margin-bottom: 3.5rem;
+  }
+
+  .lightbox-figure {
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+  }
+
+  .lightbox-media {
+    width: 100%;
+    flex: 1;
+  }
+
+  .lightbox-pdf {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border-radius: 0;
+  }
+
+  /* Room for the close button's 44px target, so the first page is not under
+     it, and for the page counter at the bottom. */
+  .pdf-pages {
+    padding: 3.75rem 0 2.5rem;
+  }
+
+  .lightbox-player {
+    width: 100%;
+    max-width: 100%;
+    /* `height: auto` is the point: the element is exactly as tall as the
+       picture, so the rest of the screen is backdrop you can tap. The ceiling
+       guarantees that strip exists even for a portrait phone video, which
+       would otherwise fill the screen and leave nothing to tap. */
+    height: auto;
+    max-height: 78dvh;
+  }
+
+  .lightbox-caption {
+    position: absolute;
+    bottom: 0.75rem;
+    max-width: 92vw;
+  }
+}
+
+/* Syntax highlighting (ADR 0073). `highlight.js` emits `hljs-*` classes; the
+   palette is ours, defined as tokens so light and dark are declared in the
+   same three places the rest of the theme uses. No stylesheet ships from the
+   package — importing one would put a fixed theme in the main CSS bundle and
+   fight the app's own. */
+:root {
+  --code-keyword: #a626a4;
+  --code-string: #3f8f3c;
+  --code-comment: #8a8f98;
+  --code-number: #b76b01;
+  --code-type: #9a6700;
+  --code-function: #3556c4;
+  --code-meta: #6a6a74;
+  --code-deleted: #b3362e;
+  --code-added: #1a7f37;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --code-keyword: #c792ea;
+    --code-string: #98c379;
+    --code-comment: #7f848e;
+    --code-number: #d19a66;
+    --code-type: #e5c07b;
+    --code-function: #7c96ec;
+    --code-meta: #9c9ca8;
+    --code-deleted: #e5776f;
+    --code-added: #4ac26b;
+  }
+}
+
+:root[data-theme='dark'] {
+  --code-keyword: #c792ea;
+  --code-string: #98c379;
+  --code-comment: #7f848e;
+  --code-number: #d19a66;
+  --code-type: #e5c07b;
+  --code-function: #7c96ec;
+  --code-meta: #9c9ca8;
+  --code-deleted: #e5776f;
+  --code-added: #4ac26b;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-doctag,
+.hljs-name {
+  color: var(--code-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-quote,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-template-tag {
+  color: var(--code-string);
+}
+
+.hljs-comment {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-attribute,
+.hljs-selector-class {
+  color: var(--code-number);
+}
+
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-built_in,
+.hljs-params {
+  color: var(--code-type);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title {
+  color: var(--code-function);
+}
+
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-punctuation,
+.hljs-operator,
+.hljs-tag {
+  color: var(--code-meta);
+}
+
+.hljs-deletion {
+  color: var(--code-deleted);
+}
+
+.hljs-addition {
+  color: var(--code-added);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* The preview's own `<code>` should not restyle inside its `<pre>`. */
+.media-text code {
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+}
+
+/* The `?perf=1` scroll-anchoring readout (`PerfOverlay`). Fixed and
+   non-interactive so watching the timeline cannot perturb it, and small
+   enough to leave the messages readable in a screen recording. */
+.perf-overlay {
+  position: fixed;
+  right: 0.25rem;
+  bottom: 4.5rem;
+  z-index: 200;
+  max-width: 92vw;
+  padding: 0.3rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #7cf07c;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: pre;
+  pointer-events: none;
+}
+
+/* Gallery rows (ADR 0081). A run of adjacent images from one sender collapses
+   into one grid, rather than N full-width rows.
+
+   The row itself must stay a plain `li.event-row` in the timeline's `<ol>`:
+   `captureAnchor` binary-searches those assuming document order is monotonic
+   in vertical position. */
+.gallery-grid {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  display: grid;
+  /* Fixed three columns, deliberately not `auto-fit`: the row's height is then
+     `ceil(n / 3)` cells regardless of container width, so the space it
+     reserves before any image loads does not depend on layout. That is
+     stronger than a single image row, which needs `info.w`/`info.h` the event
+     may not carry — 5 of 13 measured images had none (ADR 0081). */
+  /* The count comes from `GALLERY_COLUMNS` via a custom property the row
+     sets, so arrow-key navigation and the visual grid cannot disagree — they
+     were two independent literals, and `ArrowUp`/`ArrowDown` move by the TS
+     one. The fallback keeps this rule meaningful on its own. */
+  grid-template-columns: repeat(var(--gallery-columns, 3), 1fr);
+  gap: 3px;
+  max-width: 420px;
+}
+
+/* A deep link into a gallery highlights the cell, not the whole run — the
+   gallery stays intact, and `centerHighlightedRow` finds the cell because it
+   carries its own `data-event-id`. */
+.gallery-cell.highlighted {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.gallery-cell {
+  position: relative;
+  /* Square by construction, so `object-fit: cover` can crop to fill. */
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+
+.gallery-cell-box,
+.gallery-cell-open,
+.gallery-cell-deferred {
+  width: 100%;
+  height: 100%;
+}
+
+.gallery-cell-open {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.gallery-cell-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* A large encrypted image with no sender thumbnail waits for a tap rather than
+   pulling its full size to draw a 320px square — see `GALLERY_EAGER_BYTES`. */
+.gallery-cell-deferred {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.4rem;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.gallery-cell-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-cell-failed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+/* Still uploading: dim the cell until the send lands. */
+.gallery-cell-pending {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.gallery-expander {
+  font-size: 0.75rem;
+  color: var(--muted);
+  /* Never wrap: the label is short, and a wrapped one turns a control into a
+     ragged block. */
+  white-space: nowrap;
+}
+
+/* The regroup control sits on a row of its own, with no avatar. `.event-row`
+   is a two-column grid whose first column is the 1.75rem avatar slot, so a
+   lone child lands *in that slot* and wraps to one word per line on a phone.
+   Put it in the content column, where it lines up under the messages. */
+.gallery-expander-row > .gallery-expander {
+  grid-column: 2;
+  justify-self: start;
+}
+
+/* Captions for a gallery's images (ADR 0081). Beneath the grid, never on the
+   cells: a square thumbnail has no room for text, and an overlay hides the
+   picture the reader opened the gallery to look at. */
+.gallery-captions {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-width: 420px;
+}
+
+.gallery-caption {
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.gallery-caption-index {
+  display: none;
+}

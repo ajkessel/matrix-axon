@@ -1,0 +1,55 @@
+name: Lint and clippy
+
+on:
+  workflow_dispatch:
+  push:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve-runner:
+    uses: ./.github/workflows/resolve-runner.yml
+
+  lint-and-test:
+    needs: resolve-runner
+    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check-environment
+        uses: ./.github/actions/check-environment
+
+      - name: check-duplicate-adrs
+        shell: bash
+        run: |
+          echo "Checking for duplicate ADR numbers..."
+          adr_dupe=$(ls -1 docs/adr/ | sed -E 's/([0-9]{4})-.*/\1/g' | sort | uniq -c | awk '$1 > 1 {print $2}')
+          if [ -n "${adr_dupe}" ]; then
+            echo "Duplicate ADR number ${adr_dupe} detected, renumber before submitting PR"
+            exit 1
+          else
+            echo 'ADR numbers clear.'
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: binary-builder-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: binary-builder-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
