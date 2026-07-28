@@ -18,7 +18,7 @@ Run the full Axon stack — server **and** the web client — from prebuilt imag
 
 ```sh
 # 1. Fetch the one-file Compose, then start it (images pull automatically)
-curl -fsSL "https://raw.githubusercontent.com/matrix-axon/matrix-axon-archive/refs/heads/main/deploy/docker-compose.beta.yml" \
+curl -fsSL "https://raw.githubusercontent.com/matrix-axon/matrix-axon/refs/heads/main/deploy/docker-compose.beta.yml" \
   -o docker-compose.yml
 docker compose up -d
 
