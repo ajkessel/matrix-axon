@@ -12,17 +12,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  check-environment:
-    uses: ./.github/workflows/check-environment.yml
-    with:
-      require-docker: true
-
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-
   smoke:
-    needs: [check-environment, resolve-runner]
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 

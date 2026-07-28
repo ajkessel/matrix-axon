@@ -25,17 +25,6 @@ on:
         description: "buildx platforms (arm64 needs QEMU on the runner)"
         type: string
         default: linux/amd64,linux/arm64
-      runner:
-        description: "Select a specific runner"
-        required: false
-        type: choice
-        default: self-hosted
-        options:
-          - self-hosted
-          - server
-          - imac
-          - boslb015672
-          - boslb015700
   push:
     tags:
       - 'v*' 
@@ -47,14 +36,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-    with:
-      runner-label: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
-
   publish:
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write

@@ -6,25 +6,23 @@ Matrix's encrypted and decentralized architecture can make full client usability
 
 What sets Axon apart from other Matrix clients is where the hard work happens. Sync, E2EE decryption, and a full-history search index all live in Axon itself, not duplicated in every client — so a client can be wiped and reinstalled and be back to full functionality in seconds, with no history to re-sync and no on-device index to rebuild. That one persistent brain also covers multiple Matrix accounts (personal and work, even on different homeservers) under a single search index and API, and resolves edits, reactions, and threads server-side so a late reaction to an old message is never silently dropped just because a client's timeline window has moved on. Two reference clients already consume that same open, versioned `/v1/` API today — [`axon-tui`](clients/tui/README.md), a keyboard-first terminal client, and [`axon-web`](clients/web/README.md), a browser and Tauri desktop client — proof that building a third is a client-only project, not a fork. And because Axon can be self-hosted on your own hardware or cloud instance rather than a SaaS holding your decrypted history, it's working toward a single-command setup that works painlessly on Linux, MacOS, or Windows: a Docker Compose stack that brings up Postgres, Axon, and the web client behind one front door, with Caddy handling TLS and a Tailscale profile for private remote access already built in.
 
+Join our public discussion room [#axon-developer:bostoncoop.net](https://matrix.to/#/%23axon-developer%3Abostoncoop.net).
+
 See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description, [`docs/mvp/tech-spec.md`](docs/mvp/tech-spec.md) for the architecture, and https://axon.bostoncoop.net for the latest OpenAPI specification.
 
 ## User quick start with Docker
 
 Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Intended for beta testers who've been granted access to the private images.
 
-**Prereqs:** Docker, plus a GitHub token with `read:packages` that the maintainer has granted access to the beta images. The repo is private, so the same token also needs `contents:read` to fetch the Compose file (a fine-grained token scoped to this repo works; or ask the maintainer to send you `deploy/docker-compose.beta.yml` directly and skip step 2). Once this repo is open-source and public, no login will be required and you can go from zero to a full stack with just two lines.
+**Prereqs:** [Docker](https://www.docker.com/products/docker-desktop/)
 
 ```sh
-# 1. Sign in to the image registry, where $PAT is your GitHub Personal Access Token (see https://github.com/settings/tokens )
-echo "$PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
-
-# 2. Fetch the one-file Compose, then start it (images pull automatically)
-curl -fsSL -H "Authorization: Bearer $PAT" -H "Accept: application/vnd.github.raw" \
-  "https://api.github.com/repos/matrix-axon/matrix-axon/contents/deploy/docker-compose.beta.yml?ref=main" \
+# 1. Fetch the one-file Compose, then start it (images pull automatically)
+curl -fsSL "https://raw.githubusercontent.com/matrix-axon/matrix-axon-archive/refs/heads/main/deploy/docker-compose.beta.yml" \
   -o docker-compose.yml
 docker compose up -d
 
-# 3. Open the printed one-time setup URL in your browser (if installation hasn't yet finished, try again after a minute):
+# 2. Open the printed one-time setup URL in your browser (if installation hasn't yet finished, try again after a minute):
 docker compose logs axon-server | grep 'bootstrap is armed'
 ```
 

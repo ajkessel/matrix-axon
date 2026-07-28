@@ -24,12 +24,8 @@ on:
   pull_request:
 
 jobs:
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-
   migrations-immutable:
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     steps:
       # The PR head, not the default merge ref, so `base.sha..HEAD` is exactly
       # the commits the branch adds. Full history: the check walks that range,
