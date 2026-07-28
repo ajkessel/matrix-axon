@@ -8,12 +8,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-
   lint-and-test:
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v7

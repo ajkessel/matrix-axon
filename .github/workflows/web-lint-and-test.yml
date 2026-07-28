@@ -19,12 +19,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-
   web-lint-and-test:
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
 
     defaults:
       run:

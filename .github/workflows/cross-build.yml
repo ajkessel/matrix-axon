@@ -53,17 +53,6 @@ on:
         description: "Build Linux binaries"
         type: boolean
         default: true
-      runner:
-        description: "Select a specific runner"
-        required: false
-        type: choice
-        default: self-hosted
-        options:
-          - self-hosted
-          - server
-          - imac
-          - boslb015672
-          - boslb015700
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -75,15 +64,9 @@ env:
   RELEASE_FLAG: ${{ (github.event.inputs.release != 'false') && '--release' || '' }}
 
 jobs:
-  resolve-runner:
-    uses: ./.github/workflows/resolve-runner.yml
-    with:
-      runner-label: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'self-hosted' }}
-
   generate-thirdparty:
     name: Generate license disclosure
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     steps:
       - name: checkout source code
         uses: actions/checkout@v7
@@ -106,8 +89,7 @@ jobs:
 
   lint-fmt-test:
     name: rustfmt, clippy, and test
-    needs: resolve-runner
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.checks != 'false' }}
     steps:
       - name: checkout source code
@@ -142,8 +124,8 @@ jobs:
 
   windows:
     name: Build for Windows
-    needs: [resolve-runner, generate-thirdparty]
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    needs: generate-thirdparty
+    runs-on: windows-latest
     if: ${{ github.event.inputs.windows != 'false' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
@@ -224,7 +206,7 @@ jobs:
 
   macos:
     name: Build for MacOS (Intel and Silicon)
-    needs: [resolve-runner, generate-thirdparty]
+    needs: generate-thirdparty
     strategy:
       fail-fast: true
       matrix:
@@ -233,7 +215,7 @@ jobs:
             arch: intel
           - target: aarch64-apple-darwin
             arch: silicon
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: macos-latest
     if: ${{ github.event.inputs.macos != 'false' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
@@ -323,8 +305,8 @@ jobs:
 
   linux:
     name: Build for Linux
-    needs: [resolve-runner, generate-thirdparty]
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    needs: generate-thirdparty
+    runs-on: ubuntu-latest
     if: ${{ github.event.inputs.linux != 'false' }}
     steps:
       - name: Add rustup/cargo home and local binaries to PATH
@@ -399,9 +381,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    runs-on: ${{ fromJson(needs.resolve-runner.outputs.runner-json) }}
+    runs-on: ubuntu-latest
     name: Publish GitHub Release
-    needs: [resolve-runner, windows, macos, linux]
+    needs: [windows, macos, linux]
     if: ${{ !failure() && !cancelled() && github.ref_type == 'tag' }}
 
     permissions:
