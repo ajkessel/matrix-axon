@@ -11,7 +11,7 @@ on:
 
 jobs:
   deploy-docs:
-    runs-on: [api-builder]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

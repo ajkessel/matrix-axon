@@ -12,7 +12,7 @@ See [`docs/mvp/prd.md`](docs/mvp/prd.md) for a more complete product description
 
 ## User quick start with Docker
 
-Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Intended for beta testers who've been granted access to the private images.
+Run the full Axon stack — server **and** the web client — from prebuilt images, with **no clone and no build**. Images are public on GHCR, so no `docker login` or credentials are required.
 
 **Prereqs:** [Docker](https://www.docker.com/products/docker-desktop/)
 

@@ -5,8 +5,8 @@
 # Postgres + axon-server + the web client from images published to GHCR. Keep the
 # shared service config in sync with deploy/docker-compose.yml.
 #
-# Prereqs: Docker, and `docker login ghcr.io` with a token that can read the
-# (private) axon images. Then, from a directory containing this file:
+# Prereqs: Docker. The images are public on GHCR, so no `docker login` or
+# credentials are needed. Then, from a directory containing this file:
 #
 #   docker compose up -d                                       # images pull automatically
 #   docker compose logs axon-server | grep 'bootstrap is armed' # open that one-time URL

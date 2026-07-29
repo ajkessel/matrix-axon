@@ -208,16 +208,13 @@ curl -fsS https://$DOMAIN/healthz
 ## Prebuilt images (beta access)
 
 By default the stack builds `axon-server` and the web client from your checkout.
-You can instead run **prebuilt images** — useful for beta testers who shouldn't
-have to build, and for distributing without publishing publicly. The images are
-published to a **private** GHCR package; access is granted per GitHub user/team.
+You can instead run **prebuilt images** — useful for anyone who shouldn't have to
+build. The images are published to a **public** GHCR package, so pulling them
+needs no login or credentials.
 
-**Run a published image (testers):**
+**Run a published image:**
 
 ```sh
-# one-time: authenticate with a PAT that has read:packages
-echo "$PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
-
 # in deploy/.env:
 AXON_SERVER_IMAGE=ghcr.io/matrix-axon/axon-server:beta
 AXON_WEB_IMAGE=ghcr.io/matrix-axon/axon-web:beta
@@ -227,7 +224,7 @@ docker compose up -d
 # then grab the first-sign-in URL:  docker compose logs axon-server | grep 'bootstrap is armed'
 ```
 
-(`run-docker.sh` builds from source, so testers use the two commands above
+(`run-docker.sh` builds from source, so this path uses the two commands above
 directly rather than that script.)
 
 **Publish (maintainers):**
@@ -239,11 +236,12 @@ echo "$GHCR_PAT" | docker login ghcr.io -u <you> --password-stdin   # write:pack
 ```
 
 Or push a `beta-*` git tag (or run the **Publish images** workflow) to build and
-push from CI (`.github/workflows/publish-images.yml`, on the self-hosted runner).
-On the package's first push, set its visibility to **Private** in the org's
-Packages settings and add each beta tester (or a team) with **Read**. The images
-carry an `org.opencontainers.image.source` label, so GHCR links the package to
-this repo automatically.
+push from CI (`.github/workflows/publish-images.yml`, on a GitHub-hosted
+runner). On the package's *first* push, set its visibility to **Public** in the
+org's Packages settings — GHCR defaults new packages to private, and neither
+`publish.sh` nor the CI workflow's token can change that setting, so it's a
+one-time manual step. The images carry an `org.opencontainers.image.source`
+label, so GHCR links the package to this repo automatically.
 
 ## Operations
 

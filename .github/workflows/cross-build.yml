@@ -1,20 +1,17 @@
 name: Cross-platform build
 #
-# Builds the whole workspace for every platform we ship binaries for, all from
-# a single [binary-builder] Linux runner:
-#   - Linux (x86_64-unknown-linux-gnu) — native
-#   - Windows (x86_64-pc-windows-gnu) — via `cross`, which drives a mingw-w64
-#     Docker image; the runner's Docker daemon supplies this transparently.
+# Builds the whole workspace for every platform we ship binaries for, each on
+# its own GitHub-hosted runner (native compilation, no cross/osxcross):
+#   - Linux (x86_64-unknown-linux-gnu) — ubuntu-latest, native
+#   - Windows (x86_64-pc-windows-msvc) — windows-latest, native
 #   - macOS, Intel + Apple Silicon (x86_64-apple-darwin, aarch64-apple-darwin)
-#     — via osxcross, wrapping Apple's real clang/SDK. osxcross must already
-#     be set up on the runner (scripts/setup-macos-cross.sh, run once by hand
-#     with an SDK tarball you supply — Apple's SDK license means there is no
-#     automated CI-side source for it).
+#     — macos-latest, native, cross-compiling the Intel slice via rustup's
+#     macOS target support (Apple Silicon runners can build x86_64-apple-darwin
+#     without a separate SDK setup).
 #
 # Every dependency in the graph is rustls/aws-lc-rs (no OpenSSL, no native-tls)
-# and sqlx's Postgres driver is compiled in directly (no libpq), which is what
-# makes cross-compiling the server crates at all viable without a matching
-# native toolchain per platform.
+# and sqlx's Postgres driver is compiled in directly (no libpq), so there's no
+# native library per platform to worry about.
 #
 # Each of the four build targets above (windows, linux, macos-intel,
 # macos-silicon) uploads three zips — axon-tui-<target> (client only),
@@ -129,9 +126,7 @@ jobs:
       fail-fast: true
       matrix:
         target:
-          - x86_64-pc-windows-msvc  
-          - i686-pc-windows-msvc
-          - aarch64-pc-windows-msvc
+          - x86_64-pc-windows-msvc
 
     runs-on: windows-latest
     if: ${{ github.event.inputs.windows != 'false' }}
@@ -142,7 +137,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-msvc
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v6
@@ -161,17 +156,23 @@ jobs:
           path: build
 
       - name: Build workspace (Windows native)
-        if: runner.os == 'Windows'
         run: |
-          rustup target add x86_64-pc-windows-gnu
+          rustup target add x86_64-pc-windows-msvc
           cargo build --workspace --target ${{ matrix.target }} ${{ env.RELEASE_FLAG }}
 
+      # Windows runners have no `zip` (Git Bash doesn't ship one), so use
+      # PowerShell's Compress-Archive. Like `zip -j` on the other platforms, it
+      # stores the named files flat at the archive root.
       - name: Zip binaries
+        shell: pwsh
         run: |
-          BIN=target/${{ matrix.target }}/${{ env.PROFILE_DIR }}
-          zip -j target/axon-tui-windows.zip $BIN/axon-tui.exe build/THIRDPARTY LICENSE.md
-          zip -j target/axon-server-windows.zip $BIN/axon.exe build/THIRDPARTY LICENSE.md
-          zip -j target/axon-windows.zip $BIN/axon.exe $BIN/axon-tui.exe build/THIRDPARTY LICENSE.md
+          $BIN = "target/${{ matrix.target }}/${{ env.PROFILE_DIR }}"
+          Compress-Archive -Force -DestinationPath target/axon-tui-windows.zip `
+            -Path "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
+          Compress-Archive -Force -DestinationPath target/axon-server-windows.zip `
+            -Path "$BIN/axon.exe", build/THIRDPARTY, LICENSE.md
+          Compress-Archive -Force -DestinationPath target/axon-windows.zip `
+            -Path "$BIN/axon.exe", "$BIN/axon-tui.exe", build/THIRDPARTY, LICENSE.md
 
       - name: Upload axon-tui artifact
         uses: actions/upload-artifact@v7
@@ -243,7 +244,6 @@ jobs:
           path: build
 
       - name: Build workspace (macOS native)
-        if: runner.os == 'macOS'
         run: |
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
@@ -316,19 +316,11 @@ jobs:
           path: build
 
       - name: Build workspace (native Linux)
-        if: runner.os == 'linux'
-        run: CARGO_TARGET_DIR=target/cross/linux cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
+        run: cargo build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
 
-      - name: Install cross
-        if: runner.os != 'linux'
-        run: command -v cross >/dev/null || cargo install cross --locked --git https://github.com/cross-rs/cross --rev 64b5bb4d3d34de062552b9a2093affe77b4ad16a
-
-      - name: Build workspace (cross-compile)
-        if: runner.os != 'linux'
-        run: CARGO_TARGET_DIR=target/cross/linux cross build --workspace --target x86_64-unknown-linux-gnu ${{ env.RELEASE_FLAG }}
       - name: Zip binaries
         run: |
-          BIN=target/cross/linux/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
+          BIN=target/x86_64-unknown-linux-gnu/${{ env.PROFILE_DIR }}
           zip -j target/axon-tui-linux.zip $BIN/axon-tui build/THIRDPARTY LICENSE.md
           zip -j target/axon-server-linux.zip $BIN/axon build/THIRDPARTY LICENSE.md
           zip -j target/axon-linux.zip $BIN/axon $BIN/axon-tui build/THIRDPARTY LICENSE.md
