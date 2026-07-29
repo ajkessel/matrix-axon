@@ -48,7 +48,7 @@ jobs:
       - name: Build Redoc HTML
         run: |
           mkdir -p public
-          npx --yes @redocly/cli build-docs openapi/openapi.json --output=public/index.html
+          npx --yes @redocly/cli build-docs openapi/openapi.json --output=public/api.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
