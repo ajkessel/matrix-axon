@@ -45,7 +45,7 @@ matrix-axon/
   scripts/
     integration-test.sh      # end-to-end E2EE re-decryption test vs local Synapse
   .github/workflows/         # public repo: GitHub-hosted runners have free minutes, so most workflows trigger on push or release (via new tag); a few stay manual-dispatch only for other reasons (expensive/manual runs)
-    api-docs.yml             # generate HTML version of API at https://matrix-axon.github.io/matrix-axon/ on updates
+    api-docs.yml             # build the Pages site: homepage + API reference at https://matrix-axon.github.io/matrix-axon/api.html
     check-environment.yml    # local-runner environment check 
     cross-build.yml          # fmt, clippy, test, and build for MacOS, Linux, and Windows (can manually select subset if desired)
     lint-and-clippy.yml      # cargo fmt + clippy (faster than lint-and-test)
