@@ -1,5 +1,19 @@
 name: Deploy API docs
 
+# Build the Redoc HTML from openapi/openapi.json and publish it to GitHub Pages
+# at https://matrix-axon.github.io/matrix-axon/.
+#
+# This previously ran on the self-hosted `api-builder` and "deployed" by copying
+# the built file into that runner's home directory — which worked only because
+# that machine was itself the docs host. On a GitHub-hosted runner that copy
+# lands in an ephemeral home directory and is discarded, so the job reported
+# success while publishing nothing. The build/deploy split below is the standard
+# Pages flow: `upload-pages-artifact` hands the directory to the Pages service
+# and `deploy-pages` publishes it.
+#
+# Repo prerequisite: Settings → Pages → Source must be **GitHub Actions** (not
+# the legacy "deploy from a branch" mode), or `deploy-pages` fails.
+
 on:
   push:
     branches:
@@ -9,8 +23,20 @@ on:
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize deployments; let an in-flight publish finish rather than cancelling
+# it, so the live site is never left mid-deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  deploy-docs:
+  build:
+    name: Build Redoc HTML
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -22,6 +48,21 @@ jobs:
       - name: Build Redoc HTML
         run: |
           mkdir -p public
-          mkdir -p ~/api-docs
-          npx @redocly/cli build-docs openapi/openapi.json --output=public/index.html
-          cp public/index.html ~/api-docs
+          npx --yes @redocly/cli build-docs openapi/openapi.json --output=public/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
