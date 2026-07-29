@@ -3,8 +3,9 @@
 #
 # Builds the axon-server and axon-web images multi-arch and pushes them to GHCR
 # (or any registry), tagged with a moving label (default `beta`) plus the current
-# git short hash. Intended for handing prebuilt images to beta testers without
-# making them public: push to a PRIVATE GHCR package and grant testers Read.
+# git short hash. Images are published to a PUBLIC GHCR package (set once by
+# hand in the org's Packages settings — GHCR defaults new packages to private,
+# and pushing doesn't change that), so anyone can pull without credentials.
 #
 #   # one-time: log in with a PAT that has write:packages
 #   echo "$GHCR_PAT" | docker login ghcr.io -u <you> --password-stdin
@@ -92,8 +93,7 @@ publish_image() {
 [ "$WHAT" = "web" ]    || publish_image axon-server Dockerfile
 [ "$WHAT" = "server" ] || publish_image axon-web    deploy/web/Dockerfile
 
-info "Done. Testers pull with:"
-echo "    docker login ghcr.io -u <user>            # PAT with read:packages"
+info "Done. Anyone can pull (no login needed, images are public):"
 echo "    # in deploy/.env:"
 echo "    AXON_SERVER_IMAGE=${REGISTRY}/axon-server:${TAG}"
 echo "    AXON_WEB_IMAGE=${REGISTRY}/axon-web:${TAG}"
