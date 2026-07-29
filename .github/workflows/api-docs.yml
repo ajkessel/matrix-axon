@@ -1,18 +1,30 @@
 name: Deploy API docs
 
-# Build the Redoc HTML from openapi/openapi.json and publish it to GitHub Pages
-# at https://matrix-axon.github.io/matrix-axon/.
+# Publish the whole GitHub Pages site: the project homepage plus the Redoc API
+# reference generated from openapi/openapi.json.
 #
-# This previously ran on the self-hosted `api-builder` and "deployed" by copying
-# the built file into that runner's home directory — which worked only because
-# that machine was itself the docs host. On a GitHub-hosted runner that copy
-# lands in an ephemeral home directory and is discarded, so the job reported
-# success while publishing nothing. The build/deploy split below is the standard
-# Pages flow: `upload-pages-artifact` hands the directory to the Pages service
-# and `deploy-pages` publishes it.
+#   https://matrix-axon.github.io/matrix-axon/          — homepage (README.md)
+#   https://matrix-axon.github.io/matrix-axon/api.html  — API reference
 #
-# Repo prerequisite: Settings → Pages → Source must be **GitHub Actions** (not
-# the legacy "deploy from a branch" mode), or `deploy-pages` fails.
+# Two things this has to get right:
+#
+# 1. Actions-based Pages replaces the *entire* site with the uploaded artifact —
+#    it is not a partial upload alongside whatever was there before. The repo has
+#    no index.html of its own; the homepage exists only because Jekyll renders
+#    README.md. So the artifact has to contain the built site, not just the API
+#    page, or `/` starts 404ing. `jekyll-build-pages` below reproduces exactly
+#    what legacy branch mode was building, and the API page is copied in beside
+#    it.
+#
+# 2. Nothing here names the published URL, and there is no setting that does.
+#    A file's URL is the site root plus its path inside the artifact, so
+#    `_site/api.html` is served at `<site>/api.html`. (`deploy-pages`' `page_url`
+#    output is always the site root — it is the environment link, not a target.)
+#
+# Repo prerequisite: Settings → Pages → Source must be **GitHub Actions**. While
+# it is left on the legacy "deploy from a branch" mode, `deploy-pages` still
+# reports success but the live site keeps being built from the branch instead,
+# so a green run is not evidence that this workflow published anything.
 
 on:
   push:
@@ -20,6 +32,7 @@ on:
       - main
     paths:
       - 'openapi/openapi.json'
+      - 'README.md'
       - '.github/workflows/api-docs.yml'
   workflow_dispatch:
 
@@ -36,24 +49,41 @@ concurrency:
 
 jobs:
   build:
-    name: Build Redoc HTML
+    name: Build site and API reference
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Build the Jekyll site
+        # Same build legacy branch mode ran, so the homepage is unchanged.
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: .
+          destination: ./_site
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
 
-      - name: Build Redoc HTML
+      - name: Build Redoc API reference into the site
         run: |
-          mkdir -p public
-          npx --yes @redocly/cli build-docs openapi/openapi.json --output=public/api.html
+          npx --yes @redocly/cli build-docs openapi/openapi.json --output=_site/api.html
+
+      - name: Check the site has both pages
+        # Cheap guard against the silent-success failure mode this workflow has
+        # already hit twice: a deploy step that "succeeds" while publishing the
+        # wrong thing. Fail here instead of shipping a broken site.
+        run: |
+          test -s _site/index.html || { echo "::error::_site/index.html missing — the homepage would 404"; exit 1; }
+          test -s _site/api.html   || { echo "::error::_site/api.html missing — the API reference was not generated"; exit 1; }
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: public
+          path: _site
 
   deploy:
     name: Publish to GitHub Pages
