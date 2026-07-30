@@ -229,6 +229,7 @@ export function RoomPage() {
     threadUnread,
     composerFocus,
     settings,
+    search,
   } = useServices()
   const timeline = useMemo(
     () => createTimelineStore(api, media, accountId, roomId),
@@ -295,8 +296,9 @@ export function RoomPage() {
     }
     void threads.refresh()
     void members.refresh()
-    // With a deep-linked event the jump effect below owns the initial load.
-    if (highlighted === null) {
+    // A room-event jump owns its initial load, but a thread jump is resolved
+    // by ThreadPanel and must not leave the desktop room stream empty.
+    if (highlighted === null || openThread !== null) {
       void timeline.loadLatest()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
@@ -533,6 +535,7 @@ export function RoomPage() {
     // (`roomKey`), and a staged file must not survive switching between
     // them — it would send from the wrong account.
     attachmentScope: `${accountId} ${roomId}`,
+    onMutation: search.clear,
   })
   void ephemeral.revision.value
   const typingText = formatTypingIndicator(
@@ -650,6 +653,7 @@ export function RoomPage() {
     setReactionPickerEventId: setCommandReactionPickerEventId,
     formatComposerBody: commandFormatComposerBody,
     allowThreadCommand,
+    onMutation,
   }: {
     body: string
     timeline: TimelineStore
@@ -660,6 +664,7 @@ export function RoomPage() {
     setReactionPickerEventId: (eventId: string | null) => void
     formatComposerBody: typeof formatComposerBody
     allowThreadCommand: boolean
+    onMutation: () => void
   }): boolean | Promise<boolean> => {
     const latestTarget = (): TimelineEvent | null => {
       for (let i = commandVisible.length - 1; i >= 0; i -= 1) {
@@ -686,11 +691,16 @@ export function RoomPage() {
     if (command.kind === 'formatted-message') {
       const current = commandAction
       setCommandAction(null)
-      void commandTimeline.send(command.message.body, {
-        replyTo: current?.kind === 'reply' ? current.event.event_id : undefined,
-        senderId: ownUserId ?? undefined,
-        formattedBody: command.message.formattedBody,
-      })
+      void commandTimeline
+        .send(command.message.body, {
+          replyTo:
+            current?.kind === 'reply' ? current.event.event_id : undefined,
+          senderId: ownUserId ?? undefined,
+          formattedBody: command.message.formattedBody,
+        })
+        .then((ok) => {
+          if (ok) onMutation()
+        })
       return true
     }
     if (command.kind === 'refresh') {
@@ -840,11 +850,15 @@ export function RoomPage() {
         setCommandAction(null)
         void (async () => {
           const formatted = await commandFormatComposerBody(command.body!)
-          void commandTimeline.send(formatted.body, {
-            replyTo: target.event_id,
-            senderId: ownUserId ?? undefined,
-            formattedBody: formatted.formatted_body ?? null,
-          })
+          void commandTimeline
+            .send(formatted.body, {
+              replyTo: target.event_id,
+              senderId: ownUserId ?? undefined,
+              formattedBody: formatted.formatted_body ?? null,
+            })
+            .then((ok) => {
+              if (ok) onMutation()
+            })
         })()
       }
       return true
@@ -863,7 +877,9 @@ export function RoomPage() {
       return false
     }
     settings.recordRecentReaction(key)
-    void commandTimeline.toggleReaction(target, key)
+    void commandTimeline.toggleReaction(target, key).then((ok) => {
+      if (ok) onMutation()
+    })
     return true
   }
 
@@ -878,6 +894,7 @@ export function RoomPage() {
       setReactionPickerEventId,
       formatComposerBody,
       allowThreadCommand: true,
+      onMutation: search.clear,
     })
 
   const handleThreadComposerCommand = (
@@ -900,6 +917,7 @@ export function RoomPage() {
       setReactionPickerEventId: setCommandReactionPickerEventId,
       formatComposerBody: commandFormatComposerBody,
       allowThreadCommand: false,
+      onMutation: search.clear,
     })
 
   const handleMembershipCommand = async (
@@ -1367,6 +1385,7 @@ export function RoomPage() {
                 onReply={(event) => setAction({ kind: 'reply', event })}
                 onEdit={(event) => setAction({ kind: 'edit', event })}
                 onOpenThread={setThreadParam}
+                onMutation={search.clear}
               />
             </MediaViewerProvider>
           )}
@@ -1505,6 +1524,7 @@ function Timeline({
   onReply,
   onEdit,
   onOpenThread,
+  onMutation,
 }: {
   timeline: TimelineStore
   threads: ThreadsStore
@@ -1526,6 +1546,7 @@ function Timeline({
   onReply: (event: EventDto) => void
   onEdit: (event: EventDto) => void
   onOpenThread: (rootId: string) => void
+  onMutation: () => void
 }) {
   const topSentinel = useRef<HTMLDivElement>(null)
   const bottomSentinel = useRef<HTMLDivElement>(null)
@@ -2148,6 +2169,7 @@ function Timeline({
       onReply={onReply}
       onEdit={onEdit}
       onOpenThread={onOpenThread}
+      onMutation={onMutation}
     />
   )
 
