@@ -16,6 +16,7 @@ import { ServicesContext } from '../services'
 import { roomKey } from '../stores/room-list'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomList } from './RoomList'
+import { SpaceList } from './SpaceList'
 
 const ACCOUNT = '6b53f7f0-0000-4000-8000-000000000001'
 const OTHER_ACCOUNT = '6b53f7f0-0000-4000-8000-000000000002'
@@ -100,6 +101,10 @@ function renderPage(
   options: {
     activeAccounts?: unknown[]
     readMarkers?: Record<string, unknown>
+    spaceChildren?: Record<string, unknown[]>
+    /** Room ids whose `space/children` read fails, as it does when offline. */
+    spaceChildrenFail?: string[]
+    withSpaces?: boolean
   } = {},
 ) {
   const activeAccounts = options.activeAccounts ?? activeAccountsForRooms(rooms)
@@ -110,6 +115,18 @@ function renderPage(
     ),
     http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
       HttpResponse.json({ data: rooms }),
+    ),
+    http.get(
+      `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/space/children`,
+      ({ params }) =>
+        options.spaceChildrenFail?.includes(String(params.roomId)) === true
+          ? HttpResponse.json(
+              { error: { code: 'forbidden', message: 'not in room' } },
+              { status: 403 },
+            )
+          : HttpResponse.json({
+              data: options.spaceChildren?.[String(params.roomId)] ?? [],
+            }),
     ),
     http.get(
       `${TEST_BASE_URL}/v1/devices/:deviceId/state/:namespace`,
@@ -146,12 +163,157 @@ function renderPage(
     <ServicesContext.Provider value={services}>
       {/* RoomList reads useLocation for Ctrl-K / Ctrl-arrow navigation. */}
       <LocationProvider>
+        {options.withSpaces === true && <SpaceList />}
         <RoomList />
       </LocationProvider>
     </ServicesContext.Provider>,
   )
   return { services, ...utils }
 }
+
+it('filters the room list to selected space children without overriding its sort', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const first = makeRoom({
+    room_id: '!family:hs',
+    name: 'Family',
+    last_activity_ts: 100,
+  })
+  const second = makeRoom({
+    room_id: '!friends:hs',
+    name: 'Friends',
+    last_activity_ts: 200,
+  })
+  const { findByRole, getByRole, queryByRole } = renderPage(
+    [OPS, space, first, second],
+    undefined,
+    {
+      withSpaces: true,
+      spaceChildren: {
+        '!whatsapp:hs': [
+          { room_id: '!family:hs', via: ['hs'], suggested: false },
+          { room_id: '!friends:hs', via: ['hs'], suggested: false },
+        ],
+      },
+    },
+  )
+  await findByRole('button', { name: 'WhatsApp' })
+  fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
+  await waitFor(() => expect(queryByRole('link', { name: /Ops/ })).toBeNull())
+  expect(await findByRole('link', { name: /Friends/ })).toBeTruthy()
+  const links = [...document.querySelectorAll('.room-link')]
+  expect(links.map((link) => link.textContent)).toEqual([
+    expect.stringContaining('Friends'),
+    expect.stringContaining('Family'),
+  ])
+})
+
+it('keeps joined spaces in the picker rather than the all-rooms list', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const { findByRole, queryByRole } = renderPage([OPS, space], undefined, {
+    withSpaces: true,
+  })
+
+  expect(await findByRole('button', { name: 'WhatsApp' })).toBeTruthy()
+  expect(queryByRole('link', { name: /WhatsApp/ })).toBeNull()
+  expect(await findByRole('link', { name: /Ops/ })).toBeTruthy()
+})
+
+it('does not fall back to every room when a space fails to load', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const { findByRole, getByRole, queryByRole, findByText } = renderPage(
+    [OPS, space, makeRoom({ room_id: '!family:hs', name: 'Family' })],
+    undefined,
+    { withSpaces: true, spaceChildrenFail: ['!whatsapp:hs'] },
+  )
+  await findByRole('button', { name: 'WhatsApp' })
+  fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
+
+  // The scope is unknown, so the list must not quietly widen to the account.
+  await waitFor(() => expect(queryByRole('link', { name: /Ops/ })).toBeNull())
+  expect(queryByRole('link', { name: /Family/ })).toBeNull()
+  expect(await findByText(/Could not load space: not in room/)).toBeTruthy()
+  expect(getByRole('button', { name: 'Retry' })).toBeTruthy()
+})
+
+it('keeps a selected space room reachable from the room list', async () => {
+  const space = makeRoom({
+    room_id: '!whatsapp:hs',
+    name: 'WhatsApp',
+    room_type: 'm.space',
+  })
+  const { findByRole, getByRole } = renderPage([OPS, space], undefined, {
+    withSpaces: true,
+  })
+  await findByRole('button', { name: 'WhatsApp' })
+  fireEvent.click(getByRole('button', { name: 'WhatsApp' }))
+
+  // Spaces are filtered out of the list itself, so this is the only route to
+  // the space's own timeline.
+  const open = await findByRole('button', { name: 'Open space room' })
+  expect(open).toBeTruthy()
+})
+
+it('reveals space move controls only once reordering is turned on', async () => {
+  const one = makeRoom({
+    room_id: '!one:hs',
+    name: 'Space One',
+    room_type: 'm.space',
+  })
+  const two = makeRoom({
+    room_id: '!two:hs',
+    name: 'Space Two',
+    room_type: 'm.space',
+  })
+  const { services, findByRole, getByRole, queryByRole } = renderPage(
+    [OPS, one, two],
+    undefined,
+    { withSpaces: true },
+  )
+  await findByRole('button', { name: 'Space One' })
+  expect(queryByRole('button', { name: 'Move Space One down' })).toBeNull()
+
+  // jsdom reports no media-query match, i.e. the wide vertical rail.
+  fireEvent.click(getByRole('button', { name: 'Reorder spaces' }))
+  fireEvent.click(getByRole('button', { name: 'Move Space One down' }))
+  expect(services.settings.spaceOrder.value).toEqual([
+    `${ACCOUNT}/!two:hs`,
+    `${ACCOUNT}/!one:hs`,
+  ])
+})
+
+it('moves a focused space with Alt-arrow keys without any visible chrome', async () => {
+  const one = makeRoom({
+    room_id: '!one:hs',
+    name: 'Space One',
+    room_type: 'm.space',
+  })
+  const two = makeRoom({
+    room_id: '!two:hs',
+    name: 'Space Two',
+    room_type: 'm.space',
+  })
+  const { services, findByRole } = renderPage([OPS, one, two], undefined, {
+    withSpaces: true,
+  })
+  const first = await findByRole('button', { name: 'Space One' })
+  fireEvent.keyDown(first, { key: 'ArrowDown', altKey: true })
+  expect(services.settings.spaceOrder.value).toEqual([
+    `${ACCOUNT}/!two:hs`,
+    `${ACCOUNT}/!one:hs`,
+  ])
+})
 
 function roomActionsDetails(container: ParentNode): HTMLDetailsElement {
   const details = container.querySelector('.room-actions-menu')

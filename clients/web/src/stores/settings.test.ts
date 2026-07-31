@@ -14,6 +14,10 @@ describe('createSettingsStore', () => {
       timeFormat: '12h',
       activeAccountId: null,
       pinnedRooms: [],
+      spaceOrder: [],
+      spacesPaneCollapsed: false,
+      spacesPaneAutoHide: true,
+      sidebarWidth: 420,
       roomSort: 'recent',
       roomFilter: 'all',
       sidebarCollapsed: false,
@@ -78,9 +82,74 @@ describe('room-list settings (ADRs 0038/0042)', () => {
       }),
     )
     expect(store.pinnedRooms.value).toEqual([])
+    expect(store.spaceOrder.value).toEqual([])
+    expect(store.spacesPaneCollapsed.value).toBe(false)
+    expect(store.spacesPaneAutoHide.value).toBe(true)
+    expect(store.sidebarWidth.value).toBe(420)
     expect(store.roomSort.value).toBe('recent')
     expect(store.roomFilter.value).toBe('all')
     expect(store.theme.value).toBe('dark')
+  })
+
+  it('persists browser-local space ordering', () => {
+    const storage = memoryStorage()
+    const store = createSettingsStore(storage)
+    const shown = ['account/!one:hs', 'account/!two:hs']
+    store.moveSpace('account/!one:hs', 0, shown)
+    store.moveSpace('account/!two:hs', 1, shown)
+    store.moveSpace('account/!two:hs', 0, shown)
+    store.spacesPaneCollapsed.value = true
+    store.spacesPaneAutoHide.value = false
+    store.sidebarWidth.value = 480
+    expect(store.spaceOrder.value).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
+    expect(createSettingsStore(storage).spaceOrder.value).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
+    expect(createSettingsStore(storage).spacesPaneCollapsed.value).toBe(true)
+    expect(createSettingsStore(storage).spacesPaneAutoHide.value).toBe(false)
+    expect(createSettingsStore(storage).sidebarWidth.value).toBe(480)
+  })
+
+  it('moves a space down the displayed order, not the stored one', () => {
+    const store = createSettingsStore(memoryStorage())
+    const shown = ['account/!one:hs', 'account/!two:hs', 'account/!three:hs']
+    // Nothing is ranked yet, so the stored order is empty: the new position has
+    // to be resolved against what the picker actually shows.
+    store.moveSpace('account/!one:hs', 1, shown)
+    expect(store.spaceOrder.value).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+      'account/!three:hs',
+    ])
+    store.moveSpace('account/!three:hs', 0, store.spaceOrder.value)
+    expect(store.spaceOrder.value).toEqual([
+      'account/!three:hs',
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
+  })
+
+  it('keeps ranks for spaces the picker is not showing', () => {
+    const storage = memoryStorage({
+      'axon.settings': JSON.stringify({
+        version: 1,
+        spaceOrder: ['account/!gone:hs', 'account/!one:hs'],
+      }),
+    })
+    const store = createSettingsStore(storage)
+    store.moveSpace('account/!two:hs', 0, [
+      'account/!one:hs',
+      'account/!two:hs',
+    ])
+    expect(store.spaceOrder.value).toContain('account/!gone:hs')
+    expect(store.spaceOrder.value.slice(0, 2)).toEqual([
+      'account/!two:hs',
+      'account/!one:hs',
+    ])
   })
 
   it('an envelope without sidebarCollapsed defaults it to false (ADR 0062)', () => {

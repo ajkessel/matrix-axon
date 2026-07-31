@@ -8,6 +8,7 @@ import {
   useState,
 } from 'preact/hooks'
 import { layoutMode } from '../layout'
+import { localRoomHref } from '../matrix-to'
 import { useMediaBlob } from '../media/use-media-blob'
 import { useServices } from '../services'
 import { ErrorBanner } from './ErrorBanner'
@@ -116,6 +117,7 @@ export function RoomList() {
     accounts: accountStore,
     rooms,
     settings,
+    spaces,
     activeRoom,
     composerFocus,
   } = useServices()
@@ -165,6 +167,30 @@ export function RoomList() {
   }, [])
 
   const allRooms = rooms.rooms.value
+  const selectedSpace = spaces.selected.value
+  const selectedChildren =
+    selectedSpace === null
+      ? null
+      : (spaces.children.value.get(selectedSpace) ?? null)
+  // A space whose children have not loaded must not read as "this space
+  // contains everything": until the fetch resolves the scope is unknown, so the
+  // list shows why rather than silently falling back to the account filter.
+  const spaceScope: 'none' | 'ready' | 'loading' | 'failed' =
+    selectedSpace === null
+      ? 'none'
+      : selectedChildren !== null
+        ? 'ready'
+        : spaces.errors.value.has(selectedSpace)
+          ? 'failed'
+          : 'loading'
+  const spaceScopeError =
+    selectedSpace === null ? undefined : spaces.errors.value.get(selectedSpace)
+  const selectedSpaceAccount =
+    selectedSpace === null ? null : selectedSpace.split('/', 1)[0]
+  const selectedSpaceRoom =
+    selectedSpace === null
+      ? undefined
+      : allRooms.find((room) => roomKey(room) === selectedSpace)
   const accounts = accountStore.accounts.value
   const activeAccounts = useMemo(
     () => accounts.filter((account) => account.state === 'active'),
@@ -183,9 +209,11 @@ export function RoomList() {
   )
   const activeAccountsKnown =
     !accountStore.loading.value && accountStore.error.value === null
-  const scopedRooms = activeAccountsKnown
-    ? allRooms.filter((room) => activeAccountIds.has(room.account_id))
-    : allRooms
+  const scopedRooms = allRooms.filter(
+    (room) =>
+      room.room_type !== 'm.space' &&
+      (!activeAccountsKnown || activeAccountIds.has(room.account_id)),
+  )
   const showAccountFilter = activeAccountEntries.length > 1
   const labels = useMemo(
     () => accountLabels(activeAccountEntries),
@@ -217,7 +245,7 @@ export function RoomList() {
       unreadRooms: unreadKeys.size,
     })
     const next = visibleRooms(scopedRooms, {
-      accountFilter,
+      accountFilter: selectedSpaceAccount ?? accountFilter,
       nameQuery,
       roomFilter,
       roomSort,
@@ -225,8 +253,18 @@ export function RoomList() {
       roomTitles,
       hasUnread: (room) => unreadKeys.has(roomKey(room)),
     })
-    perfMark('room-list:visible-compute:end', { visible: next.length })
-    return next
+    if (selectedChildren === null) {
+      const visible = spaceScope === 'none' ? next : []
+      perfMark('room-list:visible-compute:end', { visible: visible.length })
+      return visible
+    }
+    const childIds = new Set(selectedChildren.map((child) => child.room_id))
+    const scoped = next.filter(
+      (room) =>
+        room.account_id === selectedSpaceAccount && childIds.has(room.room_id),
+    )
+    perfMark('room-list:visible-compute:end', { visible: scoped.length })
+    return scoped
   }, [
     scopedRooms,
     accountFilter,
@@ -236,6 +274,9 @@ export function RoomList() {
     pinnedRooms,
     roomTitles,
     unreadKeys,
+    selectedSpaceAccount,
+    selectedChildren,
+    spaceScope,
   ])
   useEffect(() => {
     if (
@@ -787,6 +828,65 @@ export function RoomList() {
         )}
       </div>
 
+      {selectedSpace !== null && (
+        <div class="space-scope">
+          <p class="space-scope-title">
+            {selectedSpaceRoom === undefined
+              ? 'Selected space'
+              : roomTitle(selectedSpaceRoom, roomTitles)}
+          </p>
+          <div class="space-scope-actions">
+            {/* Joined spaces are filtered out of the list below, so this is the
+                only way to reach a space's own timeline, topic or leave
+                action. */}
+            {selectedSpaceRoom !== undefined && (
+              <button
+                type="button"
+                class="ghost"
+                onClick={() =>
+                  navigateToRoom(
+                    selectedSpaceRoom,
+                    localRoomHref(
+                      selectedSpaceRoom.account_id,
+                      selectedSpaceRoom.room_id,
+                      null,
+                    ),
+                  )
+                }
+              >
+                Open space room
+              </button>
+            )}
+            <button
+              type="button"
+              class="ghost"
+              onClick={() => (spaces.selected.value = null)}
+            >
+              Show all rooms
+            </button>
+          </div>
+          {spaceScope === 'loading' && (
+            <p class="muted">Loading space rooms…</p>
+          )}
+          {spaceScope === 'failed' && (
+            <p class="error" role="alert">
+              {spaceScopeError ?? 'Could not load space.'}{' '}
+              <button
+                type="button"
+                class="ghost"
+                onClick={() =>
+                  selectedSpaceRoom !== undefined &&
+                  spaces.refresh(selectedSpaceRoom)
+                }
+                disabled={selectedSpaceRoom === undefined}
+              >
+                Retry
+              </button>
+            </p>
+          )}
+        </div>
+      )}
+
       {rooms.loading.value ? (
         <p>Loading rooms…</p>
       ) : allRooms.length === 0 ? (
@@ -795,7 +895,9 @@ export function RoomList() {
           stored events.
         </p>
       ) : visible.length === 0 ? (
-        <p>No rooms match the current filter.</p>
+        spaceScope === 'loading' || spaceScope === 'failed' ? null : (
+          <p>No rooms match the current filter.</p>
+        )
       ) : (
         <ul
           class="room-list"

@@ -1,6 +1,8 @@
 import { useLocation } from 'preact-iso'
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { inBackground } from '../api/client'
+import { timelineEvent } from '../api/frames'
+import type { components } from '../api/schema'
 import {
   localRoomHref,
   matrixToRoomReferenceLink,
@@ -8,6 +10,7 @@ import {
   serverNameFromRoomReference,
 } from '../matrix-to'
 import { parseUserIdList } from '../matrix-user'
+import { joinRoomError } from '../room-entry'
 import { useServices } from '../services'
 import type { MembersStore } from '../stores/members'
 import {
@@ -23,6 +26,37 @@ import { BodyPortal } from './BodyPortal'
 import { ErrorBanner } from './ErrorBanner'
 import { useModalFocus } from './use-modal-focus'
 import { UserAvatar } from './UserAvatar'
+
+type RoomInfoDto = components['schemas']['RoomInfoDto']
+type RoomUpgradeDto = components['schemas']['RoomUpgradeDto']
+type SpaceChildDto = components['schemas']['SpaceChildDto']
+type SpaceParentDto = components['schemas']['SpaceParentDto']
+type EventDto = components['schemas']['EventDto']
+
+type RoomStateKey = 'info' | 'pinned' | 'children' | 'parents' | 'upgrade'
+
+interface RoomStateSlice {
+  /** `accountId/roomId` the rest of this slice was loaded for. */
+  key: string
+  info: RoomInfoDto | null
+  pinned: readonly EventDto[] | null
+  children: readonly SpaceChildDto[] | null
+  parents: readonly SpaceParentDto[] | null
+  upgrade: RoomUpgradeDto | null
+  errors: Partial<Record<RoomStateKey, string>>
+}
+
+function emptyRoomState(key: string): RoomStateSlice {
+  return {
+    key,
+    info: null,
+    pinned: null,
+    children: null,
+    parents: null,
+    upgrade: null,
+    errors: {},
+  }
+}
 
 const MEMBERSHIP_ORDER = new Map([
   ['join', 0],
@@ -47,7 +81,7 @@ export function RoomInfoPanel({
   onClose: () => void
 }) {
   const location = useLocation()
-  const { rooms, search } = useServices()
+  const { rooms, search, spaces, api, live } = useServices()
   const inviteInput = useRef<HTMLInputElement>(null)
   const clearCopyStatus = useRef<number | null>(null)
   const [filter, setFilter] = useState('')
@@ -66,9 +100,35 @@ export function RoomInfoPanel({
   const [cancelInviteStatus, setCancelInviteStatus] = useState<string | null>(
     null,
   )
+  const [joinLink, setJoinLink] = useState<{
+    roomId: string
+    via: readonly string[]
+    label: string
+  } | null>(null)
+  const [joinLinkBusy, setJoinLinkBusy] = useState(false)
+  const [joinLinkStatus, setJoinLinkStatus] = useState<string | null>(null)
   const [leaveStatus, setLeaveStatus] = useState<string | null>(null)
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false)
   const [leaveBusy, setLeaveBusy] = useState(false)
+  // `RoomPage` deliberately keeps one panel instance across room navigation, so
+  // this state has to be keyed by room itself: without it, switching rooms with
+  // the drawer open leaves the previous room's encryption, access and pinned
+  // messages on screen until the new fetches land — and indefinitely if they
+  // fail. The key is compared during render so no stale frame is ever shown.
+  const roomStateKey = `${accountId}/${roomId}`
+  const [loadedState, setRoomState] = useState<RoomStateSlice>(() =>
+    emptyRoomState(roomStateKey),
+  )
+  const roomState =
+    loadedState.key === roomStateKey
+      ? loadedState
+      : emptyRoomState(roomStateKey)
+  /** Room-state details, with a failed `/info` reported rather than pending. */
+  const infoValue = (pick: (info: RoomInfoDto) => string) => {
+    if (roomState.info !== null) return pick(roomState.info)
+    return roomState.errors.info === undefined ? 'Loading…' : 'Unavailable'
+  }
+  const [roomStateVersion, setRoomStateVersion] = useState(0)
   const displayTitle = room !== undefined ? roomTitle(room, roomTitles) : roomId
   const ownUserId = room?.account_user_id ?? null
   const homeServerName = serverNameFromRoomReference(ownUserId ?? roomId ?? '')
@@ -83,6 +143,25 @@ export function RoomInfoPanel({
   const onlyJoinedMember =
     ownUserId !== null &&
     isOnlyJoinedMember(members.members.value.values(), ownUserId)
+  const parents = useMemo(
+    () =>
+      relatedSpaceParents(
+        roomState.parents,
+        spaces.children.value,
+        rooms.rooms.value,
+        accountId,
+        roomId,
+        roomTitles,
+      ),
+    [
+      roomState.parents,
+      spaces.children.value,
+      rooms.rooms.value,
+      accountId,
+      roomId,
+      roomTitles,
+    ],
+  )
 
   useEffect(() => {
     if (inviteOpen) {
@@ -96,6 +175,100 @@ export function RoomInfoPanel({
       }
     }
   }, [])
+  useEffect(() => {
+    let cancelled = false
+    const stateKey = `${accountId}/${roomId}`
+    // Writes always land on the slice for the room they were issued for, never
+    // on whatever room the panel has since moved to.
+    const forRoom = (current: RoomStateSlice) =>
+      current.key === stateKey ? current : emptyRoomState(stateKey)
+    const load = <T,>(
+      key: RoomStateKey,
+      request: Promise<{ data?: { data: T } }>,
+    ) => {
+      const fail = () =>
+        !cancelled &&
+        setRoomState((current) => ({
+          ...forRoom(current),
+          errors: {
+            ...forRoom(current).errors,
+            [key]: 'Could not load this section.',
+          },
+        }))
+      void request.then(({ data }) => {
+        if (cancelled) return
+        if (data === undefined) {
+          fail()
+          return
+        }
+        setRoomState((current) => ({
+          ...forRoom(current),
+          [key]: data.data,
+          errors: { ...forRoom(current).errors, [key]: undefined },
+        }))
+      }, fail)
+    }
+    const params = {
+      params: { path: { account_id: accountId, room_id: roomId } },
+    }
+    load(
+      'info',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/info', params),
+    )
+    load(
+      'pinned',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/pinned', params),
+    )
+    load(
+      'children',
+      api.GET(
+        '/v1/accounts/{account_id}/rooms/{room_id}/space/children',
+        params,
+      ),
+    )
+    load(
+      'parents',
+      api.GET(
+        '/v1/accounts/{account_id}/rooms/{room_id}/space/parents',
+        params,
+      ),
+    )
+    load(
+      'upgrade',
+      api.GET('/v1/accounts/{account_id}/rooms/{room_id}/upgrade', params),
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [api, accountId, roomId, roomStateVersion])
+  useEffect(() => {
+    return live.subscribe((frame) => {
+      const event = timelineEvent(frame)
+      if (
+        event !== null &&
+        event.account_id === accountId &&
+        event.room_id === roomId &&
+        [
+          'm.room.join_rules',
+          'm.room.history_visibility',
+          'm.room.guest_access',
+          'm.room.encryption',
+          'm.room.pinned_events',
+          'm.space.child',
+          'm.space.parent',
+          'm.room.tombstone',
+          'm.room.create',
+        ].includes(event.type)
+      ) {
+        setRoomStateVersion((version) => version + 1)
+      }
+    })
+  }, [live, accountId, roomId])
+  useEffect(() => {
+    if (live.reconnects.value > 0) {
+      setRoomStateVersion((version) => version + 1)
+    }
+  }, [live.reconnects.value])
 
   const copyRoomLink = async () => {
     if (clearCopyStatus.current !== null) {
@@ -209,6 +382,23 @@ export function RoomInfoPanel({
     location.route('/', true)
   }
 
+  const joinLinkedRoom = async (target: {
+    roomId: string
+    via: readonly string[]
+    label: string
+  }) => {
+    setJoinLinkBusy(true)
+    const result = await rooms.joinRoom(accountId, target.roomId, target.via)
+    setJoinLinkBusy(false)
+    setJoinLink(null)
+    if (!result.ok) {
+      setJoinLinkStatus(joinRoomError(target.label, result))
+      return
+    }
+    location.route(localRoomHref(accountId, result.roomId, null))
+    onClose()
+  }
+
   return (
     <aside
       id="room-info-panel"
@@ -269,13 +459,80 @@ export function RoomInfoPanel({
               room?.last_event_id !== undefined && room.last_event_id !== null
             }
           />
-          <DetailRow label="Encryption" value="Unavailable from current API" />
-          <DetailRow label="Access" value="Unavailable from current API" />
           <DetailRow
-            label="Room type/version"
-            value="Unavailable from current API"
+            label="Encryption"
+            value={infoValue(
+              (info) => info.encryption_algorithm ?? 'Unencrypted',
+            )}
           />
+          <DetailRow
+            label="Access"
+            value={infoValue((info) => info.join_rule ?? 'Unavailable')}
+          />
+          <DetailRow
+            label="History visibility"
+            value={infoValue(
+              (info) => info.history_visibility ?? 'Unavailable',
+            )}
+          />
+          <DetailRow
+            label="Guest access"
+            value={infoValue((info) => info.guest_access ?? 'Unavailable')}
+          />
+          <DetailRow label="Room type" value={room?.room_type ?? 'None'} />
         </dl>
+        {roomState.errors.info !== undefined && (
+          <p class="error" role="alert">
+            {roomState.errors.info}
+          </p>
+        )}
+      </section>
+
+      <RoomStateLinks
+        children={roomState.children}
+        parents={parents}
+        upgrade={roomState.upgrade}
+        errors={roomState.errors}
+        status={joinLinkStatus}
+        onOpen={(target, via, label) => {
+          const known = rooms.rooms.value.find(
+            (candidate) =>
+              candidate.account_id === accountId &&
+              candidate.room_id === target,
+          )
+          if (known !== undefined) {
+            location.route(localRoomHref(accountId, target, null))
+            onClose()
+            return
+          }
+          // Opening an unjoined relation means joining it — a membership
+          // change the button label does not imply, so it is confirmed first.
+          setJoinLinkStatus(null)
+          setJoinLink({ roomId: target, via, label })
+        }}
+      />
+
+      <section class="room-info-section" aria-labelledby="room-info-pinned">
+        <h3 id="room-info-pinned">Pinned messages</h3>
+        {roomState.errors.pinned !== undefined ? (
+          <p class="error" role="alert">
+            {roomState.errors.pinned}
+          </p>
+        ) : roomState.pinned === null ? (
+          <p class="muted">Loading pinned messages…</p>
+        ) : roomState.pinned.length === 0 ? (
+          <p class="muted">No pinned messages.</p>
+        ) : (
+          <ol class="pinned-message-list">
+            {roomState.pinned.map((event) => (
+              <li key={event.event_id}>
+                <a href={localRoomHref(accountId, roomId, event.event_id)}>
+                  {event.sender}: {eventSummary(event)}
+                </a>
+              </li>
+            ))}
+          </ol>
+        )}
       </section>
 
       <section class="room-info-section" aria-labelledby="room-info-actions">
@@ -483,6 +740,17 @@ export function RoomInfoPanel({
           onConfirm={() => void leaveRoom()}
         />
       )}
+      {joinLink !== null && (
+        <JoinLinkedRoomDialog
+          label={joinLink.label}
+          roomId={joinLink.roomId}
+          busy={joinLinkBusy}
+          onCancel={() => {
+            if (!joinLinkBusy) setJoinLink(null)
+          }}
+          onConfirm={() => void joinLinkedRoom(joinLink)}
+        />
+      )}
       {cancelInviteMember !== null && (
         <CancelInviteDialog
           member={cancelInviteMember}
@@ -551,6 +819,207 @@ function CancelInviteDialog({
               onClick={onConfirm}
             >
               {busy ? 'Canceling…' : 'Cancel invite'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </BodyPortal>
+  )
+}
+
+/**
+ * Matrix spaces normally establish membership with an `m.space.child` event
+ * in the parent space. `m.space.parent` in the child is optional, so augment
+ * the endpoint's direct projection with the joined spaces already loaded for
+ * the picker.
+ */
+function relatedSpaceParents(
+  directParents: readonly SpaceParentDto[] | null,
+  childrenBySpace: ReadonlyMap<string, readonly SpaceChildDto[]>,
+  rooms: readonly RoomDto[],
+  accountId: string,
+  roomId: string,
+  roomTitles: ReadonlyMap<string, string>,
+): readonly SpaceParentDto[] | null {
+  const parents = new Map(
+    (directParents ?? []).map((parent) => [parent.room_id, parent]),
+  )
+  for (const space of rooms) {
+    if (space.account_id !== accountId || space.room_type !== 'm.space')
+      continue
+    const child = childrenBySpace
+      .get(roomKey(space))
+      ?.find((candidate) => candidate.room_id === roomId)
+    if (child !== undefined && !parents.has(space.room_id)) {
+      parents.set(space.room_id, {
+        room_id: space.room_id,
+        room_type: space.room_type,
+        name: roomTitle(space, roomTitles),
+        canonical: false,
+        via: child.via,
+      })
+    }
+  }
+  return directParents === null && parents.size === 0
+    ? null
+    : [...parents.values()]
+}
+
+function RoomStateLinks({
+  children,
+  parents,
+  upgrade,
+  errors,
+  status,
+  onOpen,
+}: {
+  children: readonly SpaceChildDto[] | null
+  parents: readonly SpaceParentDto[] | null
+  upgrade: RoomUpgradeDto | null
+  errors: Partial<Record<RoomStateKey, string>>
+  status: string | null
+  onOpen: (roomId: string, via: readonly string[], label: string) => void
+}) {
+  const links = [
+    ...(parents ?? []).map((parent) => ({
+      label: `Parent: ${parent.name ?? parent.room_id}`,
+      roomId: parent.room_id,
+      via: parent.via,
+    })),
+    ...(children ?? []).map((child) => ({
+      label: `Child: ${child.name ?? child.room_id}`,
+      roomId: child.room_id,
+      via: child.via,
+    })),
+    ...(upgrade?.upgraded_from === null || upgrade?.upgraded_from === undefined
+      ? []
+      : [{ label: 'Upgraded from', roomId: upgrade.upgraded_from, via: [] }]),
+    ...(upgrade?.tombstoned_to === null || upgrade?.tombstoned_to === undefined
+      ? []
+      : [
+          {
+            label: 'Open replacement room',
+            roomId: upgrade.tombstoned_to,
+            via: [],
+          },
+        ]),
+  ]
+  const failed = (['children', 'parents', 'upgrade'] as const).filter(
+    (key) => errors[key] !== undefined,
+  )
+  // Nothing loaded *and* nothing failed is the only genuinely pending case. If
+  // every read failed — the offline case — this used to take the same branch
+  // and sit at "Loading…" forever with the errors suppressed.
+  if (
+    links.length === 0 &&
+    children === null &&
+    parents === null &&
+    upgrade === null &&
+    failed.length === 0
+  ) {
+    return (
+      <section class="room-info-section">
+        <h3>Spaces and upgrades</h3>
+        <p class="muted">Loading room relationships…</p>
+      </section>
+    )
+  }
+  return (
+    <section class="room-info-section" aria-labelledby="room-info-links">
+      <h3 id="room-info-links">Spaces and upgrades</h3>
+      {failed.map((key) => (
+        <p class="error" role="alert" key={key}>
+          {errors[key]}
+        </p>
+      ))}
+      {links.length === 0 && failed.length === 0 ? (
+        <p class="muted">No related spaces or upgrade links.</p>
+      ) : links.length === 0 ? null : (
+        <ul class="room-state-links">
+          {links.map((link) => (
+            <li key={`${link.label}:${link.roomId}`}>
+              <button
+                type="button"
+                class="ghost"
+                onClick={() => onOpen(link.roomId, link.via, link.label)}
+              >
+                {link.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {status !== null && (
+        <p class="error" role="alert">
+          {status}
+        </p>
+      )}
+    </section>
+  )
+}
+
+function eventSummary(event: EventDto): string {
+  if (typeof event.content === 'object' && event.content !== null) {
+    const body = (event.content as { body?: unknown }).body
+    if (typeof body === 'string' && body.trim() !== '') return body
+  }
+  return event.type
+}
+
+/**
+ * A relationship link to a room this account has not joined can only be opened
+ * by joining it, which is a membership change the link's label does not imply.
+ */
+function JoinLinkedRoomDialog({
+  label,
+  roomId,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  label: string
+  roomId: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const { containerRef } = useModalFocus<HTMLDivElement>()
+  useShortcuts(
+    {
+      Escape: (event) => {
+        event.preventDefault()
+        onCancel()
+      },
+    },
+    { whileTyping: true, capture: true },
+  )
+  return (
+    <BodyPortal>
+      <div
+        ref={containerRef}
+        class="overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Join ${label}`}
+      >
+        <div class="overlay-panel leave-room-dialog">
+          <h2>Join this room?</h2>
+          <p>
+            You have not joined <strong>{label}</strong> (<code>{roomId}</code>
+            ). Opening it joins the room with this account, which other members
+            can see.
+          </p>
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="ghost"
+              disabled={busy}
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+            <button type="button" disabled={busy} onClick={onConfirm}>
+              {busy ? 'Joining…' : 'Join and open'}
             </button>
           </div>
         </div>

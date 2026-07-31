@@ -39,6 +39,10 @@ export type TimeFormat = '12h' | '24h'
  */
 export type StateEventVisibility = 'hidden' | 'important' | 'all'
 
+/** Desktop sidebar bounds in CSS pixels. Keep the room list readable. */
+export const SIDEBAR_WIDTH_MIN = 360
+export const SIDEBAR_WIDTH_MAX = 640
+
 /** Version 1 settings envelope, the shape at rest in `localStorage`. */
 export interface SettingsV1 {
   version: 1
@@ -57,6 +61,14 @@ export interface SettingsV1 {
    * that no longer exist; the room list simply won't match them.
    */
   pinnedRooms: string[]
+  /** Personal ordering for the joined-space picker, keyed like pinned rooms. */
+  spaceOrder: string[]
+  /** Whether the desktop sidebar hides the spaces avatar rail. */
+  spacesPaneCollapsed: boolean
+  /** Keep the rail hidden while there is no meaningful space choice. */
+  spacesPaneAutoHide: boolean
+  /** Browser-local desktop sidebar width in CSS pixels. */
+  sidebarWidth: number
   /** Persisted room-list sort mode (ADR 0042). */
   roomSort: RoomSort
   /** Persisted room-list filter category (ADR 0042). */
@@ -124,6 +136,10 @@ const DEFAULTS: SettingsV1 = {
   theme: 'system',
   activeAccountId: null,
   pinnedRooms: [],
+  spaceOrder: [],
+  spacesPaneCollapsed: false,
+  spacesPaneAutoHide: true,
+  sidebarWidth: 420,
   roomSort: 'recent',
   roomFilter: 'all',
   sidebarCollapsed: false,
@@ -212,6 +228,24 @@ function parse(raw: string | null): SettingsV1 {
     pinnedRooms: Array.isArray(v1.pinnedRooms)
       ? v1.pinnedRooms.filter((key): key is string => typeof key === 'string')
       : [],
+    spaceOrder: Array.isArray(v1.spaceOrder)
+      ? v1.spaceOrder.filter((key): key is string => typeof key === 'string')
+      : [],
+    spacesPaneCollapsed:
+      typeof v1.spacesPaneCollapsed === 'boolean'
+        ? v1.spacesPaneCollapsed
+        : DEFAULTS.spacesPaneCollapsed,
+    spacesPaneAutoHide:
+      typeof v1.spacesPaneAutoHide === 'boolean'
+        ? v1.spacesPaneAutoHide
+        : DEFAULTS.spacesPaneAutoHide,
+    sidebarWidth:
+      typeof v1.sidebarWidth === 'number' &&
+      Number.isFinite(v1.sidebarWidth) &&
+      v1.sidebarWidth >= SIDEBAR_WIDTH_MIN &&
+      v1.sidebarWidth <= SIDEBAR_WIDTH_MAX
+        ? Math.round(v1.sidebarWidth)
+        : DEFAULTS.sidebarWidth,
     roomSort: oneOf(ROOM_SORTS, v1.roomSort, DEFAULTS.roomSort),
     roomFilter: oneOf(ROOM_FILTERS, v1.roomFilter, DEFAULTS.roomFilter),
     sidebarCollapsed:
@@ -273,6 +307,10 @@ export interface SettingsStore {
   theme: Signal<Theme>
   activeAccountId: Signal<string | null>
   pinnedRooms: Signal<string[]>
+  spaceOrder: Signal<string[]>
+  spacesPaneCollapsed: Signal<boolean>
+  spacesPaneAutoHide: Signal<boolean>
+  sidebarWidth: Signal<number>
   roomSort: Signal<RoomSort>
   roomFilter: Signal<RoomFilter>
   sidebarCollapsed: Signal<boolean>
@@ -293,6 +331,16 @@ export interface SettingsStore {
   pinRoom(key: string): void
   /** Unpin a room key; a no-op when it isn't pinned. */
   unpinRoom(key: string): void
+  /**
+   * Move a space key to a new position in the browser-local picker.
+   *
+   * `visibleKeys` is the picker's full displayed order, which `toIndex` indexes
+   * into. The persisted order only holds keys the user has already moved, so it
+   * has to be materialized against the displayed order before splicing —
+   * clamping `toIndex` against the stored array alone silently turned every
+   * downward move into an insert near the top.
+   */
+  moveSpace(key: string, toIndex: number, visibleKeys: readonly string[]): void
   /** Record a reaction key as recently used, newest first. */
   recordRecentReaction(key: string): void
 }
@@ -308,6 +356,10 @@ export function createSettingsStore(
   const theme = signal<Theme>(initial.theme)
   const activeAccountId = signal<string | null>(initial.activeAccountId)
   const pinnedRooms = signal<string[]>(initial.pinnedRooms)
+  const spaceOrder = signal<string[]>(initial.spaceOrder)
+  const spacesPaneCollapsed = signal<boolean>(initial.spacesPaneCollapsed)
+  const spacesPaneAutoHide = signal<boolean>(initial.spacesPaneAutoHide)
+  const sidebarWidth = signal<number>(initial.sidebarWidth)
   const roomSort = signal<RoomSort>(initial.roomSort)
   const roomFilter = signal<RoomFilter>(initial.roomFilter)
   const sidebarCollapsed = signal<boolean>(initial.sidebarCollapsed)
@@ -330,6 +382,10 @@ export function createSettingsStore(
       theme: theme.value,
       activeAccountId: activeAccountId.value,
       pinnedRooms: pinnedRooms.value,
+      spaceOrder: spaceOrder.value,
+      spacesPaneCollapsed: spacesPaneCollapsed.value,
+      spacesPaneAutoHide: spacesPaneAutoHide.value,
+      sidebarWidth: sidebarWidth.value,
       roomSort: roomSort.value,
       roomFilter: roomFilter.value,
       sidebarCollapsed: sidebarCollapsed.value,
@@ -356,6 +412,10 @@ export function createSettingsStore(
     theme,
     activeAccountId,
     pinnedRooms,
+    spaceOrder,
+    spacesPaneCollapsed,
+    spacesPaneAutoHide,
+    sidebarWidth,
     roomSort,
     roomFilter,
     sidebarCollapsed,
@@ -374,6 +434,17 @@ export function createSettingsStore(
     },
     unpinRoom(key: string) {
       pinnedRooms.value = pinnedRooms.value.filter((k) => k !== key)
+    },
+    moveSpace(key: string, toIndex: number, visibleKeys: readonly string[]) {
+      // Keys the picker no longer shows stay ranked, so a space that is briefly
+      // absent (an account still syncing) keeps its place.
+      const hidden = spaceOrder.value.filter(
+        (candidate) => candidate !== key && !visibleKeys.includes(candidate),
+      )
+      const current = visibleKeys.filter((candidate) => candidate !== key)
+      const index = Math.max(0, Math.min(toIndex, current.length))
+      current.splice(index, 0, key)
+      spaceOrder.value = [...current, ...hidden]
     },
     recordRecentReaction(key: string) {
       const trimmed = key.trim()
