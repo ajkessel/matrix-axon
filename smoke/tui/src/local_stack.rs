@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::env::{env_cargo, resolve_workspace_bin};
@@ -15,18 +16,20 @@ pub struct Manifest {
     pub rooms: Rooms,
     pub fixtures: Fixtures,
     /// Present only when the stack was brought up with `--corpus` (ADR 0086).
-    /// No scenario passes it yet; the field is here so one can address demo
-    /// fixtures by corpus name — `demo.rooms["trip-photos"]` — instead of
+    /// No smoke scenario passes it; `axon-demo-tui` requires it, and addresses
+    /// demo fixtures by corpus name — `demo.rooms["trip-photos"]` — rather than
     /// re-deriving room ids from the screen.
     #[serde(default)]
-    #[allow(dead_code)]
     pub demo: Option<Demo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct Demo {
     pub name: String,
+    /// The instant the corpus resolved its relative dates against. Scenes that
+    /// name a date must count back from this, not from their own `now`: the
+    /// stack is meant to outlive the run that seeded it.
+    pub seeded_at: DateTime<Utc>,
     pub viewer: DemoViewer,
     pub personas: BTreeMap<String, DemoPersona>,
     pub spaces: BTreeMap<String, DemoSpace>,
@@ -38,28 +41,24 @@ pub struct Demo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DemoViewer {
     pub persona: String,
     pub account: MatrixAccount,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct MatrixAccount {
     pub user_id: String,
     pub password: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DemoPersona {
     pub user_id: String,
     pub display_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DemoSpace {
     pub room_id: String,
     pub name: String,
@@ -67,7 +66,6 @@ pub struct DemoSpace {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct DemoRoom {
     pub room_id: String,
     pub name: Option<String>,
@@ -99,7 +97,6 @@ pub struct Fixtures {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 pub struct RelationFixtures {
     pub root_event_id: String,
     pub reply_event_id: String,
@@ -203,6 +200,17 @@ impl Drop for LocalStack {
         if let Err(err) = self.down() {
             eprintln!("smoke(tui): stack teardown on drop failed: {err:#}");
         }
+    }
+}
+
+impl Manifest {
+    /// Read a manifest written by `axon-smoke-local-stack up`.
+    ///
+    /// Attaching to a stack this way — rather than through [`LocalStack`] —
+    /// neither builds nor tears down anything, which is what `axon-demo-tui`
+    /// wants: the recording stack is brought up by hand and outlives the pilot.
+    pub fn read(path: &Path) -> anyhow::Result<Self> {
+        read_manifest(path)
     }
 }
 
