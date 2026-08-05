@@ -166,16 +166,93 @@ involved.
 
 ### Build identity
 
-The Settings page shows the static web bundle's build identity so testers can
-confirm which copied client they are seeing. By default `pnpm build` bakes in
-the current git commit, appending `-dirty` when `clients/web` has uncommitted
-changes, plus the build timestamp.
+The Settings page shows the bundle's build identity so testers can confirm which
+copied client they are seeing. It reads `release+version` — for example
+`0.1.0+ab12cd34ef56`:
 
-For ad hoc test deploys, override the visible version label with:
+- **release** — `version` from this package's `package.json`. The human-readable
+  number; bump it when you cut one.
+- **version** — the exact build id. By default the current git commit
+  (`--short=12`), with `-dirty` appended when `clients/web` has uncommitted
+  changes. This is what identifies a build; the release alone cannot, since
+  every build of a release shares it.
+
+For ad hoc test deploys, override the build id with:
 
 ```sh
 VITE_AXON_WEB_VERSION=iphone-swipe-test-4 pnpm build
 ```
+
+A build also writes the same values to `dist/version.json`:
+
+```json
+{
+  "release": "0.1.0",
+  "version": "ab12cd34ef56",
+  "builtAt": "2026-08-02T14:03:11.204Z"
+}
+```
+
+### Automatic refresh on a new build
+
+A running client watches `/version.json` and applies a new build on its own
+(ADR 0087), so testers no longer have to force-kill the PWA or reload by hand
+after a deploy. It checks when the live socket reconnects (a deploy restarts the
+server, so this fires within seconds), when a hidden tab becomes visible, on
+`online`, and every 15 minutes as a backstop.
+
+What it does about an update depends on what it would cost:
+
+- Returning to a tab that has been hidden a minute or more: flushes drafts and
+  reloads silently.
+- You are using the app, or you have an unsent message or an upload in flight:
+  a banner under the topbar, with a Reload button. Nothing reloads under you.
+- A lazy-loaded chunk that the deploy deleted: reloads immediately, since that
+  failure is unrecoverable.
+
+Every automatic reload is guarded so it can happen at most once per build per
+tab — if the origin's `version.json` disagrees with the bundle it actually
+serves, the client reloads once and then falls back to the banner rather than
+looping. **Settings → Check for updates** asks on demand.
+
+**None of this runs under `pnpm dev`.** HMR already owns reloading there, and
+the dev stamp is not a deployment identity: it is a git hash plus a `-dirty`
+flag, read once when the dev server starts, so it moves whenever your working
+tree does. Without the guard, restarting the dev server after a commit or an
+edit would make every open tab decide a "new build" had shipped and reload
+itself. If a dev tab is refreshing on its own, it is Vite — an HMR full reload,
+or the "optimized dependencies changed" reload after a dep re-optimize — not
+this.
+
+Every automatic reload announces itself first, so a refresh is never a mystery:
+
+```
+[axon:update] reloading to pick up a new build: ab12cd34ef56 → ef78ab90cd12 (attempt 1/3 this window)
+[axon:update] declining to reload ab12cd34ef56 → ef78ab90cd12: already attempted from this build. The banner is the remaining path.
+```
+
+Filter the console on `[axon:update]`. Nothing there means the reload came from
+somewhere else. The guard's state is readable directly, too:
+
+```js
+JSON.parse(sessionStorage.getItem('axon:update-reload'))
+// { from, targets: [...], spent, windowStartedAt }
+```
+
+Note for anyone serving the built bundle: the SPA history fallback must not
+apply to `/assets/*`. A missing hashed chunk has to return `404`, not
+`index.html` with a `200`, or the browser tries to parse HTML as a module and
+the app hangs — the exact failure this feature was built to fix. Both shipped
+servers are guarded (`vite.config.ts` for `pnpm preview`, `deploy/web/Caddyfile`
+for the Docker stack); a third needs the same. Check yours with:
+
+```sh
+curl -sI https://your-host/assets/nope-abc123.js   # must be 404, not 200
+```
+
+Cache headers follow from the same distinction: `/assets/*` is content-hashed
+and can be `immutable`, while `index.html`, `version.json`, and the manifest
+change under a fixed name and must be revalidated.
 
 ## SSO sign-in
 

@@ -116,6 +116,186 @@ describe('createDeviceStateStore', () => {
     vi.useRealTimers()
   })
 
+  // Called before an automatic reload (ADR 0087). Drafts are durable, but only
+  // once the PUT behind the 800 ms debounce has actually gone out — reloading
+  // inside that window would drop the last thing the user typed.
+  it('flushPending sends debounced writes at once and resolves after the PUT', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    store.setDraft(ACCT, ROOM, 'half-typed')
+    expect(bodies).toEqual([])
+
+    await store.flushPending()
+
+    // Resolved means sent *and* answered — no timer advance needed.
+    expect(bodies).toEqual([{ entries: { [ROOM]: { text: 'half-typed' } } }])
+  })
+
+  it('flushPending covers every namespace with pending writes', async () => {
+    const namespaces: string[] = []
+    server.use(
+      http.put(STATE_PATH, ({ params }) => {
+        namespaces.push(String(params.namespace))
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    store.setDraft(ACCT, ROOM, 'text')
+    store.advanceReadMarker(ACCT, ROOM, '$e', 1000)
+
+    await store.flushPending()
+    expect(namespaces.sort()).toEqual(['drafts', 'read_markers'])
+  })
+
+  it('flushPending on an idle store resolves without a request', async () => {
+    let puts = 0
+    server.use(
+      http.put(STATE_PATH, () => {
+        puts += 1
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+    await expect(store.flushPending()).resolves.toBeUndefined()
+    expect(puts).toBe(0)
+  })
+
+  /**
+   * The server merge is last-write-wins by arrival, so two PUTs in flight at
+   * once are a lost update the moment the network reorders them. Writes are
+   * serialized per scope to make that impossible: the second request must not
+   * even be issued until the first has landed.
+   */
+  it('never has two PUTs for one scope in flight at once', async () => {
+    const started: string[] = []
+    const finished: string[] = []
+    let releaseFirst: (() => void) | undefined
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        const body = (await request.json()) as {
+          entries: Record<string, { text: string }>
+        }
+        const text = body.entries[ROOM].text
+        started.push(text)
+        if (text === 'hel') {
+          // Hold the first request open; the second must queue behind it.
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve
+          })
+        }
+        finished.push(text)
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+
+    store.setDraft(ACCT, ROOM, 'hel')
+    const first = store.flushPending()
+    await vi.waitFor(() => expect(started).toEqual(['hel']))
+
+    store.setDraft(ACCT, ROOM, 'hello')
+    const second = store.flushPending()
+    // The second PUT has not been issued — it is waiting on the first.
+    await Promise.resolve()
+    expect(started).toEqual(['hel'])
+
+    releaseFirst!()
+    await Promise.all([first, second])
+
+    // Issued in order, so the newer text is what the server saw last.
+    expect(started).toEqual(['hel', 'hello'])
+    expect(finished).toEqual(['hel', 'hello'])
+  })
+
+  /**
+   * The reload hazard specifically: a PUT already in flight when auto-refresh
+   * calls `flushPending` has to land before the tab goes away. Awaiting only
+   * self-started batches let a stale write land after the reload.
+   */
+  it('flushPending waits for a write that was already in flight', async () => {
+    let releaseFirst: (() => void) | undefined
+    let settledFirst = false
+    server.use(
+      http.put(STATE_PATH, async ({ request }) => {
+        const body = (await request.json()) as {
+          entries: Record<string, { text: string }>
+        }
+        if (body.entries[ROOM].text === 'first') {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve
+          })
+          settledFirst = true
+        }
+        return HttpResponse.json({
+          data: { updated_at: '2026-01-01T00:00:00Z' },
+        })
+      }),
+    )
+    const { store } = setup()
+
+    // Start a write and let it reach the server, then stop touching drafts —
+    // so there is nothing *pending* when flushPending is called.
+    store.setDraft(ACCT, ROOM, 'first')
+    void store.flushPending()
+    await vi.waitFor(() => expect(releaseFirst).toBeDefined())
+
+    let flushed = false
+    const flush = store.flushPending().then(() => {
+      flushed = true
+    })
+    await Promise.resolve()
+    expect(flushed).toBe(false) // still waiting on the in-flight write
+
+    releaseFirst!()
+    await flush
+    expect(settledFirst).toBe(true)
+  })
+
+  // A flush that fails must behave exactly like a debounced one that fails:
+  // the batch is re-queued, not lost, and the caller is not left hanging.
+  it('flushPending resolves even when the PUT fails, and re-queues the write', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempts = 0
+      server.use(
+        http.put(STATE_PATH, () => {
+          attempts += 1
+          return attempts === 1
+            ? HttpResponse.error()
+            : HttpResponse.json({
+                data: { updated_at: '2026-01-01T00:00:00Z' },
+              })
+        }),
+      )
+      const { store } = setup()
+      store.setDraft(ACCT, ROOM, 'text')
+
+      await store.flushPending()
+      expect(attempts).toBe(1)
+      expect(store.draft(ACCT, ROOM)).toBe('text')
+
+      // The re-queue rescheduled a debounced flush, which then succeeds.
+      await vi.advanceTimersByTimeAsync(800)
+      expect(attempts).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('clearing a draft writes a null tombstone', async () => {
     vi.useFakeTimers()
     let body: unknown
