@@ -37,6 +37,7 @@ import {
 } from '../components/use-message-composer'
 import {
   localRoomHref,
+  localThreadEventHref,
   parseMatrixRoomReference,
   serverNameFromRoomReference,
 } from '../matrix-to'
@@ -123,6 +124,10 @@ const SWIPE_RIGHT_AXIS_RATIO = SWIPE_AXIS_RATIO
 // How far above the scroller a page starts loading, so it arrives during the
 // scroll rather than after the reader has stopped at the top edge.
 const SCROLL_BACK_PREFETCH_PX = 400
+// How long a composer focus holds `keyboardPin` open. The keyboard's own show
+// animation is under half this on every platform tested; the margin is for
+// slow devices, not correctness at the edge.
+const KEYBOARD_PIN_MS = 600
 // Pages one arrival at the top may pull automatically. The chain exists to
 // cross runs of filtered-out events, not to walk history unattended.
 const AUTO_SCROLL_BACK_PAGES = 5
@@ -322,6 +327,16 @@ export function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per room instance
   }, [timeline])
 
+  // Remembers the deep-link target already resolved. Routing into a thread
+  // changes `openThread`, which re-runs the effect below with the same
+  // `highlighted`; without this it fetches the same event a second time and
+  // then jumps the main stream toward a reply that has no row in it. Once the
+  // thread panel is open it owns the reveal.
+  const resolvedDeepLink = useRef<{
+    eventId: string
+    rootId: string | null
+  } | null>(null)
+
   // Jump to the `?event=` target — on a cold deep link *and* whenever the
   // query changes while the room is already open (WCR-09; M-W10's search
   // results navigate this way). An event already in the loaded slice needs
@@ -335,18 +350,43 @@ export function RoomPage() {
     if (timeline.events.value.some((event) => event.event_id === highlighted)) {
       return
     }
+    const resolved = resolvedDeepLink.current
+    if (
+      resolved !== null &&
+      resolved.eventId === highlighted &&
+      resolved.rootId !== null &&
+      resolved.rootId === openThread
+    ) {
+      return
+    }
     void api
       .GET('/v1/accounts/{account_id}/events/{event_id}', {
         params: { path: { account_id: accountId, event_id: highlighted } },
       })
       .then(
-        ({ data }) =>
-          data !== undefined
-            ? timeline.jumpTo(data.data.origin_ts)
-            : timeline.loadLatest(),
+        ({ data }) => {
+          if (data === undefined) {
+            return timeline.loadLatest()
+          }
+          const rootId = threadRootId(data.data)
+          resolvedDeepLink.current = { eventId: highlighted, rootId }
+          // A thread reply has no row in the main room stream to jump to —
+          // it only ever renders inside its thread's own panel. Route
+          // straight there instead of jumping the main timeline toward the
+          // reply's timestamp, which would land near the thread root but
+          // never open the thread (or reveal the reply itself).
+          if (rootId !== null && rootId !== openThread) {
+            location.route(
+              localThreadEventHref(accountId, roomId, rootId, highlighted),
+              true,
+            )
+            return
+          }
+          return timeline.jumpTo(data.data.origin_ts)
+        },
         () => timeline.loadLatest(),
       )
-  }, [api, accountId, timeline, highlighted])
+  }, [api, accountId, roomId, timeline, highlighted, openThread, location])
 
   // Mark this room active while it is open so shared chrome can mark the row.
   useEffect(() => {
@@ -1583,6 +1623,27 @@ function Timeline({
   const eventList = useRef<HTMLOListElement>(null)
   const lastOwnEventId = useRef<string | null>(null)
   const stickToBottom = useRef(true)
+  /**
+   * Whether the reader was at the live end the instant they focused the
+   * composer — captured before the keyboard moves anything, so it survives
+   * the race below. Bringing up the keyboard forces a scroll (the composer's
+   * own focus handler re-pins immediately, and iOS may nudge the scroller
+   * trying to keep the focused control in view); if either lands while the
+   * keyboard's own resize is still settling, `onScroll` reads a transient
+   * `clientHeight` and can flip `stickToBottom` false for a container that
+   * never actually left the bottom. This ref is the fix: the keyboard-resize
+   * observer below trusts it over a `stickToBottom` that just got clobbered.
+   *
+   * Left set (not consumed by the first resize) for `KEYBOARD_PIN_MS` after
+   * focus, not cleared by the next `scroller-resize` callback: the keyboard's
+   * show animation fires that observer more than once — an unrelated content
+   * reflow, then the real shrink — and clearing on the first occurrence burned
+   * the override before the real one arrived (caught live on a phone: a
+   * `keyboardPin=true` mark followed by a `keyboardPin=false` one on the very
+   * next resize, before the keyboard had actually finished shrinking anything).
+   */
+  const keyboardPin = useRef(false)
+  const keyboardPinTimer = useRef<number | null>(null)
   const resizePinFrame = useRef<number | null>(null)
   const highlightedCentering = useRef<{
     eventId: string | null
@@ -1949,6 +2010,105 @@ function Timeline({
       }
     })
     observer.observe(list)
+    return () => observer.disconnect()
+  }, [highlighted, atEnd, scheduleResizePin])
+
+  // Snapshot "was the reader at the live end" the instant the composer takes
+  // focus — before the keyboard's own resize (and the composer's separate
+  // focus-triggered pin) have a chance to fire an in-between scroll event
+  // that miscomputes `stickToBottom` (see `keyboardPin` above).
+  useEffect(() => {
+    const clearPinTimer = () => {
+      if (keyboardPinTimer.current !== null) {
+        window.clearTimeout(keyboardPinTimer.current)
+        keyboardPinTimer.current = null
+      }
+    }
+    const onFocusIn = (event: FocusEvent) => {
+      // Only the *room* composer arms the pin. The listener has to sit on
+      // `document` (focus lands before the composer's own handlers run), but
+      // `RoomPage` does not remount on in-room navigation, so matching any text
+      // control would let unrelated overlays arm it. `JumpDialog`'s date inputs
+      // are the damaging case: a resize inside the pin window then force-pins
+      // to the live end, which is the exact opposite of what "jump to date" is
+      // for.
+      const target = event.target
+      if (!(target instanceof HTMLElement)) {
+        return
+      }
+      const composer = target.closest('.composer')
+      if (composer === null) {
+        return
+      }
+      // ...and only the composer belonging to *this* timeline's pane, so the
+      // room timeline is never re-pinned by focus in the thread panel's
+      // composer, or vice versa. `ThreadPanel` doesn't render its own
+      // `Timeline`/keyboardPin instance today, so `.thread-panel` has no live
+      // counterpart to guard against yet — this is forward-looking, for
+      // whenever it does.
+      const pane = (node: Element | null | undefined) =>
+        node?.closest('.room-stream, .thread-panel') ?? null
+      const ownPane = pane(scroller.current)
+      if (ownPane === null || pane(composer) !== ownPane) {
+        return
+      }
+      keyboardPin.current = stickToBottom.current
+      clearPinTimer()
+      keyboardPinTimer.current = window.setTimeout(() => {
+        keyboardPin.current = false
+      }, KEYBOARD_PIN_MS)
+    }
+    const onFocusOut = () => {
+      keyboardPin.current = false
+      clearPinTimer()
+    }
+    document.addEventListener('focusin', onFocusIn)
+    document.addEventListener('focusout', onFocusOut)
+    return () => {
+      document.removeEventListener('focusin', onFocusIn)
+      document.removeEventListener('focusout', onFocusOut)
+      clearPinTimer()
+    }
+  }, [])
+
+  // The soft keyboard shrinks the scroller's *own* box — its flex parent
+  // loses height to the shrunk visual viewport — without touching its
+  // content, so the content-resize observer above never fires for it. Left
+  // alone, a reader already pinned to the newest message has their scrollTop
+  // unchanged while the box's bottom edge moves up to meet the keyboard,
+  // burying exactly the row they were reading. Re-pin on the scroller's own
+  // resize too, both for the keyboard's appearance and its dismissal (which
+  // grows the box back and would otherwise leave a gap of blank space below
+  // the last row). A mid-scroll reader is untouched, same as every other pin
+  // here: the `stickToBottom` guard only fires this while already at bottom.
+  useLayoutEffect(() => {
+    if (
+      highlighted !== null ||
+      !atEnd ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return
+    }
+    const el = scroller.current
+    if (el === null) {
+      return
+    }
+    const observer = new ResizeObserver(() => {
+      perfMark('timeline:keyboard:scroller-resize', {
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+        stickToBottom: stickToBottom.current,
+        keyboardPin: keyboardPin.current,
+      })
+      if (keyboardPin.current) {
+        stickToBottom.current = true
+      }
+      if (stickToBottom.current) {
+        scheduleResizePin()
+      }
+    })
+    observer.observe(el)
     return () => observer.disconnect()
   }, [highlighted, atEnd, scheduleResizePin])
 

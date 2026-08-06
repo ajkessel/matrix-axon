@@ -66,6 +66,41 @@ import { orderedSpaces } from './stores/spaces'
 import type { Account } from './stores/accounts'
 import type { RoomEntryResult, RoomsStore } from './stores/rooms'
 
+const PAGE_SCROLL_RESET_KEY = 'axon.pagescrollreset'
+
+/**
+ * Harness override for the iOS soft-keyboard drift experiment:
+ * `?pagescrollreset=0` observes the drift without correcting it,
+ * `?pagescrollreset=1` re-arms, absent defers to the Settings checkbox
+ * (`pageScrollReset`, on by default).
+ *
+ * Latched at module scope and mirrored into `sessionStorage` for the same
+ * reason `perfEnabled()` is (ADR 0077): the SSO callback does
+ * `replaceState(null, '', '/')`, so a param read any later — from inside an
+ * effect, after mount — sees a URL the query is already gone from. A first
+ * attempt read it in the effect and silently ran armed while the recording it
+ * was meant to control said `?pagescrollreset=0`; the mirror also survives the
+ * in-tab navigations that reaching a room involves.
+ */
+const pageScrollResetOverride = ((): boolean | null => {
+  let armed: boolean | null = null
+  try {
+    const param = new URLSearchParams(window.location.search).get(
+      'pagescrollreset',
+    )
+    if (param !== null) {
+      armed = param !== '0'
+      window.sessionStorage.setItem(PAGE_SCROLL_RESET_KEY, armed ? '1' : '0')
+    } else {
+      const stored = window.sessionStorage.getItem(PAGE_SCROLL_RESET_KEY)
+      armed = stored === null ? null : stored !== '0'
+    }
+  } catch {
+    // Private-mode storage failures must not change the default.
+  }
+  return armed
+})()
+
 interface PendingMatrixJoin {
   accountId: string
   accountUserId: string | null
@@ -96,7 +131,7 @@ export function App({ services }: { services?: AppServices }) {
       setPerfEnabled(svc.settings.perfMarks.value)
     }
   }, [svc, svc.settings.perfMarks.value])
-  useVisualViewportShell()
+  useVisualViewportShell(svc.settings)
   useStandaloneKeyboardAccessoryInset()
   useInstallPromptCapture()
 
@@ -150,7 +185,7 @@ function useInstallPromptCapture(): void {
   useEffect(() => setupInstallPromptCapture(window), [])
 }
 
-function useVisualViewportShell(): void {
+function useVisualViewportShell(settings: AppServices['settings']): void {
   useEffect(() => {
     const root = document.documentElement
     const viewport = window.visualViewport
@@ -175,9 +210,20 @@ function useVisualViewportShell(): void {
       // background below, so fall back to the CSS `100dvh` sizing and let the
       // next real event take over.
       if (isViewportHeightStale(viewport)) {
+        perfMark('timeline:keyboard:viewport-stale', {
+          height: viewport.height,
+          innerHeight: window.innerHeight,
+          editableFocused: isEditableFocused(),
+        })
         clear()
         return
       }
+      perfMark('timeline:keyboard:viewport-update', {
+        height: Math.round(viewport.height),
+        offsetTop: Math.round(viewport.offsetTop),
+        innerHeight: window.innerHeight,
+        editableFocused: isEditableFocused(),
+      })
       root.style.setProperty('--app-viewport-top', `${viewport.offsetTop}px`)
       root.style.setProperty('--app-viewport-left', `${viewport.offsetLeft}px`)
       root.style.setProperty('--app-viewport-width', `${viewport.width}px`)
@@ -196,6 +242,41 @@ function useVisualViewportShell(): void {
     window.addEventListener('pageshow', update)
     document.addEventListener('focusin', update)
     document.addEventListener('focusout', updateAfterBlur)
+    // `html`/`body`/`#app` are `height: 100%; overflow: hidden` — the page
+    // itself is never meant to scroll; `.timeline` is the one scrollable
+    // region. iOS Safari's own "keep the focused control visible" heuristic
+    // does not know that: focusing the composer (fixed/sticky, not in normal
+    // flow) while the keyboard is up, then dragging inside `.timeline`, can
+    // make Safari nudge the *document's* scroll position regardless — moving
+    // everything positioned off `--app-viewport-top` (composer included) away
+    // from the keyboard it's meant to sit on, with a gap of plain page
+    // background left behind. Snap it back the instant it happens.
+    // A 60fps capture showed `offsetTop` oscillating every frame (57 → 9 → 28 →
+    // 16 → 32 → 14) with a reset interleaved through it, and since `scrollTo`
+    // moves `visualViewport.offsetTop`, which is what `--app-viewport-top`
+    // positions the shell from, the correction may be driving the oscillation
+    // rather than damping it. `pageScrollResetArmed` (module scope) gates the
+    // experiment; disarmed, the mark is renamed rather than dropped, so a
+    // recording proves which arm is live and still reports the same numbers.
+    // Read per event, not per render: the listeners below must not be torn
+    // down and re-added when the checkbox flips mid-session.
+    const isArmed = () =>
+      pageScrollResetOverride ?? settings.pageScrollReset.value
+    const resetPageScroll = () => {
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        const armed = isArmed()
+        perfMark(
+          armed
+            ? 'timeline:keyboard:page-scroll-reset'
+            : 'timeline:keyboard:page-scroll-observed',
+          { scrollX: window.scrollX, scrollY: window.scrollY },
+        )
+        if (armed) {
+          window.scrollTo(0, 0)
+        }
+      }
+    }
+    window.addEventListener('scroll', resetPageScroll)
     return () => {
       viewport.removeEventListener('resize', update)
       viewport.removeEventListener('scroll', update)
@@ -204,8 +285,10 @@ function useVisualViewportShell(): void {
       window.removeEventListener('pageshow', update)
       document.removeEventListener('focusin', update)
       document.removeEventListener('focusout', updateAfterBlur)
+      window.removeEventListener('scroll', resetPageScroll)
       clear()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `pageScrollReset` is read per event inside `isArmed`, so the listeners must not be rebound when it flips
   }, [])
 }
 

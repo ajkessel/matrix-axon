@@ -1989,6 +1989,320 @@ describe('RoomPage', () => {
     expect(timeline.scrollTop).toBe(130)
   })
 
+  it('keeps the newest message visible when the soft keyboard shrinks the scroller', async () => {
+    // The keyboard shrinks the scroller's *own* box (its flex parent loses
+    // height to the shrunk visual viewport) — the content element inside it
+    // never resizes. A fake that fired every observer regardless of its
+    // target (like `installResizeObserver` above) couldn't tell this case
+    // apart from ordinary content growth, so this one dispatches only to
+    // whichever observer is watching a given target, the way a real
+    // `ResizeObserver` would.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    // Fire the scheduled pin frame synchronously: the assertion needs no real
+    // await this way, so nothing else gets a turn to run in between and
+    // mask (or fake) the effect under test.
+    const originalRaf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      callback(0)
+      return 0
+    }) as typeof requestAnimationFrame
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      const eventList = container.querySelector<HTMLElement>('.event-list')!
+      setTimelineScrollGeometry(timeline, {
+        clientHeight: 50,
+        scrollHeight: () => 100,
+      })
+      timeline.scrollTop = 50
+
+      // Only the scroller's own box shrinks; the content observer (on
+      // `.event-list`) is left untouched, so this isolates the fix under
+      // test.
+      setTimelineScrollGeometry(timeline, {
+        clientHeight: 30,
+        scrollHeight: () => 100,
+      })
+      expect(byTarget.has(eventList)).toBe(true)
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+
+      expect(timeline.scrollTop).toBe(100)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
+  it('re-pins to bottom even when a scroll event mid-keyboard-animation clobbers stickToBottom (issue found live on iOS)', async () => {
+    // The observed failure on a real phone: focusing the composer forces an
+    // immediate scroll to the (pre-keyboard) bottom, and that scroll's own
+    // `scroll` event can land *after* the keyboard has already started
+    // shrinking the scroller but *before* its resize has settled. `onScroll`
+    // then computes "not at bottom" from a transient `clientHeight` and
+    // clobbers `stickToBottom` to false — so when the keyboard's resize does
+    // settle, the plain `stickToBottom` guard alone would wrongly skip the
+    // pin. `keyboardPin`, captured at focus time before any of this noise,
+    // is what recovers it.
+    //
+    // The trace that caught this live also showed a second failure mode: an
+    // unrelated, harmless scroller-resize fires *before* the keyboard's real
+    // shrink (a minor content reflow around focus time), and a version of
+    // this fix that cleared `keyboardPin` on the first resize it saw burned
+    // the override on that harmless one — leaving nothing to rescue the real
+    // resize a moment later. This test includes that intermediate resize to
+    // cover it.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    // A queueing (not auto-running) fake: `pinLiveTimelineAfterComposerFocus`
+    // schedules its own double-rAF on focus, and it must not fire before this
+    // test is ready for it — `flushRaf` runs whatever is pending, on demand.
+    const originalRaf = globalThis.requestAnimationFrame
+    let rafQueue: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      rafQueue.push(callback)
+      return rafQueue.length
+    }) as typeof requestAnimationFrame
+    const flushRaf = () => {
+      const queued = rafQueue
+      rafQueue = []
+      queued.forEach((callback) => callback(0))
+    }
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      const textarea = container.querySelector('textarea')!
+      let clientHeight = 750
+      Object.defineProperty(timeline, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+      })
+      Object.defineProperty(timeline, 'scrollHeight', {
+        configurable: true,
+        value: 7110,
+      })
+      timeline.scrollTop = 6360 // exactly at bottom: 7110 - 6360 - 750 = 0
+
+      // Tapping the composer — captures `keyboardPin` while genuinely at
+      // the live end. (Its own focus-triggered pin is queued, not run yet.)
+      textarea.focus()
+
+      // A harmless, unrelated resize fires first — content reflowing near
+      // focus time, nothing to do with the keyboard. `keyboardPin` must
+      // survive this; it is not yet the resize the fix is watching for.
+      clientHeight = 746
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+
+      // The keyboard starts shrinking the box; a scroll event lands
+      // mid-animation, at an intermediate clientHeight, before the resize
+      // settles. This is what flips `stickToBottom` false on the real
+      // device.
+      clientHeight = 460
+      fireEvent.scroll(timeline)
+      expect(timeline.scrollTop).toBe(6360) // unmoved by the stray scroll
+
+      // The keyboard's resize settles at its final height.
+      clientHeight = 331
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+      flushRaf()
+
+      expect(timeline.scrollTop).toBe(7110)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
+  it('does not arm keyboardPin from an input outside the composer', async () => {
+    // The focus listener sits on `document` and `RoomPage` does not remount on
+    // in-room navigation, so before scoping, any text control in the page armed
+    // the pin. `JumpDialog`'s date inputs are the damaging case: a resize
+    // inside the pin window would force the reader back to the live end —
+    // exactly what jumping to a date is meant to get away from.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    const originalRaf = globalThis.requestAnimationFrame
+    let rafQueue: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      rafQueue.push(callback)
+      return rafQueue.length
+    }) as typeof requestAnimationFrame
+    const flushRaf = () => {
+      const queued = rafQueue
+      rafQueue = []
+      queued.forEach((callback) => callback(0))
+    }
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      let clientHeight = 750
+      Object.defineProperty(timeline, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+      })
+      Object.defineProperty(timeline, 'scrollHeight', {
+        configurable: true,
+        value: 7110,
+      })
+
+      // The reader is at the live end when they reach for "jump to date".
+      timeline.scrollTop = 6360 // 7110 - 6360 - 750 = 0
+      fireEvent.scroll(timeline)
+
+      // Focusing a text control that is in the page but not in the composer.
+      // This is the moment that used to capture `stickToBottom` — true, right
+      // now — and hold it for the whole pin window.
+      const stream = container.querySelector<HTMLElement>('.room-stream')!
+      const outsider = document.createElement('input')
+      stream.appendChild(outsider)
+      outsider.focus()
+
+      // They jump back into history, which is the entire point of the feature.
+      timeline.scrollTop = 1000
+      fireEvent.scroll(timeline)
+
+      // A resize lands inside what would have been the pin window.
+      clientHeight = 331
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+      flushRaf()
+
+      // No pin was armed, so the reader stays exactly where they scrolled,
+      // not just "somewhere other than the live end".
+      expect(timeline.scrollTop).toBe(1000)
+    } finally {
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
+  it('lets keyboardPin expire, so a reader who scrolled away stays there', async () => {
+    // `keyboardPin` is a bounded window (`KEYBOARD_PIN_MS`), not a flag that
+    // rides along with focus forever — once it expires, a resize is judged
+    // purely on the reader's actual position again.
+    const byTarget = new Map<Element, ResizeObserverCallback>()
+    class TargetedResizeObserver {
+      #callback: ResizeObserverCallback
+      constructor(callback: ResizeObserverCallback) {
+        this.#callback = callback
+      }
+      observe(target: Element) {
+        byTarget.set(target, this.#callback)
+      }
+      unobserve(target: Element) {
+        byTarget.delete(target)
+      }
+      disconnect() {}
+    }
+    globalThis.ResizeObserver =
+      TargetedResizeObserver as unknown as typeof ResizeObserver
+    // The true native rAF, captured *before* faking timers — `vi.useFakeTimers`
+    // fakes `requestAnimationFrame` too, and capturing after it (as an earlier
+    // version of this test did) restores a disconnected fake in `finally`,
+    // wedging every later test in this file that waits on a real animation
+    // frame.
+    const originalRaf = globalThis.requestAnimationFrame
+    vi.useFakeTimers()
+    // Queued, not run automatically or discarded: `pinLiveTimelineAfterComposer
+    // Focus`'s own focus-triggered double-rAF (unconditional — it forces the
+    // scroller to its bottom regardless of `stickToBottom`) must not fire
+    // while staging the scenario, but `scheduleResizePin`'s rAF still needs to
+    // be flushable afterward, or "no pin happened" would hold vacuously
+    // whether or not the fix actually ran.
+    let rafQueue: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      rafQueue.push(callback)
+      return rafQueue.length
+    }) as typeof requestAnimationFrame
+    const flushRaf = () => {
+      const queued = rafQueue
+      rafQueue = []
+      queued.forEach((callback) => callback(0))
+    }
+
+    try {
+      const { findByText, container } = renderRoom([event('$latest', T0)])
+      await findByText('body of $latest')
+      const timeline = container.querySelector<HTMLElement>('.timeline')!
+      const textarea = container.querySelector('textarea')!
+      let clientHeight = 750
+      Object.defineProperty(timeline, 'clientHeight', {
+        configurable: true,
+        get: () => clientHeight,
+      })
+      Object.defineProperty(timeline, 'scrollHeight', {
+        configurable: true,
+        value: 7110,
+      })
+      timeline.scrollTop = 6360 // at the bottom
+
+      textarea.focus() // captures keyboardPin=true
+      rafQueue = [] // discard the focus pin's own queued double-rAF
+
+      // The reader scrolls away for real, well within the keyboardPin window.
+      timeline.scrollTop = 1000
+      fireEvent.scroll(timeline)
+
+      // The window closes with no further keyboard resize.
+      vi.advanceTimersByTime(1000)
+
+      // A later, unrelated resize must not snap them back to the bottom —
+      // keyboardPin has expired, so only their actual position counts.
+      clientHeight = 500
+      byTarget.get(timeline)?.([], null as unknown as ResizeObserver)
+      flushRaf()
+
+      expect(timeline.scrollTop).toBe(1000)
+    } finally {
+      vi.useRealTimers()
+      globalThis.requestAnimationFrame = originalRaf
+    }
+  })
+
   it('does not repin resized room content after the user scrolls back', async () => {
     installResizeObserver()
     let scrollHeight = 100
@@ -2742,6 +3056,35 @@ describe('RoomPage', () => {
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
     }
+  })
+
+  it('a ?event= deep link into a thread reply opens the thread instead of jumping the room stream', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`, () =>
+        HttpResponse.json({
+          data: event('$reply', T0, {
+            relates_to: { rel_type: 'm.thread', event_id: '$root' },
+          }),
+        }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({ data: { events: [], next_cursor: null } }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24reply`,
+    )
+    const services = testServices()
+    render(routedRoomPage(services))
+
+    await waitFor(() =>
+      expect(window.location.search).toBe('?thread=%24root&event=%24reply'),
+    )
   })
 
   it('keeps a search/deep-link target centered when timeline rows resize', async () => {
