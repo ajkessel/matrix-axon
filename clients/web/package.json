@@ -28,7 +28,7 @@
     "highlight.js": "^11.11.1",
     "marked": "^18.0.5",
     "openapi-fetch": "^0.17.0",
-    "pdfjs-dist": "^6.1.200",
+    "pdfjs-dist": "^6.2.108",
     "postcss": "8.5.25",
     "preact": "^10.29.3",
     "preact-iso": "^2.12.0"
