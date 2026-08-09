@@ -150,6 +150,29 @@ before starting a milestone.
   `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
   search (M-W10) and the mobile clients build on it; do not change it.
   Deployment requires unknown-path → `index.html` rewrite.
+- **Async work in `RoomPage` outlives its own world.** The page does not remount
+  across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
+  `await` inside an effect can resolve after the user has moved on — a second
+  search hit, another room, a closed panel. Anything that acts on the result must
+  re-check identity first, against a **render-assigned ref** holding the room and
+  anchor the page is currently showing. Two things that look like they'd work and
+  don't: the closure's own `location` (the router hands each render its own
+  object, so a stale continuation still sees the URL it was created for and
+  passes the check), and comparing serialized paths (see the encoding trap under
+  Testing traps). Found twice in the #136 review — once as the race, once in the
+  guard written to close it.
+- **Ask the operation, not the store.** `error`, `atEnd`, and `events` describe
+  the store, not your call. `error` is written by sends, edits, reactions,
+  redactions (`mutate`/`mutateWithResult`) and `RoomPage`'s re-decryption retry;
+  `refreshHead` declines to move a slice parked in history (the WCR-05 rule)
+  without touching `events`, `error`, or `reachedEnd`, so a decline is
+  indistinguishable from a success in every signal it leaves behind. When you
+  need to know whether _your_ call did anything, the call has to say so —
+  `loadLatest` resolves to whether a head page was applied for exactly this
+  reason. Two separate bugs in the #136 review came from inferring it, one from
+  each of those signals. The corollary is a design rule, not just a caution: when
+  a third guard is going into the same function, the thing that's missing is
+  usually an API that answers the question, not another check.
 - **Live ephemerals** (`src/stores/ephemeral.ts`): `ephemeral.passthrough`
   frames are live-only overlays. `m.typing` is whole-list replace per room,
   self-expires, and clears on socket gaps. `m.receipt` is parsed from Matrix's
@@ -476,6 +499,20 @@ TimelineEvent`).
 - **The e2e mock server outlives a single spec file** (`reuseExistingServer`).
   A spec that appends to its seeded `timeline` array pollutes every later spec;
   `send-media` deliberately only broadcasts and records for `/events/:id`.
+- **A fixture that uses the same helper as the code agrees with it by
+  construction.** A URL check compared `window.location.pathname` against
+  `localRoomHref`, which runs the room id through `encodeURIComponent` — but a
+  browser keeps the literal `:` of `!localpart:server` in a path, so the
+  comparison was permanently false in every real browser and passed in every
+  test, because the fixtures seeded the URL through that same helper. Seed
+  anything that crosses the browser boundary — paths, ids, encoded params — the
+  way the browser presents it, not the way our code writes it.
+- **Run a new regression test against the unfixed code first.** A guard that
+  reads the wrong state passes its test for the wrong reason, and looks correct
+  while doing nothing. Every regression test added in #136 was checked this way,
+  which is how two silently-inert guards were caught before review — including
+  one whose test passed until the fixture stopped sharing an encoder with the
+  code it tested.
 - **`e2e/media.spec.ts` is flaky here:** headless `IntersectionObserver`
   sometimes never fires, so lazy-loaded media stays a skeleton and no proxy
   fetch is issued. It reproduces on unmodified code — don't chase it as a
