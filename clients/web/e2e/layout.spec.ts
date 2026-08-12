@@ -4,6 +4,7 @@ import {
   active,
   expectPaneCenterUncovered,
   openRoom,
+  reloadFromInsidePage,
   ROOM_ID,
   ROOM_URL,
   shown,
@@ -235,6 +236,14 @@ test('wide: the thread is a third column that shrinks the timeline', async ({
   expect(await shown(page, '.sidebar')).toBe('visible') // never covered
 })
 
+/**
+ * A reload drops the restored thread view: `?thread=` leaves the URL and the
+ * panel does not come back. `update-refresh.spec.ts` covers the same contract
+ * for the reload Axon performs itself on a new build (ADR 0087) — keep both.
+ *
+ * This behavior is gated on the engine *classifying* the load as a reload, so it
+ * must not use the driver's `page.reload()` — see `reloadFromInsidePage`.
+ */
 test('reload strips the restored thread view from a room URL', async ({
   page,
 }) => {
@@ -243,7 +252,7 @@ test('reload strips the restored thread view from a room URL', async ({
   await page.goto(`${ROOM_URL}?thread=%24root`)
   await expect(page.locator('.thread-panel')).toBeVisible()
 
-  await page.reload()
+  await reloadFromInsidePage(page)
 
   await expect(page).not.toHaveURL(/thread=/)
   await expect(page.locator('.thread-panel')).toHaveCount(0)
