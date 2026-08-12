@@ -22,6 +22,7 @@ import { ServicesContext } from '../services'
 import { ShellActionsContext } from '../shell-actions'
 import type { MemberDto, RoomDto } from '../stores/room-list'
 import type { EventDto } from '../stores/timeline'
+import { RECEIPT_DEBOUNCE_MS } from '../stores/ephemeral-sender'
 import { memoryStorage } from '../test/memory-storage'
 import { TEST_BASE_URL, testServices } from '../test/services'
 import { RoomPage } from './RoomPage'
@@ -141,6 +142,23 @@ function routedRoomPage(services: ReturnType<typeof testServices>) {
         <Router>
           <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
           <Route default component={RoomPage} />
+        </Router>
+      </LocationProvider>
+    </ServicesContext.Provider>
+  )
+}
+
+function routedRoomPageWithAwayRoute(
+  services: ReturnType<typeof testServices>,
+) {
+  const AwayPage = () => <main>Unrelated page</main>
+  return (
+    <ServicesContext.Provider value={services}>
+      <LocationProvider>
+        <Router>
+          <Route path="/:accountId/rooms/:roomId" component={RoomPage} />
+          <Route path="/away" component={AwayPage} />
+          <Route default component={AwayPage} />
         </Router>
       </LocationProvider>
     </ServicesContext.Provider>
@@ -1322,6 +1340,86 @@ describe('RoomPage', () => {
 
     await waitFor(() => expect(seenAtTs).toBe(String(expectedAtTs)))
     expect(await findByText('body of $old')).toBeTruthy()
+  })
+
+  it('does not advance the summary read marker after a jump to date', async () => {
+    const expectedStartTs = new Date(2026, 4, 20).getTime()
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({
+          data: [
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: ROOM,
+              name: 'Ops',
+              topic: null,
+              avatar_url: null,
+              canonical_alias: null,
+              last_activity_ts: T0,
+              last_event_id: '$latest',
+            },
+            {
+              account_id: ACCOUNT,
+              account_user_id: '@me:hs',
+              room_id: '!other:hs',
+              name: 'Other',
+              topic: null,
+              avatar_url: null,
+              canonical_alias: null,
+              last_activity_ts: T0 + 1,
+              last_event_id: '$other',
+            },
+          ],
+        }),
+      ),
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        return HttpResponse.json({
+          data: {
+            events:
+              atTs === null
+                ? [event('$latest', T0)]
+                : [event('$old', expectedStartTs + 1)],
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    const services = testServices()
+    const timeline = services.timelines.acquire(ACCOUNT, ROOM)
+    const { findByRole, findByText } = render(
+      routedRoomPageWithJumpButton(services),
+    )
+    await findByText('body of $latest')
+    await waitFor(() =>
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+        eventId: '$latest',
+        originTs: T0,
+      }),
+    )
+
+    fireEvent.click(await findByRole('button', { name: 'Jump' }))
+    const dialog = await findByRole('dialog', { name: 'Jump to date' })
+    fireEvent.input(within(dialog).getByLabelText('Date'), {
+      target: { value: '2026-05-20' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Jump' }))
+
+    await findByText('body of $old')
+    await waitFor(() => expect(timeline.atEnd.value).toBe(false))
+    services.rooms.noteTimelineEvent(event('$new-after-jump', T0 + 2))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+      eventId: '$latest',
+      originTs: T0,
+    })
   })
 
   it('keeps the jump dialog open on invalid input and closes it with Escape', async () => {
@@ -3087,6 +3185,138 @@ describe('RoomPage', () => {
     )
   })
 
+  it('a dead-anchor lookup cannot mutate an unrelated page after RoomPage unmounts', async () => {
+    let releaseLookup!: () => void
+    const heldLookup = new Promise<void>((resolve) => {
+      releaseLookup = resolve
+    })
+    let lookupStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          lookupStarted = true
+          await heldLookup
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-after-away', T0)],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone`,
+    )
+    const { findByText } = render(routedRoomPageWithAwayRoute(testServices()))
+    await waitFor(() => expect(lookupStarted).toBe(true))
+
+    window.history.pushState(null, '', '/away?event=%24belongs-to-away')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('Unrelated page')
+
+    releaseLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toBe('/away')
+    expect(window.location.search).toBe('?event=%24belongs-to-away')
+  })
+
+  it('a stale thread lookup cannot navigate back after RoomPage unmounts', async () => {
+    let releaseLookup!: () => void
+    const heldLookup = new Promise<void>((resolve) => {
+      releaseLookup = resolve
+    })
+    let lookupStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          lookupStarted = true
+          await heldLookup
+          return HttpResponse.json({
+            data: event('$reply-after-away', T0, {
+              relates_to: { rel_type: 'm.thread', event_id: '$root' },
+            }),
+          })
+        },
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24reply-after-away`,
+    )
+    const { findByText } = render(routedRoomPageWithAwayRoute(testServices()))
+    await waitFor(() => expect(lookupStarted).toBe(true))
+
+    window.history.pushState(null, '', '/away?event=%24belongs-to-away')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('Unrelated page')
+
+    releaseLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toBe('/away')
+    expect(window.location.search).toBe('?event=%24belongs-to-away')
+  })
+
+  it('handles a failed anchor-route replacement without an unhandled rejection', async () => {
+    let releaseHead!: () => void
+    const heldHead = new Promise<void>((resolve) => {
+      releaseHead = resolve
+    })
+    let headStarted = false
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, async () => {
+        headStarted = true
+        await heldHead
+        return HttpResponse.json({
+          data: {
+            events: [event('$tail-route-error', T0)],
+            next_cursor: null,
+          },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone`,
+    )
+    render(routedRoomPage(testServices()))
+    await waitFor(() => expect(headStarted).toBe(true))
+    const replaceState = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {
+        throw new DOMException('rate limited', 'SecurityError')
+      })
+
+    releaseHead()
+    await waitFor(() => expect(replaceState).toHaveBeenCalled())
+
+    expect(window.location.search).toContain('event=%24gone')
+  })
+
   it('keeps a search/deep-link target centered when timeline rows resize', async () => {
     installResizeObserver()
     const scrolled: string[] = []
@@ -3295,6 +3525,597 @@ describe('RoomPage', () => {
         originTs: T0,
       }),
     )
+  })
+
+  describe('a view parked in history claims nothing as read', () => {
+    /**
+     * A `?event=$old` landing five days back, with `$new` at the present and a
+     * room summary whose `last_event_id` is newer still — so both the
+     * optimistic clear and the summary-derived marker have something they
+     * *could* wrongly claim, and the assertions below are not vacuous.
+     */
+    function historyJump(tag: string) {
+      // Unique ids per test: a sibling test's debounced receipt can fire inside
+      // this one's window (the sender's timer outlives its own `cleanup()`),
+      // and identical fixtures would make the two indistinguishable.
+      const old = `$old-${tag}`
+      const fresh = `$new-${tag}`
+      const all = [
+        event(old, T0 - 5 * DAY, { body: `body of ${old}` }),
+        event(`$mid-${tag}`, T0 - 2 * DAY, { body: 'body of $mid' }),
+        event(fresh, T0, { body: `body of ${fresh}` }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          () => HttpResponse.json({ data: all[0] }),
+        ),
+        http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+          HttpResponse.json({
+            data: [
+              {
+                account_id: ACCOUNT,
+                account_user_id: '@me:hs',
+                room_id: ROOM,
+                name: 'Ops',
+                topic: null,
+                avatar_url: null,
+                canonical_alias: null,
+                last_activity_ts: T0,
+                last_event_id: '$last',
+              },
+            ],
+          }),
+        ),
+        http.get(TIMELINE_PATH, ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          let pool = [...all].sort((a, b) => b.origin_ts - a.origin_ts)
+          if (atTs !== null) {
+            pool = pool.filter((e) => e.origin_ts <= Number(atTs))
+          }
+          return HttpResponse.json({
+            data: { events: pool, next_cursor: null },
+          })
+        }),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=${encodeURIComponent(old)}`,
+      )
+      const services = testServices()
+      // Spy rather than seed-and-read: the optimistic clear races the room-list
+      // fetch that would repopulate the count, so the call itself is the
+      // deterministic signal.
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      const mine = () => reads.filter((id) => id === old || id === fresh)
+      return {
+        services,
+        reads,
+        cleared,
+        mine,
+        anchor: old,
+        newest: fresh,
+        ...render(routedRoomPage(services)),
+      }
+    }
+
+    it('does not clear the unread count on an anchored load', async () => {
+      const { cleared, anchor, findByText } = historyJump('count')
+      await findByText(`body of ${anchor}`)
+
+      // The badge belongs to `$new`, which this view has never shown. Clearing
+      // it here is the bug: it hides the room for the session and the count
+      // returns on the next load, since the server correctly refuses to
+      // advance the receipt past what was displayed (ADR 0089).
+      expect(cleared).not.toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0)
+    })
+
+    it('still clears optimistically on an ordinary open', async () => {
+      const { services } = renderRoom([event('$1', T0)])
+      const cleared = vi.spyOn(services.rooms, 'noteUnreadCounts')
+      cleanup()
+
+      render(routedRoomPage(services))
+      await waitFor(() =>
+        expect(cleared).toHaveBeenCalledWith(ACCOUNT, ROOM, 0, 0),
+      )
+    })
+
+    it('does not advance the cross-device read marker on an anchored load', async () => {
+      const { services, anchor, findByText } = historyJump('marker')
+      await findByText(`body of ${anchor}`)
+
+      // A sibling device turns this marker straight into a zeroed badge
+      // (`connectReadMarkers`), so jumping it to the summary's `$last` would
+      // mark the room read on every device from a view parked in history.
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toBeNull()
+    })
+
+    it('sends no receipt while the view stays anchored in history', async () => {
+      const { mine, anchor, findByText } = historyJump('receipt')
+      await findByText(`body of ${anchor}`)
+      // Past the sender's own debounce, so "nothing sent" means nothing was
+      // going to be sent — not that the timer hasn't fired yet.
+      await new Promise((resolve) =>
+        setTimeout(resolve, RECEIPT_DEBOUNCE_MS + 150),
+      )
+      // Nothing, even though the head has been gap-filled behind the anchor —
+      // which is why `atEnd` alone can't gate this.
+      expect(mine()).toEqual([])
+    })
+  })
+
+  /// A `?event=` target the server cannot resolve leaves the view on the live
+  /// tail. The anchor must not linger: while it does, the read-state gates all
+  /// treat the view as parked in history and the room can never be marked read
+  /// (PR review on #136).
+  it('drops an unresolvable ?event= anchor and then claims the room read', async () => {
+    const reads: string[] = []
+    server.use(
+      // The deep-link target is gone (redacted, purged, or never ours).
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.post(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+        async ({ request }) => {
+          const body = (await request.json()) as { event_id: string }
+          reads.push(body.event_id)
+          return HttpResponse.json({ data: {} })
+        },
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-dead-anchor', T0, { body: 'body of $tail' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24gone&thread=%24keep`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $tail')
+
+    // The dead anchor is dropped; unrelated params are left alone.
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+    expect(window.location.search).toContain('thread=%24keep')
+
+    // And the view is now treated as the live-tail view it actually is.
+    await waitFor(() =>
+      expect(reads.filter((id) => id === '$tail-dead-anchor')).toEqual([
+        '$tail-dead-anchor',
+      ]),
+    )
+  })
+
+  /// The page does not remount across an in-room navigation (ADR 0085), so a
+  /// slow lookup for anchor A can resolve *after* the user has followed a second
+  /// deep link to B. The stale continuation must not strip B's anchor off the
+  /// URL it now finds there.
+  it('a stale anchor lookup does not strip a newer anchor', async () => {
+    let releaseFirstLookup: () => void = () => {}
+    const firstLookupHeld = new Promise<void>((resolve) => {
+      releaseFirstLookup = resolve
+    })
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async ({ params }) => {
+          // Correct whether or not msw has already decoded the path param.
+          if (decodeURIComponent(String(params.eventId)) === '$slow') {
+            // Held until the user has already navigated away to `$b`.
+            await firstLookupHeld
+            return new HttpResponse(null, { status: 404 })
+          }
+          return HttpResponse.json({ data: event('$b', T0 - DAY) })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$b', T0 - DAY, { body: 'body of $b' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24slow`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+
+    // The user follows a second deep link before the first lookup answers.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24b`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findByText('body of $b')
+
+    // Now let the abandoned lookup finish and fail.
+    releaseFirstLookup()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24b')
+  })
+
+  /// `refreshHead` deliberately no-ops on a slice parked in history that shares
+  /// nothing with the head, without setting an error. Reading that untouched
+  /// slice as proof of absence would strip the anchor while the view is still
+  /// showing history — and then claim read state from it.
+  it('keeps a ?event= anchor when the head load declines to move a parked slice', async () => {
+    const parked = event('$old', T0 - 5 * DAY, { body: 'body of $old' })
+    const head = event('$new', T0, { body: 'body of $new' })
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        ({ params }) =>
+          decodeURIComponent(String(params.eventId)) === '$old'
+            ? HttpResponse.json({ data: parked })
+            : new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      // Head and parked page share no events, so `refreshHead` bails.
+      http.get(TIMELINE_PATH, ({ request }) => {
+        const atTs = new URL(request.url).searchParams.get('at_ts')
+        return HttpResponse.json({
+          data:
+            atTs === null
+              ? { events: [head], next_cursor: 'c1' }
+              : { events: [parked], next_cursor: 'c2' },
+        })
+      }),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24old`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $old')
+
+    // A second, dead deep link while parked in history.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24dead`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24dead')
+  })
+
+  /// A room id reached by cold navigation or an external deep link keeps its
+  /// literal `:` in `location.pathname`, which no amount of `encodeURIComponent`
+  /// on our side will match. The staleness check must not depend on that.
+  it('drops a dead anchor on a URL with an unencoded room id', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$tail-raw', T0, { body: 'body of $tail-raw' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    // Note: no `encodeURIComponent` — this is what a browser actually shows.
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${ROOM}?event=%24gone`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $tail-raw')
+
+    await waitFor(() => expect(window.location.search).not.toContain('event='))
+  })
+
+  /// `refreshHead`'s wholesale-replace branch discards the outgoing slice when
+  /// the fresh head shares nothing with it. If the anchor's target arrived in
+  /// that slice while the by-id lookup was in flight, refreshing to "check"
+  /// evicts the proof that the event exists — so a target already loaded is
+  /// answer enough and the refresh must not run at all.
+  it('keeps a ?event= anchor whose target arrived while the lookup was in flight', async () => {
+    let release404!: () => void
+    const held = new Promise<void>((resolve) => {
+      release404 = resolve
+    })
+    let headCalls = 0
+    let byIdCalls = 0
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          byIdCalls += 1
+          await held
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(TIMELINE_PATH, () => {
+        headCalls += 1
+        return HttpResponse.json({
+          data:
+            headCalls === 1
+              ? { events: [event('$seed', T0 - DAY)], next_cursor: null }
+              : // Any later head shares nothing with the slice — the eviction
+                // branch.
+                { events: [event('$fresh', T0 + 10)], next_cursor: null },
+        })
+      }),
+    )
+    // Cold, unanchored: seeds a slice at the live end without the target.
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}`,
+    )
+    const services = testServices()
+    const { findByText } = render(routedRoomPage(services))
+    await findByText('body of $seed')
+
+    // Anchor on an event the slice does not hold: the by-id lookup fires, and
+    // is held open.
+    window.history.pushState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24late`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    // Let the effect actually issue the lookup before anything else happens —
+    // otherwise the live event below lands first, the effect finds the target
+    // already loaded, and never asks.
+    await waitFor(() => expect(byIdCalls).toBe(1))
+
+    // While it is in flight the event arrives live, so the anchor is now
+    // satisfiable — the room can highlight it.
+    services.live.start()
+    services.sockets[0].emitOpen()
+    services.sockets[0].emitMessage(
+      JSON.stringify({
+        type: 'timeline.event',
+        account_id: ACCOUNT,
+        payload: event('$late', T0, { body: 'body of $late' }),
+      }),
+    )
+    await findByText('body of $late')
+
+    // Only now does the lookup answer 404.
+    release404()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24late')
+  })
+
+  /// A superseded head load means a sibling load won the generation race. If
+  /// that winner loaded the anchor, retrying without checking the winner's
+  /// slice can immediately evict the proof that the permalink is valid.
+  it('keeps a ?event= anchor loaded by the call that superseded its head check', async () => {
+    server.use(
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+    )
+    const services = testServices()
+    const timeline = services.timelines.acquire(ACCOUNT, ROOM)
+    const loadLatest = vi
+      .spyOn(timeline, 'loadLatest')
+      .mockImplementationOnce(async () => {
+        // The sibling winner loaded the anchor into the shared store.
+        timeline.ingestLive(event('$race-winner', T0))
+        return 'superseded'
+      })
+      .mockImplementationOnce(async () => {
+        // A disjoint retry models refreshHead's wholesale-replace branch.
+        timeline.resumeAtHead()
+        return 'applied'
+      })
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24race-winner`,
+    )
+
+    render(routedRoomPage(services))
+    await waitFor(() => expect(loadLatest).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(loadLatest).toHaveBeenCalledTimes(1)
+    expect(window.location.search).toContain('event=%24race-winner')
+  })
+
+  /// The timeline store is keyed by account *and* room (ADR 0085), two of the
+  /// user's accounts can be in the same room, and the page does not remount when
+  /// the account changes under the same room and anchor. A stale continuation
+  /// from the old account must not act on the new account's URL.
+  it('a stale lookup from another account does not strip the current anchor', async () => {
+    const OTHER = '6b53f7f0-0000-4000-8000-000000000002'
+    let releaseFirst!: () => void
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    server.use(
+      // Account A's lookup hangs, then 404s; account B's resolves fine.
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        async () => {
+          await firstHeld
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+      http.get(`${TEST_BASE_URL}/v1/accounts/${OTHER}/events/:eventId`, () =>
+        HttpResponse.json({ data: event('$shared', T0 - DAY) }),
+      ),
+      http.get(`${TEST_BASE_URL}/v1/rooms`, () =>
+        HttpResponse.json({ data: [] }),
+      ),
+      // The two accounts see different rooms' worth of history: A cannot see
+      // `$shared` at all, which is why its lookup 404s and why its slice can
+      // never corroborate B's anchor.
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/timeline`,
+        ({ params }) =>
+          HttpResponse.json({
+            data: {
+              events: [
+                params.accountId === OTHER
+                  ? event('$shared', T0 - DAY, { body: 'body of $shared' })
+                  : event('$a-only', T0 - DAY, { body: 'body of $a-only' }),
+              ],
+              next_cursor: null,
+            },
+          }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24shared`,
+    )
+    const { findAllByText } = render(routedRoomPage(testServices()))
+
+    // Same room, same anchor, different account — no remount.
+    window.history.pushState(
+      null,
+      '',
+      `/${OTHER}/rooms/${encodeURIComponent(ROOM)}?event=%24shared`,
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await findAllByText('body of $shared')
+
+    // Account A's lookup finally fails. It says nothing about account B's view.
+    releaseFirst()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.pathname).toContain(OTHER)
+    expect(window.location.search).toContain('event=%24shared')
+  })
+
+  /// A lookup that fails for any reason *other* than "no such event" proves
+  /// nothing about the anchor. Dropping it there would let a transient blip
+  /// permanently destroy a permalink — and mark the room read on the way out.
+  it('keeps a ?event= anchor when the lookup fails transiently', async () => {
+    for (const [label, handler] of [
+      ['5xx', () => new HttpResponse(null, { status: 503 })],
+      ['network error', () => HttpResponse.error()],
+    ] as const) {
+      server.use(
+        http.get(
+          `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+          handler,
+        ),
+        http.get(TIMELINE_PATH, () =>
+          HttpResponse.json({
+            data: {
+              events: [event('$tail', T0, { body: `tail for ${label}` })],
+              next_cursor: null,
+            },
+          }),
+        ),
+      )
+      window.history.replaceState(
+        null,
+        '',
+        `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24missing`,
+      )
+      const { findByText } = render(routedRoomPage(testServices()))
+      await findByText(`tail for ${label}`)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(window.location.search, label).toContain('event=%24missing')
+      cleanup()
+    }
+  })
+
+  /// "Not in the slice" only means "absent" if the slice is trustworthy. When
+  /// the head load itself fails there is nothing to conclude from, and the
+  /// anchor must survive for a retry.
+  it('keeps a ?event= anchor when the head load fails', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () => new HttpResponse(null, { status: 500 })),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24missing`,
+    )
+    render(routedRoomPage(testServices()))
+    await waitFor(() => expect(window.location.search).toBeTruthy())
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(window.location.search).toContain('event=%24missing')
+  })
+
+  /// The by-id lookup 404ing does not mean the anchor is unsatisfiable — the
+  /// server may simply not serve that event by id while the event is right there
+  /// in the room (the e2e mock does exactly this for seeded history). Dropping
+  /// the anchor then would throw away the highlight the deep link exists for.
+  it('keeps a ?event= anchor whose target is in the loaded tail', async () => {
+    server.use(
+      http.get(
+        `${TEST_BASE_URL}/v1/accounts/${ACCOUNT}/events/:eventId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+      http.get(TIMELINE_PATH, () =>
+        HttpResponse.json({
+          data: {
+            events: [event('$in-tail', T0, { body: 'body of $in-tail' })],
+            next_cursor: null,
+          },
+        }),
+      ),
+    )
+    window.history.replaceState(
+      null,
+      '',
+      `/${ACCOUNT}/rooms/${encodeURIComponent(ROOM)}?event=%24in-tail`,
+    )
+    const { findByText } = render(routedRoomPage(testServices()))
+    await findByText('body of $in-tail')
+
+    // Give the fallback time to settle, then confirm the anchor survived.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(window.location.search).toContain('event=%24in-tail')
   })
 
   // ADR 0085 phase 1: the store survives the room switch, so re-entry has

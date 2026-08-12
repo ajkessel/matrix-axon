@@ -89,6 +89,107 @@ describe('createTimelineStore', () => {
     expect(store.atStart.value).toBe(false)
   })
 
+  /// The head load reports its own outcome, because no signal it leaves behind
+  /// distinguishes the three cases: `error` is store-wide (sends, redactions and
+  /// the re-decryption retry write it too) and the parked-slice no-op touches
+  /// nothing at all. Consumers gate read-state claims on this (ADR 0089/#136).
+  describe('loadLatest reports what the head load did', () => {
+    it('reports applied when it replaces an empty slice', async () => {
+      server.use(
+        http.get(TIMELINE_PATH, () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: null },
+          }),
+        ),
+      )
+      const store = makeStore()
+
+      expect(await store.loadLatest()).toBe('applied')
+      expect(store.atEnd.value).toBe(true)
+    })
+
+    it('reports failed when the fetch fails', async () => {
+      server.use(
+        http.get(TIMELINE_PATH, () => new HttpResponse(null, { status: 500 })),
+      )
+      const store = makeStore()
+
+      expect(await store.loadLatest()).toBe('failed')
+    })
+
+    it('reports declined when it will not move a slice parked in history', async () => {
+      server.use(
+        http.get(TIMELINE_PATH, ({ request }) => {
+          const atTs = new URL(request.url).searchParams.get('at_ts')
+          return HttpResponse.json({
+            data:
+              atTs === null
+                ? { events: [event('$head', 900)], next_cursor: 'c1' }
+                : { events: [event('$old', 100)], next_cursor: 'c2' },
+          })
+        }),
+      )
+      const store = makeStore()
+      await store.jumpTo(100)
+      expect(store.atEnd.value).toBe(false)
+
+      // The head shares nothing with the parked page, so `refreshHead` bails by
+      // design (WCR-05) — and says so, rather than looking like a success.
+      expect(await store.loadLatest()).toBe('declined')
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$old'])
+      expect(store.error.value).toBeNull()
+    })
+
+    it('reports applied when the head merges into an overlapping slice', async () => {
+      server.use(
+        http.get(TIMELINE_PATH, () =>
+          HttpResponse.json({
+            data: { events: [event('$1', 100)], next_cursor: 'c1' },
+          }),
+        ),
+      )
+      const store = makeStore()
+      await store.loadLatest()
+
+      expect(await store.loadLatest()).toBe('applied')
+    })
+
+    /// Losing a generation race is not a failure: the winner may have applied a
+    /// perfectly good head. A caller that reads this as "couldn't verify" would
+    /// strand whatever it was gating on (PR review on #136).
+    it('reports superseded when a sibling load wins the race', async () => {
+      let releaseFirst!: () => void
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve
+      })
+      let calls = 0
+      server.use(
+        http.get(TIMELINE_PATH, async () => {
+          calls += 1
+          if (calls === 1) {
+            await firstGate
+            return HttpResponse.json({
+              data: { events: [event('$stale', 100)], next_cursor: null },
+            })
+          }
+          return HttpResponse.json({
+            data: { events: [event('$fresh', 200)], next_cursor: null },
+          })
+        }),
+      )
+      const store = makeStore()
+
+      const first = store.loadLatest() // stalled
+      expect(await store.loadLatest()).toBe('applied') // supersedes it
+      releaseFirst()
+
+      expect(await first).toBe('superseded')
+      // And the store is holding the winner's head, not nothing — which is why
+      // the loser must not be treated as a failure.
+      expect(store.events.value.map((e) => e.event_id)).toEqual(['$fresh'])
+    })
+  })
+
   it('loadOlder prepends and flags the room start', async () => {
     server.use(
       http.get(TIMELINE_PATH, ({ request }) => {

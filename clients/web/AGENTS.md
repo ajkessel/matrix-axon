@@ -150,17 +150,43 @@ before starting a milestone.
   `/:accountId/rooms/:roomId` + `?thread=<root_id>` + `?event=<event_id>` —
   search (M-W10) and the mobile clients build on it; do not change it.
   Deployment requires unknown-path → `index.html` rewrite.
+- **Marking a room read** (`RoomPage`): three effects claim read state — the
+  optimistic badge clear on mount, the summary-derived cross-device marker, and
+  the timeline-driven marker + receipt. **Every one of them is gated on the view
+  actually showing the room's newest events**, and the gates are not
+  interchangeable: the optimistic badge clear checks `highlighted === null`
+  (an `?event=` landing is parked in history by definition), while both marker
+  effects need `highlighted === null` _and_ `timeline.atEnd`. The second half
+  matters even without an event anchor: jump-to-date parks the slice in history
+  without changing the URL. Conversely, once a room summary is known the head
+  gets gap-filled, so a view anchored five days back can have the newest events
+  loaded and `atEnd` true. Removing any of these gates makes the
+  client claim messages as read that it never displayed: the badge vanishes for
+  the session and returns on reload (the server correctly refuses to advance the
+  receipt, ADR 0089), and the marker is cross-device, so `connectReadMarkers`
+  zeroes the badge on your _other_ devices too. The accepted cost is that an
+  anchored view never marks the room read even after scrolling to the bottom;
+  reopening the room normally does. The two conditions are derived once as
+  `unanchored` / `showingNewestEvents` rather than restated per effect — add a
+  new condition there, not in three places. The corollary caught in review: an
+  anchor the server cannot resolve **must be dropped from the URL**
+  (`dropUnsatisfiableAnchor`), because a lingering dead `?event=` leaves every one
+  of these gates closed for the room's whole visit while the user reads the
+  newest messages.
 - **Async work in `RoomPage` outlives its own world.** The page does not remount
   across a room switch or an `?event=`/`?thread=` change (ADR 0085), so every
   `await` inside an effect can resolve after the user has moved on — a second
   search hit, another room, a closed panel. Anything that acts on the result must
-  re-check identity first, against a **render-assigned ref** holding the room and
-  anchor the page is currently showing. Two things that look like they'd work and
-  don't: the closure's own `location` (the router hands each render its own
-  object, so a stale continuation still sees the URL it was created for and
-  passes the check), and comparing serialized paths (see the encoding trap under
-  Testing traps). Found twice in the #136 review — once as the race, once in the
-  guard written to close it.
+  re-check identity first, against a **render-bumped generation** covering the
+  account, room, anchor, and thread the page is currently showing. The generation
+  does not change when the page unmounts, so work that can navigate also needs an
+  **effect-cleanup flag** and must check both immediately before routing. Two
+  things that look like they'd work and don't: the closure's own `location` (the
+  router hands each render its own object, so a stale continuation still sees
+  the URL it was created for and passes the check), and comparing serialized
+  paths (see the encoding trap under Testing traps). Found repeatedly in the
+  #136 review — first as an in-page race, then across account changes and page
+  unmount.
 - **Ask the operation, not the store.** `error`, `atEnd`, and `events` describe
   the store, not your call. `error` is written by sends, edits, reactions,
   redactions (`mutate`/`mutateWithResult`) and `RoomPage`'s re-decryption retry;
