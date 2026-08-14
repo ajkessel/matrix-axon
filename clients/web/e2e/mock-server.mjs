@@ -238,6 +238,18 @@ const LIGHTBOX_OWN_IMAGE = {
   latest_edit_ts: null,
   reactions: null,
 }
+/**
+ * How much of `timeline` is seeded fixture rather than test-sent traffic.
+ *
+ * Sends append to `timeline`, and this one process serves *every* project in a
+ * cross-browser run, so a spec that pages history forward to the present finds
+ * it longer for each engine than the last — which is why one such spec passes
+ * alone and fails as the second project. `/__e2e/reset-timeline` truncates back
+ * to here, so a spec that plants its own fixtures starts from the same history
+ * whichever engine is running it.
+ */
+const SEEDED_TIMELINE_LENGTH = timeline.length
+
 let lightboxOwnImage = false
 /**
  * A second room of this account with a history of its own, keyed by room id.
@@ -832,6 +844,24 @@ const server = createServer((req, res) => {
   if (req.method === 'POST' && url.pathname === '/__e2e/bulk-rooms') {
     bulkRooms = Number(url.searchParams.get('count') ?? 0)
     return json(res, { data: { bulk_rooms: bulkRooms } })
+  }
+  // Drop everything tests have sent, keeping the seeded fixture. A spec whose
+  // assertions depend on how much history sits after its own sends calls this
+  // once up front, so a cross-browser run does not hand the second engine the
+  // first engine's traffic. See `SEEDED_TIMELINE_LENGTH`.
+  //
+  // Opt-in, and deliberately so: the only caller is `search.spec.ts`'s
+  // `beforeAll`, because it is the only spec asserting on history *depth* rather
+  // than on the presence of its own nonce'd messages. Every other spec is
+  // indifferent to accumulated traffic, and resetting globally would break the
+  // specs that deliberately send and then look for what they sent. If a second
+  // spec ever starts counting history length, it should call this too — and if a
+  // third does, that is the point to promote it to a shared fixture rather than
+  // let each spec remember.
+  if (req.method === 'POST' && url.pathname === '/__e2e/reset-timeline') {
+    const dropped = timeline.length - SEEDED_TIMELINE_LENGTH
+    timeline.length = SEEDED_TIMELINE_LENGTH
+    return json(res, { data: { dropped } })
   }
   // How many synthetic message events the timeline GET prepends. Zero by
   // default; the perf lane raises it to mount a long, un-windowed timeline.

@@ -1,13 +1,38 @@
-import { expect, test, type BrowserContext } from '@playwright/test'
+import {
+  expect,
+  test,
+  type BrowserContext,
+  type BrowserContextOptions,
+  type TestInfo,
+} from '@playwright/test'
+import { LIVE_TIMEOUT_MS, RECONNECT_TIMEOUT_MS } from './helpers'
 
 const ACCOUNT_ID = '11111111-1111-4111-8111-111111111111'
 const ROOM_ID = '!room:hs'
 const ROOM_URL = `/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}`
 const SEND_URL = `/v1/accounts/${ACCOUNT_ID}/rooms/${encodeURIComponent(ROOM_ID)}/send`
 
-// The mock backend is one process with shared state (its socket set and room
-// history), so dropping sockets in one test would sever another's connection.
-test.describe.configure({ mode: 'serial' })
+/**
+ * `mode: 'serial'` because the mock backend is one process with shared state
+ * (its socket set and room history), so dropping sockets in one test would sever
+ * another's connection.
+ *
+ * `timeout` because every test here opens at least one socket on the
+ * `LIVE_TIMEOUT_MS` budget and some open two, and the reconnect test adds
+ * `RECONNECT_TIMEOUT_MS` on top — up to ~36s against Playwright's 30s per-test
+ * default. Without this the *outer* timeout fires first and reports a generic
+ * "Test timeout of 30000ms exceeded", throwing away the budget the inner
+ * assertions were sized to spend. Set on the file rather than per test so a new
+ * socket-opening test here inherits it instead of rediscovering this.
+ */
+test.describe.configure({ mode: 'serial', timeout: 60_000 })
+
+/** Explicit contexts do not inherit a project's device profile automatically. */
+function projectContextOptions(testInfo: TestInfo): BrowserContextOptions {
+  const { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport } =
+    testInfo.project.use
+  return { deviceScaleFactor, hasTouch, isMobile, userAgent, viewport }
+}
 
 /** A signed-in tab: seed the token before app scripts run, then open the room. */
 async function openRoom(context: BrowserContext) {
@@ -20,18 +45,26 @@ async function openRoom(context: BrowserContext) {
   // LiveConnection wiring against a real socket.
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
+    { timeout: LIVE_TIMEOUT_MS },
   )
   return page
 }
 
-test('two tabs see each other messages live', async ({ browser }) => {
-  const contextA = await browser.newContext()
-  const contextB = await browser.newContext()
+test('two tabs see each other messages live', async ({ browser }, testInfo) => {
+  const options = projectContextOptions(testInfo)
+  const contextA = await browser.newContext(options)
+  const contextB = await browser.newContext(options)
 
   const tabA = await openRoom(contextA)
   const tabB = await openRoom(contextB)
 
   // Tab A sends; the mock broadcasts a timeline.event to every socket.
+  //
+  // Enter rather than the Send button, matching the sibling test below. What
+  // this file is about is the socket, not which affordance submitted — and the
+  // button has its own coverage in `media-send`, `reaction-scroll` and
+  // `layout`. Enter was measured working on all three engines, so there is no
+  // cross-browser reason to differ here.
   const message = `live hello ${Date.now()}`
   const composer = tabA.getByRole('textbox', { name: /^Message/ })
   await composer.fill(message)
@@ -52,9 +85,10 @@ test('two tabs see each other messages live', async ({ browser }) => {
 
 test('typing in one tab surfaces the indicator in another', async ({
   browser,
-}) => {
-  const contextA = await browser.newContext()
-  const contextB = await browser.newContext()
+}, testInfo) => {
+  const options = projectContextOptions(testInfo)
+  const contextA = await browser.newContext(options)
+  const contextB = await browser.newContext(options)
 
   const tabA = await openRoom(contextA)
   const tabB = await openRoom(contextB)
@@ -77,8 +111,8 @@ test('typing in one tab surfaces the indicator in another', async ({
 test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   browser,
   request,
-}) => {
-  const context = await browser.newContext()
+}, testInfo) => {
+  const context = await browser.newContext(projectContextOptions(testInfo))
   const page = await openRoom(context)
 
   // Kill the socket rudely (no close frame) and refuse upgrades for a moment,
@@ -95,9 +129,12 @@ test('a dropped socket shows Reconnecting, then heals by gap-fill', async ({
   await expect(page.getByText(missed)).toBeHidden()
 
   // Backoff reconnects once upgrades are allowed again, and gap-fill refetches
-  // the room head — the only path by which this event can appear.
+  // the room head — the only path by which this event can appear. The 1.5s
+  // upgrade block guarantees the first attempt is refused, so recovery cannot
+  // land before the second rung; the budget clears the fourth plus the gap-fill.
   await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
     'Live',
+    { timeout: RECONNECT_TIMEOUT_MS },
   )
   await expect(page.getByText(missed)).toBeVisible()
 

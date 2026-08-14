@@ -323,24 +323,68 @@ can still slot in later behind the same seam.
 
 ## Scripts
 
-| Script                              | Purpose                                                                                                                                      |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm dev`                          | Dev server with HMR and the `/v1` proxy                                                                                                      |
-| `pnpm build`                        | Type-check and produce a deployable `dist/`                                                                                                  |
-| `pnpm preview`                      | Serve the built `dist/` locally                                                                                                              |
-| `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec                                                                                               |
-| `pnpm check:api`                    | Check generated API types for drift                                                                                                          |
-| `pnpm test`                         | Vitest, single run                                                                                                                           |
-| `pnpm test:watch`                   | Vitest, watch mode                                                                                                                           |
-| `pnpm test:e2e`                     | Playwright e2e suite (Chromium)                                                                                                              |
-| `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`) |
-| `pnpm demo`                         | Record the ADR 0086 demo videos against a seeded local stack (needs `DEMO_MANIFEST`; see § Demo recording)                                   |
-| `pnpm lint`                         | ESLint + Prettier check                                                                                                                      |
-| `pnpm format` / `pnpm format:check` | Prettier write / check                                                                                                                       |
+| Script                              | Purpose                                                                                                                                        |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm dev`                          | Dev server with HMR and the `/v1` proxy                                                                                                        |
+| `pnpm build`                        | Type-check and produce a deployable `dist/`                                                                                                    |
+| `pnpm preview`                      | Serve the built `dist/` locally                                                                                                                |
+| `pnpm gen:api`                      | Regenerate `src/api/schema.d.ts` from the spec                                                                                                 |
+| `pnpm check:api`                    | Check generated API types for drift                                                                                                            |
+| `pnpm test`                         | Vitest, single run                                                                                                                             |
+| `pnpm test:watch`                   | Vitest, watch mode                                                                                                                             |
+| `pnpm test:e2e`                     | Playwright e2e suite (Chromium; CI also gates Firefox and desktop WebKit, then runs iPhone-profile WebKit after a web change merges to `main`) |
+| `pnpm test:e2e:perf`                | The ADR 0071 timeline→room-list perf spec, also under WebKit (sets `PERF=1`, which gates the extra WebKit project in `playwright.config.ts`)   |
+| `pnpm demo`                         | Record the ADR 0086 demo videos against a seeded local stack (needs `DEMO_MANIFEST`; see § Demo recording)                                     |
+| `pnpm lint`                         | ESLint + Prettier check                                                                                                                        |
+| `pnpm format` / `pnpm format:check` | Prettier write / check                                                                                                                         |
 
 An optional live round-trip suite runs against a real server when
 `AXON_LIVE_URL` and `AXON_LIVE_TOKEN` are set (see
 `src/api/client.live.test.ts`); it is skipped otherwise, including in CI.
+
+### Playwright browser targets
+
+`pnpm test:e2e` builds the client and runs Chromium. The Playwright mock server
+serves the built `dist/` directory, so run `pnpm build` before invoking
+Playwright directly; otherwise the browser can exercise stale or absent build
+assets instead of the checked-out source.
+
+```sh
+# One desktop engine at a time.
+pnpm build
+pnpm exec playwright test --project=chromium --fail-on-flaky-tests
+pnpm exec playwright test --project=firefox --fail-on-flaky-tests
+pnpm exec playwright test --project=webkit-desktop --fail-on-flaky-tests
+
+# The iPhone 13 WebKit profile (the post-merge lane).
+MOBILE_E2E=1 pnpm exec playwright test --project=webkit-iphone --fail-on-flaky-tests
+
+# Every configured desktop and iPhone-profile target.
+MOBILE_E2E=1 pnpm exec playwright test --fail-on-flaky-tests
+```
+
+`--fail-on-flaky-tests` turns a pass-on-retry into a failure — which means it
+does nothing at all unless retries are enabled, and `playwright.config.ts` sets
+`retries: process.env.CI ? 1 : 0`. So:
+
+- **Locally** there are no retries, so there is no "flaky" outcome to begin with:
+  a test that fails its first attempt is simply a failure, with or without the
+  flag. The flag is harmless here but redundant.
+- **On CI** `retries: 1` applies, and the lanes deliberately _omit_ the flag
+  (#157), so a test that passes on its second attempt is reported as a pass.
+
+The practical consequence is that CI is more forgiving than your terminal, and
+the difference is the retry, not the flag. When reproducing a CI result exactly,
+set `CI=1` — that also makes Playwright require a fresh mock server rather than
+reusing one already listening on port 4599.
+
+**A local full-suite Firefox run currently fails**, and that is expected until
+#157 is fixed: two specs per run hang waiting for the socket to report `Live`,
+which spec varies from run to run, and each passes on Firefox in isolation. The
+wait is shared setup (`openRoom`/`expectLive`, used by a dozen specs), so this is
+not attributable to any one test. `CI=1 pnpm exec playwright test
+--project=firefox` reproduces what the gate sees, because the retry absorbs it.
+Chromium and WebKit are green locally.
 
 CI runs the schema sync check, lint, format check, tests, and the build via
 `.github/workflows/web-lint-and-test.yml` (path-filtered `pull_request` plus

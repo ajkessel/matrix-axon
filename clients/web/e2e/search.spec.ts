@@ -1,5 +1,10 @@
-import { expect, test, type Page } from '@playwright/test'
-import { openRoom, ROOM_URL } from './helpers'
+import {
+  expect,
+  request as apiRequest,
+  test,
+  type Page,
+} from '@playwright/test'
+import { openRoom, ROOM_URL, shortcutForProject } from './helpers'
 
 /**
  * Message search (ADR 0066, M-W10). A real browser earns its keep here: the
@@ -13,6 +18,25 @@ import { openRoom, ROOM_URL } from './helpers'
  * would double the hit counts the second time around.
  */
 test.describe.configure({ mode: 'serial' })
+
+/**
+ * Start from the seeded fixture rather than from whatever ran before.
+ *
+ * The nonce above keeps *hit counts* honest across reruns, but the forward-
+ * paging test asserts on how much history sits between its hit and the present,
+ * and that is not nonce-scoped: one mock process serves every project, so each
+ * engine in a cross-browser run inherits the previous engine's sends and has
+ * further to page. That is why that test passes alone and fails as the second
+ * project. Dropping test-sent traffic once, up front, makes the fixture the
+ * same for whichever engine is running.
+ */
+test.beforeAll(async () => {
+  const context = await apiRequest.newContext({
+    baseURL: test.info().project.use.baseURL,
+  })
+  expect((await context.post('/__e2e/reset-timeline')).ok()).toBe(true)
+  await context.dispose()
+})
 
 const NONCE = `n${Date.now()}`
 
@@ -80,13 +104,15 @@ test('open with /, search, jump to the hit, and Back reopens the search', async 
   await expect(page.locator('a.search-hit')).toHaveCount(1)
 })
 
-test('Ctrl-Shift-F opens search from the composer; Escape closes it', async ({
+test('the modifier search shortcut opens search from the composer; Escape closes it', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.focus()
-  await page.keyboard.press('Control+Shift+F')
+  await page.keyboard.press(
+    shortcutForProject(testInfo.project.name, 'Control+Shift+F', 'Meta+G'),
+  )
   await expect(dialog(page)).toBeVisible()
 
   // Visible ≠ listening: Preact binds the overlay's Escape after paint, so

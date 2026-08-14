@@ -62,13 +62,81 @@ export async function reloadFromInsidePage(page: Page): Promise<void> {
   ])
 }
 
+/** Wait until the initial room-list refresh has durably committed its cache. */
+export async function waitForRoomListCache(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            new Promise<number>((resolve) => {
+              const request = indexedDB.open('axon-cache', 1)
+              request.onerror = () => resolve(0)
+              request.onsuccess = () => {
+                const keys = request.result
+                  .transaction('rooms', 'readonly')
+                  .objectStore('rooms')
+                  .getAllKeys()
+                keys.onerror = () => resolve(0)
+                keys.onsuccess = () => resolve(keys.result.length)
+              }
+            }),
+        ),
+      { timeout: 5000 },
+    )
+    .toBeGreaterThan(0)
+}
+
 /** A signed-in tab at the room, wide enough for two panes, socket up. */
 export async function openRoom(page: Page): Promise<void> {
   await signIn(page)
   await page.setViewportSize({ width: 1400, height: 900 })
   await page.goto(ROOM_URL)
-  await expect(page.getByRole('status', { name: /WebSocket:/ })).toHaveText(
+  await expectLive(page)
+}
+
+/**
+ * Budgets for the connection indicator, both derived from one policy: the
+ * reconnect ladder in `src/stores/live-connection.ts`, where
+ * `INITIAL_BACKOFF_MS` is 1s and doubles, so attempts after a failure land at
+ * roughly 1s, 3s, 7s and 15s.
+ *
+ * They live here, together, so that retuning that ladder means editing one
+ * place. A copy in a spec file has no signal that the policy it was derived from
+ * moved, and would drift back toward the 5s default — a number that sits
+ * *inside* the ladder, and so cannot survive even one refused handshake.
+ *
+ * Worth being exact about what these did *not* fix, because the imprecision was
+ * expensive. They are headroom, not the cure for the Firefox flake that prompted
+ * them: that was the mock backend leaving client-initiated closes half-finished
+ * until the retained sockets stopped Firefox from opening another one at all,
+ * and raising these budgets did not stop it (#157). A socket that will never
+ * connect looks exactly like a budget that is too small, and reading the first
+ * as the second is how a harness bug became weeks of work.
+ *
+ * - `LIVE_TIMEOUT_MS` covers a first connect through the third attempt. A first
+ *   connect has no backoff and is normally immediate, but any refused or slow
+ *   upgrade drops it onto the ladder.
+ * - `RECONNECT_TIMEOUT_MS` covers a reconnect after a deliberate drop, which
+ *   starts one rung in because the drop refuses the first attempt outright.
+ */
+export const LIVE_TIMEOUT_MS = 15_000
+export const RECONNECT_TIMEOUT_MS = 20_000
+
+/**
+ * Assert the socket is reporting `Live`.
+ *
+ * Matched on `/^WebSocket:/` rather than the full `'WebSocket: Live'`, even
+ * though the exact name is more specific: the accessible name *contains the
+ * state being asserted*, so keying the locator to it means a socket that never
+ * goes live fails with "element(s) not found" instead of naming the state it
+ * was actually stuck in. The prefix disambiguates this indicator from the other
+ * `role="status"` elements just as well, and reports `Reconnecting…` as text.
+ */
+export async function expectLive(page: Page): Promise<void> {
+  await expect(page.getByRole('status', { name: /^WebSocket:/ })).toHaveText(
     'Live',
+    { timeout: LIVE_TIMEOUT_MS },
   )
 }
 

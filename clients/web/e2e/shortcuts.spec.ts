@@ -7,6 +7,15 @@ import {
   shortcutForProject,
   signIn,
 } from './helpers'
+const roomStepShortcut = (
+  projectName: string,
+  direction: 'ArrowDown' | 'ArrowUp',
+) =>
+  shortcutForProject(
+    projectName,
+    `Control+${direction}`,
+    `Meta+Alt+${direction}`,
+  )
 
 /**
  * Keyboard shortcuts (ADR 0078). These need a real browser: the chords carry
@@ -141,12 +150,16 @@ test('Ctrl-B toggles the sidebar both ways', async ({ page }) => {
   await expect(page.locator('.sidebar')).toBeVisible()
 })
 
-test('Ctrl-ArrowDown moves to a room from the index', async ({ page }) => {
+test('the room-step shortcut moves to a room from the index', async ({
+  page,
+}, testInfo) => {
   await openRoom(page)
   await page.goto('/')
   await expect(page.locator('a.room-link').first()).toBeVisible()
 
-  await page.keyboard.press('Control+ArrowDown')
+  await page.keyboard.press(
+    roomStepShortcut(testInfo.project.name, 'ArrowDown'),
+  )
 
   await expect(page).toHaveURL(/\/rooms\//)
 })
@@ -158,16 +171,16 @@ test('Ctrl-ArrowDown moves to a room from the index', async ({ page }) => {
  * chord from `useShortcuts`. Ctrl-↓ had no such rival and worked, which is the
  * asymmetry that surfaced the bug.
  */
-test('Ctrl-Arrow steps rooms while the composer holds focus', async ({
+test('the room-step shortcut steps rooms while the composer holds focus', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.focus()
   await expect(composer).toHaveValue('')
 
   // `E2E Room` is the first row, so "previous" wraps to the last one.
-  await page.keyboard.press('Control+ArrowUp')
+  await page.keyboard.press(roomStepShortcut(testInfo.project.name, 'ArrowUp'))
   await expect(page).toHaveURL(LAST_ROOM_URL)
   // The edit banner must not have opened behind the room change.
   await expect(page.locator('.composer-banner')).toHaveCount(0)
@@ -181,21 +194,25 @@ test('Ctrl-Arrow steps rooms while the composer holds focus', async ({
     page.locator('a.room-link[aria-current="page"]'),
   ).toHaveAttribute('href', LAST_ROOM_URL)
 
-  await page.keyboard.press('Control+ArrowDown')
+  await page.keyboard.press(
+    roomStepShortcut(testInfo.project.name, 'ArrowDown'),
+  )
   await expect(page).toHaveURL(ROOM_URL)
 })
 
 /** The room list's own arrow roving must not swallow the chord either. */
-test('Ctrl-Arrow steps rooms while the room list holds focus', async ({
+test('the room-step shortcut steps rooms while the room list holds focus', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   await page.keyboard.press('Control+k')
   await expect(page.locator('input.name-filter')).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect.poll(() => active(page)).toContain('room-link')
 
-  await page.keyboard.press('Control+ArrowDown')
+  await page.keyboard.press(
+    roomStepShortcut(testInfo.project.name, 'ArrowDown'),
+  )
   await expect(page).not.toHaveURL(ROOM_URL)
 })
 
@@ -204,15 +221,17 @@ test('Ctrl-Arrow steps rooms while the room list holds focus', async ({
  * composer is keyed by room id, so the destination mounts a *new* textarea —
  * focus has to be re-taken after that mount, not before.
  */
-test('Ctrl-Arrow keeps focus in the composer it started in', async ({
+test('the room-step shortcut keeps focus in the composer it started in', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   await composer.focus()
   await expect(composer).toBeFocused()
 
-  await page.keyboard.press('Control+ArrowDown')
+  await page.keyboard.press(
+    roomStepShortcut(testInfo.project.name, 'ArrowDown'),
+  )
   await expect(page).toHaveURL(/!long%3Ahs/)
 
   // The focused element is the *destination* room's composer, not the one we
@@ -231,30 +250,34 @@ test('Ctrl-Arrow keeps focus in the composer it started in', async ({
 })
 
 /** …but stepping from the room list leaves the keyboard in the room list. */
-test('Ctrl-Arrow from the room list does not steal focus to the composer', async ({
+test('the room-step shortcut from the room list does not steal focus to the composer', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   await page.keyboard.press('Control+k')
   await expect(page.locator('input.name-filter')).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect.poll(() => active(page)).toContain('room-link')
 
-  await page.keyboard.press('Control+ArrowDown')
+  await page.keyboard.press(
+    roomStepShortcut(testInfo.project.name, 'ArrowDown'),
+  )
   await expect(page).not.toHaveURL(ROOM_URL)
   await expect.poll(() => active(page)).toContain('room-link')
 })
 
 test('? opens the help; Escape closes it; typing ? does not open it', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const dialog = page.getByRole('dialog', { name: 'Help' })
 
   await page.keyboard.press('?')
   await expect(dialog).toBeVisible()
   // The popup renders the SHORTCUTS table, so it lists what is actually bound.
-  await expect(dialog).toContainText('Ctrl-K')
+  await expect(dialog).toContainText(
+    shortcutForProject(testInfo.project.name, 'Ctrl-K', '⌘-K'),
+  )
   await expect(dialog).toContainText('Cycle filter')
 
   await page.keyboard.press('Escape')
@@ -340,7 +363,7 @@ test('Escape closes the thread panel, then focuses the composer', async ({
 
 test('Ctrl-/ opens the help from the composer, where ? cannot', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const composer = page.getByRole('textbox', { name: /^Message/ })
   const dialog = page.getByRole('dialog', { name: 'Help' })
@@ -353,19 +376,25 @@ test('Ctrl-/ opens the help from the composer, where ? cannot', async ({
 
   await page.keyboard.press('Control+/')
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('? or Ctrl-/')
+  await expect(dialog).toContainText(
+    shortcutForProject(testInfo.project.name, '? or Ctrl-/', '? or ⌘-/'),
+  )
 })
 
 test('the ? button opens the help without touching the keyboard', async ({
   page,
-}) => {
+}, testInfo) => {
   await openRoom(page)
   const help = page.getByRole('button', { name: 'Keyboard shortcuts' })
   // The tooltip gained its slash-command hint in #88; the unit test at
   // `app.test.tsx` was updated with it and this lane was not.
   await expect(help).toHaveAttribute(
     'title',
-    'Keyboard shortcuts (/help; ? or Ctrl-/)',
+    `Keyboard shortcuts (/help; ${shortcutForProject(
+      testInfo.project.name,
+      '? or Ctrl-/',
+      '? or ⌘-/',
+    )})`,
   )
 
   await help.click()
