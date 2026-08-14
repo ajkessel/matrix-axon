@@ -52,7 +52,12 @@ mutation pattern: a trait port (`ReadReceiptSender`, separate from
 `MessageSender` since it has different failure tolerance) implemented by an
 adapter over `axon-sync`'s `SdkGateway::send_read_receipt`, which calls
 `Room::send_multiple_receipts` with both the public read receipt and the
-fully-read marker set to the same event.
+fully-read marker set to the same event. *(Amended by ADR 0089 — a receipt is
+read in arrival order, not the display order this route's `event_id` used to
+state. Which event to name is now decided by the **client**, from
+`EventDto.arrival_order`; this route sends whatever it is given, verbatim. Do not
+reintroduce a resolution or inference step here — ADR 0089 records the
+server-side version that was tried and why it cannot be made correct.)*
 
 Clients call this route as a **second, fire-and-forget action alongside** the
 existing internal device-state PUT — not instead of it. ADR 0048's
