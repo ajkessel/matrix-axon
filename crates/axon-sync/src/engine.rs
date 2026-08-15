@@ -284,7 +284,7 @@ impl SyncEngine {
     /// path. `axon-server` wraps this in an adapter implementing its
     /// `MessageSender` port; the returned value is cheap to construct and clone.
     pub fn gateway(&self) -> SdkGateway {
-        SdkGateway::new(self.manager.clone())
+        SdkGateway::new(self.manager.clone(), self.store.clone())
     }
 
     /// An authenticated media fetcher over the per-account clients, for the API
@@ -1127,6 +1127,102 @@ const UNREAD_COUNTS_RESWEEP: Duration = Duration::from_secs(300);
 /// fan out one Postgres round trip per room unbounded on every sweep.
 const UNREAD_COUNTS_SWEEP_CONCURRENCY: usize = 8;
 
+/// Bound on one upstream room probe in [`reconcile_upstream_rooms`] (ADR 0090).
+/// A rejection from a purged room has been observed taking nearly 4s, so this is
+/// generous — but it is a background sweep, and nothing waits on it.
+const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many suspect rooms one reconcile pass probes. Each probe is an upstream
+/// round trip, and suspicion accrues only from a *failed* room-scoped call, so
+/// the queue is normally empty; a backlog drains a few rooms per
+/// [`UNREAD_COUNTS_RESWEEP`] rather than bursting.
+const UPSTREAM_PROBES_PER_SWEEP: usize = 8;
+
+/// Why a room must not carry an unread count at all, or `None` when it may.
+///
+/// Both cases are rooms the account is still nominally joined to, whose counts
+/// can never again be corrected by reading them:
+///
+/// - **Absent upstream** (ADR 0090): the homeserver no longer serves the room, so
+///   no read receipt can land and matrix-sdk will never recompute. Confirmed by
+///   [`reconcile_upstream_rooms`]'s probe, not guessed from one failure.
+/// - **Tombstoned**: the room has been replaced, and `Store::list_rooms` already
+///   hides it — so a count here is invisible to clients but still sums into
+///   totals and sits in the table forever. Its successor carries the
+///   conversation, and any unread state belongs there.
+///
+/// `is_tombstoned` must be decided the way `Store::list_rooms` decides to hide —
+/// on the *presence* of an `m.room.tombstone` state event, not on whether a
+/// successor can be read out of it. A tombstone whose `replacement_room` is
+/// missing, or one that has been redacted, still hides the room from every
+/// client while yielding no successor; inferring from the successor would leave
+/// exactly those rooms accruing an unreadable count forever, which is the bug
+/// ADR 0090 exists to fix.
+///
+/// Nothing tests that, and this function's own tests cannot: by the time a
+/// `bool` reaches here, the choice of predicate has already been made at the
+/// call site. Swapping `is_tombstoned()` back for `successor_room().is_some()`
+/// is green today. Issue #164 tracks the missing seam.
+fn unread_suppression_reason(is_gone_upstream: bool, is_tombstoned: bool) -> Option<&'static str> {
+    if is_gone_upstream {
+        Some("room is absent upstream")
+    } else if is_tombstoned {
+        Some("room has been tombstoned")
+    } else {
+        None
+    }
+}
+
+/// Whether an upstream probe's outcome proves the homeserver does not serve the
+/// room (ADR 0090).
+///
+/// Only a *client* rejection counts — `403` (we are not in a room the server
+/// does know) or `404` (it knows no such room or route). Everything else is
+/// inconclusive by construction: a `5xx` is the homeserver failing, not
+/// answering, and Synapse reports its own internal errors as `M_UNKNOWN` exactly
+/// like the `404 M_UNKNOWN` a purged room produces — so classifying on the
+/// error *kind* rather than the status would let a server-side outage mark live
+/// rooms gone. A transport failure carries no status at all and reaches here as
+/// `None`.
+fn probe_proves_room_absent(status: Option<u16>) -> bool {
+    matches!(status, Some(403) | Some(404))
+}
+
+/// What one upstream probe settled (ADR 0090).
+///
+/// Three outcomes, deliberately not two. An earlier version carried a
+/// `bool` "absent", which made `Reachable` and `Inconclusive` the same value and
+/// cleared the suspect row for both — so a transient `502` during an outage
+/// erased the suspicion on a genuinely purged room, destroyed its
+/// `first_flagged_at`, dropped it out of `suspect_upstream_rooms` (only
+/// `suspect` rows are re-probed), and logged *"suspect room answered upstream"*
+/// while doing it. Nothing but the user re-opening the room would put it back,
+/// which is the opposite of the unattended reconcile this ADR promises. Keep
+/// these three distinct: "it answered" and "we could not tell" are not the same
+/// fact, and only one of them is evidence.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeVerdict {
+    /// The homeserver served the room. Clears any suspicion.
+    Reachable,
+    /// A client rejection proves the homeserver does not serve it.
+    Absent,
+    /// The homeserver failed rather than answered, or never answered. Proves
+    /// nothing; the row stays `suspect` for a later pass.
+    Inconclusive,
+}
+
+/// Classify a probe's result. Split from the probe itself so the three-way
+/// decision is testable without a homeserver — the predicate it wraps was always
+/// unit-tested, while the branch consuming it was not, which is how the
+/// two-outcome version shipped green.
+fn probe_verdict<T, E>(outcome: &Result<T, E>, status: Option<u16>) -> ProbeVerdict {
+    match outcome {
+        Ok(_) => ProbeVerdict::Reachable,
+        Err(_) if probe_proves_room_absent(status) => ProbeVerdict::Absent,
+        Err(_) => ProbeVerdict::Inconclusive,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UnreadCountsSnapshot {
     notification: u64,
@@ -1861,13 +1957,31 @@ async fn capture_unread_counts(
     account_id: Uuid,
     live_tx: &broadcast::Sender<LiveFrame>,
     last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
+    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
 ) {
     if room.state() != RoomState::Joined {
         return;
     }
-    let (snapshot, receipts_settled) = UnreadCountsSnapshot::from_room(room);
-    let value = snapshot.pair();
+    let (sdk_snapshot, receipts_settled) = UnreadCountsSnapshot::from_room(room);
     let room_id = room.room_id();
+    // A room that can never again be corrected by reading it is pinned to zero
+    // rather than skipped (ADR 0090): skipping would leave whatever wrong value
+    // is already persisted in place, which is the frozen badge this exists to
+    // clear. Zeroing flows through the ordinary write path below, so the row,
+    // the dedup cache, and the live frame stay consistent.
+    let suppression = unread_suppression_reason(
+        gone_upstream
+            .lock()
+            .expect("unread-counts gone-upstream lock")
+            .contains(room_id),
+        room.is_tombstoned(),
+    );
+    let snapshot = if suppression.is_some() {
+        UnreadCountsSnapshot::new(0, 0)
+    } else {
+        sdk_snapshot
+    };
+    let value = snapshot.pair();
     let cached = last
         .lock()
         .expect("unread-counts cache lock")
@@ -1875,6 +1989,15 @@ async fn capture_unread_counts(
         .copied();
     if cached_unread_counts_match(cached, snapshot) {
         return;
+    }
+    if let Some(reason) = suppression {
+        tracing::debug!(
+            %account_id,
+            %room_id,
+            sdk_notification_count = sdk_snapshot.notification,
+            reason,
+            "pinning unread counts to zero"
+        );
     }
     // Never let an unsettled room *raise* a count. While matrix-sdk holds an
     // unmatched receipt for this room its counts come from a fallback anchor
@@ -1892,7 +2015,7 @@ async fn capture_unread_counts(
     // afterwards, so the true value lands within one sweep. Suppressing an
     // increase leaves both the cache and the row untouched, which is what makes
     // that later re-evaluation see a diff and write it.
-    if !receipts_settled && unread_counts_increased(cached, snapshot) {
+    if suppression.is_none() && !receipts_settled && unread_counts_increased(cached, snapshot) {
         tracing::debug!(
             %account_id,
             %room_id,
@@ -1950,6 +2073,7 @@ async fn sweep_unread_counts(
     account_id: Uuid,
     live_tx: &broadcast::Sender<LiveFrame>,
     last: &Mutex<HashMap<OwnedRoomId, (u64, u64)>>,
+    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
     prune: bool,
 ) {
     use futures_util::stream::{self, StreamExt};
@@ -1993,7 +2117,7 @@ async fn sweep_unread_counts(
 
     stream::iter(rooms)
         .for_each_concurrent(UNREAD_COUNTS_SWEEP_CONCURRENCY, |room| async move {
-            capture_unread_counts(&room, store, account_id, live_tx, last).await;
+            capture_unread_counts(&room, store, account_id, live_tx, last, gone_upstream).await;
         })
         .await;
 }
@@ -2033,6 +2157,225 @@ async fn seed_unread_counts_cache(
     cache
 }
 
+/// Read the set of rooms currently confirmed absent upstream (ADR 0090).
+///
+/// Called to seed the watcher and again at the top of every re-sweep, because
+/// the table — not the in-memory set — is the source of truth. Suppression has to
+/// be able to *stop*: a successful room-scoped send clears a room's row
+/// (`SdkGateway::note_room_reachability`), and an accumulate-only set would keep
+/// pinning that room's counts to zero for the rest of the process even though
+/// the homeserver serves it again.
+///
+/// Returns `Err` rather than an empty set on a failed read, because "no room is
+/// gone" and "we could not find out" are different answers and only one of them
+/// is safe to act on. At the seed there is no prior state to lose, so the caller
+/// starts empty; at a re-sweep the same value would drop every confirmed verdict
+/// on one transient pool timeout, and the sweep immediately after would write
+/// each purged room's stale non-zero SDK snapshot back and broadcast it — the
+/// frozen badge this ADR exists to clear, restored for a full re-sweep window.
+async fn read_gone_upstream_rooms(
+    store: &Store,
+    account_id: Uuid,
+) -> Result<HashSet<OwnedRoomId>, axon_store::StoreError> {
+    let rows = store.rooms_gone_upstream(account_id).await?;
+    Ok(rows
+        .iter()
+        .filter_map(|room_id| match RoomId::parse(room_id) {
+            Ok(parsed) => Some(parsed),
+            Err(_) => {
+                tracing::warn!(%account_id, %room_id, "skipping malformed persisted room id");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Apply a re-sweep's re-read of the absent-upstream set, keeping the current
+/// one if the read failed (ADR 0090).
+///
+/// Split out so the choice is testable without a store: it is a two-line
+/// decision that was wrong once and is invisible in the loop it lives in. "No
+/// room is gone" and "we could not find out" arrive here as different values and
+/// must stay that way — replacing the set from an `Err` un-suppresses every
+/// confirmed room, and the sweep that runs next writes each purged room's stale
+/// non-zero snapshot back and broadcasts it.
+fn apply_gone_upstream_refresh(
+    gone_upstream: &Mutex<HashSet<OwnedRoomId>>,
+    account_id: Uuid,
+    refreshed: Result<HashSet<OwnedRoomId>, axon_store::StoreError>,
+) {
+    match refreshed {
+        Ok(rooms) => {
+            *gone_upstream
+                .lock()
+                .expect("unread-counts gone-upstream lock") = rooms;
+        }
+        Err(err) => {
+            tracing::warn!(
+                %account_id, error = %err,
+                "failed to refresh rooms absent upstream; keeping the previous set"
+            );
+        }
+    }
+}
+
+/// Verify rooms a failed room-scoped call flagged as suspect, and settle each
+/// one (ADR 0090).
+///
+/// The flag itself proves nothing: the rejection Synapse returns for a purged
+/// room (`404 M_UNKNOWN: Could not find event …`) names the *event*, and is
+/// indistinguishable from "this particular event is unknown". So each suspect
+/// room gets one bounded, room-scoped probe — the smallest state read there is,
+/// `m.room.create` — and only a client rejection (`403`/`404`, see
+/// [`probe_proves_room_absent`]) settles it as absent. A probe that succeeds
+/// clears the suspicion; a homeserver failure or a transport error leaves the
+/// row for the next pass, so an outage delays a verdict instead of fabricating
+/// one.
+///
+/// At most [`UPSTREAM_PROBES_PER_SWEEP`] rooms per pass, and the remainder is
+/// logged rather than silently dropped.
+///
+/// Checks `cancel` between probes. The loop is the one place in the unread
+/// watcher that can hold the tick for minutes — `UPSTREAM_PROBES_PER_SWEEP`
+/// sequential round trips, each up to [`UPSTREAM_PROBE_TIMEOUT`] — and its
+/// caller's `select!` cannot observe cancellation until it returns, so without
+/// this a shutdown would wait out the whole backlog. Abandoning mid-pass costs
+/// nothing: every verdict is written durably as it is reached, and the rooms
+/// left unprobed are still `suspect` for the next boot.
+async fn reconcile_upstream_rooms(
+    client: &Client,
+    store: &Store,
+    account_id: Uuid,
+    cancel: &CancellationToken,
+) {
+    use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+    use matrix_sdk::ruma::events::StateEventType;
+
+    let suspects = match store.suspect_upstream_rooms(account_id).await {
+        Ok(suspects) => suspects,
+        Err(err) => {
+            tracing::warn!(%account_id, error = %err, "failed to read suspect rooms; skipping reconcile");
+            return;
+        }
+    };
+    if suspects.is_empty() {
+        return;
+    }
+    if suspects.len() > UPSTREAM_PROBES_PER_SWEEP {
+        tracing::debug!(
+            %account_id,
+            suspects = suspects.len(),
+            probing = UPSTREAM_PROBES_PER_SWEEP,
+            "deferring some suspect rooms to the next reconcile pass"
+        );
+    }
+
+    for room_id in suspects.iter().take(UPSTREAM_PROBES_PER_SWEEP) {
+        let Ok(parsed_room_id) = RoomId::parse(room_id) else {
+            tracing::warn!(%account_id, %room_id, "skipping malformed persisted room id");
+            continue;
+        };
+        let request = get_state_event_for_key::v3::Request::new(
+            parsed_room_id.clone(),
+            StateEventType::RoomCreate,
+            String::new(),
+        );
+        // Races cancellation rather than only checking between probes: an
+        // in-flight probe can sit for `UPSTREAM_PROBE_TIMEOUT`, and shutdown
+        // should not have to wait it out. `biased` so a token already cancelled
+        // wins without starting another round trip.
+        let outcome = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                tracing::debug!(
+                    %account_id,
+                    "cancelled mid-reconcile; unprobed rooms stay suspect for the next pass"
+                );
+                return;
+            }
+            outcome = tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, client.send(request)) => outcome,
+        };
+        let (verdict, detail) = match outcome {
+            Ok(result) => {
+                let status = result
+                    .as_ref()
+                    .err()
+                    .and_then(|err| err.as_client_api_error())
+                    .map(|api_err| api_err.status_code.as_u16());
+                let detail = match &result {
+                    Ok(_) => "probe succeeded".to_owned(),
+                    Err(err) => err.to_string(),
+                };
+                (probe_verdict(&result, status), detail)
+            }
+            Err(_elapsed) => {
+                tracing::debug!(
+                    %account_id, %room_id,
+                    timeout_secs = UPSTREAM_PROBE_TIMEOUT.as_secs(),
+                    "upstream room probe timed out; leaving the room suspect"
+                );
+                continue;
+            }
+        };
+
+        if verdict == ProbeVerdict::Inconclusive {
+            // The homeserver failed rather than answered. Leave the row — and
+            // its `first_flagged_at` — exactly as it is, the same way the
+            // timeout arm above does. Clearing here would erase a genuine
+            // suspicion on a transient blip and take the room out of the probe
+            // queue, since only `suspect` rows are re-probed.
+            tracing::debug!(
+                %account_id, %room_id, detail,
+                "upstream room probe was inconclusive; leaving the room suspect"
+            );
+            continue;
+        }
+
+        if verdict == ProbeVerdict::Absent {
+            let promoted = match store
+                .mark_room_upstream_gone(account_id, room_id, &detail)
+                .await
+            {
+                Ok(promoted) => promoted,
+                Err(err) => {
+                    tracing::warn!(%account_id, %room_id, error = %err, "failed to record a room as absent upstream");
+                    continue;
+                }
+            };
+            if !promoted {
+                // A room-scoped call succeeded while this probe was in flight
+                // and cleared the row. That is newer, stronger evidence than a
+                // probe that has already returned, so the verdict is dropped
+                // rather than written back over it.
+                tracing::debug!(
+                    %account_id, %room_id, detail,
+                    "discarding an absent verdict: the room proved reachable while the probe ran"
+                );
+                continue;
+            }
+            // Nothing is inserted into the watcher's in-memory set here: the
+            // caller re-reads it from the table right after this pass, so the
+            // durable row stays the only place a verdict lives.
+            //
+            // `warn`: the room stays in the room list with its history, but it is
+            // now inert — nothing sent to it will reach anyone.
+            tracing::warn!(
+                %account_id, %room_id, detail,
+                "room is absent upstream; unread counts for it are pinned to zero"
+            );
+        } else {
+            if let Err(err) = store
+                .clear_room_upstream_reconcile(account_id, room_id)
+                .await
+            {
+                tracing::warn!(%account_id, %room_id, error = %err, "failed to clear room reconcile state");
+                continue;
+            }
+            tracing::debug!(%account_id, %room_id, detail, "suspect room answered upstream; suspicion cleared");
+        }
+    }
+}
+
 /// Keep `room_unread_counts` tracking matrix-sdk's client-side unread
 /// notification/mention counts (issue #313, ADR 0070). These are derived from
 /// synced read-receipt state and match the unread badge semantics Matrix
@@ -2070,9 +2413,36 @@ async fn watch_unread_counts(
 ) {
     let last: Mutex<HashMap<OwnedRoomId, (u64, u64)>> =
         Mutex::new(seed_unread_counts_cache(&store, account_id).await);
+    // Rooms a probe has already confirmed absent upstream (ADR 0090). Seeded from
+    // the store for the same reason `last` is: a restart must not re-derive a
+    // count for a room it has already ruled out, and the verdict is durable.
+    let gone_upstream: Mutex<HashSet<OwnedRoomId>> = Mutex::new(
+        read_gone_upstream_rooms(&store, account_id)
+            .await
+            .unwrap_or_else(|err| {
+                // Only safe to swallow here: there is no prior set to lose, and
+                // the first re-sweep re-reads it. Erring open means a purged
+                // room's badge stays wrong until then, which beats pinning a
+                // live room to zero on a verdict we never actually read.
+                tracing::warn!(
+                    %account_id, error = %err,
+                    "failed to read rooms absent upstream; starting that set empty"
+                );
+                HashSet::new()
+            }),
+    );
 
     let mut updates = client.room_info_notable_update_receiver();
-    sweep_unread_counts(&client, &store, account_id, &live_tx, &last, false).await;
+    sweep_unread_counts(
+        &client,
+        &store,
+        account_id,
+        &live_tx,
+        &last,
+        &gone_upstream,
+        false,
+    )
+    .await;
 
     // The first tick of `interval` fires immediately; defer it by one period
     // so the resweep timer doesn't immediately re-run what the startup sweep
@@ -2087,12 +2457,39 @@ async fn watch_unread_counts(
         tokio::select! {
             _ = cancel.cancelled() => return,
             _ = resweep.tick() => {
-                sweep_unread_counts(&client, &store, account_id, &live_tx, &last, true).await;
+                // Probe first, then re-read the verdicts, then sweep: a room
+                // confirmed gone in this pass is zeroed by the sweep that
+                // follows rather than waiting five more minutes, and a room
+                // whose row was cleared since the last pass stops being
+                // suppressed in the same window.
+                reconcile_upstream_rooms(&client, &store, account_id, &cancel).await;
+                // `reconcile_upstream_rooms` returns on cancellation rather than
+                // finishing its backlog, so re-check before starting the two
+                // steps that follow: a store read plus a full sweep of up to
+                // `UNREAD_COUNTS_SWEEP_CONCURRENCY` concurrent writes. Without
+                // this, a shutdown signalled mid-probe still waits both of them
+                // out before the outer `select!` gets to look at the token
+                // again, which is the delay probing races to avoid.
+                if cancel.is_cancelled() {
+                    return;
+                }
+                // Only on a successful read; a failed one keeps the previous
+                // set. See `apply_gone_upstream_refresh`.
+                apply_gone_upstream_refresh(
+                    &gone_upstream,
+                    account_id,
+                    read_gone_upstream_rooms(&store, account_id).await,
+                );
+                sweep_unread_counts(&client, &store, account_id, &live_tx, &last, &gone_upstream, true)
+                    .await;
             }
             update = updates.recv() => match update {
                 Ok(update) => {
                     if let Some(room) = client.get_room(&update.room_id) {
-                        capture_unread_counts(&room, &store, account_id, &live_tx, &last).await;
+                        capture_unread_counts(
+                            &room, &store, account_id, &live_tx, &last, &gone_upstream,
+                        )
+                        .await;
                     }
                 }
                 // We always re-derive the current value rather than diff the missed
@@ -2297,5 +2694,417 @@ mod ephemeral_tests {
         let raw = serde_json::json!({ "type": "m.presence", "content": { "presence": "online" } });
         let allow: HashSet<String> = ["m.presence".to_owned()].into_iter().collect();
         assert!(ephemeral_frame_from_raw(Uuid::new_v4(), None, raw, &allow).is_some());
+    }
+}
+
+#[cfg(test)]
+mod upstream_reconcile_tests {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    use matrix_sdk::ruma::{OwnedRoomId, RoomId};
+    use uuid::Uuid;
+
+    use super::{
+        apply_gone_upstream_refresh, probe_proves_room_absent, probe_verdict,
+        unread_suppression_reason, ProbeVerdict,
+    };
+
+    /// A healthy joined room is never suppressed — the whole point of the guard
+    /// is that it fires only for rooms whose counts can no longer be corrected.
+    #[test]
+    fn a_healthy_room_is_not_suppressed() {
+        assert!(unread_suppression_reason(false, false).is_none());
+    }
+
+    /// Both conditions suppress on their own, and the absent-upstream reason wins
+    /// when a room is somehow both (the more specific fact about why nothing can
+    /// reach it).
+    #[test]
+    fn absent_or_tombstoned_suppresses() {
+        assert_eq!(
+            unread_suppression_reason(true, false),
+            Some("room is absent upstream")
+        );
+        assert_eq!(
+            unread_suppression_reason(false, true),
+            Some("room has been tombstoned")
+        );
+        assert_eq!(
+            unread_suppression_reason(true, true),
+            Some("room is absent upstream")
+        );
+    }
+
+    /// Only a client rejection settles a room as absent.
+    #[test]
+    fn client_rejections_prove_a_room_absent() {
+        assert!(probe_proves_room_absent(Some(403)));
+        assert!(probe_proves_room_absent(Some(404)));
+    }
+
+    /// A homeserver that fails rather than answers proves nothing. This is the
+    /// case that matters most: Synapse reports its own internal errors with the
+    /// same `M_UNKNOWN` errcode a purged room produces, so a 500 during an
+    /// outage must not mark every probed room gone.
+    #[test]
+    fn server_failures_and_transport_errors_prove_nothing() {
+        assert!(!probe_proves_room_absent(Some(500)));
+        assert!(!probe_proves_room_absent(Some(502)));
+        assert!(!probe_proves_room_absent(Some(429)));
+        assert!(!probe_proves_room_absent(None));
+    }
+
+    /// A success is not a rejection, however the caller reports it.
+    #[test]
+    fn success_statuses_prove_nothing() {
+        assert!(!probe_proves_room_absent(Some(200)));
+    }
+
+    /// "It answered" and "we could not tell" are different facts, and only the
+    /// first is evidence. The two-outcome version of this code collapsed them
+    /// into one `bool` and cleared a genuine suspicion on any 5xx.
+    #[test]
+    fn an_inconclusive_probe_is_not_a_success() {
+        let failed: Result<(), ()> = Err(());
+        for status in [Some(500), Some(502), Some(429), None] {
+            assert_eq!(
+                probe_verdict(&failed, status),
+                ProbeVerdict::Inconclusive,
+                "status {status:?} proves nothing and must not read as reachable"
+            );
+        }
+    }
+
+    /// Only a client rejection settles a room as absent.
+    #[test]
+    fn a_client_rejection_settles_the_room_absent() {
+        let failed: Result<(), ()> = Err(());
+        assert_eq!(probe_verdict(&failed, Some(403)), ProbeVerdict::Absent);
+        assert_eq!(probe_verdict(&failed, Some(404)), ProbeVerdict::Absent);
+    }
+
+    fn room(id: &str) -> OwnedRoomId {
+        RoomId::parse(id).expect("test room id")
+    }
+
+    /// A failed re-read is not evidence that nothing is gone.
+    ///
+    /// The set is replaced on every re-sweep, so a store error that produced an
+    /// empty set here would un-suppress every confirmed room on one transient
+    /// pool timeout — and the sweep that runs immediately after would write each
+    /// purged room's stale non-zero snapshot back and broadcast it, restoring
+    /// the frozen badge ADR 0090 exists to clear for a whole re-sweep window.
+    #[test]
+    fn a_failed_refresh_keeps_the_previous_gone_set() {
+        let gone: Mutex<HashSet<OwnedRoomId>> =
+            Mutex::new(HashSet::from([room("!purged:localhost")]));
+
+        apply_gone_upstream_refresh(
+            &gone,
+            Uuid::new_v4(),
+            Err(axon_store::StoreError::EmbeddedMigration(
+                "pool timeout".to_owned(),
+            )),
+        );
+
+        assert_eq!(
+            *gone.lock().unwrap(),
+            HashSet::from([room("!purged:localhost")]),
+            "a read that failed must not be read as an empty verdict set"
+        );
+    }
+
+    /// A successful re-read *does* replace it — including with an empty set,
+    /// which is how a recovered room stops being suppressed without a restart.
+    #[test]
+    fn a_successful_refresh_replaces_the_gone_set() {
+        let gone: Mutex<HashSet<OwnedRoomId>> =
+            Mutex::new(HashSet::from([room("!recovered:localhost")]));
+
+        apply_gone_upstream_refresh(&gone, Uuid::new_v4(), Ok(HashSet::new()));
+
+        assert!(
+            gone.lock().unwrap().is_empty(),
+            "clearing a room's row must un-suppress it in the same window"
+        );
+    }
+
+    /// A served room clears its suspicion, and the status carried alongside a
+    /// success never overrides that.
+    #[test]
+    fn a_served_room_is_reachable() {
+        let served: Result<(), ()> = Ok(());
+        assert_eq!(probe_verdict(&served, None), ProbeVerdict::Reachable);
+        assert_eq!(probe_verdict(&served, Some(200)), ProbeVerdict::Reachable);
+        assert_eq!(
+            probe_verdict(&served, Some(404)),
+            ProbeVerdict::Reachable,
+            "the outcome decides, not a stray status"
+        );
+    }
+}
+
+/// Probe-classification tests that drive the real loop against a stand-in
+/// homeserver (ADR 0090).
+///
+/// The three-way verdict is unit-tested above, but the bug that motivated it was
+/// in the *branch consuming it*, not the predicate — so these run
+/// [`reconcile_upstream_rooms`] end to end against an axum loopback server and
+/// assert what happened to the durable row. DB-gated like the rest of the
+/// store-touching tests.
+#[cfg(test)]
+mod reconcile_loop_tests {
+    use std::net::SocketAddr;
+
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::*;
+
+    /// Serve `router` on an ephemeral loopback port, mirroring `discovery.rs`'s
+    /// harness. The task lives for the duration of the test process.
+    async fn serve(router: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// A homeserver that answers `status` to the probe.
+    ///
+    /// A fallback rather than a route for the state endpoint: ruma sends the
+    /// empty `state_key` as a trailing empty path segment
+    /// (`…/state/m.room.create/`), which an obvious `{state_key}` pattern does
+    /// not match — the router would 404 on its own and every test would read as
+    /// a client rejection no matter what it configured. Answering everything
+    /// keeps the stand-in honest about the one thing it is standing in for.
+    ///
+    /// `restore_session`'s account-data read is excepted and always 404s, which
+    /// is what a homeserver says for account data that was never set; letting it
+    /// fall through would hand the client a room-create body for it.
+    fn state_router(status: StatusCode, body: serde_json::Value) -> Router {
+        Router::new()
+            .route(
+                "/_matrix/client/v3/user/{user_id}/account_data/{event_type}",
+                get(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "errcode": "M_NOT_FOUND", "error": "not set" })),
+                    )
+                }),
+            )
+            .fallback(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            })
+    }
+
+    /// A client that will actually *send* the probe.
+    ///
+    /// The session restore is load-bearing, not ceremony: the room-state
+    /// endpoint requires authentication, so an anonymous client fails locally
+    /// with "no access token provided" and never opens a connection. That error
+    /// carries no status, so it classifies as `Inconclusive` — which is the
+    /// verdict two of these tests are asserting, and they would pass without the
+    /// homeserver being consulted at all.
+    async fn client_for(addr: SocketAddr) -> Client {
+        use matrix_sdk::authentication::matrix::MatrixSession;
+        use matrix_sdk::store::RoomLoadSettings;
+        use matrix_sdk::{SessionMeta, SessionTokens};
+
+        let client = Client::builder()
+            .homeserver_url(format!("http://{addr}"))
+            .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11])
+            // Retry is disabled for the same reason the session is restored: with
+            // it on, matrix-sdk retries a 5xx until `UPSTREAM_PROBE_TIMEOUT`
+            // elapses, so the loop takes the *timeout* arm and the inconclusive
+            // branch under test is never reached. That version of this test
+            // passed against the two-outcome bug it exists to catch, and took 15
+            // seconds to do it.
+            .request_config(matrix_sdk::config::RequestConfig::new().disable_retry())
+            .build()
+            .await
+            .expect("client against the stand-in homeserver");
+        client
+            .matrix_auth()
+            .restore_session(
+                MatrixSession {
+                    meta: SessionMeta {
+                        user_id: matrix_sdk::ruma::UserId::parse("@probe:localhost")
+                            .expect("test user id"),
+                        device_id: "PROBEDEV".into(),
+                    },
+                    tokens: SessionTokens {
+                        access_token: "probe-token".to_owned(),
+                        refresh_token: None,
+                    },
+                },
+                RoomLoadSettings::default(),
+            )
+            .await
+            .expect("restore a session so the probe is actually sent");
+        client
+    }
+
+    async fn test_store() -> Store {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for these tests");
+        Store::connect(&url, 5).await.expect("connect + migrate")
+    }
+
+    /// A homeserver that fails rather than answers must **delay** a verdict, not
+    /// erase the suspicion.
+    ///
+    /// This is the case the two-outcome version got wrong: `502` is not a client
+    /// rejection, so it was classified "not absent", fell into the same branch as
+    /// a success, and cleared the row — dropping a genuinely purged room out of
+    /// `suspect_upstream_rooms`, which is the only queue that gets re-probed.
+    /// Reverting to that behaviour fails this test.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn an_inconclusive_probe_leaves_the_room_suspect() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-502-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!inconclusive-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::BAD_GATEWAY,
+            json!({ "errcode": "M_UNKNOWN", "error": "bad gateway" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(
+            store
+                .suspect_upstream_rooms(account_id)
+                .await
+                .expect("suspects"),
+            vec![room_id.clone()],
+            "an outage delays the verdict; it must not erase the suspicion"
+        );
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .is_empty(),
+            "nor does it fabricate one"
+        );
+    }
+
+    /// A client rejection is the only thing that settles a room as absent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_rejected_probe_settles_the_room_absent() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-404-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!purged-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::NOT_FOUND,
+            json!({ "errcode": "M_NOT_FOUND", "error": "unknown room" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .contains(&room_id),
+            "a 404 proves the homeserver does not serve the room"
+        );
+    }
+
+    /// A served room clears its suspicion — the recovery path ADR 0090 promises.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_served_room_clears_its_suspicion() {
+        let store = test_store().await;
+        let account = store
+            .upsert_account(
+                &format!("@probe-200-{}:localhost", Uuid::new_v4()),
+                "https://hs.example.org",
+            )
+            .await
+            .expect("account");
+        let account_id = account.account_id;
+        let room_id = format!("!alive-{}:localhost", Uuid::new_v4());
+
+        store
+            .flag_room_upstream_suspect(account_id, &room_id, "M_FORBIDDEN")
+            .await
+            .expect("flag suspect");
+
+        let addr = serve(state_router(
+            StatusCode::OK,
+            json!({ "room_version": "10", "creator": "@alice:localhost" }),
+        ))
+        .await;
+        reconcile_upstream_rooms(
+            &client_for(addr).await,
+            &store,
+            account_id,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            store
+                .suspect_upstream_rooms(account_id)
+                .await
+                .expect("suspects")
+                .is_empty(),
+            "a room that answers is no longer suspect"
+        );
+        assert!(
+            store
+                .rooms_gone_upstream(account_id)
+                .await
+                .expect("gone")
+                .is_empty(),
+            "and is certainly not gone"
+        );
     }
 }
