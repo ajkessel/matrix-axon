@@ -291,12 +291,19 @@ async fn reconcile_sending_media_uploads_resets_stale_sending_rows() {
         .await
         .expect("claim upload")
         .expect("claimed row");
+    let staged_before = store
+        .get_media_upload(account_id, staged_id)
+        .await
+        .expect("get staged upload before reconcile")
+        .expect("staged row present");
 
-    let reset = store
+    // The reconcile is process-wide, so parallel tests may contribute other
+    // `sending` rows to its affected-row count. Assert this account's state
+    // transitions below instead of depending on a database-global total.
+    store
         .reconcile_sending_media_uploads()
         .await
         .expect("reconcile sending uploads");
-    assert_eq!(reset, 1, "only the wedged 'sending' row is reset");
 
     let reconciled = store
         .get_media_upload(account_id, sending_id)
@@ -310,6 +317,10 @@ async fn reconcile_sending_media_uploads_resets_stale_sending_rows() {
         .expect("get untouched upload")
         .expect("row still present");
     assert_eq!(untouched.state, MediaUploadState::Staged);
+    assert_eq!(
+        untouched.updated_at, staged_before.updated_at,
+        "an already-staged row must not be touched by the sending-only reconcile"
+    );
 
     common::cleanup_account(&pool, account_id).await;
 }
