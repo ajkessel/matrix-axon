@@ -17,6 +17,18 @@ name: Web e2e
 
 on:
   workflow_dispatch:
+    inputs:
+      projects:
+        description: "Which e2e project(s) to run"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - chromium
+          - firefox
+          - webkit-desktop
+          - webkit-iphone
   push:
     branches:
       - main
@@ -42,17 +54,38 @@ env:
 
 jobs:
   web-e2e:
+    # `jobs.<job_id>.if` and `strategy.matrix` can't see the `matrix` context
+    # (the condition/matrix decide whether and how the job runs, before any
+    # matrix value exists), but both can see `github` directly — so the
+    # workflow_dispatch `projects` choice is read as a plain expression
+    # comparison right here, with no separate job and no shell script to feed
+    # it into. Piping untrusted `workflow_dispatch` input through a `run:`
+    # shell string is a script-injection risk (the `type: choice` dropdown
+    # only constrains the web UI — a workflow_dispatch fired via the API can
+    # send any string), so this avoids that class of bug entirely rather than
+    # hardening a script against it.
+    #
+    # `webkit-iphone` alone resolves to an empty matrix below, which is a
+    # hard error for `strategy.matrix.include` — so it's excluded here too,
+    # skipping the job outright instead of expanding a zero-entry matrix.
+    if: |
+      github.event_name != 'workflow_dispatch' ||
+      contains(fromJson('["all","chromium","firefox","webkit-desktop"]'), github.event.inputs.projects)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - project: chromium
-            browser: chromium
-          - project: firefox
-            browser: firefox
-          - project: webkit-desktop
-            browser: webkit
+        include: >-
+          ${{
+            (github.event_name != 'workflow_dispatch' || github.event.inputs.projects == 'all')
+              && fromJson('[{"project":"chromium","browser":"chromium"},{"project":"firefox","browser":"firefox"},{"project":"webkit-desktop","browser":"webkit"}]')
+            || github.event.inputs.projects == 'chromium'
+              && fromJson('[{"project":"chromium","browser":"chromium"}]')
+            || github.event.inputs.projects == 'firefox'
+              && fromJson('[{"project":"firefox","browser":"firefox"}]')
+            || github.event.inputs.projects == 'webkit-desktop'
+              && fromJson('[{"project":"webkit-desktop","browser":"webkit"}]')
+          }}
 
     defaults:
       run:
@@ -96,7 +129,12 @@ jobs:
           if-no-files-found: ignore
 
   web-e2e-iphone:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Runs on the main push gate as before, plus manual dispatch when the
+    # `projects` input asks for it (either `all` or the lane by name).
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.projects == 'all' || github.event.inputs.projects == 'webkit-iphone'))
     runs-on: ubuntu-latest
 
     defaults:
@@ -135,3 +173,23 @@ jobs:
           path: clients/web/test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+  # `type: choice` only constrains the web UI — a workflow_dispatch fired via
+  # the REST/GraphQL API can send any string for `projects`. An unrecognized
+  # value makes both e2e jobs' `if` conditions false, so the run would
+  # otherwise complete with zero jobs and no failure, easy to misread as
+  # "e2e passed" rather than "e2e didn't run." Fail loudly instead. The input
+  # goes through `env:`, not into the script text, so this can't reintroduce
+  # the injection class the `resolve-matrix` removal fixed above.
+  invalid-projects-input:
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      !contains(fromJson('["all","chromium","firefox","webkit-desktop","webkit-iphone"]'), github.event.inputs.projects)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on unrecognized projects input
+        env:
+          PROJECTS_INPUT: ${{ github.event.inputs.projects }}
+        run: |
+          echo "::error::Unrecognized 'projects' input: '$PROJECTS_INPUT'. Expected one of: all, chromium, firefox, webkit-desktop, webkit-iphone."
+          exit 1
