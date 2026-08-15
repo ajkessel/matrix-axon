@@ -53,6 +53,7 @@ function event(
     room_id: ROOM,
     sender: '@alice:hs',
     origin_ts: ts,
+    arrival_order: ts,
     type: 'm.room.message',
     body: `body of ${id}`,
     content: { msgtype: 'm.text', body: `body of ${id}` },
@@ -3652,6 +3653,170 @@ describe('RoomPage', () => {
       // Nothing, even though the head has been gap-filled behind the anchor —
       // which is why `atEnd` alone can't gate this.
       expect(mine()).toEqual([])
+    })
+  })
+
+  describe('the receipt names the arrival-newest event (ADR 0089)', () => {
+    /**
+     * The LinkedIn portal that prompted ADR 0089, with its real numbers. A
+     * mautrix bridge creates the room, emits its own state, and *then* backfills
+     * the pre-existing conversation carrying its real, older timestamps — so the
+     * backfilled message is oldest by `origin_ts` and newest by arrival order:
+     *
+     *   event                  origin_ts        arrival_order   rendered?
+     *   m.room.create          1785928306622    1871406         no (state)
+     *   uk.half-shot.bridge    1785928309453    1871424         no (state)
+     *   m.room.message  (mid)  1785928308453    1871410         yes
+     *   m.room.message  (old)  1785928304987    1871426         yes
+     *
+     * Three separate things have to hold at once here, which is why one fixture
+     * carries all of them:
+     *
+     *  - the receipt names the **arrival-max** visible event (the backfilled
+     *    `old` message), not the display-last one — the original bug;
+     *  - the marker names the **display-last** visible event (`mid`), on
+     *    `origin_ts` — handing it the arrival-newest event would feed it an
+     *    older timestamp than it holds and, being forward-only, it would stop
+     *    advancing altogether;
+     *  - **neither** names a state event the user never saw rendered. Under the
+     *    default `stateEvents: 'important'` the create and bridge events do not
+     *    render, and ADR 0089's contract is "among the events it has actually
+     *    displayed". `bridgeArrival` lets a test hand the hidden bridge event
+     *    the winning arrival order to prove the filter is what excludes it,
+     *    rather than the comparison happening to favour a visible event.
+     */
+    const CREATE_TS = 1_785_928_306_622
+    const BRIDGE_TS = 1_785_928_309_453
+    const MID_TS = 1_785_928_308_453
+    const MESSAGE_TS = 1_785_928_304_987
+
+    function portal(tag: string, bridgeArrival = 1_871_424) {
+      // Unique ids per test: the ephemeral sender's debounce timer outlives its
+      // own `cleanup()`, so a sibling test's receipt can land inside this one's
+      // window and identical fixtures would be indistinguishable.
+      const ids = {
+        create: `$create-${tag}`,
+        bridge: `$bridge-${tag}`,
+        mid: `$mid-${tag}`,
+        message: `$message-${tag}`,
+      }
+      const all = [
+        event(ids.create, CREATE_TS, {
+          type: 'm.room.create',
+          state_key: '',
+          arrival_order: 1_871_406,
+        }),
+        event(ids.bridge, BRIDGE_TS, {
+          type: 'uk.half-shot.bridge',
+          state_key: 'linkedin',
+          arrival_order: bridgeArrival,
+        }),
+        event(ids.mid, MID_TS, {
+          arrival_order: 1_871_410,
+          body: 'body of $mid',
+          content: { msgtype: 'm.text', body: 'body of $mid' },
+        }),
+        event(ids.message, MESSAGE_TS, {
+          arrival_order: 1_871_426,
+          body: 'body of $message',
+          content: { msgtype: 'm.text', body: 'body of $message' },
+        }),
+      ]
+      const reads: string[] = []
+      server.use(
+        http.post(
+          `${TEST_BASE_URL}/v1/accounts/:accountId/rooms/:roomId/read`,
+          async ({ request }) => {
+            const body = (await request.json()) as { event_id: string }
+            reads.push(body.event_id)
+            return HttpResponse.json({ data: {} })
+          },
+        ),
+      )
+      // The endpoint's shape is newest-first in display order, which the store
+      // reverses. No room summary: the summary-derived marker is a separate
+      // effect on a separate input, and leaving it out keeps this test about the
+      // timeline effect's two picks.
+      const rendered = renderRoom(
+        [...all].sort((a, b) => b.origin_ts - a.origin_ts),
+        { rooms: [] },
+      )
+      const ours = Object.values(ids)
+      return {
+        ...rendered,
+        ids,
+        mine: () => reads.filter((id) => ours.includes(id)),
+      }
+    }
+
+    it('receipts the backfilled message, not the display-last state event', async () => {
+      const { ids, mine, findByText } = portal('receipt')
+      await findByText('body of $message')
+
+      // Past the sender's debounce, so this is the settled choice.
+      await waitFor(() => expect(mine()).toEqual([ids.message]))
+      // Spelled out because it is the entire bug: the display-last event is the
+      // bridge state event, and that is what the old `findLast` sent.
+      expect(mine()).not.toContain(ids.bridge)
+    })
+
+    it('still advances the cross-device marker in display order', async () => {
+      const { services, ids, findByText } = portal('marker')
+      await findByText('body of $message')
+
+      // The marker is a display-order artifact (ADR 0048) and stays on
+      // `origin_ts`: it names the *display-last* event, not the receipt's.
+      // Handing it the arrival-newest event would feed it an older `origin_ts`
+      // than it already holds and — being forward-only — it would stop advancing
+      // altogether.
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: ids.mid,
+          originTs: MID_TS,
+        }),
+      )
+    })
+
+    it('recomputes both picks when the visibility rule changes mid-room', async () => {
+      // The predicate is re-created every render and so cannot be a dependency
+      // itself; the values it closes over have to be listed instead. Without
+      // them, turning state events on repaints the timeline while both read
+      // positions stay computed under the old rule — visibly inconsistent with
+      // what is on screen, and stuck that way until some unrelated dependency
+      // happens to fire the effect.
+      const { services, ids, mine, findByText } = portal('toggle', 1_871_999)
+      await findByText('body of $message')
+      await waitFor(() => expect(mine()).toEqual([ids.message]))
+
+      // The bridge event becomes a rendered row, and it is both display-last
+      // and arrival-max — so it is now the correct answer to both picks.
+      services.settings.stateEvents.value = 'all'
+
+      await waitFor(() => expect(mine().at(-1)).toBe(ids.bridge))
+      await waitFor(() =>
+        expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+          eventId: ids.bridge,
+          originTs: BRIDGE_TS,
+        }),
+      )
+    })
+
+    it('names no event the user never saw, on either pick', async () => {
+      // The bridge event now wins *both* comparisons outright — it is
+      // display-last by `origin_ts` and, at 1_871_999, arrival-max as well. It
+      // is also a state event the default `stateEvents: 'important'` does not
+      // render. Only the visibility filter can keep it out of both picks, so
+      // this fails the moment that filter goes away, in a way the numbers alone
+      // cannot rescue.
+      const { services, ids, mine, findByText } = portal('hidden', 1_871_999)
+      await findByText('body of $message')
+
+      await waitFor(() => expect(mine()).toEqual([ids.message]))
+      expect(mine()).not.toContain(ids.bridge)
+      expect(services.deviceState.readMarker(ACCOUNT, ROOM)).toEqual({
+        eventId: ids.mid,
+        originTs: MID_TS,
+      })
     })
   })
 
