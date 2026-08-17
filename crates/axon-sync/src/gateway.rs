@@ -27,6 +27,7 @@ use matrix_sdk::attachment::{AttachmentConfig, AttachmentInfo, BaseFileInfo, Bas
 use matrix_sdk::room::reply::{EnforceThread, Reply};
 use matrix_sdk::room::Receipts;
 use matrix_sdk::ruma::api::client::directory::get_public_rooms_filtered;
+use matrix_sdk::ruma::api::client::membership::leave_room;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName};
 use matrix_sdk::ruma::api::client::room::{create_room, Visibility};
 use matrix_sdk::ruma::api::error::ErrorKind;
@@ -68,6 +69,20 @@ fn map_sdk_err(err: matrix_sdk::Error) -> GatewayError {
         Some(ErrorKind::BadState) => GatewayError::Invalid(err.to_string()),
         _ => GatewayError::Upstream(err.to_string()),
     }
+}
+
+/// Homeserver answers that do not prove the membership is gone when we have
+/// no local [`Room`]. `M_FORBIDDEN` is "not in that room"; `M_NOT_FOUND` and
+/// `M_UNKNOWN` are what Synapse returns for a room it no longer resolves
+/// (the production reject that motivated ADR 0091). None of these distinguish
+/// "invite withdrawn" from "ACL" from "unknown room", so they are
+/// [`LeaveOutcome::Unconfirmed`], not a hard error. A transport failure
+/// (`None`) or any other kind stays a failure so the client can retry.
+fn leave_fallback_is_unconfirmed(kind: Option<&ErrorKind>) -> bool {
+    matches!(
+        kind,
+        Some(ErrorKind::Forbidden | ErrorKind::NotFound | ErrorKind::Unknown)
+    )
 }
 
 /// Reject an operation on a room that isn't `Joined` (ADR 0068, M19d/M19e).
@@ -606,6 +621,25 @@ fn message_relates_to(relation: Relation<'_>) -> Result<Option<Value>, GatewayEr
 type PowerLevelLock = Arc<AsyncMutex<()>>;
 type PowerLevelLocks = Arc<Mutex<HashMap<(Uuid, String), PowerLevelLock>>>;
 
+/// What [`SdkGateway::leave`] managed to establish about the membership.
+///
+/// Both variants are a success as far as the client is concerned — the
+/// request stands — but only [`Left`](LeaveOutcome::Left) is evidence about
+/// the room, so callers must not drive destructive local bookkeeping (such as
+/// dropping the `room_invites` row) off [`Unconfirmed`](LeaveOutcome::Unconfirmed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveOutcome {
+    /// The homeserver accepted the leave, or the SDK's own `Room::leave` did.
+    Left,
+    /// The homeserver answered `M_FORBIDDEN`, `M_NOT_FOUND`, or `M_UNKNOWN`
+    /// to the no-local-`Room` fallback. Most often that means "not in that
+    /// room" — already left, invite withdrawn, or the server no longer
+    /// resolves it — but it is also what a server ACL returns, and without
+    /// a local [`Room`] there is nothing to tell them apart. Treat the
+    /// membership as unknown until sync says otherwise.
+    Unconfirmed,
+}
+
 /// Sends Matrix message-like events on behalf of an account, routed through that
 /// account's SDK client. Cheap to [`Clone`] (every field is a handle).
 #[derive(Clone)]
@@ -931,13 +965,60 @@ impl SdkGateway {
         room.typing_notice(typing).await.map_err(map_sdk_err)
     }
 
-    /// Leave this room (ADR 0068, M19b). The `m.room.member` leave event this
-    /// produces already drives existing downstream handling — the ADR 0037
-    /// membership filter and ADR 0044's opt-in `purge_on_leave` — via the sync
-    /// path's own `persist_state_event`; this method only issues the call.
-    pub async fn leave(&self, account_id: Uuid, room_id: &str) -> Result<(), GatewayError> {
-        let room = self.room(account_id, room_id).await?;
-        room.leave().await.map_err(map_sdk_err)
+    /// Leave this room (ADR 0068, M19b), or decline a pending invite (ADR 0091).
+    /// The `m.room.member` leave event this produces already drives existing
+    /// downstream handling — the ADR 0037 membership filter and ADR 0044's
+    /// opt-in `purge_on_leave` — via the sync path's own `persist_state_event`;
+    /// this method only issues the call.
+    ///
+    /// Sliding Sync can evict an invited room from the SDK's in-memory map
+    /// while Axon still lists it in `room_invites`. Reject must not depend
+    /// on `get_room`: a missing local [`Room`] falls through to the same
+    /// `POST /_matrix/client/v3/rooms/{roomId}/leave` the SDK would send.
+    /// A homeserver `M_FORBIDDEN` / `M_NOT_FOUND` / `M_UNKNOWN` on that
+    /// fallback reports [`LeaveOutcome::Unconfirmed`] rather than a plain
+    /// success — see that variant for why the distinction matters.
+    pub async fn leave(
+        &self,
+        account_id: Uuid,
+        room_id: &str,
+    ) -> Result<LeaveOutcome, GatewayError> {
+        let client = self.manager.get_or_connect(account_id).await?;
+        let parsed =
+            RoomId::parse(room_id).map_err(|e| GatewayError::Invalid(format!("room id: {e}")))?;
+        if let Some(room) = client.get_room(&parsed) {
+            return room
+                .leave()
+                .await
+                .map(|()| LeaveOutcome::Left)
+                .map_err(map_sdk_err);
+        }
+        tracing::info!(
+            %account_id,
+            %room_id,
+            "leave: no local Room handle; sending client-server leave"
+        );
+        match client
+            .send(leave_room::v3::Request::new(parsed.to_owned()))
+            .await
+        {
+            Ok(_) => Ok(LeaveOutcome::Left),
+            Err(err) => {
+                let sdk_err = matrix_sdk::Error::from(err);
+                if leave_fallback_is_unconfirmed(sdk_err.client_api_error_kind()) {
+                    tracing::info!(
+                        %account_id,
+                        %room_id,
+                        error_kind = ?sdk_err.client_api_error_kind(),
+                        "leave: homeserver refused without a local Room; \
+                         membership unconfirmed"
+                    );
+                    Ok(LeaveOutcome::Unconfirmed)
+                } else {
+                    Err(map_sdk_err(sdk_err))
+                }
+            }
+        }
     }
 
     /// Forget a left or banned-from room (ADR 0068, M19b). The homeserver only
@@ -1480,6 +1561,7 @@ mod tests {
     use matrix_sdk::attachment::{AttachmentInfo, BaseFileInfo, BaseImageInfo};
     use matrix_sdk::room::reply::EnforceThread;
     use matrix_sdk::ruma::api::client::room::Visibility;
+    use matrix_sdk::ruma::api::error::ErrorKind;
     use matrix_sdk::ruma::events::room::message::{AddMentions, MessageType, ReplyWithinThread};
     use matrix_sdk::ruma::events::room::power_levels::{RoomPowerLevels, RoomPowerLevelsSource};
     use matrix_sdk::ruma::events::room::MediaSource;
@@ -1489,10 +1571,10 @@ mod tests {
 
     use super::{
         attachment_info, attachment_reply, build_create_room_request,
-        check_self_demotion_guardrail, effective_mime, media_message_type,
-        merge_power_level_changes, message_relates_to, parse_room_id_or_alias, parse_server_name,
-        parse_server_names, parse_tag_name, parse_user_id, thread_member_root, validate_tag_order,
-        MAX_TAG_NAME_BYTES,
+        check_self_demotion_guardrail, effective_mime, leave_fallback_is_unconfirmed,
+        media_message_type, merge_power_level_changes, message_relates_to, parse_room_id_or_alias,
+        parse_server_name, parse_server_names, parse_tag_name, parse_user_id, thread_member_root,
+        validate_tag_order, MAX_TAG_NAME_BYTES,
     };
     use crate::error::GatewayError;
 
@@ -1610,6 +1692,22 @@ mod tests {
         let tag = format!("u.{}", "a".repeat(MAX_TAG_NAME_BYTES - 2));
         assert_eq!(tag.len(), MAX_TAG_NAME_BYTES);
         parse_tag_name(&tag).expect("tag at the byte limit should be accepted");
+    }
+
+    #[test]
+    fn leave_fallback_treats_forbidden_not_found_and_unknown_as_unconfirmed() {
+        assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::Forbidden)));
+        assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::NotFound)));
+        assert!(leave_fallback_is_unconfirmed(Some(&ErrorKind::Unknown)));
+    }
+
+    #[test]
+    fn leave_fallback_does_not_treat_other_kinds_as_unconfirmed() {
+        assert!(!leave_fallback_is_unconfirmed(None));
+        assert!(!leave_fallback_is_unconfirmed(Some(&ErrorKind::BadState)));
+        assert!(!leave_fallback_is_unconfirmed(Some(
+            &ErrorKind::CannotLeaveServerNoticeRoom
+        )));
     }
 
     #[test]
