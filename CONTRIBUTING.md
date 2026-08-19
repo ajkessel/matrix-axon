@@ -1,7 +1,7 @@
 # Contributing to Axon
 
 Everything you need between `git clone` and a merged pull request. For what
-Axon *is*, see [README.md](README.md); for the working conventions and the
+Axon _is_, see [README.md](README.md); for the working conventions and the
 current state of each milestone, see [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
@@ -25,8 +25,7 @@ hooks also watch:**
 
 - **Node.js 24 (LTS)**, what CI uses. The hard floor is **22.13**: pnpm 11 needs
   the `node:sqlite` builtin and Vite 8 needs 20.19+/22.12+. Odd-numbered and
-  older releases fail with `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module:
-  node:sqlite`.
+  older releases fail with an `ERR_UNKNOWN_BUILTIN_MODULE` for `node:sqlite`.
 - **pnpm 11**, pinned in `clients/web/package.json`'s `packageManager` field.
 
 **If you run the server, the smoke lanes, or the integration suite:**
@@ -81,8 +80,8 @@ brew install --cask docker
 You likely need to start Docker from the desktop the first time and grant it
 administrative privileges.
 
-> On older Intel Macs, `pnpm` may fail with `Cannot verify the identity of the
-> @pnpm/exe.darwin-x64 native binary`. That is an upstream bug; use corepack
+> On older Intel Macs, `pnpm` may fail to verify the identity of the
+> `@pnpm/exe.darwin-x64` native binary. That is an upstream bug; use corepack
 > instead — see [clients/web/README.md](clients/web/README.md).
 
 #### Windows (PowerShell)
@@ -245,8 +244,8 @@ jj-hooks run --runner pre-commit --stage pre-push 'main@upstream..@'   # jj
 > temporary git worktree under `$TMPDIR` and builds there, so the rust hooks
 > start from a cold `target/` — around 16 GB for this workspace. If `/tmp` is a
 > tmpfs (the systemd default on many distributions), the build dies partway
-> through with `rustc-LLVM ERROR: IO failure on output stream: Disk quota
-> exceeded`, which looks like a compiler bug and is not one:
+> through with an `rustc-LLVM ERROR` reporting `Disk quota exceeded` on the
+> output stream — which looks like a compiler bug and is not one:
 >
 > ```bash
 > TMPDIR=/path/on/real/disk jj push
@@ -267,6 +266,21 @@ agents alike. The rules that most often surprise a first contributor:
   `scripts/check-migrations-immutable.sh` enforces this in CI and in the hook.
 - **Docs track code in the same PR.** Behavior described by `README.md`,
   `AGENTS.md`, or this file must be updated alongside the change.
+- **Break prose lines after sentences, not at a column.**
+  One sentence per line, or per long clause.
+  Nothing enforces it and nothing reflows — `prettier` runs with
+  `proseWrap: "preserve"`, so it fixes tables, lists and emphasis and never
+  moves a line break in body text.
+  The reason is diffs: an unwrapped paragraph makes every edit one enormous
+  changed line, and a hard column wrap makes a one-word edit rewrap the whole
+  paragraph.
+  A break per sentence gives a diff that names the sentence that changed.
+  Existing files are not being reflowed; this is for prose you write.
+- **Keep a code span on one line** inside a list item or blockquote.
+  Whitespace inside backticks is content, so prettier cannot re-indent a
+  continuation line and dedents it out of the block instead — which drops the
+  list indent or the blockquote's `>`.
+  It still renders correctly, which is exactly why it goes unnoticed.
 
 ## Start over
 
