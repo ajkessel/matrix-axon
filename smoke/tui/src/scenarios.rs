@@ -122,14 +122,33 @@ pub async fn send_round_trip(ctx: &Ctx) -> ScenarioOutcome {
     outcome
 }
 
-/// Wait until the room list, the seeded message, and the input line have all
-/// painted — i.e. the TUI is up and talking to the stub.
+/// Wait until the stub profile has actually painted: room list, input line,
+/// **and** the seeded timeline.
+///
+/// The timeline assertion is the important one. Without it, first paint was
+/// satisfied by the chrome alone, so a page the TUI rejected wholesale looked
+/// identical to a page it rendered — which is how #190 hid: the stub's
+/// `EventDto` was missing `arrival_order`, every timeline response failed to
+/// deserialize, and *every* stub scenario ran against an empty message pane
+/// without noticing. Only the one scenario that needed a request made on the
+/// success path went red, and it reported a missing `/threads` rather than the
+/// empty timeline that caused it.
+///
+/// Every stub scenario is seeded with the "smoke seed" message by
+/// `get_timeline`, so this holds for all of them.
 fn wait_first_paint(
     driver: &mut PtyDriver,
     state: &StubState,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    wait_for_room_and_input(driver, &state.room_name, timeout)
+    let deadline = Instant::now() + timeout;
+    wait_for_room_and_input_until(driver, &state.room_name, deadline)?;
+    driver.wait_for_screen_or_exit(
+        "the seeded timeline to render",
+        deadline.saturating_duration_since(Instant::now()),
+        |screen| screen.contains("smoke seed"),
+    )?;
+    Ok(())
 }
 
 fn wait_for_room_and_input(
@@ -137,16 +156,28 @@ fn wait_for_room_and_input(
     room_name: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    wait_for_room_and_input_until(driver, room_name, Instant::now() + timeout)
+}
+
+fn wait_for_room_and_input_until(
+    driver: &mut PtyDriver,
+    room_name: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
     let room_name = room_name.to_owned();
-    driver.wait_for_screen_or_exit("the room list to render", timeout, move |screen| {
-        screen.contains("Rooms") && screen.contains(&room_name)
-    })?;
+    driver.wait_for_screen_or_exit(
+        "the room list to render",
+        deadline.saturating_duration_since(Instant::now()),
+        move |screen| screen.contains("Rooms") && screen.contains(&room_name),
+    )?;
     // Anchor to the bottom section of the screen where the input box lives,
     // not the entire screen — the room-list selection marker "> " renders at
     // the top and would satisfy screen.contains('>') immediately.
-    driver.wait_for_screen_or_exit("the input line to render", timeout, |screen| {
-        screen.lines().rev().take(5).any(|l| l.contains('>'))
-    })?;
+    driver.wait_for_screen_or_exit(
+        "the input line to render",
+        deadline.saturating_duration_since(Instant::now()),
+        |screen| screen.lines().rev().take(5).any(|l| l.contains('>')),
+    )?;
     Ok(())
 }
 
@@ -185,7 +216,22 @@ where
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(anyhow!("timed out after {timeout:?} waiting for {what}"));
+            // Name what *did* arrive. Without it the message says only which
+            // request never came, which cannot distinguish "the TUI asked and
+            // the stub rejected it" from "the TUI never got far enough to ask"
+            // — two failures with completely different causes.
+            let seen = state.journal();
+            let served = if seen.is_empty() {
+                "nothing at all".to_owned()
+            } else {
+                seen.iter()
+                    .map(|e| format!("{} {}", e.method, e.path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(anyhow!(
+                "timed out after {timeout:?} waiting for {what}; stub served: {served}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
