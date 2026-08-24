@@ -275,7 +275,10 @@ agents alike. The rules that most often surprise a first contributor:
   changed line, and a hard column wrap makes a one-word edit rewrap the whole
   paragraph.
   A break per sentence gives a diff that names the sentence that changed.
-  Existing files are not being reflowed; this is for prose you write.
+  This is for prose you write, and for paragraphs you are already rewriting for other reasons.
+  `AGENTS.md` and `README.md` have been reflowed; no other existing file has, this one included — most of its prose is still hard-wrapped at a column.
+  To reflow a file, put it in its own PR with nothing else in it, then — once that PR has merged — add its squash SHA to `.git-blame-ignore-revs` in a one-line follow-up.
+  That second step is what actually makes `git blame` skip it; the isolated PR only makes it possible.
 - **Keep a code span on one line** inside a list item or blockquote.
   Whitespace inside backticks is content, so prettier cannot re-indent a
   continuation line and dedents it out of the block instead — which drops the
