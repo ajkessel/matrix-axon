@@ -54,7 +54,15 @@ if ! git cat-file -e "$base:$spec" 2>/dev/null; then
   exit 0
 fi
 
-if git diff --quiet "$base" HEAD -- "$spec" 2>/dev/null; then
+# Deliberately the working tree, not HEAD: under jj, .git/HEAD stays detached
+# at @-, so a breaking edit sitting in the working-copy commit @ would be
+# invisible to `git diff ... HEAD` and the local pre-push hook would pass
+# silently, leaving only CI to catch it. `git diff <base> -- <path>` (one
+# commit, no second ref) compares <base> straight against the working tree,
+# which is @'s content under jj and equals HEAD's under a clean git checkout
+# (e.g. in CI) — the same "check the working tree, not just history" instinct
+# as check-migrations-immutable.sh's Arm B.
+if git diff --quiet "$base" -- "$spec" 2>/dev/null; then
   echo "OK: $spec unchanged since $base."
   exit 0
 fi
@@ -63,7 +71,7 @@ tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
 git show "$base:$spec" >"$tmpdir/base.json"
-git show "HEAD:$spec" >"$tmpdir/head.json"
+cp "$spec" "$tmpdir/head.json"
 
 # Pinned release + checksums (https://github.com/oasdiff/oasdiff/releases).
 # Bumping the version means updating the matching sha256 below.
@@ -90,12 +98,24 @@ case "$os" in
 esac
 
 url="https://github.com/oasdiff/oasdiff/releases/download/v${oasdiff_version}/${asset}"
-curl -fsSL -o "$tmpdir/oasdiff.tar.gz" "$url"
-echo "${sha256}  ${tmpdir}/oasdiff.tar.gz" | sha256sum -c - >/dev/null
+curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused -o "$tmpdir/oasdiff.tar.gz" "$url"
+
+# macOS has no sha256sum (that's coreutils); it ships shasum -a 256 instead.
+if command -v sha256sum >/dev/null 2>&1; then
+  echo "${sha256}  ${tmpdir}/oasdiff.tar.gz" | sha256sum -c - >/dev/null
+elif command -v shasum >/dev/null 2>&1; then
+  echo "${sha256}  ${tmpdir}/oasdiff.tar.gz" | shasum -a 256 -c - >/dev/null
+else
+  echo "FAIL: neither sha256sum nor shasum found; cannot verify the oasdiff download." >&2
+  exit 2
+fi
 tar -xzf "$tmpdir/oasdiff.tar.gz" -C "$tmpdir" oasdiff
 
+# WARN, not just ERR: a response field or enum value quietly dropping to
+# optional-or-gone is exactly the axon-tui scenario ADR 0099 exists for, and
+# oasdiff classifies that as a warning, not an error.
 set +e
-breaking=$("$tmpdir/oasdiff" breaking --fail-on ERR "$tmpdir/base.json" "$tmpdir/head.json" 2>&1)
+breaking=$("$tmpdir/oasdiff" breaking --fail-on WARN "$tmpdir/base.json" "$tmpdir/head.json" 2>&1)
 status=$?
 set -e
 
@@ -103,6 +123,17 @@ if [ "$status" -eq 0 ]; then
   echo "OK: no breaking change to $spec since $base."
   [ -z "$breaking" ] || printf '%s\n' "$breaking"
   exit 0
+fi
+
+# oasdiff exits 1 specifically for "breaking changes found at/above the
+# --fail-on threshold" (verified against v1.29.1: 100 is a usage error, 102 a
+# spec-load error). Anything else is oasdiff itself failing, not a compat
+# verdict, and must not be reported as one — an author cannot "acknowledge"
+# a tool bug with an API-Breaking-Change trailer.
+if [ "$status" -ne 1 ]; then
+  echo "FAIL: oasdiff exited $status (a tool/spec error, not a breaking-change verdict):" >&2
+  printf '%s\n' "$breaking" >&2
+  exit 2
 fi
 
 reason=$(git log --format="%(trailers:key=${trailer_key},valueonly)" "$base..HEAD" | tr '\n' ' ')
