@@ -30,10 +30,19 @@ already exposes, which clients actually surface it to a user?_
 (designed, not landed) · Not started · Deferred (deliberately not building
 yet)
 
+**On the "Packaged shell" column.** ADR 0102 withdrew the separate SwiftUI and
+Compose clients: desktop and mobile are the _same_ `dist` as `axon-web`, inside
+a Tauri shell. So this column never diverges from `axon-web` on a capability
+the web bundle implements — a row reading Done for `axon-web` and Not started
+here would describe work nobody is going to do. It tracks only what the shell
+must supply for itself: transport, deep links, file save, external links,
+camera permission, and the OS credential store. Everything else is inherited.
+Read a blank as "inherited from `axon-web`".
+
 ## Matrix
 
 <!-- prettier-ignore -->
-| Capability | Server (`/v1/`) | axon-tui | axon-web | iOS (future) | Notes |
+| Capability | Server (`/v1/`) | axon-tui | axon-web | Packaged shell | Notes |
 |---|---|---|---|---|---|
 | Text send / edit / redact / react | Done (M6, ADR 0021) | Done | Done | Not started | |
 | Media send (`m.image`/`m.file`) | Done (M15, ADR 0059) | Done | Done | Not started | |
