@@ -724,27 +724,27 @@ function isInstalledDisplay(): boolean {
  * *old* server.
  */
 function ServerSettings() {
-  // From the graph, not `browserPlatform()`. Constructing one here always sees
-  // the browser's `'/'` default and hides this panel — including in the shell,
-  // which is the only build that can reach it.
   const { auth, platform } = useServices()
+  // Hidden wherever the platform has a same-origin default — every browser
+  // deployment, where the server is not a choice anyone made and offering to
+  // "change" it would be offering to break the app.
+  //
+  // Read from the *graph's* platform, not `browserPlatform()`: that helper
+  // always reports `'/'`, so guarding on it hid this section on every platform
+  // including the one it exists for.
   if (platform.defaultApiBaseUrl !== null) {
     return null
   }
-  const current = resolveApiBaseUrl()
   return (
     <section class="panel">
       <h2>Server</h2>
-      <p class="muted">{current ?? 'No server configured.'}</p>
+      <p class="muted">{resolveApiBaseUrl() ?? 'No server configured.'}</p>
       <button
         type="button"
         class="danger"
-        onClick={() => {
-          // Credentials go with the server that issued them; see
-          // `disconnectFromServer`.
+        onClick={() =>
           disconnectFromServer(window.localStorage, () => auth.clearToken())
-          window.location.assign('/')
-        }}
+        }
       >
         Change server
       </button>
