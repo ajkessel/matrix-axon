@@ -78,11 +78,16 @@ pub fn run() {
         .expect("error while running the Axon shell");
 }
 
-/// Claim the `axon://` scheme with the OS — in development builds only.
+/// Claim the OAuth callback scheme with the OS — in development builds only.
+///
+/// `org.matrixaxon.axon`, per RFC 8252 § 7.1 and ADR 0102 § 4. Note this is
+/// *not* `APP_SCHEME`: that one stays `axon`, is served in-webview, and is
+/// never registered with the OS.
 ///
 /// A release build must not do this. The installers already register the
 /// scheme (`plugins.deep-link.desktop.schemes` is compiled into them, and the
-/// generated `.deb` carries `MimeType=x-scheme-handler/axon`), and registering
+/// generated `.deb` carries `MimeType=x-scheme-handler/org.matrixaxon.axon`),
+/// and registering
 /// again at runtime writes a *second*, user-level `.desktop` file alongside the
 /// installed one. The user is then asked which of two identical-looking
 /// handlers should open the link, and the answer decides which binary runs —
@@ -117,7 +122,7 @@ fn log_scheme_registration(error: &tauri_plugin_deep_link::Error) {
         // nothing has gone wrong.
         return;
     }
-    eprintln!("could not register the axon:// scheme for development ({error})");
+    eprintln!("could not register the callback scheme for development ({error})");
 }
 
 /// Create the app window.
