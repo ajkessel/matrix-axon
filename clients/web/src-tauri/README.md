@@ -68,22 +68,21 @@ name rather than the package's.
 
 ## Icons
 
-`icons/` is generated from `icon-source.png`, which is the artwork as
-supplied. It is currently **60×60**, and `tauri icon` wants 1024×1024, so it is
-upscaled on the way in:
+`icons/` is generated from `icon-source.png`, which is the supplied artwork
+converted to PNG (2048x2048):
 
 ```sh
-python3 -c "from PIL import Image; \
-  Image.open('src-tauri/icon-source.png').convert('RGBA') \
-    .resize((1024,1024), Image.LANCZOS).save('/tmp/axon-1024.png')"
-pnpm exec tauri icon /tmp/axon-1024.png -o src-tauri/icons
+pnpm exec tauri icon src-tauri/icon-source.png -o src-tauri/icons
 ```
 
-A 17× upscale cannot add detail. It is fine at the sizes a window and a
-launcher actually use, and soft at 1024 — which is the size the App Store
-requires and inspects. **Replace `icon-source.png` with artwork at 1024×1024
-(or the original vector) before any store submission**, and regenerate; nothing
-else has to change.
+Two notes on the source. It arrived as a JPEG, so it carries no alpha channel
+— which does not matter for this artwork, because the design is a _filled
+tile_ rather than a glyph meant to float on transparency, and iOS masks its own
+rounded corners from a filled square anyway. And JPEG is lossy, so the flat
+background has faint compression noise baked into it (adjacent corner pixels
+differ by a point or two where a flat field should be uniform). It is
+imperceptible at every size an icon is displayed at, and the PNG here stops any
+further loss, but a PNG or vector master would be cleaner if one exists.
 
 ## The bundle identifier is provisional
 
