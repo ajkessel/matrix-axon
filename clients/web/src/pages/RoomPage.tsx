@@ -251,6 +251,7 @@ export function RoomPage() {
     search,
     timelines,
     attachments: staging,
+    platform,
   } = useServices()
   // Warm across room switches rather than rebuilt per mount (ADR 0085 phase
   // 1). The store may therefore arrive already populated — and stale, since
@@ -1234,6 +1235,7 @@ export function RoomPage() {
     attachmentScope: `${accountId}\0${roomId}`,
     onMutation: search.clear,
     staging,
+    nativeDrops: platform.onNativeFileDrop,
   })
   void ephemeral.revision.value
   const typingText = formatTypingIndicator(

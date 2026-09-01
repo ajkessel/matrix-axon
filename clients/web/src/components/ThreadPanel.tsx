@@ -152,6 +152,7 @@ export function ThreadPanel({
     search,
     settings,
     attachments: staging,
+    platform,
   } = useServices()
   const location = useLocation()
   const hideRedacted = settings.hideRedactedEvents.value
@@ -256,6 +257,7 @@ export function ThreadPanel({
     attachmentScope: `${accountId}\0${roomId}\0${rootId}`,
     onMutation: search.clear,
     staging,
+    nativeDrops: platform.onNativeFileDrop,
   })
 
   /**
