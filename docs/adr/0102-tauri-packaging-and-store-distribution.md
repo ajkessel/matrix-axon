@@ -7,17 +7,17 @@ M-W12 scope and its "out of scope" list, and reverses the premise ADR 0101
 reasoned from ("no store channel is planned for any target").
 
 Decided: the shell technology for all five targets, the transport, runtime
-server configuration, the callback scheme, the milestone split, and the macOS
-architecture policy. Not decided here: push notifications (deliberately
-deferred, see § "What this does not decide"), and the HEIC question ADR 0101
-left open — this ADR only constrains where a decoder may not live.
+server configuration, the callback scheme and the bundle identifier it derives
+from, the milestone split, and the macOS architecture policy. Not decided here:
+push notifications (deliberately deferred, see § "What this does not decide"),
+and the HEIC question ADR 0101 left open — this ADR only constrains where a
+decoder may not live.
 
-**Unlanded dependencies.** ADR 0101 is proposed in PR #328 and is not on `main`
-as this is written, so every reference to it here is to a proposed decision;
-§ 6 in particular reverses a premise that is not yet recorded anywhere but that
-PR. The hand-off page § "What actually blocks a packaged build today" describes
-is proposed in PR #331. Both should land, or this ADR's wording should be
-revisited, before it is merged.
+**Dependencies, both now landed.** This ADR was opened standing on two
+unmerged PRs, and said so. ADR 0101 arrived on `main` in #328, so § 6's
+reversal of its premise now has something recorded to reverse; the OAuth
+hand-off page arrived in #331, so the Context section below describes shipped
+behaviour rather than a proposal. Nothing here is prospective any more.
 
 ## In brief
 
@@ -125,12 +125,11 @@ redirect to the client's `redirect_uri`, which is correct for a browser client
 and wrong for a private scheme: the OS takes the URL and the tab is left with
 no document to render, so it spins forever on a sign-in that has already
 succeeded. Reported on Windows against Edge, reproducible every time. The
-server must therefore answer a private-scheme `redirect_uri` with a small
-hand-off page that performs the same delivery from script and says the tab can
-be closed — proposed in PR #331, which is not merged as this is written. http
-and https are untouched. The lesson generalises past this one bug: "the client
-is native" is not purely a client-side fact, and the parts of the API that hand
-something *back* to a client are where it surfaces.
+server therefore answers a private-scheme `redirect_uri` with a small hand-off
+page that performs the same delivery from script and says the tab can be
+closed (#331). http and https are untouched. The lesson generalises past this
+one bug: "the client is native" is not purely a client-side fact, and the parts
+of the API that hand something *back* to a client are where it surfaces.
 
 ## Decision
 
@@ -249,10 +248,12 @@ look like a host.
 
 Two consequences worth stating rather than discovering.
 
-**It couples the callback to the bundle identifier**, which is still
-provisional. Changing the identifier after any build ships means re-registering
-the redirect URI on every operator's server, so the identifier has to be
-settled before the first release rather than after.
+**It couples the callback to the bundle identifier**, which this ADR therefore
+also settles: `org.matrixaxon.axon`, previously carried as provisional in
+`tauri.conf.json`. It could not stay provisional once the callback derives from
+it — changing it after any build ships would mean re-registering the redirect
+URI on every operator's server, and on the stores it is permanent from the
+first submission.
 
 **It is not the scheme the bundle is served from.** The shell serves its own
 assets from `axon://localhost/`, which is an in-webview protocol handler that
@@ -295,12 +296,13 @@ But § 4 offers several compliance routes, and the case usually cited in this
 argument does not support the strong reading. VLC's App Store removal was a
 *GPL* dispute; VideoLAN's own statement describes relicensing the iOS client to
 MPLv2 precisely so store distribution would work. Anyone wanting to revisit
-this should start there and take advice, rather than from this paragraph. libheif and libde265 are LGPL-3.0, and a wasm decoder
-minified into an application chunk is the worst posture of the three ADR 0101
-weighed. Since WKWebView decodes HEIC natively, a bundled decoder would buy
-nothing on precisely the two platforms where it would cost the most. ADR 0101's
-open question stays open, but the browser-bundle option is now foreclosed for
-any build that reaches a store, and any future decoder must be a
+this should start there and take advice, rather than from this paragraph.
+libheif and libde265 are LGPL-3.0, and a wasm decoder minified into an
+application chunk is the worst posture of the three ADR 0101 weighed. Since
+WKWebView decodes HEIC natively, a bundled decoder would buy nothing on
+precisely the two platforms where it would cost the most. ADR 0101's open
+question stays open, but the browser-bundle option is now foreclosed for any
+build that reaches a store, and any future decoder must be a
 per-platform-excluded resource or a server-side transcode in `axon-media`.
 
 This does not implicate the webviews themselves. WebKitGTK is a system shared
@@ -340,9 +342,10 @@ auto-reload it drove, since all three rest on the origin being able to serve a
 different build. Note the interval state that leaves: a packaged build has *no*
 update path at all until the Tauri updater lands, and the updater needs the
 signing key that M-W12's own release infrastructure produces, so this is
-sequenced behind that rather than beside it. Desktop direct-download builds get the
-Tauri updater; store builds get the store's own update channel. Service workers remain banned, which as a side effect forecloses
-issue #23's media service worker for packaged builds.
+sequenced behind that rather than beside it. Desktop direct-download builds get
+the Tauri updater; store builds get the store's own update channel. Service
+workers remain banned, which as a side effect forecloses issue #23's media
+service worker for packaged builds.
 
 ### 9. macOS ships one universal bundle, unlike the server and TUI
 
@@ -427,11 +430,11 @@ silo; it is not a prerequisite for shipping M-W13.
 - `README.md` already advertises a Mac Tauri client and a "(soon to be
   packaged) Tauri desktop client"; this ADR makes those claims true rather
   than requiring their removal.
-- `docs/client-parity.md` gains no column — the shell runs the same `dist` as
-  `axon-web`. Its `iOS (future)` column is retitled to `Packaged shell` in this
-  ADR's own change, because a column of "Not started" against rows `axon-web`
-  has Done described work nobody was going to do. Its `window.open` note and
-  its HEIC row still want updating once the shell exists.
+- `docs/client-parity.md` gains no column and *loses* one. Its `iOS (future)`
+  column is removed in this ADR's own change: the shell runs the same `dist`,
+  so that column could only ever repeat `axon-web`'s, and leaving it filled
+  with "Not started" described work nobody was going to do. Its `window.open`
+  note and its HEIC row still want updating once the shell exists.
 - `clients/web/src-tauri` is **not** a member of the root Cargo workspace. It
   carries its own `[workspace]` table and the root gains a matching `exclude`.
   Otherwise `cargo build --workspace` in `cross-build.yml` would require

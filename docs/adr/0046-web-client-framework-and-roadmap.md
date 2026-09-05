@@ -177,7 +177,7 @@ items remain open and are *not* resolved by that prep:
   CORS client. M-W1.5 stays unbuilt and stays owed to separately-hosted browser
   deployments.)*
 - **`file://` routing hash-fallback under Tauri** (open question 5 below)
-  remains unresolved and unimplemented — see `clients/web/src/app.tsx:46`,
+  remains unresolved and unimplemented — see `clients/web/src/app.tsx:134`,
   which flags it explicitly as "M-W12's problem."
   *(Resolved by ADR 0102 § 5: history routing is kept on every target, with a
   Rust URI-scheme handler in the shell serving `index.html` for any non-asset
